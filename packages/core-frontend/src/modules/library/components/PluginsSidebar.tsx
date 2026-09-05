@@ -87,6 +87,15 @@ export interface PluginsSidebarProps {
    * appears — which is the honest default for a view with no actions wired.
    */
   onContextMenu?(target: SidebarContextTarget): void;
+  /**
+   * The Skills section — a file tree of the shared `Skills/` root — rendered
+   * between the lenses and the plugins. A SLOT rather than a component this
+   * nav names: the tree reads the workspace and navigates on its own, and the
+   * sidebar stays what it is, a pure view of names and counts. Omitted, the
+   * nav has no Skills section, which keeps a host rendering the shipped nav
+   * source-compatible.
+   */
+  skillsTree?: ReactNode;
 }
 
 /**
@@ -123,6 +132,7 @@ export function PluginsSidebar({
   pluginsIndexActive,
   onOpenPluginsIndex,
   onContextMenu,
+  skillsTree,
 }: PluginsSidebarProps) {
   const rowClass = (selected: boolean) =>
     cn(
@@ -272,6 +282,9 @@ export function PluginsSidebar({
             ownedAttention > 0 ? ownedAttention : ownedCount,
             ownedAttention > 0 ? 'pending' : 'count',
           )}
+          {/* Skills first, plugins after: a skill is the thing, a plugin is
+              a bundle of them. The tree brings its own label. */}
+          {skillsTree}
           <PluginsLabel onCreate={onCreatePlugin} />
 
           {/* Your own space leads the plugins, as in the prototype (line 2487):
@@ -337,52 +350,73 @@ export function PluginsSidebar({
 }
 
 /**
- * The `INCLUDED IN YOUR MCP` heading, and the one way to make a new plugin —
- * the prototype's `.lbladd` (line 78).
+ * A nav section's name, with an optional row of actions at its right edge.
+ * The first one has no top padding — the sidebar's own `pt-6` already placed
+ * it — so every label is the same component with its spacing decided by where
+ * it sits, not by which one it is.
  *
- * The heading says what this list IS rather than what its rows are called:
- * these folders are the set mounted into the caller's MCP — the agent's
- * working context — not merely a directory of plugins. (The locked rows that
- * trail the list sit below a gap for exactly that reason: they are in the
- * workspace but not in your MCP, and the break is what keeps the heading
- * honest about them.)
- *
- * `All plugins` is NOT a row here. It heads the whole nav instead: it is the
- * Library's home rather than one more entry in the set mounted into your MCP,
- * and inside this list it used to collect the clicks meant for the plugins
- * under it.
- *
- * The `+` is always in the DOM and always reachable by keyboard; only its
- * opacity follows hover, so the nav stays quiet without the control being
- * conditional. `focus-visible:opacity-100` is what keeps that honest for
+ * The actions are always in the DOM and always reachable by keyboard; only
+ * their opacity follows hover, so the nav stays quiet without the controls
+ * being conditional. `focus-within:opacity-100` is what keeps that honest for
  * anyone who never hovers anything.
+ *
+ * Exported for the Skills tree, whose heading is this label with the tree's
+ * own create buttons in the slot — one heading style over every list of
+ * places in this nav.
  */
-/**
- * A nav section's name. The first one has no top padding — the sidebar's own
- * `pt-6` already placed it — so the two labels are the same component with
- * their spacing decided by where they sit, not by which one they are.
- */
-function SectionLabel({ children, spaced = false }: { children: ReactNode; spaced?: boolean }) {
+export function SectionLabel({
+  children,
+  spaced = false,
+  actions,
+}: {
+  children: ReactNode;
+  spaced?: boolean;
+  actions?: ReactNode;
+}) {
   return (
-    <div className={cn('px-2.5 pb-1.5 text-label uppercase text-ink-faint', spaced && 'pt-5')}>
-      {children}
+    <div className={cn('group/label flex items-center gap-1 px-2.5 pb-1.5', spaced && 'pt-5')}>
+      <span className="text-label uppercase text-ink-faint">{children}</span>
+      {actions && (
+        <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/label:opacity-100">
+          {actions}
+        </span>
+      )}
     </div>
   );
 }
 
+/**
+ * The `PLUGINS` heading, and the one way to make a new plugin — the
+ * prototype's `.lbladd` (line 78).
+ *
+ * It used to read "Included in your MCP", from when a plugin was the only
+ * way a skill reached an agent. Skills have a root of their own now, listed
+ * as a tree above this section, so the heading says what these rows ARE:
+ * plugins — the bundles the caller is in. (The locked rows that trail the
+ * list sit below a gap for the same reason: they are in the workspace but
+ * not the caller's, and the break is what keeps the heading honest.)
+ *
+ * `All plugins` is NOT a row here. It heads the whole nav instead: it is the
+ * Library's home rather than one more entry in the caller's set, and inside
+ * this list it used to collect the clicks meant for the plugins under it.
+ */
 function PluginsLabel({ onCreate }: { onCreate(): void }) {
   return (
-    <div className="group/label flex items-center gap-1 px-2.5 pb-1.5 pt-5">
-      <span className="text-label uppercase text-ink-faint">Included in your MCP</span>
-      <button
-        type="button"
-        onClick={onCreate}
-        title="New plugin"
-        aria-label="New plugin"
-        className="ml-auto flex size-4.5 items-center justify-center rounded-xs text-ui leading-none text-ink-faint opacity-0 transition-opacity hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover/label:opacity-100"
-      >
-        +
-      </button>
-    </div>
+    <SectionLabel
+      spaced
+      actions={
+        <button
+          type="button"
+          onClick={onCreate}
+          title="New plugin"
+          aria-label="New plugin"
+          className="flex size-4.5 items-center justify-center rounded-xs text-ui leading-none text-ink-faint hover:bg-hover hover:text-ink"
+        >
+          +
+        </button>
+      }
+    >
+      Plugins
+    </SectionLabel>
   );
 }

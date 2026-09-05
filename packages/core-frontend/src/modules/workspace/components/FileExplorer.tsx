@@ -1,4 +1,15 @@
-import { useState, useCallback, useEffect, useMemo, useRef, createContext, useContext } from 'react';
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  createContext,
+  useContext,
+  type ReactNode,
+  type Ref,
+} from 'react';
 import {
   ChevronRight,
   FilePlus,
@@ -26,8 +37,9 @@ import {
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
-import { useWorkspace, type PendingEntry } from '../state/workspace.context';
-import { mergePendingIntoTree, pathExistsInTree, findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { useWorkspace } from '../state/workspace.context';
+import { findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
@@ -95,16 +107,24 @@ function readPinnedPaths(): string[] {
 }
 
 interface PinnedController {
+  /**
+   * Whether this tree offers pinning at all. Only the Knowledge explorer has
+   * a Company Context section to pin INTO; a tree without one hides the item
+   * rather than offering a verb that lands nowhere.
+   */
+  available: boolean;
   isPinned: (path: string) => boolean;
   togglePin: (path: string) => void;
 }
 
 // Default no-op so a ContextMenu rendered outside the provider (e.g. in a unit
 // test) never throws — the real controller is supplied by FileExplorer.
-const PinnedContext = createContext<PinnedController>({
+const NO_PINNING: PinnedController = {
+  available: false,
   isPinned: () => false,
   togglePin: () => {},
-});
+};
+const PinnedContext = createContext<PinnedController>(NO_PINNING);
 const usePinned = () => useContext(PinnedContext);
 
 // Lets the deep right-click menu open the Manage access sheet without prop
@@ -135,6 +155,28 @@ const SuggestionsContext = createContext<SuggestionsController>({
   open: () => {},
 });
 const useSuggestions = () => useContext(SuggestionsContext);
+
+/**
+ * Which row is current, and where a row's click goes.
+ *
+ * Context, for the same reason as the three above — and because the SAME rows
+ * serve two navs. The Knowledge explorer opens a file in the pane workspace
+ * on the checked-out branch; the Library's Skills tree opens a skill on its
+ * own page, on the default branch, whatever is checked out. The rows know
+ * neither: they report the path they hold and read which one is active.
+ */
+export interface TreeNav {
+  /** The workspace-relative path the surface is showing — lights its row, reveals its folders. */
+  activePath: string | null;
+  open(path: string): void;
+}
+const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
+const useTreeNav = () => useContext(TreeNavContext);
+
+/** What a headless root's stand-in heading can ask of it — see `FileTreeNode.controls`. */
+export interface FileTreeNodeControls {
+  create(kind: 'file' | 'directory'): void;
+}
 
 /** Depth-first lookup of a tree entry by its exact relativePath. */
 function findEntryByPath(node: FileTreeEntry, path: string): FileTreeEntry | null {
@@ -174,7 +216,7 @@ function ContextMenu({
   returnFocusTo?: React.RefObject<HTMLElement | null>;
 }) {
   const { deleteEntry, unzipHere } = useWorkspace();
-  const { isPinned, togglePin } = usePinned();
+  const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
   const pinned = isPinned(entry.relativePath);
   const [unzipping, setUnzipping] = useState(false);
@@ -298,7 +340,7 @@ function ContextMenu({
           </MenuItem>
         </>
       )}
-      {entry.type === 'directory' && !isRoot && (
+      {entry.type === 'directory' && !isRoot && pinning && (
         <MenuItem role="menuitem" onClick={() => { togglePin(entry.relativePath); onClose(); }}>
           <span className="flex items-center gap-2">
             {pinned ? <PinOff size={14} /> : <Pin size={14} />}
@@ -425,11 +467,14 @@ function RenameInput({
 
 const DRAG_MIME = 'application/x-workspace-path';
 
-function FileTreeNode({
+export function FileTreeNode({
   entry,
   depth,
   initiallyExpanded,
   collapseChildren,
+  hideRow = false,
+  outdent = false,
+  controls,
 }: {
   entry: FileTreeEntry;
   depth: number;
@@ -440,9 +485,29 @@ function FileTreeNode({
   // When set, this node's direct children start collapsed (so opening Knowledge
   // reveals the ontologies without cascading them all open).
   collapseChildren?: boolean;
+  /**
+   * Render the children and nothing of the row itself: no name, no caret, no
+   * menu, always open, children at THIS depth. For a root whose place a
+   * section label has taken — the Library's Skills tree heads its scopes with
+   * "SKILLS", not with a folder row called Skills under it.
+   */
+  hideRow?: boolean;
+  /**
+   * Draw this node's descendants one indent step to the left. Set by a
+   * headless root for its whole subtree: the children keep their LOGICAL
+   * depth (so what starts open and what starts shut is exactly as under a
+   * drawn root), but sit where the missing row's children would have been.
+   */
+  outdent?: boolean;
+  /**
+   * The verbs a hidden row's hover buttons would have offered, for the
+   * section label that stands in for it — `create` opens the same inline
+   * input the row's buttons open.
+   */
+  controls?: Ref<FileTreeNodeControls>;
 }) {
-  const { openFilePath, createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
-  const { openFile } = useFileNav();
+  const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
+  const nav = useTreeNav();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
@@ -479,6 +544,16 @@ function FileTreeNode({
   // at which point intent is reset and auto-expand takes over again.
   const [userIntent, setUserIntent] = useState<boolean | null>(null);
   const [creating, setCreating] = useState<'file' | 'directory' | null>(null);
+  useImperativeHandle(
+    controls,
+    () => ({
+      create: (kind) => {
+        setUserIntent(true);
+        setCreating(kind);
+      },
+    }),
+    [],
+  );
   const [renaming, setRenaming] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   // Only the root row uses these refs, but hooks must run unconditionally.
@@ -522,7 +597,7 @@ function FileTreeNode({
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  const paddingLeft = indentFor(depth);
+  const paddingLeft = indentFor(depth) - (outdent ? 13 : 0);
   const isRoot = entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
   // A folder with nothing in it doesn't get a caret, because there is nothing
@@ -535,15 +610,15 @@ function FileTreeNode({
   // deep-link URLs reveal the file's row in the tree) or while files
   // dropped under it are still uploading (so the user can watch them
   // fill in).
-  const isOpenFileAncestor = entry.type === 'directory' && !!openFilePath && (
-    isRoot || openFilePath.startsWith(entry.relativePath + '/')
+  const isOpenFileAncestor = entry.type === 'directory' && !!nav.activePath && (
+    isRoot || nav.activePath.startsWith(entry.relativePath + '/')
   );
   const autoExpanded = entry.type === 'directory' && (isPending || isOpenFileAncestor);
 
   // Fingerprint of what currently drives auto-expand. When it transitions
   // (different file opened, upload starts), the user's prior collapse intent
   // is stale — reset so deep-links / new uploads can re-reveal the folder.
-  const autoTrigger = `${isPending ? 'P' : ''}|${isOpenFileAncestor ? openFilePath : ''}`;
+  const autoTrigger = `${isPending ? 'P' : ''}|${isOpenFileAncestor ? nav.activePath : ''}`;
   const prevAutoTriggerRef = useRef(autoTrigger);
   useEffect(() => {
     if (prevAutoTriggerRef.current !== autoTrigger) {
@@ -552,7 +627,7 @@ function FileTreeNode({
     }
   }, [autoTrigger]);
 
-  const isExpanded = userIntent ?? (autoExpanded || (initiallyExpanded ?? depth < 2));
+  const isExpanded = hideRow || (userIntent ?? (autoExpanded || (initiallyExpanded ?? depth < 2)));
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -636,6 +711,7 @@ function FileTreeNode({
     const dirPath = isRoot ? '' : entry.relativePath;
     return (
       <div>
+        {!hideRow && (
         <div
           className={cn(
             ROW_CLASS,
@@ -754,13 +830,16 @@ function FileTreeNode({
             </>
           )}
         </div>
+        )}
         {isExpanded && (
           <div>
             {creating && (
               // Line the input up with the child rows it is about to join:
               // one more indent step (13px), plus the caret slot (13px) and
-              // the row gap (6px) the child's name starts after.
-              <div style={{ paddingLeft: paddingLeft + 32 }} className="px-2 py-0.5">
+              // the row gap (6px) the child's name starts after. A headless
+              // root's children are outdented a step, so only the slot and
+              // the gap remain.
+              <div style={{ paddingLeft: paddingLeft + (hideRow ? 19 : 32) }} className="px-2 py-0.5">
                 <InlineInput
                   placeholder={creating === 'file' ? 'filename' : 'folder name'}
                   onSubmit={async (name) => {
@@ -794,6 +873,7 @@ function FileTreeNode({
                 key={child.relativePath}
                 entry={child}
                 depth={depth + 1}
+                outdent={hideRow || outdent}
                 initiallyExpanded={collapseChildren ? false : undefined}
               />
             ))}
@@ -847,7 +927,7 @@ function FileTreeNode({
     );
   }
 
-  const isActive = entry.relativePath === openFilePath;
+  const isActive = entry.relativePath === nav.activePath;
 
   return (
     <>
@@ -865,7 +945,7 @@ function FileTreeNode({
         draggable={!renaming && !isPending}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
-        onClick={() => { if (!renaming && !isPending) openFile(entry.relativePath); }}
+        onClick={() => { if (!renaming && !isPending) nav.open(entry.relativePath); }}
         onContextMenu={handleContextMenu}
         title={isPending ? 'Adding…' : undefined}
       >
@@ -933,83 +1013,26 @@ function FileTreeNode({
 // ── Explorer Root ──
 
 /**
- * Walk down to the node that actually holds the KB content. The file tree roots
- * at the per-branch workspace dir and wraps the KB clone a level or two deep
- * (`<branch>/<kbDir>/{KnowledgeBase,Data,Agents,Pipelines,Skills,Tools,…}`), so
- * the split lives below the visible root. Returns the first node whose children
- * include one of those well-known root directories, or null when there's no
- * such split (legacy clones).
+ * Everything a tree of `FileTreeNode`s needs AROUND it, and nothing about
+ * where it sits: the navigation (which row is current, where a click goes),
+ * the suggestion rows' change-request dialog, the right-click menu's Manage
+ * access sheet, and — for the one tree that has somewhere to pin into — a pin
+ * controller. The Knowledge explorer and the Library's Skills tree both render
+ * inside one of these, which is why their rows cannot drift: the rows are one
+ * component and so are their surroundings.
  */
-// (`findKbRoot` lives in `../utils/fileTree` — shared with registry-
-// contributed explorer items.)
-
-export function FileExplorer() {
-  const {
-    fileTree,
-    kbDirName,
-    dispatchUpload,
-    uploadError,
-    clearUploadError,
-    uploadNotice,
-    clearUploadNotice,
-    pendingUploads,
-  } = useWorkspace();
-  const [dragOver, setDragOver] = useState(false);
-  // Download is now a per-path permission (resolved server-side from the
-  // access tree's `download:` verb), so there's no global preflight gate
-  // here anymore. The menu items always render; if the user clicks on a
-  // file they don't have download permission for, the backend returns 403
-  // and `handleDownload` shows the error.
-  // Optimistic overlay: every dropped/picked file shows up in the tree
-  // within a frame, even before its commit echoes back from the server.
-  const serverTree = useMemo(
-    () => (fileTree ? mergePendingIntoTree(fileTree, pendingUploads) : null),
-    [fileTree, pendingUploads],
-  );
-
-  // The caller's own proposed files that do NOT exist on this branch — they
-  // live only on the personal suggestions branch behind an open change
-  // request. The tree shows them beside the branch's real files (synthesized
-  // below), coloured differently, and clicking one opens the request.
+export function TreeChrome({
+  nav,
+  suggestionOnlyPaths,
+  pinned,
+  children,
+}: {
+  nav: TreeNav;
+  suggestionOnlyPaths: ReadonlyMap<string, number>;
+  pinned?: PinnedController;
+  children: ReactNode;
+}) {
   const openChangeRequests = useOpenChangeRequests();
-  const suggestionOnlyPaths = useMemo(() => {
-    const map = new Map<string, number>();
-    if (!serverTree) return map;
-    /**
-     * "Not in the tree" has TWO causes, and only one earns a row: the file is
-     * new on the suggestions branch — or the server FILTERED it (.bevelignore,
-     * read gates). The client cannot evaluate those rules itself, but it can
-     * read their verdict off the tree: if the path's top-level folder under
-     * the repo root is absent, the whole subtree is hidden (a skill proposal
-     * under a bevelignored `Plugins/` was the observed leak), so the overlay
-     * must not resurrect it. The known cost: a proposal that CREATES a new
-     * top-level root folder shows no row until it merges.
-     */
-    const hiddenRoot = (path: string): boolean => {
-      const prefix = kbDirName && path.startsWith(`${kbDirName}/`) ? `${kbDirName}/` : '';
-      const segments = path.slice(prefix.length).split('/');
-      if (segments.length < 2) return false; // directly under the repo root
-      return !pathExistsInTree(serverTree, `${prefix}${segments[0]}`);
-    };
-    for (const [path, crNumber] of openChangeRequests.minePaths) {
-      if (!pathExistsInTree(serverTree, path) && !hiddenRoot(path)) {
-        map.set(path, crNumber);
-      }
-    }
-    return map;
-  }, [serverTree, openChangeRequests, kbDirName]);
-
-  const mergedTree = useMemo(() => {
-    if (!serverTree || suggestionOnlyPaths.size === 0) return serverTree;
-    // Reuses the pending-upload synthesizer: same parent-directory creation,
-    // same sort order, and a real entry always wins over a synthesized one.
-    const asEntries = new Map<string, PendingEntry>();
-    for (const path of suggestionOnlyPaths.keys()) {
-      asEntries.set(path, { fullPath: path, type: 'file' });
-    }
-    return mergePendingIntoTree(serverTree, asEntries);
-  }, [serverTree, suggestionOnlyPaths]);
-
   // A clicked suggestion row opens the SHARED change-request dialog on the
   // request the path belongs to — the row is a link to the request, and the
   // dialog is the one change-request view the app has.
@@ -1024,6 +1047,122 @@ export function FileExplorer() {
     }),
     [suggestionOnlyPaths, openChangeRequests],
   );
+  // Right-click → Manage access opens this sheet for the chosen entry.
+  const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
+
+  return (
+    <>
+      <TreeNavContext.Provider value={nav}>
+      <PinnedContext.Provider value={pinned ?? NO_PINNING}>
+      <ManageAccessContext.Provider value={setAccessTarget}>
+      <SuggestionsContext.Provider value={suggestionsController}>
+        {children}
+      </SuggestionsContext.Provider>
+      </ManageAccessContext.Provider>
+      </PinnedContext.Provider>
+      </TreeNavContext.Provider>
+      {openSuggestionCr && (
+        <ChangeRequestDialog
+          cr={openSuggestionCr}
+          onClose={() => setOpenSuggestionCr(null)}
+          onResolved={() => {
+            setOpenSuggestionCr(null);
+            window.dispatchEvent(new Event(PR_STALE_EVENT));
+          }}
+        />
+      )}
+      {accessTarget && (
+        <ManageAccessDialog
+          key={accessTarget.relativePath}
+          entry={accessTarget}
+          // The dialog is keyed on the path, so pointing it at a parent remounts
+          // it against that folder — the whole retarget is this one setter.
+          onManageAncestor={setAccessTarget}
+          onClose={() => setAccessTarget(null)}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * The upload banners: the last upload's error, or the one non-error notice
+ * (it landed on the suggestions branch). Rendered by every tree that can
+ * upload, because the state is the workspace's and a drop into a tree with no
+ * banner would fail — or succeed elsewhere — in silence.
+ */
+export function UploadNotices() {
+  const { uploadError, clearUploadError, uploadNotice, clearUploadNotice } = useWorkspace();
+  return (
+    <>
+      {uploadError && (
+        <div
+          role="alert"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-danger bg-danger-soft border-b border-danger/30 shrink-0"
+        >
+          <span className="flex-1 truncate" title={uploadError.reason}>
+            Couldn't add {uploadError.filename}: {uploadError.reason}
+          </span>
+          <IconButton
+            size={18}
+            tone="danger"
+            title="Dismiss"
+            aria-label="Dismiss upload error"
+            onClick={clearUploadError}
+          >
+            <X size={12} />
+          </IconButton>
+        </div>
+      )}
+      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
+          so is load-bearing — nothing appears in the tree where the user
+          dropped the files, and silence there reads as a failed upload. */}
+      {uploadNotice && (
+        <div
+          role="status"
+          className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
+        >
+          <span className="flex-1" title={uploadNotice}>
+            {uploadNotice}
+          </span>
+          <IconButton
+            size={18}
+            title="Dismiss"
+            aria-label="Dismiss upload notice"
+            onClick={clearUploadNotice}
+          >
+            <X size={12} />
+          </IconButton>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Walk down to the node that actually holds the KB content. The file tree roots
+ * at the per-branch workspace dir and wraps the KB clone a level or two deep
+ * (`<branch>/<kbDir>/{KnowledgeBase,Data,Agents,Pipelines,Skills,Tools,…}`), so
+ * the split lives below the visible root. Returns the first node whose children
+ * include one of those well-known root directories, or null when there's no
+ * such split (legacy clones).
+ */
+// (`findKbRoot` lives in `../utils/fileTree` — shared with registry-
+// contributed explorer items.)
+
+export function FileExplorer() {
+  const { openFilePath, dispatchUpload } = useWorkspace();
+  const { openFile } = useFileNav();
+  const [dragOver, setDragOver] = useState(false);
+  // Download is now a per-path permission (resolved server-side from the
+  // access tree's `download:` verb), so there's no global preflight gate
+  // here anymore. The menu items always render; if the user clicks on a
+  // file they don't have download permission for, the backend returns 403
+  // and `handleDownload` shows the error.
+  const { tree: mergedTree, suggestionOnlyPaths } = useMergedWorkspaceTree();
+  // The pane workspace's own navigation: the open tab is the current row, and
+  // a click opens the file on the checked-out branch.
+  const nav = useMemo<TreeNav>(() => ({ activePath: openFilePath, open: openFile }), [openFilePath, openFile]);
 
   // Pinned folders — a personal, client-side shortcut list surfaced at the top
   // of the explorer. Stored as relativePaths in localStorage; toggled from the
@@ -1041,7 +1180,7 @@ export function FileExplorer() {
     });
   }, []);
   const pinnedController = useMemo<PinnedController>(
-    () => ({ isPinned: (path) => pinnedPaths.includes(path), togglePin }),
+    () => ({ available: true, isPinned: (path) => pinnedPaths.includes(path), togglePin }),
     [pinnedPaths, togglePin],
   );
   // Resolve pinned paths to live tree entries, dropping any that no longer
@@ -1062,9 +1201,6 @@ export function FileExplorer() {
   // ships none of its own.
   const { explorerItems } = useAppRegistry();
 
-  // Right-click → Manage access opens this sheet for the chosen entry.
-  const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
-
   // KB content splits into separate top-level folders; surface them as labelled
   // sections rather than a single flat root. The Knowledge section hoists
   // `KnowledgeBase/`'s children and folds in any other top-level content folder
@@ -1079,6 +1215,10 @@ export function FileExplorer() {
   // none of the surrounding affordances, on a folder whose access is managed
   // from the plugin page. Deep links into a plugin file still resolve; the
   // folder just is not a browsing destination in Knowledge.
+  //
+  // `Skills/` neither: the Skills & Tools sidebar renders that root as its
+  // own tree (`SkillsTree`), with these same rows, and a skill file opens on
+  // its skill page there.
   //
   // `Data/`, `Agents/` and `Pipelines/` are rendered when PRESENT but never
   // created by core (see `CORE_REQUIRED_DIRS`) — a deployment that owns the
@@ -1151,7 +1291,7 @@ export function FileExplorer() {
   );
 
   return (
-    <>
+    <TreeChrome nav={nav} suggestionOnlyPaths={suggestionOnlyPaths} pinned={pinnedController}>
     {/* No background, no border, no width: this is the CONTENTS of the app's
         one sidebar, and `SidebarFrame` is the sidebar. It used to be
         `bg-white` against the Library's `bg-sidebar`, which is how two navs in
@@ -1175,49 +1315,7 @@ export function FileExplorer() {
         setDragOver(false);
       }}
     >
-      {uploadError && (
-        <div
-          role="alert"
-          className="flex items-start gap-1 px-2 py-1 text-xs text-danger bg-danger-soft border-b border-danger/30 shrink-0"
-        >
-          <span className="flex-1 truncate" title={uploadError.reason}>
-            Couldn't add {uploadError.filename}: {uploadError.reason}
-          </span>
-          <IconButton
-            size={18}
-            tone="danger"
-            title="Dismiss"
-            aria-label="Dismiss upload error"
-            onClick={clearUploadError}
-          >
-            <X size={12} />
-          </IconButton>
-        </div>
-      )}
-      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
-          so is load-bearing — nothing appears in the tree where the user
-          dropped the files, and silence there reads as a failed upload. */}
-      {uploadNotice && (
-        <div
-          role="status"
-          className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
-        >
-          <span className="flex-1" title={uploadNotice}>
-            {uploadNotice}
-          </span>
-          <IconButton
-            size={18}
-            title="Dismiss"
-            aria-label="Dismiss upload notice"
-            onClick={clearUploadNotice}
-          >
-            <X size={12} />
-          </IconButton>
-        </div>
-      )}
-      <PinnedContext.Provider value={pinnedController}>
-      <ManageAccessContext.Provider value={setAccessTarget}>
-      <SuggestionsContext.Provider value={suggestionsController}>
+      <UploadNotices />
       <div className="flex-1 overflow-y-auto min-h-0">
         {/* "Company Context", not "Pinned". The mechanism is pinning; the
             SECTION is the handful of places this company actually works out
@@ -1263,31 +1361,8 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
       </div>
-      </SuggestionsContext.Provider>
-      </ManageAccessContext.Provider>
-      </PinnedContext.Provider>
       <PullRequestsForMe />
     </div>
-    {openSuggestionCr && (
-      <ChangeRequestDialog
-        cr={openSuggestionCr}
-        onClose={() => setOpenSuggestionCr(null)}
-        onResolved={() => {
-          setOpenSuggestionCr(null);
-          window.dispatchEvent(new Event(PR_STALE_EVENT));
-        }}
-      />
-    )}
-    {accessTarget && (
-      <ManageAccessDialog
-        key={accessTarget.relativePath}
-        entry={accessTarget}
-        // The dialog is keyed on the path, so pointing it at a parent remounts
-        // it against that folder — the whole retarget is this one setter.
-        onManageAncestor={setAccessTarget}
-        onClose={() => setAccessTarget(null)}
-      />
-    )}
-    </>
+    </TreeChrome>
   );
 }

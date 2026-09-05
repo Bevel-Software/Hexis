@@ -23,8 +23,9 @@ after an upgrade can take a little longer.
 
 The maintenance phase commits to the knowledge base on every branch when a
 release needs it. The current steps: rename a legacy `Groups/` root to
-`Plugins/`; create the `Skills/` root and hide it from the Knowledge tree
-like `Plugins/`; write a `plugin.json` into every plugin folder that predates
+`Plugins/`; create the `Skills/` root (and take back the `.bevelignore` rule an
+earlier release added for it — the Skills & Tools sidebar shows that root as
+a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
 **Downgrading is not supported** once a version's migrations have run: an

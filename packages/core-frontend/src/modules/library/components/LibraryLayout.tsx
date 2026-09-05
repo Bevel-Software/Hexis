@@ -22,6 +22,7 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
+import { SkillsTree } from './SkillsTree';
 import { PluginsSidebarMenu } from './PluginsSidebarMenu';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { DeletePluginDialog } from './DeletePluginDialog';
@@ -96,8 +97,8 @@ export function LibraryLayout() {
    * The member rows: every plugin the caller can READ (or manages), whether or
    * not anything is in it yet. Counts come from the catalog, membership does
    * not — a freshly created plugin has no skills or tools, and deriving the
-   * rows from the items alone made it vanish from the very nav that says
-   * "Included in your MCP". Being in a plugin is what puts it in your MCP;
+   * rows from the items alone made it vanish from the very nav that lists
+   * the caller's plugins. Being in a plugin is what puts it in your MCP;
    * having content is not. The catalog still contributes names the summaries
    * miss (a per-file grant can surface one skill from an otherwise unreadable
    * folder), so the two witnesses are merged rather than either winning.
@@ -232,6 +233,7 @@ export function LibraryLayout() {
           pluginsIndexActive={isPluginsIndexPath(location.pathname)}
           onOpenPluginsIndex={() => navigate(pathForPluginsIndex())}
           onContextMenu={openContextMenu}
+          skillsTree={<SkillsTree />}
         />
       </SidebarFrame>
 

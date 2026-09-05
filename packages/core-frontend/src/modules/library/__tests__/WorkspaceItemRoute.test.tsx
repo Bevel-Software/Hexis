@@ -92,7 +92,13 @@ function wrap(children: ReactNode) {
 
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  const rawFile = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
+  return (
+    <>
+      <div aria-label="pathname">{location.pathname}</div>
+      <div aria-label="raw-file">{String(rawFile)}</div>
+    </>
+  );
 }
 
 function renderAt(url: string) {
@@ -474,6 +480,66 @@ describe('WorkspaceItemRoute', () => {
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::notes.md',
     );
+  });
+
+  /**
+   * The shared-skills root: skills and the scope folders that own them, no
+   * plugin around them. The same evidence rules as under `Plugins/`, with
+   * the two plugin destinations replaced — a scope has no page, and a file
+   * filed directly in a scope opens as the plain file it is.
+   */
+  describe('a skill under the shared Skills/ root', () => {
+    const SHARED: LibraryData = {
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        { name: 'discovery-call', description: '', path: 'Skills/Sales/discovery-call' },
+      ],
+    };
+
+    beforeEach(() => {
+      dataMock.useLibraryData.mockReturnValue(SHARED);
+    });
+
+    it("renders a shared skill file on that file's tab, inside the library nav", async () => {
+      renderAt(itemUrl('Skills/Sales/discovery-call/checklist.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('discovery-call::checklist.md');
+      expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+    });
+
+    it('opens a bare shared skill folder on SKILL.md', async () => {
+      renderAt(itemUrl('Skills/Sales/discovery-call'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('discovery-call::SKILL.md');
+    });
+
+    it('resolves a just-created shared skill from its SKILL.md alone', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Skills/Sales/brand-new/SKILL.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('brand-new::SKILL.md');
+    });
+
+    it('sends a SCOPE folder home — the sidebar tree is where scopes are browsed', async () => {
+      renderAt(itemUrl('Skills/Sales'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent(/^\/skills-and-tools$/),
+      );
+    });
+
+    it("opens a scope's own file as a plain file, in the pane workspace", async () => {
+      renderAt(itemUrl('Skills/Sales/access.md'));
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      // Same URL — the raw view is router state, never a different address.
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales/access.md'));
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+    });
+
+    it('waits for the catalog rather than guessing a scope is a skill', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Skills/Sales'));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument());
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales'));
+    });
   });
 
   it('a non-default branch never renders an item page', async () => {
