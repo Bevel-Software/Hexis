@@ -1,6 +1,6 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH, PLUGINS_DIR, pluginManifestName } from '@bevel-software/platform-shared';
+import { isProtectedBranch, DEFAULT_BRANCH, pluginManifestName } from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,
@@ -86,7 +86,7 @@ export function createAccessRoutes(
   const defaultBranchPrincipals = async (): Promise<{
     roles: string[];
     groups: string[];
-    plugins: string[];
+    plugins: { name: string; folder: string }[];
   }> => {
     await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
     const { roles, groups, plugins } = await accessControl.kbPrincipals(
@@ -94,6 +94,26 @@ export function createAccessRoutes(
     );
     // `plugins` is defensive: an older resolver double may omit it.
     return { roles, groups, plugins: plugins ?? [] };
+  };
+
+  /**
+   * The plugins `email` may DISCOVER — read the folder's access.md, the same
+   * verdict the plugin index lists on. Both the suggest list and the grant
+   * route go through this, so a plugin hidden from the picker cannot be
+   * named in a grant either, and an undiscoverable one answers exactly like
+   * one that does not exist.
+   */
+  const discoverablePlugins = async (
+    email: string,
+    plugins: { name: string; folder: string }[],
+  ): Promise<{ name: string; folder: string }[]> => {
+    if (plugins.length === 0) return [];
+    const verdicts = await accessControl.canReadBatch(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+      email,
+      plugins.map((p) => `${p.folder}/access.md`),
+    );
+    return plugins.filter((p) => verdicts.get(`${p.folder}/access.md`) === true);
   };
 
   /**
@@ -372,16 +392,13 @@ export function createAccessRoutes(
       // same verdict the plugin index lists on), so the picker never names a
       // plugin its enumeration would hide. Their `plugin/<Name>/<verb>`
       // tokens are built client-side; the name is what a person searches for.
-      const candidatePlugins = plugins.filter((p) => !q || p.toLowerCase().includes(q));
-      const discoverable = candidatePlugins.length
-        ? await accessControl.canReadBatch(
-            workspaceIdForBranch(DEFAULT_BRANCH),
-            user.email,
-            candidatePlugins.map((p) => `${PLUGINS_DIR}/${p}/access.md`),
-          )
-        : new Map<string, boolean>();
-      const matchedPlugins = candidatePlugins
-        .filter((p) => discoverable.get(`${PLUGINS_DIR}/${p}/access.md`) === true)
+      const matchedPlugins = (
+        await discoverablePlugins(
+          user.email,
+          plugins.filter((p) => !q || p.name.toLowerCase().includes(q)),
+        )
+      )
+        .map((p) => p.name)
         .slice(0, CAP);
 
       let people: { name: string; email: string }[] = [];
@@ -723,13 +740,15 @@ export function createAccessRoutes(
           );
         }
       } else if (principal.kind === 'plugin') {
-        // A plugin grant must name a plugin that EXISTS on the default branch
-        // (a folder carrying an access.md — the same set the suggest list
-        // offers). Matched on the manifest slug, the identity the token
-        // canonicalises to.
+        // A plugin grant must name a plugin the caller can DISCOVER on the
+        // default branch — the same set the suggest list offers, so a plugin
+        // hidden from the picker is refused here with the same words as one
+        // that does not exist. Matched on the manifest slug, the identity the
+        // token canonicalises to.
         const { plugins } = await defaultBranchPrincipals();
         const slug = pluginManifestName(principal.plugin);
-        if (!plugins.some((p) => pluginManifestName(p) === slug)) {
+        const visible = await discoverablePlugins(user.email, plugins);
+        if (!visible.some((p) => pluginManifestName(p.name) === slug)) {
           throw new AccessMutationError(
             `No plugin named "${principal.plugin}". Pick an existing plugin.`,
             404,

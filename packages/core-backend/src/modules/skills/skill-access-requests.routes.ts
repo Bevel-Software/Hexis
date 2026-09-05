@@ -92,7 +92,13 @@ export function createSkillAccessRequestRoutes(deps: {
       }
       const ws = await workspaceService.getOrCreateForBranch(branch);
       const accessPath = `${kbDirName}/${rulesOf(folder)}`;
-      const current = await workspaceService.readFile(ws.id, accessPath).catch(() => '');
+      // Only a PROVEN absence reads as "no rules yet": any other failure must
+      // not be turned into an empty file that a splice then overwrites.
+      const current = await workspaceService.readFile(ws.id, accessPath).catch((err: unknown) => {
+        const code = (err as { code?: unknown } | null)?.code;
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+        return '';
+      });
       const spliced = spliceGrant(
         current,
         'write',

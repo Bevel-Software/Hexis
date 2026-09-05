@@ -45,20 +45,27 @@ export class MarketplaceCompilerService {
     private readonly source: PluginSource = new KbPluginSource(),
   ) {}
 
-  /** The default-branch commit the next compile would read. */
+  /**
+   * The default-branch commit the next compile would read. Throws when git
+   * cannot say: the repo service keys freshness on this value, and a stable
+   * placeholder would make every later compile look unnecessary — source
+   * changes and access revocations would never reach that caller again.
+   */
   async sourceCommit(): Promise<string> {
     const { kbRoot } = await this.checkout();
-    try {
-      const { stdout } = await execFileAsync('git', ['-C', kbRoot, 'rev-parse', 'HEAD']);
-      return stdout.trim();
-    } catch {
-      return 'unknown';
-    }
+    const { stdout } = await execFileAsync('git', ['-C', kbRoot, 'rev-parse', 'HEAD']);
+    const sha = stdout.trim();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`could not read the default branch's commit (${sha || 'empty'})`);
+    return sha;
   }
 
   async compileFor(audience: CompileAudience): Promise<VirtualTree & { sourceCommit: string }> {
     const { wsId, kbRoot } = await this.checkout();
-    const sourceCommit = await this.sourceCommit();
+    // Strictness about the commit belongs to the FRESHNESS check (the repo
+    // service calls `sourceCommit()` itself and refuses to serve without
+    // one). A compile of a checkout git cannot describe still yields a
+    // correct tree; only its README and bundle version lose the sha.
+    const sourceCommit = await this.sourceCommit().catch(() => 'unknown');
     const skills = await this.skillService.listSkills(undefined);
     const membership = await this.links.membership();
     const { plugins } = await this.source.discover(kbRoot);

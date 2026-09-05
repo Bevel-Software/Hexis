@@ -108,6 +108,8 @@ export interface VirtualTree {
 
 const BUNDLE_NAME = 'hexis-all';
 const SKILLS_PLUGIN_NAME = 'skills-and-knowledge';
+/** Slugs the compiler emits itself; a real plugin may not take them. */
+const RESERVED_SLUGS = new Set([BUNDLE_NAME, SKILLS_PLUGIN_NAME]);
 const NEVER_SHIPPED = new Set(['access.md', '.bevelignore']);
 
 export async function compileMarketplace(input: CompileInput): Promise<VirtualTree> {
@@ -158,7 +160,16 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     );
     const mcp = portableMcp(plugin.mcpServers);
     if (dedup.length === 0 && mcp === null) continue; // nothing this caller may see
-    const slug = typeof manifest?.name === 'string' && manifest.name ? manifest.name : pluginManifestName(name);
+    // The slug is ALWAYS sanitised, even when the manifest declares a name: it
+    // becomes a path segment in the compiled tree, and a checked-in manifest
+    // is repository content, not trusted input. The same folding the
+    // provisioner applies (`[a-z0-9.-]`, no runs, no leading dots) leaves
+    // nothing that can be a separator or a parent reference.
+    const slug = pluginManifestName(typeof manifest?.name === 'string' && manifest.name ? manifest.name : name);
+    if (out.some((p) => p.slug === slug) || RESERVED_SLUGS.has(slug)) {
+      warnings.push(`${plugin.folder}: manifest name "${slug}" is already taken in this marketplace — plugin skipped`);
+      continue;
+    }
     out.push({
       slug,
       displayName: typeof manifest?.displayName === 'string' ? manifest.displayName : name,
@@ -188,7 +199,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     ? { [options.knowledgeBaseMcp.name]: { type: 'streamable-http', url: options.knowledgeBaseMcp.url } }
     : undefined;
   if (leftovers.length > 0 || kbMcp) {
-    const slug = options.skillsPluginName ?? SKILLS_PLUGIN_NAME;
+    const slug = pluginManifestName(options.skillsPluginName ?? SKILLS_PLUGIN_NAME);
     if (out.some((p) => p.slug === slug)) {
       warnings.push(`the skills plugin "${slug}" collides with a plugin's manifest name — standalone skills not shipped`);
     } else {
@@ -228,7 +239,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   }
 
   // 4. The one-install bundle: a Claude manifest with nothing but dependencies.
-  const bundle = options.bundleName ?? BUNDLE_NAME;
+  const bundle = pluginManifestName(options.bundleName ?? BUNDLE_NAME);
   const slugs = out.map((p) => p.slug);
   if (slugs.length > 0) {
     const shortSha = options.sourceCommit.slice(0, 12) || '0';

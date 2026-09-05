@@ -138,7 +138,13 @@ export class MarketplaceRepoService {
     const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-marketplace-'));
     try {
       for (const [rel, bytes] of tree.files) {
-        const abs = path.join(scratch, rel);
+        // The compiler sanitises every segment it invents, but the tree is
+        // built from repository content, so the sink checks containment
+        // itself: nothing is written outside the scratch directory.
+        const abs = path.resolve(scratch, rel);
+        if (!abs.startsWith(scratch + path.sep)) {
+          throw new Error(`refusing to materialise "${rel}": escapes the scratch tree`);
+        }
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, bytes);
       }

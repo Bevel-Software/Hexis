@@ -160,7 +160,9 @@ describe('PluginLinksService', () => {
     expect(JSON.parse(await read('Plugins/GTM/plugin.json')).extensions).toBeUndefined();
     expect(await read('Skills/Eng/deploy/access.md')).not.toContain('plugin/GTM');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
-    expect(commits).toEqual([`${KB_DIR}/Plugins/GTM/plugin.json`, `${KB_DIR}/Skills/Eng/deploy/access.md`]);
+    // Revoke lands first, manifest second: a failure between the two leaves
+    // the visible half-state (still listed, no grant), never the silent one.
+    expect(commits).toEqual([`${KB_DIR}/Skills/Eng/deploy/access.md`, `${KB_DIR}/Plugins/GTM/plugin.json`]);
   });
 
   it('unlink leaves the grant in place when the actor may not edit the skill — and says so', async () => {

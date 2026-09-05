@@ -1124,7 +1124,7 @@ export class AccessControlService implements IAccessControl {
   async kbPrincipals(workspaceId: string): Promise<{
     roles: string[];
     groups: string[];
-    plugins: string[];
+    plugins: { name: string; folder: string }[];
     people: { name: string; email: string }[];
   }> {
     let model: AccessModel;
@@ -1146,12 +1146,17 @@ export class AccessControlService implements IAccessControl {
     // Plugins = the FOLDER names behind the synthesised `plugin/<Name>/<verb>`
     // principals, once each (three keys share a folder). Personal folders are
     // plugins to the resolver but not to a person picking a grantee.
-    const plugins = new Set<string>();
+    const plugins = new Map<string, string>();
     for (const [key, principal] of model.roles.byCanonical) {
       if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
       else if (principal.kind === 'group') groups.push(principal.displayName);
-      else if (principal.kind === 'plugin' && principal.pluginFolder && !isPersonalPluginFolder(principal.pluginFolder)) {
-        plugins.add(principal.pluginFolder);
+      else if (
+        principal.kind === 'plugin' &&
+        principal.pluginFolder &&
+        principal.pluginDir &&
+        !isPersonalPluginFolder(principal.pluginFolder)
+      ) {
+        plugins.set(principal.pluginFolder, principal.pluginDir);
       }
     }
     // People = roles.yaml member emails (name-less) ∪ access.md `Name <email>`
@@ -1173,7 +1178,14 @@ export class AccessControlService implements IAccessControl {
       name: name || email.split('@')[0],
       email,
     }));
-    return { roles, groups, plugins: [...plugins].sort((a, b) => a.localeCompare(b)), people };
+    return {
+      roles,
+      groups,
+      plugins: [...plugins.entries()]
+        .map(([name, folder]) => ({ name, folder }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      people,
+    };
   }
 
   async findEmailByHash(

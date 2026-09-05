@@ -110,6 +110,14 @@ export class PluginLinksService {
     return this.locks.run(`plugin:${pluginManifestName(folder)}`, async () => {
       const { manifest, manifestRel } = await this.readManifest(wsId, folder);
       const roots = linkedSkillRoots(manifest);
+      // Manifest FIRST, grant second — two commits, deliberately in this
+      // order. The two files live in different folders and the commit
+      // pipeline is path-scoped, so there is no single commit to be had; what
+      // can be chosen is which half-state a failure leaves. Listed-but-not-
+      // shared is the visible one: the link index reports the missing grant,
+      // the card wears the amber dot, and Repair finishes the job. The other
+      // order would leave shared-but-not-listed — an over-share nothing
+      // surfaces.
       if (!roots.includes(root)) {
         await this.workspaceService.writeFile(
           wsId,
@@ -135,16 +143,13 @@ export class PluginLinksService {
       if (!roots.includes(root)) {
         throw new PluginLinkError(`"${root}" is not linked into ${folder}.`, 404, { kind: 'not-linked', root });
       }
-      await this.workspaceService.writeFile(
-        wsId,
-        manifestRel,
-        `${JSON.stringify(withLinkedSkillRoots(manifest, roots.filter((r) => r !== root)), null, 2)}\n`,
-      );
-      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, manifestRel, user);
 
-      // Revoke only where the actor may edit the skill's rules; otherwise the
-      // grant stays for a skill editor to remove — never a silent no-op that
-      // pretends it happened.
+      // Revoke FIRST, manifest second — the mirror of `link`'s ordering and
+      // for the same reason: a failure between the two must leave the
+      // visible half-state (listed, no grant → amber dot, Repair), never the
+      // silent one (unlisted, still shared). Revoke only where the actor may
+      // edit the skill's rules; otherwise the grant stays for a skill editor
+      // to remove — never a silent no-op that pretends it happened.
       let revoked = false;
       if (await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(root))) {
         let changed = false;
@@ -164,6 +169,12 @@ export class PluginLinksService {
         }
         revoked = true;
       }
+      await this.workspaceService.writeFile(
+        wsId,
+        manifestRel,
+        `${JSON.stringify(withLinkedSkillRoots(manifest, roots.filter((r) => r !== root)), null, 2)}\n`,
+      );
+      await this.commits.runPendingCommit(wsId, DEFAULT_BRANCH, manifestRel, user);
       this.changed(wsId);
       return { root, revoked };
     });
@@ -173,17 +184,20 @@ export class PluginLinksService {
     const folder = await this.pluginFolder(plugin);
     const root = this.rootOrThrow(rawRoot);
     const wsId = linksWorkspaceId();
-    const { manifest } = await this.readManifest(wsId, folder);
-    if (!linkedSkillRoots(manifest).includes(root)) {
-      throw new PluginLinkError(`"${root}" is not linked into ${folder}.`, 404, { kind: 'not-linked', root });
-    }
-    if (!(await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(root)))) {
-      throw new PluginLinkError(`You can't change who may read "${root}".`, 403, {
-        kind: 'needs-skill-write',
-        root,
-      });
-    }
+    // Everything under the lock, the manifest read included: a repair that
+    // checked the link and then waited on an unlink would re-grant a root the
+    // manifest no longer names.
     return this.locks.run(`plugin:${pluginManifestName(folder)}`, async () => {
+      const { manifest } = await this.readManifest(wsId, folder);
+      if (!linkedSkillRoots(manifest).includes(root)) {
+        throw new PluginLinkError(`"${root}" is not linked into ${folder}.`, 404, { kind: 'not-linked', root });
+      }
+      if (!(await this.accessControl.canWrite(wsId, user.email, accessMdPathForFolder(root)))) {
+        throw new PluginLinkError(`You can't change who may read "${root}".`, 403, {
+          kind: 'needs-skill-write',
+          root,
+        });
+      }
       await this.grantTokens(wsId, user, folder, root);
       this.changed(wsId);
       return { root };

@@ -75,6 +75,7 @@ export function synthesizePluginPrincipals(
         emails,
         kind: 'plugin',
         pluginFolder: folder,
+        pluginDir: dir,
       });
       for (const email of emails) {
         let set = index.byEmail.get(email);

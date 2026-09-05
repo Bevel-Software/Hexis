@@ -168,12 +168,17 @@ describe('KbPluginSource — one walk, both shapes', () => {
     expect(warnings).toEqual([]);
   });
 
-  it('keeps the first of two plugins that share a name and says which was skipped', async () => {
+  it('keeps the first of two plugins whose names fold to one slug, and says which was skipped', async () => {
     await write('Plugins/a/GTM/plugin.json', '{}');
     await write('Plugins/b/GTM/plugin.json', '{}');
+    // Different spelling, same manifest slug: still one plugin.
+    await write('Plugins/c/gtm/plugin.json', '{}');
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     expect(plugins.map((p) => p.folder)).toEqual(['Plugins/a/GTM']);
-    expect(warnings).toEqual(['Plugins/b/GTM: plugin name "GTM" is already used by Plugins/a/GTM — plugin skipped']);
+    expect(warnings).toEqual([
+      'Plugins/b/GTM: plugin name "GTM" is already used by Plugins/a/GTM — plugin skipped',
+      'Plugins/c/gtm: plugin name "gtm" is already used by Plugins/a/GTM — plugin skipped',
+    ]);
   });
 
   it('a knowledge base without a plugins root has no plugins and no complaint', async () => {

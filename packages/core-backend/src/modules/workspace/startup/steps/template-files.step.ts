@@ -232,14 +232,14 @@ export class TemplateFilesStep implements OnServerStart {
     // LINE PRESENCE, not effective outcome: a later `!AGENTS.md` negation is
     // the operator explicitly choosing to SHOW the file, and hiding it is a
     // default this step provides, not a mandate it re-imposes every boot.
-    added.push(...(await mergeIgnorePattern(repoDir, branch, 'AGENTS.md')));
-
-    // The shared-skills root is the Library's, like `Plugins/`: a KB whose
-    // ignore file predates it would show `Skills/` in the Knowledge tree and
-    // the agent view. Same idempotent, line-presence merge as above — and
-    // spelled with the CONFIGURED root name, since a deployment may have
-    // renamed it.
-    added.push(...(await mergeIgnorePattern(repoDir, branch, `${SKILLS_DIR}/`)));
+    //
+    // The shared-skills root rides the same merge: it is the Library's, like
+    // `Plugins/`, and a KB whose ignore file predates it would show `Skills/`
+    // in the Knowledge tree and the agent view. Spelled with the CONFIGURED
+    // root name, since a deployment may have renamed it. ONE read-modify-
+    // write for both patterns: two merges would each read the on-disk file
+    // and the second declared write would drop the first's line.
+    added.push(...(await mergeIgnorePatterns(repoDir, branch, ['AGENTS.md', `${SKILLS_DIR}/`])));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
@@ -328,7 +328,7 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
 }
 
 /**
- * Ensure `.bevelignore` carries `pattern`, declaring the appended content when
+ * Ensure `.bevelignore` carries every `pattern`, declaring the appended content when
  * absent. Returns the paths changed, for the note.
  *
  * APPENDS — never rewrites. The file is the operator's, and every rule
@@ -341,17 +341,17 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
  * is not a rule for the root `AGENTS.md`, and treating it as one would leave
  * the mismatch this exists to close.
  */
-async function mergeIgnorePattern(repoDir: string, branch: KbBranch, pattern: string): Promise<string[]> {
+async function mergeIgnorePatterns(repoDir: string, branch: KbBranch, patterns: string[]): Promise<string[]> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
   } catch {
     // No ignore file — the copy declared from the template arrives with the
-    // pattern in it (guaranteed at declaration time, see the required-files
+    // patterns in it (guaranteed at declaration time, see the required-files
     // loop above).
     return [];
   }
-  const merged = withIgnorePattern(current, pattern);
+  const merged = patterns.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
   if (merged === current) return [];
   branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];

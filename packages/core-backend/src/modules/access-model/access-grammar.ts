@@ -271,6 +271,8 @@ export interface RolesIndex {
       kind?: 'role' | 'group' | 'plugin';
       /** For `kind: 'plugin'`: the plugin FOLDER name the principal derives from. */
       pluginFolder?: string;
+      /** For `kind: 'plugin'`: the repo-relative plugin directory, e.g. `Plugins/GTM`. */
+      pluginDir?: string;
     }
   >;
   byEmail: Map<string, Set<string>>;
@@ -597,6 +599,16 @@ export function parseRolesYaml(
     if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
       errors.push(
         `roles.yaml: role '${displayName}' starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix — that spelling is the explicit role token in access entries`,
+      );
+      continue;
+    }
+    // A role spelled `plugin/…` would be overwritten by the synthesised plugin
+    // principal of the same key while its members kept the token — plugin
+    // access for people who are not plugin members. Refused at parse time,
+    // like the group name-safety rule.
+    if (canonical.startsWith(PLUGIN_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${PLUGIN_TOKEN_PREFIX}' prefix — that spelling is the plugin-principal token in access entries`,
       );
       continue;
     }

@@ -230,7 +230,10 @@ describe('plugin principals', () => {
         'Plugins/personal-abc123/access.md': '---\n---\nread:\n  - Ali <ali@x.io>\n',
       });
       const { plugins } = await svc.kbPrincipals(workspaceId);
-      expect(plugins).toEqual(['GTM', 'Ops']);
+      expect(plugins).toEqual([
+        { name: 'GTM', folder: 'Plugins/GTM' },
+        { name: 'Ops', folder: 'Plugins/Ops' },
+      ]);
     });
   });
 });

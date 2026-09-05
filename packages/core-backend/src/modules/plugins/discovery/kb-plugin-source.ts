@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE } from '@bevel-software/platform-shared';
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, pluginManifestName } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin, Discovery, PluginSource } from './plugin-source.js';
 import { readNativePlugin } from './native.source.js';
 import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bundle.source.js';
@@ -37,13 +37,18 @@ export class KbPluginSource implements PluginSource {
     const registry = await loadRegistry(kbRoot, warnings);
     const seen = new Map<string, string>();
 
+    // Uniqueness is judged on the MANIFEST SLUG, not the raw name: `Sales Team`
+    // and `sales-team` fold to one slug, and the slug is what the compiled
+    // marketplace keys a plugin on — two folders sharing it would be two
+    // plugins with one key and one of them silently overwritten.
     const claim = (plugin: DiscoveredPlugin): void => {
-      const twin = seen.get(plugin.name);
+      const key = pluginManifestName(plugin.name);
+      const twin = seen.get(key);
       if (twin) {
         warnings.push(`${plugin.folder}: plugin name "${plugin.name}" is already used by ${twin} — plugin skipped`);
         return;
       }
-      seen.set(plugin.name, plugin.folder);
+      seen.set(key, plugin.folder);
       plugins.push(plugin);
     };
 

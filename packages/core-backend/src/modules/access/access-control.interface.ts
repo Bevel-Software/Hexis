@@ -326,8 +326,12 @@ export interface IAccessControl {
   kbPrincipals(workspaceId: string): Promise<{
     roles: string[];
     groups: string[];
-    /** Plugin FOLDER names whose `plugin/<Name>/<verb>` principals exist (personal folders excluded). */
-    plugins: string[];
+    /**
+     * Plugins whose `plugin/<Name>/<verb>` principals exist (personal folders
+     * excluded): the display name and the repo-relative folder, so a caller
+     * can apply the discoverability verdict (`canRead` on `<folder>/access.md`).
+     */
+    plugins: { name: string; folder: string }[];
     people: { name: string; email: string }[];
   }>;
 

@@ -173,6 +173,23 @@ describe('compileMarketplace', () => {
     expect(tree.plugins).toEqual(['gtm', 'skills-and-knowledge', 'hexis-all']);
   });
 
+  it('a manifest name is repository content: it is folded to a safe slug, and a duplicate slug is skipped', async () => {
+    // A hostile or mistaken manifest name must never become a path segment
+    // that escapes the compiled tree.
+    await write('Plugins/GTM/plugin.json', JSON.stringify({ name: '../../etc/passwd' }));
+    // A second plugin whose name folds to the same slug as the first.
+    await write('Plugins/Twin/plugin.json', JSON.stringify({ name: 'etc-passwd' }));
+    await write('Plugins/Twin/access.md', '---\nread:\n  - everyone\n---\nread:\n  - Sam <sam@x.io>\n');
+    await write('Plugins/Twin/skills/twin-skill/SKILL.md', '---\ndescription: t\n---\n');
+
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const paths = [...tree.files.keys()];
+    expect(paths.every((p) => !p.includes('..') && !p.startsWith('/'))).toBe(true);
+    expect(paths).toContain('plugins/etc-passwd/skills/outreach/SKILL.md');
+    expect(paths).not.toContain('plugins/etc-passwd/skills/twin-skill/SKILL.md');
+    expect(tree.warnings.some((w) => w.includes('Plugins/Twin') && w.includes('already taken'))).toBe(true);
+  });
+
   it('a name clash inside one plugin keeps the first by path and says so', async () => {
     // A second `deploy` skill, linked from the same plugin via a folder root.
     await write('Skills/Ops/deploy/SKILL.md', '---\ndescription: Ops deploy.\n---\n');
