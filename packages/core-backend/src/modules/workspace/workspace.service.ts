@@ -291,7 +291,6 @@ export class WorkspaceService implements IWorkspaceService {
       } catch {
         continue;
       }
-      if (this.inFlightBootstraps.has(branch)) continue;
       try {
         await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
       } catch (err) {
@@ -299,6 +298,11 @@ export class WorkspaceService implements IWorkspaceService {
         if (code === 'ENOENT' || code === 'ENOTDIR') continue;
         throw err;
       }
+      // AFTER the probe, with no await in between: a bootstrap registers
+      // itself before it creates `.git`, so any clone whose `.git` was found
+      // while its bootstrap is running is in this map by now. Checking before
+      // the probe left a window where the clone started in between.
+      if (this.inFlightBootstraps.has(branch)) continue;
       cloned.push({ id: entry.name, branch });
     }
     return cloned;

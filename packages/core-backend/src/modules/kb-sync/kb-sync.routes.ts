@@ -50,6 +50,17 @@ export interface KbSyncRouteDeps {
 const BODY_LIMIT = '2mb';
 
 /**
+ * Stamped on EVERY response this router writes. The endpoint answers 503 for
+ * an ordinary result (a branch could not be pulled), and a reverse proxy
+ * answers 503 when the backend is down; by status alone the browser cannot
+ * tell them apart, and it must — one is a line on the page, the other the
+ * maintenance overlay. A proxy standing in for a dead upstream never sets
+ * this header. Exposed to cross-origin callers in `create-core-server.ts`.
+ */
+export const SYNC_RESPONSE_HEADER = 'X-Hexis-Sync';
+export const SYNC_RESPONSE_MARKER = 'result';
+
+/**
  * Whether a request path belongs to this router and must reach it with its
  * body UNPARSED. The server's global JSON parser consults this: once that
  * parser has read the stream, `express.raw` below sees nothing and the
@@ -84,6 +95,7 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
     res: express.Response,
     select: () => Selection | null,
   ): Promise<void> {
+    res.setHeader(SYNC_RESPONSE_HEADER, SYNC_RESPONSE_MARKER);
     const raw: Buffer | undefined = Buffer.isBuffer(req.body) ? req.body : undefined;
 
     const auth = await verifySyncCredential(

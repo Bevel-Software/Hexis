@@ -54,13 +54,15 @@ export function clearToken(): void {
 
 export interface AuthFetchOptions {
   /**
-   * Statuses this endpoint answers with as an ORDINARY result, which must not
-   * be read as the proxy answering for a dead backend. `POST /api/sync` says
-   * 503 when a branch could not be pulled — the backend is up and telling us
-   * so. Only the listed statuses are exempted; a network failure or another
-   * proxy status still signals.
+   * Recognise a response that carries one of the proxy-down statuses but is
+   * in fact the BACKEND answering — an ordinary result of this endpoint, not
+   * the proxy standing in for a dead upstream. `POST /api/sync` says 503 when
+   * a branch could not be pulled, and marks every response it writes with a
+   * header a proxy never sets; the caller checks for that marker here. A
+   * status alone is never enough: a proxy 503 looks identical by status.
+   * Network failures always signal, whatever this returns.
    */
-  applicationStatuses?: readonly number[];
+  isApplicationResponse?: (response: Response) => boolean;
 }
 
 /**
@@ -88,10 +90,7 @@ export async function authFetch(
     throw err;
   }
 
-  if (
-    PROXY_DOWN_STATUSES.has(response.status) &&
-    !opts.applicationStatuses?.includes(response.status)
-  ) {
+  if (PROXY_DOWN_STATUSES.has(response.status) && !opts.isApplicationResponse?.(response)) {
     signalUnreachable();
   }
 

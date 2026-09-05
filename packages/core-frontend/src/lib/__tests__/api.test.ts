@@ -94,7 +94,7 @@ describe('authFetch transport-failure signalling', () => {
   });
 });
 
-describe('authFetch application-level statuses', () => {
+describe('authFetch application-level responses', () => {
   let watcher: ReturnType<typeof watchUnreachable>;
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -104,23 +104,29 @@ describe('authFetch application-level statuses', () => {
     watcher.stop();
   });
 
-  it('a status the caller declares ordinary does not signal, another proxy status still does', async () => {
-    // `POST /api/sync` answers 503 when a branch could not be pulled — the
-    // backend is up and saying so. A 502 is still the proxy answering for a
-    // dead upstream.
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('{}', { status: 503 }));
-    await authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] });
+  it('a 503 the endpoint marked as its own does not signal; an unmarked 503 and a 502 still do', async () => {
+    // `POST /api/sync` answers 503 when a branch could not be pulled and stamps
+    // the response; a reverse proxy answering for a dead backend never does.
+    const marked = (r: Response) => r.headers.get('x-hexis-sync') === 'result';
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('{}', { status: 503, headers: { 'x-hexis-sync': 'result' } }),
+    );
+    await authFetch('/api/sync', { method: 'POST' }, { isApplicationResponse: marked });
     expect(watcher.seen()).toBe(0);
 
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 502 }));
-    await authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('<html>503</html>', { status: 503 }));
+    await authFetch('/api/sync', { method: 'POST' }, { isApplicationResponse: marked });
     expect(watcher.seen()).toBe(1);
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 502 }));
+    await authFetch('/api/sync', { method: 'POST' }, { isApplicationResponse: marked });
+    expect(watcher.seen()).toBe(2);
   });
 
   it('a network failure on such a call still signals', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Failed to fetch'));
     await expect(
-      authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] }),
+      authFetch('/api/sync', { method: 'POST' }, { isApplicationResponse: () => true }),
     ).rejects.toThrow('Failed to fetch');
     expect(watcher.seen()).toBe(1);
   });

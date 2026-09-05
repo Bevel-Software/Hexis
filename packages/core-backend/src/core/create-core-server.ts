@@ -33,7 +33,11 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { createKbSyncRoutes, isSyncRawBodyPath } from '../modules/kb-sync/kb-sync.routes.js';
+import {
+  createKbSyncRoutes,
+  isSyncRawBodyPath,
+  SYNC_RESPONSE_HEADER,
+} from '../modules/kb-sync/kb-sync.routes.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -133,7 +137,9 @@ export async function createCoreServer(
     cors({
       origin: true,
       credentials: true,
-      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate'],
+      // `SYNC_RESPONSE_HEADER` is how the browser tells the sync endpoint's
+      // own 503 from a reverse proxy's — see `kb-sync.routes.ts`.
+      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
     }),
   );
   // Global JSON body parser. Some overlay routes carry a whole document dump

@@ -87,6 +87,15 @@ async function readError(res: Response): Promise<never> {
   throw new Error(data.error || `Request failed (${res.status})`);
 }
 
+/**
+ * The header the sync endpoint stamps on every response it writes, so the
+ * client can tell its 503 ("a branch could not be pulled") from a reverse
+ * proxy's 503 ("the backend is down"). Mirrors `SYNC_RESPONSE_HEADER` in the
+ * backend's `kb-sync.routes.ts`.
+ */
+const SYNC_RESPONSE_HEADER = 'x-hexis-sync';
+const SYNC_RESPONSE_MARKER = 'result';
+
 /** What "Sync now" came back with. A 409 or 503 still carries per-branch results. */
 export interface SyncNowResult {
   /** True for 200 — every branch current. */
@@ -105,10 +114,16 @@ export interface SyncNowResult {
  */
 export async function syncNow(): Promise<SyncNowResult> {
   // The endpoint answers 503 when a branch could not be pulled — an ordinary
-  // result here, not the backend being down — so that one status is exempted
-  // from the maintenance-overlay signal. A network failure or a 502/504 from
-  // the proxy still signals, as for every other call.
-  const res = await authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] });
+  // result here, not the backend being down. It marks every response it
+  // writes with `X-Hexis-Sync: result`, which a reverse proxy answering for a
+  // dead backend never sets, so only a 503 carrying that marker is exempted
+  // from the maintenance-overlay signal. A proxy 503, a 502/504 or a network
+  // failure still signals, as for every other call.
+  const res = await authFetch(
+    '/api/sync',
+    { method: 'POST' },
+    { isApplicationResponse: (r) => r.headers.get(SYNC_RESPONSE_HEADER) === SYNC_RESPONSE_MARKER },
+  );
   let body: unknown;
   try {
     body = await res.json();

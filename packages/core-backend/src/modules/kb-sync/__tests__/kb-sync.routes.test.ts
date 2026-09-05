@@ -259,3 +259,22 @@ describe('POST /api/sync — behind the production JSON parser', () => {
     expect(isSyncRawBodyPath('/api/setup/status')).toBe(false);
   });
 });
+
+describe('POST /api/sync — the response marker', () => {
+  it('every answer carries the header a proxy never sets, including the 503 and the 401', async () => {
+    const ok = await mount({});
+    expect((await post(ok.base, { headers: { authorization: `Bearer ${SECRET}` } })).headers.get('x-hexis-sync')).toBe('result');
+    server?.close();
+    const down = await mount({
+      result: {
+        status: 'partial',
+        results: [{ branch: 'main', outcome: 'error', error: 'could not read from remote' }],
+        changeRequests: { closedDeletedBranch: 0 },
+      },
+    });
+    const res = await post(down.base, { headers: { authorization: `Bearer ${SECRET}` } });
+    expect(res.status).toBe(503);
+    expect(res.headers.get('x-hexis-sync')).toBe('result');
+    expect((await post(down.base)).headers.get('x-hexis-sync')).toBe('result');
+  });
+});

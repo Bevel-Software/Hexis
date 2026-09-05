@@ -7,6 +7,13 @@ export type {
   SyncWorkspacePort,
 } from './kb-sync.interface.js';
 export { KbSyncService } from './kb-sync.service.js';
-export { createKbSyncRoutes, httpStatusFor, isSyncRawBodyPath, type KbSyncRouteDeps } from './kb-sync.routes.js';
+export {
+  createKbSyncRoutes,
+  httpStatusFor,
+  isSyncRawBodyPath,
+  SYNC_RESPONSE_HEADER,
+  SYNC_RESPONSE_MARKER,
+  type KbSyncRouteDeps,
+} from './kb-sync.routes.js';
 export { parseSyncPayload, type ParsedSyncPayload, type SyncPayloadSource } from './sync-payload.js';
 export { verifySyncCredential, type SyncAuthInput, type SyncAuthResult, type SyncCredential } from './sync-auth.js';

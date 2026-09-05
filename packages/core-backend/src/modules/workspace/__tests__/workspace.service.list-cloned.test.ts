@@ -59,7 +59,10 @@ describe('WorkspaceService.listClonedWorkspaces — what is not a clone', () => 
   });
 
   it('a directory whose name round-trips but is not a branch git accepts', async () => {
-    for (const name of ['main', 'foo!', 'has space', '-leading-dash']) {
+    // `foo!`, `-leading-dash` and `a..b` survive encodeURIComponent unchanged, so
+    // only the validator can exclude them; `has space` does not round-trip and
+    // is excluded one step earlier. Both guards have to hold.
+    for (const name of ['main', 'foo!', '-leading-dash', 'a..b', 'has space']) {
       await fs.mkdir(path.join(root, name, 'knowledge-base', '.git'), { recursive: true });
     }
     const svc = new WorkspaceService(root, 'https://example.test/kb.git', 'knowledge-base');
