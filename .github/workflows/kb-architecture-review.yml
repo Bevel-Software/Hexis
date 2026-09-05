@@ -151,7 +151,11 @@ jobs:
   review:
     needs: start
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Sized for a full sweep, not a skim: the review skill obliges the agent
+    # to enumerate every added symbol and trace guards/locks/contracts to
+    # their other end in the local checkout. Thoroughness is the product;
+    # a shorter cap here quietly rewards sampling.
+    timeout-minutes: 45
     permissions:
       # READ-ONLY, deliberately. The agent needs to see the PR (description,
       # threads, checks) to review it, and nothing more: `publish` speaks for
@@ -394,6 +398,14 @@ jobs:
           # and warn, so a hiccup here never hides a one-pager that exists.
           onepager_missing=0
           onepager_stale=0
+          # 0 only when THIS run's page was read back and lacks a non-empty
+          # "Rule outputs" section. Deliberately generic: the workflow checks
+          # that the section EXISTS — which rules it holds, and their shapes,
+          # live in the knowledge base's rule nodes, so rules can be added,
+          # edited or removed without touching this file. Defaults to 1
+          # because every path that cannot read the page either errors via
+          # onepager_ok already or is excused (KB unreachable).
+          ruleoutputs_ok=1
           # 1 only when the one-pager was read back and names THIS run — or
           # when the knowledge base could not be asked at all, because an
           # outage must never fail a review by itself. Everything else — no
@@ -438,13 +450,14 @@ jobs:
                 # verdict still links to the previous run's page — which may
                 # even review the same head, when a re-trigger applies changed
                 # rules to unchanged code. So the page names the RUN that wrote
-                # it, and only this run's id passes. Read the top of the file
-                # only (the tag is in <head>; the page can be long). The
+                # it, and only this run's id passes. The read covers the whole
+                # page (the tag is in <head>, but the Rule outputs check below
+                # needs the body; the cap is generous, not unbounded). The
                 # pattern is handed to jq as an argument — POSIX classes, no
                 # backslashes — and tolerates quote style, spacing and a
                 # self-closing `/>`, never a different run id.
                 read_args=$(jq -n --arg b "$branch" --arg p "$path" --arg s "$sid" \
-                  '{branch: $b, path: $p, sessionId: $s, limit: 4000}')
+                  '{branch: $b, path: $p, sessionId: $s, limit: 200000}')
                 code=$(curl -sS -m 20 -o page.json -w '%{http_code}' -X POST \
                         -H "Authorization: Bearer $KB_KEY" -H 'Content-Type: application/json' \
                         -d "$read_args" "${KB_ORIGIN%/}/api/agent/tools/read_file" || echo 000)
@@ -453,6 +466,19 @@ jobs:
                    && jq -e --arg pat "$tag_pattern" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1; then
                   echo "One-pager verified in the knowledge base and written by this run: $branch:$path"
                   onepager_ok=1
+                  # The page is real and this run's — now the generic format
+                  # gate: a terminal review's page must carry a non-empty
+                  # Rule outputs section (the template's
+                  # `<pre class="rule-outputs">`). A page without it is a
+                  # summary, not a review — the incident here was a "pass"
+                  # whose page narrated the rules in prose and skipped every
+                  # required block. Only the section's EXISTENCE is checked;
+                  # its contents belong to the rule nodes.
+                  ro_pattern="<pre[[:space:]][^>]*class=[\"']rule-outputs[\"'][^>]*>[[:space:]]*[^[:space:]<]"
+                  if ! jq -e --arg pat "$ro_pattern" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1; then
+                    echo "::warning::The one-pager at $branch:$path has no non-empty Rule outputs section — the review's rule blocks are its evidence; marking the check errored."
+                    ruleoutputs_ok=0
+                  fi
                 elif [ "$code" = 200 ]; then
                   echo "::warning::The one-pager at $branch:$path was not written by this run ($REVIEW_RUN_ID) — a previous run's page; dropping the link."
                   url=""; onepager_stale=1
@@ -473,6 +499,7 @@ jobs:
             echo "headline=$headline"
             echo "url=$url"
             echo "onepager_ok=$onepager_ok"
+            echo "ruleoutputs_ok=$ruleoutputs_ok"
           } >> "$GITHUB_OUTPUT"
 
           # The comment body: verdict line, the risks and blockers, the link.
@@ -501,6 +528,12 @@ jobs:
             printf '\n'
             if [ -n "$url" ]; then
               printf '[Full analysis](%s)\n' "$url"
+              if [ "$ruleoutputs_ok" != 1 ] && { [ "$outcome" = go-ahead ] || [ "$outcome" = escalated ]; }; then
+                # The page exists and is this run's, but skipped the rule
+                # blocks — same condition as the status step, on purpose.
+                echo ""
+                echo "The full analysis carries no Rule outputs section, so the check is marked as errored — the rule blocks are the review's evidence; re-trigger with \`/bevel-review\` to regenerate it."
+              fi
             elif [ "$outcome" = go-ahead ] || [ "$outcome" = escalated ]; then
               # A terminal verdict without its one-pager: say so on the PR
               # rather than silently dropping the link — the reader would
@@ -547,6 +580,7 @@ jobs:
           HEADLINE: ${{ steps.render.outputs.headline }}
           URL: ${{ steps.render.outputs.url }}
           ONEPAGER_OK: ${{ steps.render.outputs.onepager_ok }}
+          RULEOUTPUTS_OK: ${{ steps.render.outputs.ruleoutputs_ok }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -575,6 +609,13 @@ jobs:
             if [ "${ONEPAGER_OK:-0}" != 1 ]; then
               state=error
               fallback="review incomplete — no one-pager written by this run; re-trigger /bevel-review"
+            elif [ "${RULEOUTPUTS_OK:-1}" != 1 ]; then
+              # The page is this run's but carries no Rule outputs section —
+              # the verbatim rule blocks are the review's evidence, and a page
+              # without them is a summary. Generic on purpose: WHICH rules and
+              # their shapes live in the knowledge base, never here.
+              state=error
+              fallback="review incomplete — one-pager has no Rule outputs section; re-trigger /bevel-review"
             fi
           fi
 
