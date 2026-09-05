@@ -30,6 +30,7 @@ pin in `.env` cannot be changed out from under you in the UI.
 | `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
 | `PORT` | no | Backend port (default 3001) |
 | `KB_DIR_NAME` | no | Directory name of the KB clone inside each workspace |
+| `KB_KNOWLEDGE_BASE_DIR` / `KB_SKILLS_DIR` / `KB_PLUGINS_DIR` | setup screen | The three top-level folders of the repository (defaults `KnowledgeBase`, `Skills`, `Plugins`). Rename them to read a repository laid out by someone else; the three must differ. Restart to apply |
 | `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |

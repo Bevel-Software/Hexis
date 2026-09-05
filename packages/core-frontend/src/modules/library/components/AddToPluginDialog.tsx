@@ -1,6 +1,8 @@
 import { Button, Dialog, Surface } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
 import { NewSkillPanel } from './NewSkillPanel';
+import { LinkSkillPanel } from './LinkSkillPanel';
+import type { LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { COPIED_TOAST, COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 
@@ -18,6 +20,13 @@ export interface AddToPluginDialogProps {
   canWrite: boolean | null;
   /** Every skill name already in the catalog. The admin create half rejects collisions. */
   existingSkills: string[];
+  /**
+   * The caller's catalog, for the "link an existing skill" half. Optional
+   * together with `onLinked`: a caller without them gets the dialog as it was
+   * before linking existed.
+   */
+  linkable?: LibraryItem[];
+  onLinked?(): void;
   onClose(): void;
 }
 
@@ -43,6 +52,8 @@ export function AddToPluginDialog({
   primaryPath,
   canWrite,
   existingSkills,
+  linkable,
+  onLinked,
   onClose,
 }: AddToPluginDialogProps) {
   const { isAdmin } = useAdmin();
@@ -84,6 +95,28 @@ export function AddToPluginDialog({
             ? `Use the prompt below to have your agent draft the skill and add it to ${name} for everyone in the plugin.`
             : `Use the prompt below to have your agent draft the skill and send it to ${name} as a change request for an owner to review.`}
       </p>
+
+      {/* Linking is the MANAGER's half: it edits this plugin's manifest, and the
+          server refuses anyone else. A non-manager only gets the prompt below. */}
+      {canWrite && linkable && onLinked && (
+        <>
+          <div className="mt-3">
+            <LinkSkillPanel
+              plugin={name}
+              items={linkable}
+              onLinked={() => {
+                onLinked();
+                onClose();
+              }}
+            />
+          </div>
+          <div className="my-3.5 flex items-center gap-3">
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+            <span className="text-meta text-ink-faint">or</span>
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+          </div>
+        </>
+      )}
 
       {isAdmin && (
         <>

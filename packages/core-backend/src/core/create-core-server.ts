@@ -20,7 +20,7 @@ import {
 import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.tools.js';
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
-import { registerSkillsTools, createSkillsRoutes } from '../modules/skills/index.js';
+import { registerSkillsTools, createSkillsRoutes, createSkillAccessRequestRoutes } from '../modules/skills/index.js';
 import { createPluginsRoutes } from '../modules/plugins/index.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
@@ -33,7 +33,8 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
+import { createMarketplaceGitRoutes } from '../modules/marketplace/index.js';
+import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -178,6 +179,9 @@ export async function createCoreServer(
   const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
   mcpResourceUrl.username = '';
   mcpResourceUrl.password = '';
+  const marketplaceGitUrl = new URL(`/git/${core.marketplaceRepo.repoName}`, core.config.publicBackendUrl);
+  marketplaceGitUrl.username = '';
+  marketplaceGitUrl.password = '';
 
   /**
    * The handful of facts the browser needs BEFORE it can render anything, and
@@ -200,6 +204,18 @@ export async function createCoreServer(
         protectedBranches: [...PROTECTED_BRANCHES],
       },
       /**
+       * The three renameable KB roots, for the same reason as the branch
+       * model: the file tree, the library router and every path rule read
+       * them, and they used to be compile-time constants.
+       */
+      kbLayout: currentKbLayout(),
+      /**
+       * The per-user marketplace git remote (see modules/marketplace). Same
+       * derivation as `mcpUrl`: our address, userinfo stripped — the caller
+       * adds their own connection key.
+       */
+      marketplaceGitUrl: marketplaceGitUrl.toString(),
+      /**
        * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
        *
        * The frontend used to build this from `window.location.origin`, which
@@ -216,6 +232,19 @@ export async function createCoreServer(
       mcpUrl: mcpResourceUrl.toString(),
     });
   });
+
+  // The per-user marketplace as a git remote. Outside `/api` and ahead of
+  // every JWT mount: it authenticates with a connection key in HTTP Basic
+  // (what `git clone https://key:<k>@…` sends), and git's own http-backend
+  // serves the protocol. See modules/marketplace.
+  app.use(
+    '/git',
+    createMarketplaceGitRoutes({
+      repo: core.marketplaceRepo,
+      keys: core.externalApiKeyService,
+      mountPath: '/git',
+    }),
+  );
 
   // Overlay boot-time side effects (startup reconciles, periodic sweeps).
   await ext.onBoot?.(core);
@@ -431,7 +460,23 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSkillsRoutes(core.skillService, core.pendingSkillsService),
+    createSkillsRoutes(core.skillService, core.pendingSkillsService, core.pluginLinkIndex, core.accessControl),
+  );
+  // Asking for write on a shared skill — the join-request machinery pointed
+  // at a skill folder. Same JWT gate, same fail-closed shape.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createSkillAccessRequestRoutes({
+      skillService: core.skillService,
+      accessControl: core.accessControl,
+      workflow: core.workflowService,
+      workspaceService: core.workspaceService,
+      joinRequests: core.joinRequestsService,
+      kbDirName: core.kbDirName,
+      resolveUser: async (req) =>
+        req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null,
+    }),
   );
   // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: plugins the caller cannot access (member,
@@ -446,6 +491,7 @@ export async function createCoreServer(
     core.pluginProvisionService,
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    core.pluginLinksService,
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).

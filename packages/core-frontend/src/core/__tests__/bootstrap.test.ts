@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { configureBranchModel, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  configureBranchModel,
+  configureKbLayout,
+  DEFAULT_BRANCH,
+  DEFAULT_KB_LAYOUT,
+  PLUGINS_DIR,
+  SKILLS_DIR,
+} from '@bevel-software/platform-shared';
 import { loadServerConfig } from '../bootstrap';
 import { mcpEndpointUrl } from '../../shared/mcp';
 
@@ -26,6 +33,7 @@ afterEach(() => {
   // The model is module-global; restore what the shared test setup applied so
   // a later suite is not left with whatever a case here configured.
   configureBranchModel(CONFIGURED);
+  configureKbLayout({ ...DEFAULT_KB_LAYOUT });
 });
 
 const respond = (branchModel: unknown, rest: Record<string, unknown> = {}) =>
@@ -70,6 +78,30 @@ describe('loadServerConfig', () => {
    * one the OAuth metadata publishes, and that is the one that decides
    * whether a connector works.
    */
+  describe('the KB layout', () => {
+    it('applies the root names the server runs with', async () => {
+      respond(CONFIGURED, {
+        kbLayout: { knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' },
+      });
+      await loadServerConfig();
+      expect(SKILLS_DIR).toBe('skills');
+      expect(PLUGINS_DIR).toBe('plugins');
+    });
+
+    it('keeps the defaults when an older server sends none', async () => {
+      respond(CONFIGURED);
+      await loadServerConfig();
+      expect(SKILLS_DIR).toBe('Skills');
+      expect(PLUGINS_DIR).toBe('Plugins');
+    });
+
+    it('keeps the defaults rather than applying a layout that cannot be valid', async () => {
+      respond(CONFIGURED, { kbLayout: { knowledgeBaseDir: 'x', skillsDir: 'x', pluginsDir: 'x' } });
+      await loadServerConfig();
+      expect(SKILLS_DIR).toBe('Skills');
+    });
+  });
+
   describe('the MCP endpoint', () => {
     it('applies what the server said', async () => {
       respond(CONFIGURED, { mcpUrl: 'https://kb.acme.com/api/mcp' });

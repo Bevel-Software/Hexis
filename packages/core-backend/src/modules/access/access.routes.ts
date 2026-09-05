@@ -1,10 +1,11 @@
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { isProtectedBranch, DEFAULT_BRANCH, pluginManifestName } from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,
   GrantSources,
+  ResolvedPrincipal,
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -22,7 +23,10 @@ import {
 import {
   canonicalRoleName,
   EVERYONE_CANONICAL,
+  PLUGIN_TOKEN_PREFIX,
+  PLUGIN_TOKEN_VERBS,
   ROLE_TOKEN_PREFIX,
+  type PluginTokenVerb,
   type Verb,
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
@@ -79,20 +83,51 @@ export function createAccessRoutes(
   // accepts — the same principals the admin screens manage, regardless of
   // which branch the caller is viewing. People stay branch-local (the
   // caller's own workspace).
-  const defaultBranchPrincipals = async (): Promise<{ roles: string[]; groups: string[] }> => {
+  const defaultBranchPrincipals = async (): Promise<{
+    roles: string[];
+    groups: string[];
+    plugins: { name: string; folder: string }[];
+  }> => {
     await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
-    const { roles, groups } = await accessControl.kbPrincipals(workspaceIdForBranch(DEFAULT_BRANCH));
-    return { roles, groups };
+    const { roles, groups, plugins } = await accessControl.kbPrincipals(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+    );
+    // `plugins` is defensive: an older resolver double may omit it.
+    return { roles, groups, plugins: plugins ?? [] };
   };
 
   /**
-   * What the mutation routes accept as a principal. `group` exists only at
-   * this boundary: in the access.md entry grammar a group grant is a
-   * bare-name token (bare names resolve GROUP-FIRST, then fall back to the
-   * role), so it is spliced as a role-shaped principal — the separate kind
-   * buys validation against the right namespace and honest 404s.
+   * The plugins `email` may DISCOVER — read the folder's access.md, the same
+   * verdict the plugin index lists on. Both the suggest list and the grant
+   * route go through this, so a plugin hidden from the picker cannot be
+   * named in a grant either, and an undiscoverable one answers exactly like
+   * one that does not exist.
    */
-  type RoutePrincipal = Principal | { kind: 'group'; group: string };
+  const discoverablePlugins = async (
+    email: string,
+    plugins: { name: string; folder: string }[],
+  ): Promise<{ name: string; folder: string }[]> => {
+    if (plugins.length === 0) return [];
+    const verdicts = await accessControl.canReadBatch(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+      email,
+      plugins.map((p) => `${p.folder}/access.md`),
+    );
+    return plugins.filter((p) => verdicts.get(`${p.folder}/access.md`) === true);
+  };
+
+  /**
+   * What the mutation routes accept as a principal. `group` and `plugin`
+   * exist only at this boundary: in the access.md entry grammar a group grant
+   * is a bare-name token (bare names resolve GROUP-FIRST, then fall back to
+   * the role) and a plugin grant is the `plugin/<Name>/<verb>` token, so both
+   * are spliced as role-shaped principals — the separate kinds buy validation
+   * against the right namespace and honest 404s.
+   */
+  type RoutePrincipal =
+    | Principal
+    | { kind: 'group'; group: string }
+    | { kind: 'plugin'; plugin: string; verb: PluginTokenVerb };
 
   /**
    * The role-shaped principal the splice layer actually writes/matches.
@@ -104,6 +139,9 @@ export function createAccessRoutes(
    */
   const asSplicePrincipal = (p: RoutePrincipal): Principal => {
     if (p.kind === 'group') return { kind: 'role', role: p.group };
+    // Written with the folder's own casing; `parseAccessEntry` canonicalises
+    // the name half to the manifest slug on the way back in.
+    if (p.kind === 'plugin') return { kind: 'role', role: `${PLUGIN_TOKEN_PREFIX}${p.plugin.trim()}/${p.verb}` };
     if (p.kind === 'role') {
       const canonical = canonicalRoleName(p.role);
       const bare = canonical.startsWith(ROLE_TOKEN_PREFIX)
@@ -336,7 +374,7 @@ export function createAccessRoutes(
       // Independent lookups batched in ONE Promise.all: the default-branch
       // principals (cached model), the branch-local KB people (cached model),
       // and the users table (only consulted once the query is long enough).
-      const [{ roles, groups }, { people: kbPeople }, userRows] = await Promise.all([
+      const [{ roles, groups, plugins }, { people: kbPeople }, userRows] = await Promise.all([
         defaultBranchPrincipals(),
         accessControl.kbPrincipals(req.params.id),
         q.length >= 2 ? db.select().from(users) : Promise.resolve([]),
@@ -348,6 +386,19 @@ export function createAccessRoutes(
 
       const matchedGroups = groups
         .filter((g) => !q || g.toLowerCase().includes(q))
+        .slice(0, CAP);
+
+      // Plugins the caller can DISCOVER (read the folder's access.md — the
+      // same verdict the plugin index lists on), so the picker never names a
+      // plugin its enumeration would hide. Their `plugin/<Name>/<verb>`
+      // tokens are built client-side; the name is what a person searches for.
+      const matchedPlugins = (
+        await discoverablePlugins(
+          user.email,
+          plugins.filter((p) => !q || p.name.toLowerCase().includes(q)),
+        )
+      )
+        .map((p) => p.name)
         .slice(0, CAP);
 
       let people: { name: string; email: string }[] = [];
@@ -373,6 +424,10 @@ export function createAccessRoutes(
       res.json({
         roles: matchedRoles,
         groups: matchedGroups,
+        // Plugin FOLDER names; each stands for three grantable principals
+        // (`plugin/<Name>/read|write|owner`). Not `plugins` — that key is the
+        // deprecated alias of `roles` below.
+        pluginPrincipals: matchedPlugins,
         people,
         peopleWithheld: q.length < 2,
         // DEPRECATED alias of `roles` — the shipped share dialog still reads
@@ -428,8 +483,19 @@ export function createAccessRoutes(
         throw new AccessMutationError('group principal needs a group name');
       }
       principal = { kind: 'group', group: principalRaw.group };
+    } else if (principalRaw.kind === 'plugin') {
+      if (typeof principalRaw.plugin !== 'string' || !principalRaw.plugin.trim()) {
+        throw new AccessMutationError('plugin principal needs a plugin name');
+      }
+      const verb = principalRaw.verb;
+      if (typeof verb !== 'string' || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) {
+        throw new AccessMutationError(
+          `plugin principal needs a verb: one of ${PLUGIN_TOKEN_VERBS.join(', ')}`,
+        );
+      }
+      principal = { kind: 'plugin', plugin: principalRaw.plugin, verb: verb as PluginTokenVerb };
     } else {
-      throw new AccessMutationError("principal.kind must be 'user', 'group', or 'role'");
+      throw new AccessMutationError("principal.kind must be 'user', 'group', 'plugin', or 'role'");
     }
     const targetKind = kind as TargetKind;
     const repoRelTarget = toRepoRelative(rawPath);
@@ -517,12 +583,12 @@ export function createAccessRoutes(
     // non-actionable. Built over the union of every principal in the four
     // eligible lists (kinded `principals`, with the name-only `roles` list as
     // the all-roles fallback).
-    const collectives = new Map<string, { name: string; kind: 'role' | 'group' }>();
+    const collectives = new Map<string, ResolvedPrincipal>();
     for (const list of [eligible, readers, owners, downloaders]) {
       const kinded =
         list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
       for (const p of kinded) {
-        const key = `${p.kind === 'group' ? 'g' : 'r'}:${p.name.toLowerCase()}`;
+        const key = `${p.kind === 'group' ? 'g' : p.kind === 'plugin' ? 'p' : 'r'}:${p.name.toLowerCase()}`;
         if (!collectives.has(key)) collectives.set(key, p);
       }
     }
@@ -671,6 +737,22 @@ export function createAccessRoutes(
             `No group named "${principal.group}". Pick an existing group.`,
             404,
             { kind: 'unknown-group', group: principal.group },
+          );
+        }
+      } else if (principal.kind === 'plugin') {
+        // A plugin grant must name a plugin the caller can DISCOVER on the
+        // default branch — the same set the suggest list offers, so a plugin
+        // hidden from the picker is refused here with the same words as one
+        // that does not exist. Matched on the manifest slug, the identity the
+        // token canonicalises to.
+        const { plugins } = await defaultBranchPrincipals();
+        const slug = pluginManifestName(principal.plugin);
+        const visible = await discoverablePlugins(user.email, plugins);
+        if (!visible.some((p) => pluginManifestName(p.name) === slug)) {
+          throw new AccessMutationError(
+            `No plugin named "${principal.plugin}". Pick an existing plugin.`,
+            404,
+            { kind: 'unknown-plugin', plugin: principal.plugin },
           );
         }
       }

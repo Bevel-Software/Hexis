@@ -40,6 +40,36 @@ const FIELDS: Record<
     placeholder: 'knowledge-base',
     advanced: true,
   },
+  knowledgeBaseDir: {
+    label: 'Knowledge folder',
+    help: 'The top-level folder in the repository that holds the knowledge. Change it only to read a repository laid out by someone else.',
+    placeholder: 'KnowledgeBase',
+    advanced: true,
+  },
+  skillsDir: {
+    label: 'Skills folder',
+    help: 'The top-level folder that holds shared skills. The three folder names must differ.',
+    placeholder: 'Skills',
+    advanced: true,
+  },
+  pluginsDir: {
+    label: 'Plugins folder',
+    help: 'The top-level folder that holds plugins. The three folder names must differ.',
+    placeholder: 'Plugins',
+    advanced: true,
+  },
+  pluginDialect: {
+    label: 'Plugin format',
+    help: '"native" reads plugin.json manifests (the default). "bundle" reads plugin.bundle.json files and an MCP registry, for a repository laid out that way.',
+    placeholder: 'native',
+    advanced: true,
+  },
+  mcpRegistryPath: {
+    label: 'MCP registry file',
+    help: 'Only for the bundle format: where the MCP server registry lives in the repository.',
+    placeholder: 'configs/mcp/registry.json',
+    advanced: true,
+  },
   defaultBranch: {
     label: 'Main branch',
     help: 'The version everyone sees. Filled in from your repository when you test the connection.',

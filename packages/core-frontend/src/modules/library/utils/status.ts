@@ -241,6 +241,61 @@ export interface LibraryFilterable {
   owned: boolean;
   /** Folder plugin from the item's KB path, or null when it sits in none. */
   plugin: string | null;
+  /**
+   * Lives under the shared `Skills/` root rather than in a plugin folder.
+   * Such an item has no folder plugin, but it is not "yours alone" either —
+   * it is owned by a scope and shared into plugins by link — so the
+   * ungrouped view leaves it out and only the catalog-wide view lists it.
+   */
+  shared?: boolean;
+  /**
+   * Every plugin the item belongs to, inline or by link. `plugin` above is the
+   * FOLDER plugin only (routing, "yours alone"); this is what the plugin
+   * page and the sidebar counts go by.
+   */
+  plugins?: { name: string }[];
+}
+
+/** "Yours alone": in no plugin folder AND not a shared skill. */
+export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared'>): boolean {
+  return item.plugin === null && !item.shared;
+}
+
+/** Whether an item belongs to `plugin` — by folder, or by a link from the plugin's manifest. */
+export function isInPlugin(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>, plugin: string): boolean {
+  return item.plugin === plugin || (item.plugins?.some((m) => m.name === plugin) ?? false);
+}
+
+/**
+ * The item as the plugin page should show it: a LINK whose grant is missing
+ * gets the amber note in the tools' grammar — "Needs setup", and "yours to set
+ * up" for someone who can edit the skill's rules — because until the grant is
+ * back, the plugin's members cannot read it. Healthy links are untouched.
+ */
+export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus }>(
+  item: T,
+  plugin: string,
+): T {
+  const membership = (item.plugins as { name: string; linked?: boolean; granted?: boolean }[] | undefined)?.find(
+    (m) => m.name === plugin,
+  );
+  if (!membership?.linked || membership.granted !== false) return item;
+  return {
+    ...item,
+    status: {
+      state: 'warn',
+      text: item.owned ? 'Needs setup: share with plugin members' : 'Needs setup',
+      hint: `The skill's access rules no longer name ${plugin}'s members. Repair the link from the skill page.`,
+    },
+  };
+}
+
+/** The distinct plugin names an item belongs to. */
+export function pluginsOfItem(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>): string[] {
+  const names = new Set<string>();
+  if (item.plugin !== null) names.add(item.plugin);
+  for (const m of item.plugins ?? []) names.add(m.name);
+  return [...names];
 }
 
 /** Sidebar selection narrows; the query matches name/description within it. */
@@ -260,9 +315,9 @@ export function filterLibraryItems<T extends LibraryFilterable>(
       case 'owned':
         return item.owned;
       case 'group':
-        return item.plugin === filter.plugin;
+        return isInPlugin(item, filter.plugin);
       case 'ungrouped':
-        return item.plugin === null;
+        return isUngrouped(item);
     }
   });
 }
@@ -279,8 +334,9 @@ export function pluginCounts<T extends LibraryFilterable>(
 ): { plugin: string; count: number }[] {
   const counts = new Map<string, number>();
   for (const item of items) {
-    if (item.plugin === null) continue;
-    counts.set(item.plugin, (counts.get(item.plugin) ?? 0) + 1);
+    // A linked skill counts for every plugin that links it, like the plugin
+    // index's own totals.
+    for (const name of pluginsOfItem(item)) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return [...counts.entries()]
     .map(([plugin, count]) => ({ plugin, count }))

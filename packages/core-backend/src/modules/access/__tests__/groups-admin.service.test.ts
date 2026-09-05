@@ -184,6 +184,14 @@ describe('GroupsAdminService', () => {
     expect(await groupsYaml()).not.toContain('role/');
   });
 
+  it("createGroup refuses the reserved 'plugin/' prefix — a group could otherwise pose as a plugin's members", async () => {
+    await expect(service.createGroup(ADMIN, 'plugin/GTM/read')).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining('plugin/'),
+    });
+    expect(await groupsYaml()).not.toContain('plugin/');
+  });
+
   it('create → add → remove → delete lifecycle lands on disk', async () => {
     await service.createGroup(ADMIN, 'Contractors');
     await service.addMember(ADMIN, 'contractors', 'temp@x.io');

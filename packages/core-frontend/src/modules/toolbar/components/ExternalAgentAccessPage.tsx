@@ -17,6 +17,7 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
+import { marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -277,6 +278,47 @@ export function ExternalAgentAccessPage() {
                   <ExternalLink size={11} className="opacity-60" aria-hidden="true" />
                 </Link>
                 <ConnectionInstructions mcpUrl={mcpUrl} />
+              </div>
+            </details>
+
+            <details className="border border-line rounded" data-testid="marketplace-section">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Skills as native plugins (marketplace)
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <p className="text-meta text-ink-muted leading-snug">
+                  Instead of reading skills through the MCP server, an agent can install them
+                  as native plugins. Every skill you may read is compiled into a plugin
+                  marketplace at the git remote below; it needs an external API key from the{' '}
+                  <button
+                    type="button"
+                    onClick={() => setTab('autonomous')}
+                    className="underline text-ink-muted hover:text-ink"
+                  >
+                    Autonomous agents
+                  </button>{' '}
+                  tab, which the key dialog shows filled in.
+                </p>
+                <CopyBlock label="Marketplace git remote" value={marketplaceGitUrl()} rows={2} />
+                <CopyBlock
+                  label="Claude Code (one install, everything you may read)"
+                  value={marketplaceCommands('<external-api-key>').claude}
+                  rows={2}
+                />
+                <CopyBlock
+                  label="Codex"
+                  value={marketplaceCommands('<external-api-key>').codex}
+                  rows={2}
+                />
+                <CopyBlock
+                  label="Any other agent, via the skills CLI"
+                  value={marketplaceCommands('<external-api-key>').skills}
+                  rows={2}
+                />
+                <p className="text-meta text-ink-muted leading-snug">
+                  The key stays in the URL: Claude Code refreshes marketplaces in the background
+                  without credential helpers. Revoke the key here to cut the agent off.
+                </p>
               </div>
             </details>
 
@@ -561,6 +603,47 @@ export function ExternalAgentAccessPage() {
                   value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
                   rows={11}
                   className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </div>
+              <div>
+                <div className="text-xs font-medium text-ink mb-1">
+                  Skills as native plugins — the marketplace
+                </div>
+                <p className="text-meta text-ink-muted mb-1 leading-snug">
+                  Every skill you may read, compiled into a plugin marketplace served as a git
+                  remote. One install brings all of it; a later update fetches what changed.
+                  The key stays in the URL because Claude Code refreshes marketplaces without
+                  credential helpers.
+                </p>
+                <textarea
+                  readOnly
+                  aria-label="Claude Code marketplace command"
+                  value={marketplaceCommands(reveal.plaintext).claude}
+                  rows={2}
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
+                  Codex installs every plugin on add:
+                </p>
+                <textarea
+                  readOnly
+                  aria-label="Codex marketplace command"
+                  value={marketplaceCommands(reveal.plaintext).codex}
+                  rows={2}
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
+                  Any other agent, through the skills CLI:
+                </p>
+                <textarea
+                  readOnly
+                  aria-label="skills CLI command"
+                  value={marketplaceCommands(reveal.plaintext).skills}
+                  rows={2}
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>

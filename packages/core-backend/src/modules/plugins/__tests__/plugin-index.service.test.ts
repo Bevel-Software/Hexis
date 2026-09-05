@@ -62,9 +62,14 @@ describe('PluginIndexService', () => {
 
   const kb = () => join(root, wsId, KB_DIR);
 
-  /** A REAL plugin: a folder carrying the access.md that makes it exist. */
+  /**
+   * A REAL plugin: a folder carrying the manifest discovery reads AND the
+   * access.md that makes it exist to the index (a legacy folder without a
+   * manifest gets one from the boot step before the index ever runs).
+   */
   const pluginDir = async (name: string) => {
     await mkdir(join(kb(), 'Plugins', name), { recursive: true });
+    await writeFile(join(kb(), 'Plugins', name, 'plugin.json'), `{"name":"${name.toLowerCase()}"}`);
     await writeFile(join(kb(), 'Plugins', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
   };
 
@@ -90,6 +95,10 @@ describe('PluginIndexService', () => {
     await mkdir(join(kb(), 'Plugins', 'Ghost'), { recursive: true });
     await mkdir(join(kb(), 'Plugins', 'Residue'), { recursive: true });
     await writeFile(join(kb(), 'Plugins', 'Residue', 'notes.md'), 'leftover');
+    // A manifest alone is a plugin to discovery but not to the index: the
+    // access.md is what a deleted plugin's residue lacks.
+    await mkdir(join(kb(), 'Plugins', 'Manifest-only'), { recursive: true });
+    await writeFile(join(kb(), 'Plugins', 'Manifest-only', 'plugin.json'), '{"name":"manifest-only"}');
     await pluginDir('Real');
 
     const catalog = await svc().catalog();

@@ -1,8 +1,15 @@
-import { configureBranchModel, validateBranchModel } from '@bevel-software/platform-shared';
+import {
+  configureBranchModel,
+  configureKbLayout,
+  validateBranchModel,
+  validateKbLayout,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 // The pure module, NOT the `shared/mcp` barrel — the same reason `test-setup.ts`
 // avoids it. This runs BEFORE React renders, and the barrel would drag the
 // components and their icon imports into the boot path to set one string.
 import { configureMcpUrl } from '../shared/mcp/connect-snippets';
+import { configureMarketplaceGitUrl } from '../shared/marketplace-url';
 
 /** What `GET /api/config` serves. Unauthenticated — see the route's comment. */
 interface ServerConfig {
@@ -14,6 +21,13 @@ interface ServerConfig {
    * is what every connect surface did before this existed.
    */
   mcpUrl?: string;
+  /**
+   * Optional for the same version-skew reason: a server that predates the
+   * field leaves the defaults in place, which is what it was running with.
+   */
+  kbLayout?: KbLayout;
+  /** The per-user marketplace git remote; absent from an older server. */
+  marketplaceGitUrl?: string;
 }
 
 /**
@@ -53,6 +67,20 @@ export async function loadServerConfig(): Promise<void> {
   const problem = validateBranchModel(config.branchModel);
   if (!problem) configureBranchModel(config.branchModel);
 
+  // The KB layout has defaults, so an absent or invalid one is not a boot
+  // failure either: the module keeps its defaults, which is exactly what an
+  // older server that omits the field is running with.
+  const layout = config.kbLayout;
+  if (
+    layout &&
+    typeof layout.knowledgeBaseDir === 'string' &&
+    typeof layout.skillsDir === 'string' &&
+    typeof layout.pluginsDir === 'string' &&
+    !validateKbLayout(layout)
+  ) {
+    configureKbLayout(layout);
+  }
+
   /**
    * Unconditional, and deliberately not guarded by the branch-model check
    * above: an unconfigured deployment still has a real address, and the
@@ -61,6 +89,7 @@ export async function loadServerConfig(): Promise<void> {
    * origin rather than taking down the boot for a snippet.
    */
   configureMcpUrl(config.mcpUrl);
+  configureMarketplaceGitUrl(config.marketplaceGitUrl);
 }
 
 /**

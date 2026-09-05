@@ -42,6 +42,13 @@ export interface LibraryCardCommonProps {
    * person who has to decide (being waited on).
    */
   pending?: { authorName: string; mine: boolean };
+  /**
+   * A skill's governance lifecycle (`metadata.lifecycle`). Only the two states
+   * that need a reader's attention are shown — `deprecated` (still works,
+   * find the replacement) and `retired` (kept for its owners, never
+   * distributed); `active` and absence render nothing.
+   */
+  lifecycle?: string;
   /** Open the item. The whole card is the target. */
   onOpen(): void;
 }
@@ -75,6 +82,7 @@ export function LibraryCard({
   status,
   version,
   pending,
+  lifecycle,
   onOpen,
   flavor,
 }: LibraryCardProps) {
@@ -140,6 +148,11 @@ export function LibraryCard({
         {owned && !pending && (
           <Badge tone="outline" size="xs" className="shrink-0 uppercase">
             Owner
+          </Badge>
+        )}
+        {(lifecycle === 'deprecated' || lifecycle === 'retired') && (
+          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
+            {lifecycle === 'retired' ? 'Retired' : 'Deprecated'}
           </Badge>
         )}
       </span>
