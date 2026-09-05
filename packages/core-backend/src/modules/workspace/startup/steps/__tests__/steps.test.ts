@@ -186,20 +186,41 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).toContain('MyStuff/'); // the operator's rules survive
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
+    expect(lines).toContain('Skills/'); // and the shared-skills root's
+  });
+
+  it('hides the Skills/ root on an existing KB whose ignore file predates it, keeping every other rule', async () => {
+    // A knowledge base seeded before `Skills/` existed: its ignore file names
+    // `Plugins/` and knows nothing of the new root. The top-up appends the
+    // one line, so the root stays the Library's and out of the agent view.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = '# mine\n.git/\nAGENTS.md\nPlugins/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text.startsWith('# mine\n.git/\nAGENTS.md\nPlugins/\n')).toBe(true);
+    expect(text.split('\n').map((l) => l.trim())).toContain('Skills/');
+    // Idempotent: a second boot has nothing to add.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
   });
 
   it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
     // Appending the positive rule after the negation would WIN under ordered
     // matching and silently defeat the operator's stated choice to show it.
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\n';
+    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      '# operator wants the doc visible\n!AGENTS.md\n',
+      '# operator wants the doc visible\n!AGENTS.md\nSkills/\n',
     );
   });
 

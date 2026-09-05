@@ -212,7 +212,10 @@ export class TemplateFilesStep implements OnServerStart {
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way.
       if (rel === IGNORE_FILENAME) {
-        content = withIgnorePattern(new TextDecoder().decode(content), 'AGENTS.md');
+        content = withIgnorePattern(
+          withIgnorePattern(new TextDecoder().decode(content), 'AGENTS.md'),
+          `${SKILLS_DIR}/`,
+        );
       }
       branch.write(rel, content);
       added.push(rel);
@@ -230,6 +233,13 @@ export class TemplateFilesStep implements OnServerStart {
     // the operator explicitly choosing to SHOW the file, and hiding it is a
     // default this step provides, not a mandate it re-imposes every boot.
     added.push(...(await mergeIgnorePattern(repoDir, branch, 'AGENTS.md')));
+
+    // The shared-skills root is the Library's, like `Plugins/`: a KB whose
+    // ignore file predates it would show `Skills/` in the Knowledge tree and
+    // the agent view. Same idempotent, line-presence merge as above — and
+    // spelled with the CONFIGURED root name, since a deployment may have
+    // renamed it.
+    added.push(...(await mergeIgnorePattern(repoDir, branch, `${SKILLS_DIR}/`)));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
