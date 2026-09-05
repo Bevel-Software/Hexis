@@ -68,6 +68,18 @@ export interface ValidationReport {
   rawOutput: string;
 }
 
+/** What `IGitService.syncFromRemote` observed under its one hold of the clone. */
+export interface RemoteSyncPullResult {
+  /** HEAD before the pull; null when the clone had no commits yet. */
+  before: string | null;
+  /** HEAD after the pull; null only when origin is still empty too. */
+  after: string | null;
+  /** Whether the working tree's CONTENT differs — tree ids, not commit ids. */
+  treeChanged: boolean;
+  /** Repo-relative paths whose content changed; empty unless `treeChanged`. */
+  changedPaths: string[];
+}
+
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean }): Promise<BranchInfo[]>;
@@ -141,6 +153,27 @@ export interface IGitService {
    * drop every catalog cache and reload every attached browser for nothing.
    */
   pull(workspaceId: string): Promise<{ treeChanged: boolean }>;
+  /**
+   * The remote sync's pull, observed as ONE serialized operation: where HEAD
+   * was, the pull, where HEAD is, and which repo-relative paths changed
+   * (rename-aware: both ends). `pull` bracketed by separate reads would let a
+   * concurrent save land between them and be announced as the sync's own.
+   *
+   * Tolerant of an unborn HEAD (a clone of an empty upstream): `before` is
+   * null, and paths are diffed against the empty tree. Throws the typed
+   * pull-conflict error like `pull`, and a typed "remote branch gone" error
+   * when origin no longer has the branch — including for an unborn clone,
+   * once origin has any branch at all. The one exception: an unborn clone
+   * against an origin with NO branches (a fresh deployment nobody has pushed
+   * to) resolves to `after: null`, since there is nothing to sync and nothing
+   * stale.
+   */
+  syncFromRemote(workspaceId: string): Promise<RemoteSyncPullResult>;
+  /**
+   * Whether origin still has `branch` right now (`ls-remote`). Used to
+   * revalidate that a clone is still stale before it is retired.
+   */
+  remoteBranchExists(workspaceId: string, branch: string): Promise<boolean>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set

@@ -33,6 +33,11 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import {
+  createKbSyncRoutes,
+  isSyncRawBodyPath,
+  SYNC_RESPONSE_HEADER,
+} from '../modules/kb-sync/kb-sync.routes.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -132,7 +137,9 @@ export async function createCoreServer(
     cors({
       origin: true,
       credentials: true,
-      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate'],
+      // `SYNC_RESPONSE_HEADER` is how the browser tells the sync endpoint's
+      // own 503 from a reverse proxy's — see `kb-sync.routes.ts`.
+      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
     }),
   );
   // Global JSON body parser. Some overlay routes carry a whole document dump
@@ -141,10 +148,13 @@ export async function createCoreServer(
   // parse once the first has run, so without this the 10 MB global limit would
   // shadow the route's larger limit and 413 a large-but-valid upload before it
   // ever reaches the route).
+  // The sync routes (`/api/sync` and `/api/sync/<branch>`) read their body as
+  // raw bytes: one of their credentials is an HMAC over exactly what arrived,
+  // which a parsed-and-reserialised body cannot reproduce.
   const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
   const globalJson = express.json({ limit: '10mb' });
   app.use((req, res, next) => {
-    if (jsonExemptPaths.has(req.path)) return next();
+    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
   });
 
@@ -178,6 +188,10 @@ export async function createCoreServer(
   const mcpResourceUrl = new URL('/api/mcp', core.config.publicBackendUrl);
   mcpResourceUrl.username = '';
   mcpResourceUrl.password = '';
+  /** The remote-sync address the setup status publishes for admins to paste into a hook. */
+  const syncUrl = new URL('/api/sync', core.config.publicBackendUrl);
+  syncUrl.username = '';
+  syncUrl.password = '';
 
   /**
    * The handful of facts the browser needs BEFORE it can render anything, and
@@ -276,6 +290,17 @@ export async function createCoreServer(
     core.mcpOAuthProvider,
     core.mcpResourceMetadataUrl,
   ));
+
+  // Remote sync — `POST /api/sync`, called by a git host's webhook or a
+  // pipeline with the deployment's sync secret (or by an admin's session).
+  // Same reason as MCP for mounting here: a non-JWT bearer must not meet a
+  // protected mount first.
+  app.use('/api', createKbSyncRoutes({
+    kbSync: core.kbSyncService,
+    syncSecret: () => core.settings.resolve('kbSyncSecret'),
+    authService: core.authService,
+    adminAccess: core.adminAccess,
+  }));
 
   // MCP OAuth 2.1 authorization server: /authorize, /token, /register,
   // /revoke + the /.well-known metadata documents (the SDK requires an
@@ -478,7 +503,12 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner),
+    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, {
+      // Same address family as the MCP endpoint above, userinfo stripped for
+      // the same reason: this string is handed to admins to paste elsewhere.
+      url: syncUrl.toString(),
+      lastSync: () => core.kbSyncService.lastSync(),
+    }),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
     service: core.mcpServerEditService,

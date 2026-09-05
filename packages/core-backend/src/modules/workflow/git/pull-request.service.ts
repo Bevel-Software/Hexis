@@ -438,6 +438,15 @@ export class PullRequestService implements IPullRequestService {
     this.cachedList.clear();
   }
 
+  /**
+   * Evict the CR-list caches alone. Each list entry carries `touchedNodePaths`
+   * resolved against a workspace's tree at the time; a remote sync that moved
+   * that tree makes them stale without touching any one request.
+   */
+  invalidateListCache(): void {
+    this.cachedList.clear();
+  }
+
   private async findRow(prNumber: number): Promise<ChangeRequestRow | null> {
     const [row] = await this.db
       .select()

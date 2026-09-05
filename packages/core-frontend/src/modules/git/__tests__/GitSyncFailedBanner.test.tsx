@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { GitSyncFailedBanner } from '../components/GitSyncFailedBanner';
 import {
@@ -10,6 +10,15 @@ import {
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
 import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
+
+// The conflict rendering opens files through the file-navigation hook, which
+// needs a router and the git context. Neither belongs in this suite: the
+// banner's contract is what it says and which paths it offers, so the hook
+// is replaced with a recorder.
+const { openWorkspacePath } = vi.hoisted(() => ({ openWorkspacePath: vi.fn() }));
+vi.mock('../../workspace/routing/kb-routes', () => ({
+  useFileNav: () => ({ openFile: vi.fn(), openWorkspacePath }),
+}));
 
 /**
  * A minimal stand-in for the SSE bus: keeps the handlers the component
@@ -177,5 +186,44 @@ describe('GitSyncFailedBanner', () => {
     const alert = screen.getByRole('alert');
     expect(alert.textContent).toContain('could not read Username');
     expect(screen.getAllByRole('alert')).toHaveLength(1);
+  });
+});
+
+describe('GitSyncFailedBanner — remote-sync conflict', () => {
+  const CONFLICT = {
+    kind: 'git-sync-failed',
+    workspaceId: 'ws-1',
+    branch: 'feat/x',
+    reason:
+      'feat/x could not be synced: Plugins/x/SKILL.md was changed in Hexis and on the git host. Resolve the conflict on feat/x in Hexis, then sync again.',
+    conflictedPaths: ['Plugins/x/SKILL.md', 'Docs/a.md'],
+  };
+
+  it('tells the author to reconcile the files, and lists each one', () => {
+    const bus = renderBanner();
+    bus.emit(CONFLICT);
+    const alert = screen.getByRole('alert');
+    // This one IS the author's to act on — no "check the server logs".
+    expect(alert.textContent).toContain('changed both here and there');
+    expect(alert.textContent).not.toContain('server logs');
+    expect(screen.getByRole('button', { name: 'Plugins/x/SKILL.md' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Docs/a.md' })).toBeTruthy();
+  });
+
+  it('a file link opens that file in this workspace', () => {
+    const bus = renderBanner();
+    bus.emit(CONFLICT);
+    openWorkspacePath.mockClear();
+    act(() => {
+      screen.getByRole('button', { name: 'Docs/a.md' }).click();
+    });
+    expect(openWorkspacePath).toHaveBeenCalledWith('knowledge-base/Docs/a.md');
+  });
+
+  it('clears like any other failure once the branch syncs', () => {
+    const bus = renderBanner();
+    bus.emit(CONFLICT);
+    bus.emit({ kind: 'git-sync-recovered', workspaceId: 'ws-1', branch: 'feat/x' });
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

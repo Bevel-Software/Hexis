@@ -25,6 +25,7 @@ import type {
   AcquireLockResult,
   AuthUser,
   Branch,
+  BranchSyncOutcome,
   BranchWorkspaceStatus,
   CancelChangeRequestResult,
   Change,
@@ -40,6 +41,7 @@ import type {
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
+  RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { and, eq, or } from 'drizzle-orm';
@@ -65,6 +67,7 @@ import {
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
+  RemoteBranchGoneError,
   WorkflowDomainError,
   WorkflowValidationError,
 } from '../../shared/domain-errors.js';
@@ -99,6 +102,33 @@ function isOpenPairViolation(err: unknown): boolean {
   const message = fieldOf(err, 'message') ?? fieldOf(cause, 'message');
   return typeof message === 'string' && message.includes(OPEN_PAIR_CONSTRAINT);
 }
+
+/**
+ * The one sentence a remote-sync conflict is reported with — in the sync
+ * response, on the branch's banner and in the log — so whoever sees any of
+ * the three reads the same thing: which branch, which files, that automatic
+ * recovery is under way, and what to do if it does not clear.
+ */
+export function syncConflictMessage(branch: string, conflictedPaths: string[]): string {
+  // Bounded: the same sentence goes to the response, the banner and the log,
+  // and it must be one sentence in all three whatever the conflict's size.
+  // The full path list rides beside it as `conflictedPaths`.
+  const shown = conflictedPaths.slice(0, SYNC_CONFLICT_FILES_NAMED);
+  const more = conflictedPaths.length - shown.length;
+  const files =
+    conflictedPaths.length === 0
+      ? 'some files'
+      : more > 0
+        ? `${shown.join(', ')} and ${more} more file${more === 1 ? '' : 's'}`
+        : shown.join(', ');
+  return (
+    `${branch} is not in sync yet: ${files} changed both in Hexis and on the git host. ` +
+    `Recovery is queued; if this stays, open the files on ${branch} in Hexis, keep what you want, and save.`
+  );
+}
+
+/** How many conflicted files the sync-conflict sentence names before "and N more". */
+const SYNC_CONFLICT_FILES_NAMED = 3;
 
 /** Redact the shared GitHub token from any error string before surfacing it. */
 function redactTokens(msg: string): string {
@@ -268,7 +298,14 @@ export class WorkflowService implements IWorkflowService {
   }
 
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch> {
-    return this.git.createBranch(workspaceId, name, fromBase);
+    // Under the branch's lifecycle lock, like `deleteBranch` and the
+    // retirement of a clone the host deleted: creating a branch is the one
+    // operation that can bring a "gone" branch back, and the retirement's
+    // "still gone on origin?" check is only a guarantee if nothing can
+    // recreate the branch between that check and the delete.
+    return this.branchLifecycle.run(`branch:${name}`, () =>
+      this.git.createBranch(workspaceId, name, fromBase),
+    );
   }
 
   /**
@@ -456,9 +493,11 @@ export class WorkflowService implements IWorkflowService {
    * pulls the default workspace therefore has to say so, or those catalogs
    * keep serving the pre-pull scan for the rest of their TTL: a merge landing
    * an approved skill, the recovery ladder after a non-fast-forward push, and
-   * a plain sync from the remote alike. Routing every pull through here makes
+   * a user's update-from-remote alike. Routing every pull through here makes
    * that ONE mechanism — "the default branch's tree changed" — instead of a
-   * separate special case per event.
+   * separate special case per event. (The remote sync, `syncWorkspaceFromRemote`,
+   * pulls directly: it owes the same announcement to every branch and per
+   * file, and makes it from the same `treeChanged` verdict.)
    *
    * Announced only after the pull RESOLVES, and only when it CHANGED the
    * tree's content: a pull that threw left the tree as it was, and so did an
@@ -484,6 +523,128 @@ export class WorkflowService implements IWorkflowService {
       }
       throw err;
     }
+  }
+
+  async retireRemoteGoneClone(workspaceId: string): Promise<boolean> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const id = workspaceIdForBranch(branch);
+    // The lock `createBranch` and `deleteBranch` take: no Hexis operation can
+    // bring this branch back into being while the clone is examined and
+    // removed. The sync's own hold on the clone ended when its outcome was
+    // returned, so the branch is asked about AGAIN here rather than trusted
+    // from then — a recreate that landed in between keeps its clone. A clone
+    // being bootstrapped right now is left alone too: it can only be cloning
+    // a branch that exists, so the retirement is already moot. What remains
+    // is a recreate pushed from OUTSIDE Hexis in the milliseconds between the
+    // origin check and the delete, with a bootstrap starting in that same
+    // window; the next sync of that branch clones it fresh.
+    return this.branchLifecycle.run(`branch:${branch}`, async () => {
+      if (!(await this.workspaceService.hasBootstrappedWorkspace(id))) return false;
+      if (this.workspaceService.isBootstrapInFlight(branch)) return false;
+      if (await this.git.remoteBranchExists(branch, branch)) return false;
+      await this.workspaceService.deleteWorkspace(id);
+      return true;
+    });
+  }
+
+  /**
+   * Cap on per-path `file-changed` events one sync announces for a branch.
+   * Past it the tree event alone carries the news — a bulk import that
+   * rewrote hundreds of files would otherwise fan hundreds of events out to
+   * every open browser to say what one refresh says.
+   */
+  private static readonly SYNC_FILE_EVENT_CAP = 200;
+
+  async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const id = workspaceIdForBranch(branch);
+    // Two spellings of one workspace id are in circulation — the encoded
+    // directory name (`ali%2Fx`, what the clone listing yields) and the
+    // Express-decoded form (`ali/x`, what every HTTP route hands the git
+    // layer) — and the git layer's mutex keys on the raw string. Speaking the
+    // routes' spelling to git is what puts a webhook's rebase in the same
+    // queue as the author's concurrent save on a slashed branch; the event
+    // bus gets the encoded form, which every SSE consumer canonicalises.
+    const gitId = branch;
+    // Every failure below is an OUTCOME, never a throw: the caller runs this
+    // over many clones, and one broken clone must not abort the others.
+    let pulled: RemoteSyncPullResult;
+    try {
+      pulled = await this.git.syncFromRemote(gitId);
+    } catch (err) {
+      if (err instanceof RemoteBranchGoneError) {
+        // Not a failure: the host deleted the branch, so there is nothing to
+        // sync and the caller retires the stale clone. No banner — nobody is
+        // editing a branch that no longer exists.
+        console.log(`[sync] branch "${branch}" no longer exists on the host`);
+        return { branch, outcome: 'remote-gone' };
+      }
+      if (err instanceof PullRebaseConflictError) {
+        // Same path as `updateFromRemote`: the rebase was aborted inside
+        // the pull (the clone is exactly what it was) and the divergence goes
+        // to the retry → recovery-agent → escalate ladder, attributed to the
+        // recovery bot since no person triggered this. It is still reported
+        // as a conflict because it is not resolved at request time — the
+        // caller's retry, or the ladder, settles it; the banner clears on the
+        // next clean pull or push.
+        await this.queuePullConflictRecovery(gitId, err);
+        const message = syncConflictMessage(branch, err.conflictedPaths);
+        console.warn(`[sync] ${message}`);
+        this.noteGitSyncFailed(gitId, branch, err, { paths: err.conflictedPaths, message });
+        return { branch, outcome: 'conflict', conflictedPaths: err.conflictedPaths, error: message };
+      }
+      const message = sanitizeError(err);
+      console.warn(`[sync] pull failed for branch "${branch}": ${message}`);
+      this.noteGitSyncFailed(gitId, branch, err);
+      return { branch, outcome: 'error', error: message };
+    }
+    // A clean pull is proof origin is reachable and this clone rebases onto
+    // it — the condition a `git-sync-failed` banner on this branch was
+    // waiting for, whether a sync or a push raised it.
+    this.noteGitSyncOk(gitId, branch);
+    const { before, after, treeChanged, changedPaths } = pulled;
+    // Origin still empty (an unborn clone of an unborn upstream), or nothing new.
+    if (after === null || after === before) return { branch, outcome: 'up-to-date', to: after ?? '' };
+    // HEAD moved, so the branch reports `updated` — but the announcement
+    // keys on the pull's own verdict about CONTENT: commits that left the
+    // tree identical (an empty commit, a rebase replayed to the same
+    // result) are nothing for a browser to refetch or a catalog to drop.
+    if (!treeChanged) return { branch, outcome: 'updated', from: before, to: after };
+    try {
+      // Announce the new tree. The tree event alone already refreshes every
+      // open file explorer and, on the default branch, drops the skill / tool /
+      // plugin catalogues (`catalog-cache-invalidation.ts`); the CR list
+      // caches the touched paths it resolved against the old tree, so drop
+      // that too.
+      this.prs.invalidateListCache();
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+      // Per-file events so an open tab on a file the host rewrote refetches
+      // instead of showing stale bytes until its next tree refresh. The paths
+      // were observed under the same hold as the pull, so they are exactly
+      // this sync's — never a save that landed alongside. Capped: a bulk
+      // import would otherwise fan hundreds of events out to say what one
+      // refresh says.
+      if (changedPaths.length <= WorkflowService.SYNC_FILE_EVENT_CAP) {
+        for (const p of changedPaths) {
+          this.events?.emit({
+            kind: 'file-changed',
+            workspaceId: id,
+            branch,
+            path: `${this.kbDirName}/${p}`,
+            newSha: after,
+            byUserId: 'system',
+            byUserName: 'Git sync',
+          });
+        }
+      }
+    } catch (err) {
+      // The pull landed, so origin is fine and no banner is raised — but the
+      // caller must still hear that this branch's announcement did not happen.
+      const message = sanitizeError(err);
+      console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
+      return { branch, outcome: 'error', error: message };
+    }
+    return { branch, outcome: 'updated', from: before, to: after };
   }
 
   /**
@@ -1063,7 +1224,20 @@ export class WorkflowService implements IWorkflowService {
    * machinery is unaffected — all this adds is that someone finds out, rather
    * than the deployment looking healthy while nothing reaches the remote.
    */
-  private noteGitSyncFailed(workspaceId: string, branch: string, err: unknown): void {
+  private noteGitSyncFailed(
+    workspaceId: string,
+    branch: string,
+    err: unknown,
+    /**
+     * Set only by a remote-sync conflict: the files a person must reconcile,
+     * and the sentence we composed about them. That sentence is ours (branch
+     * name + repo paths, no git stderr), so it goes out verbatim — the same
+     * string the sync response and the log carry — rather than through the
+     * sanitiser, whose 200-character clip would make the banner disagree
+     * with them.
+     */
+    conflict?: { paths: string[]; message: string },
+  ): void {
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
     this.gitSyncFailing.add(id);
@@ -1073,7 +1247,8 @@ export class WorkflowService implements IWorkflowService {
       branch,
       // Git stderr can quote a credentialed URL; the banner is user-facing and
       // the string also lands in client logs, so sanitize before it leaves.
-      reason: sanitizeError(err),
+      reason: conflict ? conflict.message : sanitizeError(err),
+      ...(conflict ? { conflictedPaths: conflict.paths } : {}),
     });
   }
 

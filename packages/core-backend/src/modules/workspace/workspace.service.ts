@@ -249,6 +249,73 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Every branch with a finished clone on disk, whether or not this process
+   * has touched it yet. The remote sync reads this: clones survive a restart,
+   * and a hook that fires before anyone opens a branch must still find its
+   * clone. Same disk scan as `findAnyWorkspaceId`.
+   *
+   * What is listed: directories holding a `<kbDirName>/.git`, whose name is
+   * the encoding of a branch git would accept, and whose bootstrap is not in
+   * flight right now. The in-flight exclusion matters because `git clone`
+   * creates `.git` long before the working tree is checked out — pulling a
+   * clone mid-bootstrap would run git against a half-written tree — and a
+   * clone that is being created this instant is current by definition. A
+   * clone left behind by a crash mid-checkout is NOT distinguished here: the
+   * rest of this service treats a directory with `.git` as a clone too, and
+   * the pull's own errors are how such a tree surfaces.
+   *
+   * A missing root means no clones (nothing has been bootstrapped yet); any
+   * other failure to read it is propagated, so a sync cannot report success
+   * over a root it could not see. One entry that cannot be probed (an ACL, a
+   * half-deleted directory) is returned with `unreadable` set rather than
+   * thrown, so it fails as one branch and not as the whole listing.
+   */
+  async listClonedWorkspaces(): Promise<Array<{ id: string; branch: string; unreadable?: string }>> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return [];
+      throw err;
+    }
+    const cloned: Array<{ id: string; branch: string; unreadable?: string }> = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const branch = branchForWorkspaceId(entry.name);
+      // Not one of ours unless the name is the encoding of a branch git
+      // accepts: `branchForWorkspaceId` returns a malformed name unchanged, so
+      // the round-trip catches those, and the validator catches a stray
+      // directory whose name merely round-trips.
+      if (workspaceIdForBranch(branch) !== entry.name) continue;
+      try {
+        assertValidBranchName(branch);
+      } catch {
+        continue;
+      }
+      try {
+        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        cloned.push({
+          id: entry.name,
+          branch,
+          unreadable: `Could not read this branch's clone: ${redactError(err)}`,
+        });
+        continue;
+      }
+      // AFTER the probe, with no await in between: a bootstrap registers
+      // itself before it creates `.git`, so any clone whose `.git` was found
+      // while its bootstrap is running is in this map by now. Checking before
+      // the probe left a window where the clone started in between.
+      if (this.inFlightBootstraps.has(branch)) continue;
+      cloned.push({ id: entry.name, branch });
+    }
+    return cloned;
+  }
+
+  /**
    * Run the clone. When a `referenceRepo` is supplied and the referenced
    * clone fails (e.g. the sibling's object store is corrupt or mid-write),
    * fall back once to a plain network clone so a bad sibling can never
@@ -406,6 +473,15 @@ export class WorkspaceService implements IWorkspaceService {
       this.branchDirs.delete(branch);
       throw err;
     }
+  }
+
+  /**
+   * Whether a clone of `branch` is being created at this moment. Read by the
+   * retirement of a clone the host deleted: a bootstrap in flight means the
+   * branch exists again, so there is nothing stale to remove.
+   */
+  isBootstrapInFlight(branch: string): boolean {
+    return this.inFlightBootstraps.has(branch);
   }
 
   /**

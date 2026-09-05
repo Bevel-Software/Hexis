@@ -1,13 +1,65 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { copyToClipboard } from '../../../lib/clipboard';
 import {
   saveSettings,
+  syncNow,
+  syncOutcomeError,
   testConnection,
   SettingsProblems,
   type ConnectionTest,
+  type LastSync,
   type SettingStatus,
+  type SyncNowResult,
+  type SyncStatus,
 } from '../services/setup.api';
+
+/** A value to paste elsewhere, with the one button such a value needs. */
+function CopyValue({ value, label }: { value: string; label: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
+  const copy = async () => {
+    // `copyToClipboard` answers false for every ordinary reason a copy does
+    // not land (no secure context, no focus, no clipboard at all); the button
+    // says so rather than pretending.
+    const landed = await copyToClipboard(value);
+    setState(landed ? 'copied' : 'failed');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState('idle'), 1500);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <code className="min-w-0 break-all rounded bg-surface px-2 py-1 font-mono text-meta text-ink">
+        {value}
+      </code>
+      <Button type="button" variant="outline" size="sm" onClick={() => void copy()} aria-label={label}>
+        {state === 'copied' ? 'Copied' : state === 'failed' ? 'Couldn’t copy' : 'Copy'}
+      </Button>
+    </div>
+  );
+}
+
+/** "main updated, ali/x up to date" — the per-branch outcomes as one phrase. */
+function describeOutcomes(results: LastSync['results']): string {
+  if (results.length === 0) return 'nothing to sync yet';
+  const word = (r: LastSync['results'][number]): string => {
+    switch (r.outcome) {
+      case 'up-to-date':
+        return 'up to date';
+      case 'not-cloned':
+        return 'not cloned';
+      case 'remote-gone':
+        return 'deleted on the host';
+      default:
+        return r.outcome;
+    }
+  };
+  return results.map((r) => `${r.branch} ${word(r)}`).join(', ');
+}
 
 /** Copy for each setting: what it is, in the words of someone who has to fill it in. */
 const FIELDS: Record<
@@ -38,6 +90,12 @@ const FIELDS: Record<
     label: 'Folder name',
     help: 'What the repository folder is called inside each workspace. Cosmetic; leave it as it is.',
     placeholder: 'knowledge-base',
+    advanced: true,
+  },
+  kbSyncSecret: {
+    label: 'Sync secret',
+    help: 'Lets your git host tell this deployment when the repository changes, so pushes and merged pull requests show up right away. Add a webhook, action or pipeline step that calls POST /api/sync/<branch> with this value as a bearer token. Optional: without it, only an administrator can trigger a sync. Stored encrypted, and never shown again.',
+    placeholder: 'A long random string',
     advanced: true,
   },
   defaultBranch: {
@@ -132,6 +190,11 @@ interface Props {
    * and the restart banners must never drift between first run and later.
    */
   variant?: 'setup' | 'settings';
+  /**
+   * The remote-sync facts to show beside the sync secret: the address a hook
+   * calls, and what the last call did. Absent on a build without the module.
+   */
+  sync?: SyncStatus;
 }
 
 /**
@@ -150,8 +213,11 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
+export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [syncing, setSyncing] = useState(false);
+  /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
+  const [syncResult, setSyncResult] = useState<SyncNowResult | null>(null);
   const [problems, setProblems] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<ConnectionTest | null>(null);
@@ -349,6 +415,88 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
     }
   }
 
+  async function runSync() {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      setSyncResult(await syncNow());
+      // The status carries the last-sync record; refetch so it shows this one.
+      onSaved();
+    } catch (err) {
+      setSyncResult({
+        ok: false,
+        results: [],
+        error: err instanceof Error ? err.message : 'Could not sync.',
+      });
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  /**
+   * Beside the sync secret: the address a hook calls (in both variants — an
+   * admin wiring a hook needs it before first run too), and once the
+   * deployment is live, what the last call did plus a button to make one.
+   */
+  function renderSyncPanel() {
+    if (!sync) return null;
+    const last = sync.last;
+    return (
+      <Surface tone="surface" radius="md" className="mt-3 space-y-3 border border-line p-3">
+        <div className="space-y-1.5">
+          <span className="text-meta font-medium text-ink">Address for the hook</span>
+          <CopyValue value={`${sync.url}/<branch>`} label="Copy the sync address" />
+          <p className="text-meta text-ink-faint">
+            Replace <code className="font-mono">&lt;branch&gt;</code> with the branch that changed;
+            send the secret as a bearer token.
+          </p>
+        </div>
+        {variant === 'settings' && (
+          <div className="space-y-2">
+            <p role="status" className="text-meta text-ink-muted">
+              {last
+                ? `Last sync ${new Date(last.at).toLocaleString()} by ${last.by}: ${describeOutcomes(last.results)}.`
+                : 'No sync since this server started.'}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void runSync()}
+                disabled={syncing}
+              >
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </Button>
+              <span className="text-meta text-ink-faint">
+                Pulls every branch from the repository with your own session — the same thing the
+                hook does.
+              </span>
+            </div>
+            {syncResult && (
+              <p
+                role="status"
+                // One line per failed branch: the server's sentences are
+                // joined with newlines and rendered as such.
+                className={`whitespace-pre-line text-detail ${syncResult.ok ? 'text-ok' : 'text-danger'}`}
+              >
+                {syncResult.error
+                  ? syncResult.error
+                  : syncResult.ok
+                    ? `Synced: ${describeOutcomes(syncResult.results)}.`
+                    : (syncResult.results
+                        .map(syncOutcomeError)
+                        .filter((e): e is string => !!e)
+                        .join('\n') ||
+                      `Not fully synced: ${describeOutcomes(syncResult.results)}.`)}
+              </p>
+            )}
+          </div>
+        )}
+      </Surface>
+    );
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (saving) return;
@@ -497,6 +645,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
           </datalist>
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+        {setting.key === 'kbSyncSecret' && renderSyncPanel()}
         {/* Only AFTER setup: on first run there is nothing yet to lose, so
             the caution would be noise. Once a deployment is live, this field
             is the one whose careless edit strands everything. */}
@@ -684,10 +833,36 @@ export function SetupScreen({ settings, onSaved, variant = 'setup' }: Props) {
                     </div>
                   </details>
                 )}
+
+                {/* The sync panel normally hangs off the secret's field. When
+                    the secret comes from the environment that field is in the
+                    locked list below, not here — but the address, the last
+                    sync and Sync now are about the deployment, not the secret,
+                    and an admin with an env-set secret needs them just as much. */}
+                {section.id === 'knowledge-base' &&
+                  sync &&
+                  !fields.some((f) => f.key === 'kbSyncSecret') &&
+                  renderSyncPanel()}
               </Surface>
             );
           })}
 
+
+          {/* When EVERY knowledge-base setting comes from the environment the
+              section above does not render at all, and the sync panel that
+              normally lives inside it would vanish with it. The panel is
+              about the deployment, not about any one editable field, so it
+              gets its own place here in that case. */}
+          {sync && editable.every((s) => s.section !== 'knowledge-base') && (
+            <Surface as="section" tone="surface" radius="lg" elevation="card" className="p-6">
+              <h2 className="text-title font-semibold text-ink">Repository sync</h2>
+              <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">
+                The knowledge-base connection is set by the environment. The sync hook is still
+                yours to wire up and check on here.
+              </p>
+              {renderSyncPanel()}
+            </Surface>
+          )}
 
           {/* A rejected connection stops here rather than at the far side of
               it. Saving these answers would finish setup — the server checks

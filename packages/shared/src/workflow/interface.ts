@@ -21,6 +21,7 @@ import type { AuthUser } from '../auth/types.js';
 import type {
   AcquireLockResult,
   Branch,
+  BranchSyncOutcome,
   BranchWorkspaceStatus,
   CancelChangeRequestResult,
   Change,
@@ -44,7 +45,9 @@ export interface IWorkflowService {
   /**
    * Create a new unprotected branch. Protected branches cannot be created
    * via the workflow — the protected set is bootstrapped from the KB repo's
-   * initial state and never grown at runtime.
+   * initial state and never grown at runtime. Holds the branch-lifecycle
+   * lock for `name`, so creation is serialised with the branch's deletion
+   * and with the retirement of a stale clone under that name.
    */
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch>;
   /**
@@ -101,6 +104,31 @@ export interface IWorkflowService {
    * `user` when provided (falls back to the recovery bot).
    */
   updateFromRemote(workspaceId: string, user?: AuthUser): Promise<void>;
+  /**
+   * The remote-sync step for ONE branch's clone, driven by a git host's
+   * webhook or a pipeline rather than by a person's save. Pulls with the same
+   * rebase-and-autostash `updateFromRemote` uses and, when HEAD moved,
+   * announces the new tree (`fs-tree-changed`, one `file-changed` per path)
+   * so open browsers, agents and the catalogues see it at once.
+   *
+   * On a conflict it does what `updateFromRemote` does — the divergence goes
+   * to the same background recovery ladder (attributed to the recovery bot,
+   * since no person triggered the sync) — and, because that is not resolved
+   * at request time, reports it as a `conflict` outcome naming the files, so
+   * the caller can fail and a person can step in if recovery does not clear
+   * it. Never throws for a per-branch failure; every failure is an outcome.
+   */
+  syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome>;
+  /**
+   * Retire the clone of a branch the host has deleted (a `remote-gone`
+   * outcome). Runs under the branch-lifecycle lock — the one `createBranch`
+   * and `deleteBranch` hold, so no Hexis operation can recreate the branch
+   * while the clone is examined and removed — revalidates against origin
+   * first, and backs off while a clone of the branch is being bootstrapped.
+   * A branch recreated in the meantime therefore keeps its clone. Returns
+   * whether the clone was removed.
+   */
+  retireRemoteGoneClone(workspaceId: string): Promise<boolean>;
   /**
    * Hard-reset the workspace's checked-out branch to `origin/<branch>` (fetch
    * first), discarding any local divergence. Break-glass primitive for

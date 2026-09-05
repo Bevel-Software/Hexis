@@ -6,6 +6,7 @@ const api = vi.hoisted(() => ({
   fetchSetupStatus: vi.fn(),
   saveSettings: vi.fn(),
   testConnection: vi.fn(),
+  syncNow: vi.fn(),
 }));
 vi.mock('../services/setup.api', async () => {
   // The error class is real — the screen distinguishes field problems from a
@@ -43,6 +44,7 @@ beforeEach(() => {
   api.fetchSetupStatus.mockReset();
   api.saveSettings.mockReset();
   api.testConnection.mockReset();
+  api.syncNow.mockReset();
   reload = vi.fn();
   Object.defineProperty(window, 'location', {
     configurable: true,
@@ -739,5 +741,121 @@ describe('SetupScreen', () => {
     await userEvent.type(screen.getByLabelText('Folder name'), 'company-brain');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
     expect(await screen.findByText(/restart it when convenient/)).toBeInTheDocument();
+  });
+});
+
+describe('SetupScreen — remote sync panel', () => {
+  const SYNC_SETTING: SettingStatus = {
+    key: 'kbSyncSecret', envVar: 'KB_SYNC_SECRET', section: KB, source: 'unset', configured: false, secret: true, restartToApply: false,
+  };
+  const SYNC = {
+    url: 'https://hexis.example.test/api/sync',
+    last: {
+      at: Date.UTC(2026, 8, 4, 12, 0, 0),
+      by: 'github-signature',
+      status: 'synced' as const,
+      results: [{ branch: 'main', outcome: 'updated' as const, from: 'aaa', to: 'bbb' }],
+    },
+  };
+
+  it('shows the address a hook calls on first run, without a Sync now button', () => {
+    render(<SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} />);
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Copy the sync address' })).toBeTruthy();
+    // The 'setup' variant never offers the button or the history, whatever the
+    // record says: on first run the repository behind them is not connected yet.
+    expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull();
+  });
+
+  it('shows the address on the Deployment page too', () => {
+    render(
+      <SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} variant="settings" />,
+    );
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+  });
+
+  it('keeps the panel when the secret is set by the environment', () => {
+    const fromEnv: SettingStatus = { ...SYNC_SETTING, source: 'env', configured: true };
+    render(
+      <SetupScreen settings={[...SETTINGS, fromEnv]} sync={SYNC} onSaved={() => {}} variant="settings" />,
+    );
+    // The secret itself is locked, listed under the environment…
+    expect(screen.getByText('KB_SYNC_SECRET')).toBeTruthy();
+    // …but the address, the history and Sync now are still there.
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+  });
+
+  it('on the Deployment page: says what the last sync did, and Sync now reports the result', async () => {
+    api.syncNow.mockResolvedValue({
+      ok: true,
+      status: 'synced',
+      results: [
+        { branch: 'main', outcome: 'updated' },
+        { branch: 'ali/x', outcome: 'up-to-date' },
+      ],
+    });
+    const onSaved = vi.fn();
+    render(
+      <SetupScreen
+        settings={[...SETTINGS, SYNC_SETTING]}
+        sync={SYNC}
+        onSaved={onSaved}
+        variant="settings"
+      />,
+    );
+    expect(screen.getByText(/Last sync .* by github-signature: main updated\./)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+    await waitFor(() => expect(screen.getByText('Synced: main updated, ali/x up to date.')).toBeTruthy());
+    expect(api.syncNow).toHaveBeenCalledTimes(1);
+    // The status carries the last-sync record, so the page refetches it.
+    expect(onSaved).toHaveBeenCalled();
+  });
+
+  it('a conflict comes back as the branch’s own message', async () => {
+    api.syncNow.mockResolvedValue({
+      ok: false,
+      status: 'partial',
+      results: [
+        { branch: 'main', outcome: 'conflict', error: 'main is not in sync yet: a.md changed both in Hexis and on the git host.' },
+      ],
+    });
+    render(
+      <SetupScreen
+        settings={[...SETTINGS, SYNC_SETTING]}
+        sync={{ ...SYNC, last: null }}
+        onSaved={() => {}}
+        variant="settings"
+      />,
+    );
+    expect(screen.getByText('No sync since this server started.')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+    await waitFor(() =>
+      expect(screen.getByText(/main is not in sync yet: a\.md changed both/)).toBeTruthy(),
+    );
+  });
+});
+
+describe('SetupScreen — sync panel when the whole knowledge base is env-set', () => {
+  it('still renders the address and Sync now, in a section of its own', () => {
+    const KB_FROM_ENV: SettingStatus[] = SETTINGS.map((s) =>
+      s.section === 'knowledge-base' ? { ...s, source: 'env', configured: true } : s,
+    );
+    const syncFromEnv: SettingStatus = {
+      key: 'kbSyncSecret', envVar: 'KB_SYNC_SECRET', section: 'knowledge-base', source: 'env', configured: true, secret: true, restartToApply: false,
+    };
+    render(
+      <SetupScreen
+        settings={[...KB_FROM_ENV, syncFromEnv]}
+        sync={{ url: 'https://hexis.example.test/api/sync', last: null }}
+        onSaved={() => {}}
+        variant="settings"
+      />,
+    );
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Repository sync' })).toBeTruthy();
   });
 });

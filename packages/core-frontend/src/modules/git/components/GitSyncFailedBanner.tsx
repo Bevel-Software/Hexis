@@ -1,8 +1,34 @@
 import { useCallback, useState } from 'react';
-import { CloudOff } from 'lucide-react';
+import { CloudOff, GitMerge } from 'lucide-react';
 import { useEventBusSubscription } from '../../workflow/hooks/useEventBusSubscription';
 import { canonicalizeWorkspaceId } from '../../workflow/state/event-bus.context';
 import { useWorkspace } from '../../workspace/state/workspace.context';
+import { useFileNav } from '../../workspace/routing/kb-routes';
+
+/**
+ * The files a remote sync could not reconcile, each a link that opens it.
+ * Its own component so the navigation hook is only mounted for the conflict
+ * case — the push-failure banner has nothing to open.
+ */
+function ConflictFiles({ paths }: { paths: string[] }) {
+  const { kbDirName } = useWorkspace();
+  const { openWorkspacePath } = useFileNav();
+  return (
+    <ul className="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-0.5">
+      {paths.map((p) => (
+        <li key={p}>
+          <button
+            type="button"
+            className="font-mono underline underline-offset-2 hover:text-ink"
+            onClick={() => openWorkspacePath(`${kbDirName}/${p}`)}
+          >
+            {p}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 /**
  * Shown when a commit landed locally but could not be pushed to the remote.
@@ -48,9 +74,9 @@ export function GitSyncFailedBanner() {
   // settles it (failures re-emit on every attempt, recoveries on the next
   // transition). The alternative — clearing on switch — hides real, still-
   // broken state, which is the exact failure mode this PR exists to fix.
-  const [failures, setFailures] = useState<ReadonlyMap<string, { branch: string; reason: string }>>(
-    new Map(),
-  );
+  const [failures, setFailures] = useState<
+    ReadonlyMap<string, { branch: string; reason: string; conflictedPaths?: string[] }>
+  >(new Map());
 
   useEventBusSubscription(
     'git-sync-failed',
@@ -61,7 +87,11 @@ export function GitSyncFailedBanner() {
         // failure from being recorded under this one's key.
         if (!canonId || canonicalizeWorkspaceId(e.workspaceId) !== canonId) return;
         setFailures((prev) =>
-          new Map(prev).set(canonId, { branch: e.branch, reason: e.reason }),
+          new Map(prev).set(canonId, {
+            branch: e.branch,
+            reason: e.reason,
+            conflictedPaths: e.conflictedPaths,
+          }),
         );
       },
       [canonId],
@@ -86,6 +116,30 @@ export function GitSyncFailedBanner() {
 
   const failure = canonId ? failures.get(canonId) : undefined;
   if (!failure) return null;
+
+  // A remote-sync CONFLICT is the one failure an author can act on, not only
+  // an operator: the same file changed here and on the git host. Automatic
+  // recovery is already running; if it does not clear, the person decides.
+  // Different copy, and the files themselves, each a link.
+  if (failure.conflictedPaths && failure.conflictedPaths.length > 0) {
+    return (
+      <div
+        role="alert"
+        className="px-3 py-1.5 bg-sunken border-b border-line text-xs text-ink shrink-0"
+      >
+        <div className="flex items-center gap-2">
+          <GitMerge size={13} className="shrink-0" />
+          <span className="flex-1">
+            <span className="font-mono font-semibold">{failure.branch}</span> isn’t in sync with
+            the git repository yet: these files were changed both here and there. Hexis is trying
+            to reconcile them. If this notice stays, open each one, keep the content you want, and
+            save.
+          </span>
+        </div>
+        <ConflictFiles paths={failure.conflictedPaths} />
+      </div>
+    );
+  }
 
   return (
     <div
