@@ -469,19 +469,25 @@ jobs:
                   # The page is real and this run's — now the generic format
                   # gate: a terminal review's page must carry a non-empty
                   # Rule outputs section (the template's
-                  # `<pre class="rule-outputs">`). A page without it is a
+                  # `<pre class="rule-outputs">`). A page without one is a
                   # summary, not a review — the incident here was a "pass"
                   # whose page narrated the rules in prose and skipped every
-                  # required block. Only the section's EXISTENCE is checked;
-                  # its contents belong to the rule nodes. Two tests, so the
-                  # content's first character never matters (a block may open
-                  # with markup): the section's open tag must be present, and
-                  # the literally-empty form — open tag, whitespace, close
-                  # tag — must not be how it appears.
-                  ro_open="<pre[[:space:]][^>]*class=[\"']rule-outputs[\"'][^>]*>"
-                  ro_empty="${ro_open}[[:space:]]*</pre>"
-                  if ! jq -e --arg pat "$ro_open" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1 \
-                     || jq -e --arg pat "$ro_empty" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1; then
+                  # required block. Only substance is checked — WHICH rules
+                  # and their shapes live in the rule nodes.
+                  #
+                  # The question is asked of the section's CONTENT, not of
+                  # the page's shape: capture each rule-outputs block's
+                  # interior (lazy, up to its closing tag) and pass when ANY
+                  # interior holds a non-whitespace character. One semantic,
+                  # so the traps of composing page-level patterns cannot
+                  # recur: content may open with markup, and an empty block
+                  # beside a substantive one is fine. A block with no closing
+                  # tag captures nothing and is treated as absent — that page
+                  # is malformed, and erroring it is correct.
+                  ro_pattern="<pre[[:space:]][^>]*class=[\"']rule-outputs[\"'][^>]*>(.*?)</pre>"
+                  if ! jq -e --arg pat "$ro_pattern" \
+                       '[(.content? // "") | tostring | scan($pat; "is")] | flatten | map(tostring) | any(test("[^[:space:]]"))' \
+                       page.json >/dev/null 2>&1; then
                     echo "::warning::The one-pager at $branch:$path has no non-empty Rule outputs section — the review's rule blocks are its evidence; marking the check errored."
                     ruleoutputs_ok=0
                   fi
