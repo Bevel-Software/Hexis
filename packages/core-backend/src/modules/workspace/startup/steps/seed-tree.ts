@@ -90,7 +90,7 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
 }
 
 /** Template files that are TEXT and may carry layout placeholders; anything else is copied byte for byte. */
-const TEXT_TEMPLATE = /(\.(md|markdown|ya?ml|json|txt|template)|\/?\.[^/]+)$/i;
+const TEXT_TEMPLATE = /(\.(md|markdown|ya?ml|json|txt|template)|(?:^|[/\\])\.[^/\\]+)$/i;
 
 /**
  * Copy one template file (by repo-relative path) into `dest`, creating

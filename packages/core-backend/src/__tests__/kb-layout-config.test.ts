@@ -8,6 +8,7 @@ import {
   currentKbLayout,
   ontologyRoots,
   pluginOfPath,
+  renderKbLayoutPlaceholders,
   reservedRootDirNames,
   validateKbLayout,
   validateKbRootName,
@@ -37,6 +38,19 @@ describe('KB layout — validation', () => {
     expect(validateKbRootName('.hidden')).not.toBeNull();
     expect(validateKbRootName('bad\nname')).not.toBeNull();
     expect(validateKbRootName('Skills')).toBeNull();
+  });
+
+  test('refuses a configurable root that takes a fixed reserved name', () => {
+    expect(
+      validateKbLayout({ knowledgeBaseDir: 'KnowledgeBase', skillsDir: 'data', pluginsDir: 'Plugins' }),
+    ).toMatch(/reserved folder name/);
+  });
+
+  test('renders placeholders without interpreting $-patterns in a folder name', () => {
+    expect(
+      renderKbLayoutPlaceholders('a {{skillsDir}} b', { knowledgeBaseDir: 'K', skillsDir: 'Sales$&', pluginsDir: 'P' }),
+    ).toBe('a Sales$& b');
+    expect(renderKbLayoutPlaceholders('no placeholders', DEFAULT_KB_LAYOUT)).toBe('no placeholders');
   });
 
   test('refuses two roots sharing a name, case-insensitively — one folder on a case-insensitive disk', () => {

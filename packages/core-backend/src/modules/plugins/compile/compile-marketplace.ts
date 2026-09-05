@@ -166,7 +166,11 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     // provisioner applies (`[a-z0-9.-]`, no runs, no leading dots) leaves
     // nothing that can be a separator or a parent reference.
     const slug = pluginManifestName(typeof manifest?.name === 'string' && manifest.name ? manifest.name : name);
-    if (out.some((p) => p.slug === slug) || RESERVED_SLUGS.has(slug)) {
+    if (RESERVED_SLUGS.has(slug)) {
+      warnings.push(`${plugin.folder}: manifest name "${slug}" is reserved by the marketplace and cannot be a plugin — plugin skipped`);
+      continue;
+    }
+    if (out.some((p) => p.slug === slug)) {
       warnings.push(`${plugin.folder}: manifest name "${slug}" is already taken in this marketplace — plugin skipped`);
       continue;
     }
@@ -241,7 +245,13 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   // 4. The one-install bundle: a Claude manifest with nothing but dependencies.
   const bundle = pluginManifestName(options.bundleName ?? BUNDLE_NAME);
   const slugs = out.map((p) => p.slug);
-  if (slugs.length > 0) {
+  if (slugs.includes(bundle)) {
+    // Only reachable with a non-default bundle name that folds to a real
+    // plugin's slug: the default is reserved above. Skipping the bundle
+    // beats overwriting that plugin's manifests with a dependency list.
+    warnings.push(`the bundle name "${bundle}" collides with a plugin's manifest name — no bundle plugin emitted`);
+  }
+  if (slugs.length > 0 && !slugs.includes(bundle)) {
     const shortSha = options.sourceCommit.slice(0, 12) || '0';
     const description = `Everything in ${options.owner}'s marketplace you may read — one install.`;
     put(
@@ -266,7 +276,8 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   for (const s of flat) await copySkill(kbRoot, s, `skills/${s.name}`, put);
 
   // 6. The two catalogues + a README naming the source.
-  const entries = [...out.map((p) => ({ slug: p.slug, description: p.description ?? p.displayName })), ...(slugs.length ? [{ slug: bundle, description: 'Everything you may read, one install' }] : [])];
+  const bundleEmitted = slugs.length > 0 && !slugs.includes(bundle);
+  const entries = [...out.map((p) => ({ slug: p.slug, description: p.description ?? p.displayName })), ...(bundleEmitted ? [{ slug: bundle, description: 'Everything you may read, one install' }] : [])];
   put(
     '.claude-plugin/marketplace.json',
     `${JSON.stringify(

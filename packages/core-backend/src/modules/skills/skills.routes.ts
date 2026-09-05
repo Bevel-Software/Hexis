@@ -1,10 +1,20 @@
 import express from 'express';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
 
 /** The slice of the plugin link index this surface reads — see `PluginLinkIndex`. */
 export interface SkillMembershipSource {
-  membership(): Promise<{ bySkill: Map<string, PluginMembership[]> }>;
+  membership(): Promise<{
+    bySkill: Map<string, PluginMembership[]>;
+    byPlugin: Map<string, { folder: string }>;
+  }>;
+}
+
+/** The one access verdict this surface needs: may the caller read a path on the default branch? */
+export interface SkillMembershipGate {
+  canReadBatch(workspaceId: string, userEmail: string, paths: string[]): Promise<Map<string, boolean>>;
 }
 
 /**
@@ -28,6 +38,12 @@ export function createSkillsRoutes(
   skillService: ISkillService,
   pendingSkills?: IPendingSkillService,
   links?: SkillMembershipSource,
+  /**
+   * With `links`: the memberships a caller sees name only plugins they may
+   * DISCOVER (read the plugin's access.md — the plugin index's own listing
+   * verdict), so this surface never reveals a plugin `/api/plugins` omits.
+   */
+  gate?: SkillMembershipGate,
 ): express.Router {
   const router = express.Router();
 
@@ -43,12 +59,28 @@ export function createSkillsRoutes(
       return;
     }
     let bySkill: Map<string, PluginMembership[]>;
+    let discoverable: (plugin: string) => boolean = () => true;
     try {
-      bySkill = (await links.membership()).bySkill;
+      const membership = await links.membership();
+      bySkill = membership.bySkill;
+      if (gate) {
+        const folders = [...membership.byPlugin.entries()];
+        const verdicts = folders.length
+          ? await gate.canReadBatch(
+              workspaceIdForBranch(DEFAULT_BRANCH),
+              email,
+              folders.map(([, p]) => `${p.folder}/access.md`),
+            )
+          : new Map<string, boolean>();
+        const visible = new Set(folders.filter(([, p]) => verdicts.get(`${p.folder}/access.md`) === true).map(([name]) => name));
+        discoverable = (plugin) => visible.has(plugin);
+      }
     } catch {
       bySkill = new Map(); // membership is a decoration; the shelf must not fall with it
     }
-    res.json({ skills: skills.map((s) => ({ ...s, plugins: bySkill.get(s.path) ?? [] })) });
+    res.json({
+      skills: skills.map((s) => ({ ...s, plugins: (bySkill.get(s.path) ?? []).filter((m) => discoverable(m.name)) })),
+    });
   });
 
   /**

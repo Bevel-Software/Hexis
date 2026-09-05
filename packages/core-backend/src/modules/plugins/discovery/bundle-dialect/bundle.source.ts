@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
+import { isPersonalPluginFolder, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 
@@ -41,8 +41,14 @@ export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<
   let text: string;
   try {
     text = await fs.readFile(path.join(kbRoot, DEFAULT_REGISTRY_PATH), 'utf-8');
-  } catch {
-    return null; // no registry: bundles without a profile are still plugins
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    // No registry is a valid state: bundles without a profile are still
+    // plugins. A registry that exists but cannot be read is not.
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      warnings.push(`${DEFAULT_REGISTRY_PATH} could not be read (${String(code ?? err)}) — every mcpProfile is unresolved`);
+    }
+    return null;
   }
   const registry = parseRegistry(text);
   warnings.push(...registry.warnings);
@@ -102,7 +108,9 @@ export async function readBundlePlugin(
     name,
     folder,
     relFolder,
-    personal: false,
+    // The same rule as the native reader: a reserved personal folder directly
+    // under the root is a place, not a plugin, whatever file it carries.
+    personal: !relFolder.includes('/') && isPersonalPluginFolder(leaf),
     exists: true,
     manifest,
     manifestText: null,

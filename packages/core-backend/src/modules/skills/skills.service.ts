@@ -144,7 +144,11 @@ export class SkillService implements ISkillService {
         return;
       }
       ignore = await ignore.extendedWith(dir);
-      if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
+      // A rule may name the skill's own file, not only a folder above it.
+      if (
+        entries.some((e) => e.isFile() && e.name === 'SKILL.md') &&
+        !ignore.isIgnored(path.join(dir, 'SKILL.md'), false)
+      ) {
         let raw: string;
         try {
           raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');

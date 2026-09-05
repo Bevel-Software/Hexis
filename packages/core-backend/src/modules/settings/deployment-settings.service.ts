@@ -429,7 +429,12 @@ export class DeploymentSettingsService {
 
     let restartRequired = false;
     for (const { key, value, def } of toWrite) {
-      if (def.restartToApply && this.resolve(key) !== value) restartRequired = true;
+      // Compared against the EFFECTIVE value: a layout root that was unset
+      // was already running on its default, so saving that default changes
+      // nothing a restart would pick up.
+      const effective =
+        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
+      if (def.restartToApply && effective !== value) restartRequired = true;
       const encrypted = def.secret === true;
       const stored = encrypted ? this.crypto!.encrypt(value) : value;
       await this.db

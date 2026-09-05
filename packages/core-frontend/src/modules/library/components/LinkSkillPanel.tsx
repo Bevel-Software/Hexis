@@ -39,7 +39,9 @@ export function LinkSkillPanel({
   const candidates = useMemo(() => {
     const q = query.trim().toLowerCase();
     return items
-      .filter((i): i is LibraryItem => i.kind === 'skill' && !i.pending && !isInPlugin(i, plugin))
+      // Retired skills are kept for their owners and never shared onward; the
+      // server refuses them too, this just keeps them out of the list.
+      .filter((i): i is LibraryItem => i.kind === 'skill' && !i.pending && i.lifecycle !== 'retired' && !isInPlugin(i, plugin))
       .filter((i) => !q || i.name.toLowerCase().includes(q) || i.description.toLowerCase().includes(q))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [items, plugin, query]);

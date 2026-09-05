@@ -150,7 +150,11 @@ export function createMarketplaceGitRoutes(deps: {
     let headersDone = false;
     child.stdout.on('data', (chunk: Buffer) => {
       if (headersDone) {
-        res.write(chunk);
+        // Backpressure: a slow client must not make Node buffer a whole pack.
+        if (!res.write(chunk)) {
+          child.stdout.pause();
+          res.once('drain', () => child.stdout.resume());
+        }
         return;
       }
       headerBuf = Buffer.concat([headerBuf, chunk]);

@@ -70,7 +70,16 @@ export async function loadServerConfig(): Promise<void> {
   // The KB layout has defaults, so an absent or invalid one is not a boot
   // failure either: the module keeps its defaults, which is exactly what an
   // older server that omits the field is running with.
-  if (config.kbLayout && !validateKbLayout(config.kbLayout)) configureKbLayout(config.kbLayout);
+  const layout = config.kbLayout;
+  if (
+    layout &&
+    typeof layout.knowledgeBaseDir === 'string' &&
+    typeof layout.skillsDir === 'string' &&
+    typeof layout.pluginsDir === 'string' &&
+    !validateKbLayout(layout)
+  ) {
+    configureKbLayout(layout);
+  }
 
   /**
    * Unconditional, and deliberately not guarded by the branch-model check

@@ -624,6 +624,10 @@ export function SkillPage({
       )}
       {manageOpen && kbDirName && skillPath && (
         <ManageAccessDialog
+          // The Library speaks the DEFAULT branch: a skill's rules are edited
+          // where the catalog reads them, whatever branch the ambient
+          // workspace happens to be on.
+          workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
           entry={{ name, relativePath: `${kbDirName}/${skillPath}`, type: 'directory' }}
           onClose={() => {
             setManageOpen(false);

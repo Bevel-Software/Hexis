@@ -123,14 +123,17 @@ export class PluginLinkIndex {
     // segment says nothing). Personal folders are places, not plugins —
     // their skills belong to nobody's plugin.
     const ownerOf = (skillPath: string) =>
-      discovered.plugins.find((p) => !p.personal && skillPath.startsWith(`${p.folder}/`));
+      discovered.plugins.find((p) => !p.personal && p.exists && skillPath.startsWith(`${p.folder}/`));
     for (const s of skills) {
       const owner = ownerOf(s.path);
       if (owner) add(s.path, { name: owner.name, linked: false, granted: true });
     }
 
     for (const plugin of discovered.plugins) {
-      if (plugin.personal) continue;
+      // Personal folders are places, not plugins; a manifest without the
+      // access.md that makes a plugin EXIST is a ghost the index and the
+      // compiler omit, so it must not be linkable or hold grants either.
+      if (plugin.personal || !plugin.exists) continue;
       const roots = plugin.linkedRoots;
       const linkedSkills: string[] = [];
       const unresolvedRoots: string[] = [];

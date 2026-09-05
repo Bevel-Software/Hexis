@@ -50,9 +50,14 @@ export function parseRegistry(text: string): McpRegistry {
       warnings.push('registry.json: a server without an id was skipped');
       continue;
     }
+    if (servers.has(raw.id)) {
+      warnings.push(`registry.json: server "${raw.id}" is declared twice — the second declaration is ignored`);
+      continue;
+    }
     const config = isRecord(raw.config) ? raw.config : configFromFlat(raw);
-    if (!config) {
-      warnings.push(`registry.json: server "${raw.id}" has no usable config — skipped`);
+    const problem = config ? unusableConfigReason(config) : 'no usable config';
+    if (!config || problem) {
+      warnings.push(`registry.json: server "${raw.id}" ${problem} — skipped`);
       continue;
     }
     servers.set(raw.id, { id: raw.id, name: typeof raw.name === 'string' ? raw.name : undefined, config });
@@ -60,6 +65,10 @@ export function parseRegistry(text: string): McpRegistry {
   for (const raw of asArray(root.profiles)) {
     if (!isRecord(raw) || typeof raw.id !== 'string' || !raw.id) {
       warnings.push('registry.json: a profile without an id was skipped');
+      continue;
+    }
+    if (profiles.has(raw.id)) {
+      warnings.push(`registry.json: profile "${raw.id}" is declared twice — the second declaration is ignored`);
       continue;
     }
     profiles.set(raw.id, {
@@ -130,6 +139,24 @@ function toMcpEntry(config: Record<string, unknown>): Record<string, unknown> {
   if (isRecord(config.env)) out.env = config.env;
   if (typeof config.cwd === 'string') out.cwd = config.cwd;
   return out;
+}
+
+/**
+ * Why a config cannot become a working `mcp.json` entry, or null when it can:
+ * an http-style transport needs a non-empty `url`, anything else needs a
+ * non-empty `command`. Compiled as-is, such an entry would fail in every
+ * client that installs it.
+ */
+function unusableConfigReason(config: Record<string, unknown>): string | null {
+  const type = typeof config.type === 'string' ? config.type.toLowerCase() : undefined;
+  const url = typeof config.url === 'string' ? config.url.trim() : '';
+  const command = typeof config.command === 'string' ? config.command.trim() : '';
+  if (type === 'http' || type === 'streamable-http' || type === 'sse') {
+    return url ? null : `has transport "${type}" but no url`;
+  }
+  if (type === 'stdio') return command ? null : 'has transport "stdio" but no command';
+  if (type !== undefined) return `has an unknown transport "${type}"`;
+  return url || command ? null : 'has neither a url nor a command';
 }
 
 function configFromFlat(raw: Record<string, unknown>): Record<string, unknown> | null {

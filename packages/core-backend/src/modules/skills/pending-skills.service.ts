@@ -119,6 +119,8 @@ export class PendingSkillsService implements IPendingSkillService {
         name: isSafeSkillName(declared) ? declared : folderName,
         description: fm.description,
         version: fm.version,
+        owner: fm.owner,
+        lifecycle: fm.lifecycle,
         path: folder,
         changeRequestNumber: cr.number,
         branch: cr.branch,

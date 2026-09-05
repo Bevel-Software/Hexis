@@ -231,9 +231,14 @@ export class PluginLinksService {
     return root;
   }
 
-  /** Released skills under the root — the catalog's answer, not the file system's. */
+  /**
+   * Released skills under the root — the catalog's answer, not the file
+   * system's. A RETIRED skill is kept for its owners and never shared onward,
+   * so it does not count as something a link could reach.
+   */
   private async resolvedSkills(root: string): Promise<string[]> {
     return (await this.skillService.listSkills(undefined))
+      .filter((s) => s.lifecycle !== 'retired')
       .map((s) => s.path)
       .filter((p) => skillUnderRoot(p, root));
   }
@@ -282,13 +287,33 @@ export class PluginLinksService {
     const manifestRel = `${this.kbDirName}/${folder}/${PLUGIN_MANIFEST_FILE}`;
     const abs = path.join(await this.workspaceService.getWorkspacePath(wsId), manifestRel);
     let manifest: Record<string, unknown> | null = null;
+    let text: string | null = null;
     try {
-      const parsed: unknown = JSON.parse(await fs.readFile(abs, 'utf-8'));
-      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-        manifest = parsed as Record<string, unknown>;
+      text = await fs.readFile(abs, 'utf-8');
+    } catch (err) {
+      // Only a PROVEN absence gets the fresh minimal manifest a pre-manifest
+      // folder deserves. Any other failure must surface: the caller writes the
+      // manifest back, and a skeleton over a real one would erase its
+      // version, description and MCP extension block.
+      const code = (err as { code?: unknown } | null)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+    }
+    if (text !== null) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          manifest = parsed as Record<string, unknown>;
+        }
+      } catch {
+        /* unparsable */
       }
-    } catch {
-      /* absent or unparsable — a pre-manifest folder gets a fresh minimal manifest */
+      if (manifest === null) {
+        throw new PluginLinkError(
+          `${manifestRel} is not a JSON object; fix the manifest before changing its links.`,
+          422,
+          { kind: 'bad-manifest' },
+        );
+      }
     }
     return {
       manifest: manifest ?? (JSON.parse(renderPluginManifest(path.posix.basename(folder))) as Record<string, unknown>),

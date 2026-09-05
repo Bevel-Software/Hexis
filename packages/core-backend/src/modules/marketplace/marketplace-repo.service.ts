@@ -11,7 +11,11 @@ const execFileAsync = promisify(execFile);
 /** What the repo service asks the compiler for — the one seam it has. */
 export interface MarketplaceCompiler {
   sourceCommit(): Promise<string>;
-  compileFor(audience: { userEmail: string }): Promise<VirtualTree & { sourceCommit: string }>;
+  compileFor(
+    audience: { userEmail: string },
+    /** The commit the tree is compiled from, when the caller already read it. */
+    sourceCommit?: string,
+  ): Promise<VirtualTree & { sourceCommit: string }>;
 }
 
 export interface EnsureResult {
@@ -84,7 +88,13 @@ export class MarketplaceRepoService {
       await this.git(['-C', this.repoDir, 'config', 'http.receivepack', 'false']);
       await this.git(['-C', this.repoDir, 'config', 'http.uploadpack', 'true']);
       await fs.mkdir(this.sidecarDir(), { recursive: true });
-    })();
+    })().catch((err: unknown) => {
+      // A failed initialisation is retried by the next request, not
+      // remembered until restart: a volume that was briefly unavailable must
+      // not turn every later fetch into a 500.
+      this.initialised = null;
+      throw err;
+    });
     await this.initialised;
   }
 
@@ -102,7 +112,10 @@ export class MarketplaceRepoService {
       const head = await this.headOf(namespace);
       if (last === current && head !== null) return { namespace, compiled: false, sourceCommit: current };
 
-      const tree = await this.compiler.compileFor({ userEmail: user.email });
+      // The commit just read is the one the tree is stamped with: a second
+      // read that failed would otherwise record a placeholder as the compiled
+      // source and make every later fetch recompile.
+      const tree = await this.compiler.compileFor({ userEmail: user.email }, current);
       const sha = await this.commitTree(namespace, tree, head);
       await this.writeSidecar(namespace, tree.sourceCommit);
       return { namespace, compiled: sha !== head, sourceCommit: tree.sourceCommit };
@@ -136,6 +149,10 @@ export class MarketplaceRepoService {
     parent: string | null,
   ): Promise<string> {
     const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-marketplace-'));
+    // The throwaway index lives BESIDE the scratch worktree, never inside it:
+    // `git add -A` would otherwise stage the index (and its lock) into every
+    // compiled tree.
+    const indexDir = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-marketplace-index-'));
     try {
       for (const [rel, bytes] of tree.files) {
         // The compiler sanitises every segment it invents, but the tree is
@@ -148,7 +165,7 @@ export class MarketplaceRepoService {
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, bytes);
       }
-      const index = path.join(scratch, '.hexis-index');
+      const index = path.join(indexDir, 'index');
       const env = { ...process.env, GIT_INDEX_FILE: index, GIT_DIR: this.repoDir, GIT_WORK_TREE: scratch };
       await this.git(['add', '-A', '--', '.'], { cwd: scratch, env });
       const treeSha = (await this.git(['write-tree'], { env })).stdout.trim();
@@ -171,6 +188,7 @@ export class MarketplaceRepoService {
       return sha;
     } finally {
       await fs.rm(scratch, { recursive: true, force: true });
+      await fs.rm(indexDir, { recursive: true, force: true });
     }
   }
 

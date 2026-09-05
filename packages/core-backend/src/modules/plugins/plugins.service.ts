@@ -1,7 +1,6 @@
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
-  pluginOfPath,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -108,7 +107,7 @@ export class PluginIndexService implements IPluginIndexService {
       if (folders.size === 0) return [];
 
       const [skillCounts, toolCounts] = await Promise.all([
-        this.countSkills(),
+        this.countSkills(folders),
         this.countTools(folders),
       ]);
 
@@ -159,10 +158,10 @@ export class PluginIndexService implements IPluginIndexService {
     return byName;
   }
 
-  private async countSkills(): Promise<Map<string, number>> {
+  private async countSkills(folders: Map<string, string[]>): Promise<Map<string, number>> {
     // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
     // property of the plugin, not of who is asking.
-    if (!this.links) return bucketByPlugin(await this.skillService.listSkills(undefined));
+    if (!this.links) return bucketByFolder(await this.skillService.listSkills(undefined), folders);
     // With links, a skill counts for EVERY plugin that holds it — inline in
     // its folder, or linked from a manifest. Personal folders are already
     // absent from the membership (they are places, not plugins).
@@ -191,13 +190,18 @@ export class PluginIndexService implements IPluginIndexService {
   }
 }
 
-/** Count items per plugin folder name; ungrouped items (`null`) count nowhere. */
-function bucketByPlugin(items: { path: string }[]): Map<string, number> {
+/**
+ * Count items per plugin by FOLDER PREFIX against the discovered folders —
+ * not by `pluginOfPath`'s second-segment rule, which would file a nested
+ * plugin's skills under its grouping folder. Items in no plugin count nowhere.
+ */
+function bucketByFolder(items: { path: string }[], folders: Map<string, string[]>): Map<string, number> {
   const counts = new Map<string, number>();
+  const byFolder = [...folders.entries()].map(([name, [folder]]) => ({ name, prefix: `${folder}/` }));
   for (const item of items) {
-    const plugin = pluginOfPath(item.path);
-    if (plugin === null) continue;
-    counts.set(plugin, (counts.get(plugin) ?? 0) + 1);
+    const owner = byFolder.find((f) => item.path.startsWith(f.prefix));
+    if (!owner) continue;
+    counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
   }
   return counts;
 }

@@ -156,6 +156,11 @@ export function validateKbLayout(layout: KbLayout): string | null {
   if (new Set(names).size !== names.length) {
     return 'The knowledge base, skills and plugins folders must have three different names.';
   }
+  // The fixed reserved roots are taken too: naming the skills folder `Data`
+  // would give one directory two reserved roles.
+  const fixed = [DATA_DIR, AGENTS_DIR, PIPELINES_DIR].map((n) => n.toLowerCase());
+  const clash = names.find((n) => fixed.includes(n));
+  if (clash) return `"${clash}" is a reserved folder name (${[DATA_DIR, AGENTS_DIR, PIPELINES_DIR].join(', ')}).`;
   return null;
 }
 
@@ -186,10 +191,12 @@ export function currentKbLayout(): KbLayout {
  * passes through unchanged.
  */
 export function renderKbLayoutPlaceholders(text: string, layout: KbLayout = currentKbLayout()): string {
+  // Replacer FUNCTIONS: a string replacement would interpret `$&`, `$$` and
+  // friends inside a folder name, and `$` is a legal character in one.
   return text
-    .replaceAll('{{knowledgeBaseDir}}', layout.knowledgeBaseDir)
-    .replaceAll('{{skillsDir}}', layout.skillsDir)
-    .replaceAll('{{pluginsDir}}', layout.pluginsDir);
+    .replaceAll('{{knowledgeBaseDir}}', () => layout.knowledgeBaseDir)
+    .replaceAll('{{skillsDir}}', () => layout.skillsDir)
+    .replaceAll('{{pluginsDir}}', () => layout.pluginsDir);
 }
 
 /**

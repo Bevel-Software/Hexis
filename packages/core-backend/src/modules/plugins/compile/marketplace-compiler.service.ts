@@ -55,17 +55,22 @@ export class MarketplaceCompilerService {
     const { kbRoot } = await this.checkout();
     const { stdout } = await execFileAsync('git', ['-C', kbRoot, 'rev-parse', 'HEAD']);
     const sha = stdout.trim();
-    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`could not read the default branch's commit (${sha || 'empty'})`);
+    // SHA-1 or SHA-256 object format: any hex object id is a commit.
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`could not read the default branch's commit (${sha || 'empty'})`);
     return sha;
   }
 
-  async compileFor(audience: CompileAudience): Promise<VirtualTree & { sourceCommit: string }> {
+  async compileFor(
+    audience: CompileAudience,
+    /** The commit to stamp the tree with, when the caller already read it (the freshness check does). */
+    knownCommit?: string,
+  ): Promise<VirtualTree & { sourceCommit: string }> {
     const { wsId, kbRoot } = await this.checkout();
     // Strictness about the commit belongs to the FRESHNESS check (the repo
     // service calls `sourceCommit()` itself and refuses to serve without
     // one). A compile of a checkout git cannot describe still yields a
     // correct tree; only its README and bundle version lose the sha.
-    const sourceCommit = await this.sourceCommit().catch(() => 'unknown');
+    const sourceCommit = knownCommit ?? (await this.sourceCommit().catch(() => 'unknown'));
     const skills = await this.skillService.listSkills(undefined);
     const membership = await this.links.membership();
     const { plugins } = await this.source.discover(kbRoot);

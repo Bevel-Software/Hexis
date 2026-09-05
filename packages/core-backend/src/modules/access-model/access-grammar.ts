@@ -546,7 +546,9 @@ export function parseAccessEntry(
     const cut = rest.lastIndexOf('/');
     const name = cut > 0 ? rest.slice(0, cut).trim() : '';
     const verb = cut > 0 ? rest.slice(cut + 1).trim().toLowerCase() : '';
-    if (!name || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) {
+    // Exactly one separator: `plugin/GTM/foo/read` is a typo, not a grant to
+    // some plugin whose slug happens to fold `GTM/foo` into `gtm-foo`.
+    if (!name || name.includes('/') || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) {
       return {
         ok: false,
         error:

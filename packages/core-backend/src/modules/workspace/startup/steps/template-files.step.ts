@@ -370,7 +370,7 @@ async function mergeIgnorePatterns(repoDir: string, branch: KbBranch, patterns: 
 /**
  * `text` with `pattern` guaranteed present as a LINE — appended under a
  * comment naming its origin when absent, returned unchanged when present.
- * Line-wise match, same rationale as {@link mergeIgnorePattern}.
+ * Line-wise match, same rationale as {@link mergeIgnorePatterns}.
  *
  * An explicit `!pattern` line also returns the text unchanged: that is the
  * operator choosing to SHOW the file, and ordered matching means a positive

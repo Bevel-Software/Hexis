@@ -64,8 +64,11 @@ async function addManifests(branch: KbBranch): Promise<void> {
     let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return 0;
+    } catch (err) {
+      // Absence is the plugins root not existing yet; anything else must stop
+      // the boot rather than quietly leave legacy plugins without manifests.
+      if (isAbsence(err)) return 0;
+      throw err;
     }
     let beneath = 0;
     for (const entry of entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'))) {
@@ -100,8 +103,9 @@ async function hasSkillBeneath(dir: string): Promise<boolean> {
   let entries: import('node:fs').Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return false;
+  } catch (err) {
+    if (isAbsence(err)) return false;
+    throw err;
   }
   if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) return true;
   for (const entry of entries) {
@@ -113,5 +117,16 @@ async function hasSkillBeneath(dir: string): Promise<boolean> {
 }
 
 async function isFile(abs: string): Promise<boolean> {
-  return fs.stat(abs).then((s) => s.isFile(), () => false);
+  return fs.stat(abs).then(
+    (s) => s.isFile(),
+    (err: unknown) => {
+      if (isAbsence(err)) return false;
+      throw err; // a probe that fails for another reason is not "no manifest"
+    },
+  );
+}
+
+function isAbsence(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }

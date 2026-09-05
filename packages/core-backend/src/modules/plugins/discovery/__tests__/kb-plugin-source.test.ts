@@ -100,6 +100,27 @@ describe('KbPluginSource — bundles', () => {
     expect(plugins.find((p) => p.name === 'close')!.mcpServers).toBeNull();
   });
 
+  it('skips a registry server that could not work, and the second of two declarations with one id', async () => {
+    await write(
+      'configs/mcp/registry.json',
+      JSON.stringify({
+        servers: [
+          { id: 'jira', config: { command: 'npx', args: ['-y', 'jira-mcp'] } },
+          { id: 'jira', config: { command: 'something-else' } },
+          { id: 'no-url', config: { type: 'http' } },
+          { id: 'odd', config: { type: 'grpc', url: 'https://x' } },
+        ],
+        profiles: [{ id: 'global', servers: ['jira', 'no-url', 'odd'] }],
+      }),
+    );
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    const example = plugins.find((p) => p.name === 'example-plugin')!;
+    expect(example.mcpServers).toEqual({ jira: { type: 'stdio', command: 'npx', args: ['-y', 'jira-mcp'] } });
+    expect(warnings.some((w) => w.includes('"jira" is declared twice'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"no-url" has transport "http" but no url'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"odd" has an unknown transport'))).toBe(true);
+  });
+
   it('cuts an extends cycle instead of hanging, and keeps what it collected', async () => {
     await write('plugins/loop/plugin.bundle.json', JSON.stringify({ name: 'loop', mcpProfile: 'loop-a' }));
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
