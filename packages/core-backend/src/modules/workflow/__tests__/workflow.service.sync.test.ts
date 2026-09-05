@@ -20,13 +20,15 @@ import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
  */
 function build(opts: {
   heads: string[];
-  pull?: () => Promise<void>;
+  pull?: () => Promise<{ treeChanged: boolean } | void>;
   changedPaths?: string[];
+  /** What the pull says about the tree (default: it changed). */
+  treeChanged?: boolean;
 }) {
   const heads = [...opts.heads];
   const git = {
     headSha: vi.fn(async () => heads.shift() ?? 'zzz'),
-    pull: vi.fn(opts.pull ?? (async () => {})),
+    pull: vi.fn(opts.pull ?? (async () => ({ treeChanged: opts.treeChanged ?? true }))),
     changedPathsBetween: vi.fn(async () => opts.changedPaths ?? []),
   } as unknown as GitService;
   const prs = { invalidateListCache: vi.fn() } as unknown as PullRequestService;
@@ -77,7 +79,7 @@ describe('WorkflowService.syncWorkspaceFromRemote', () => {
   });
 
   it('HEAD unchanged: up-to-date, nothing announced, nothing invalidated', async () => {
-    const { svc, prs, emit } = build({ heads: ['aaa', 'aaa'] });
+    const { svc, prs, emit } = build({ heads: ['aaa', 'aaa'], treeChanged: false });
     expect(await svc.syncWorkspaceFromRemote('main')).toEqual({
       branch: 'main',
       outcome: 'up-to-date',
@@ -172,6 +174,7 @@ describe('WorkflowService.syncWorkspaceFromRemote', () => {
       heads: ['aaa', 'aaa', 'aaa'],
       pull: async () => {
         if (fail) throw new Error('could not read from remote');
+        return { treeChanged: false };
       },
     });
     await svc.syncWorkspaceFromRemote('main');
@@ -221,7 +224,7 @@ describe('WorkflowService.syncWorkspaceFromRemote — every failure is an outcom
         if (reads++ === 0) return 'aaa';
         throw new Error('EIO');
       }),
-      pull: vi.fn(async () => {}),
+      pull: vi.fn(async () => ({ treeChanged: true })),
       changedPathsBetween: vi.fn(),
     } as unknown as GitService;
     const { svc, emit } = buildWithGit(git);
@@ -242,5 +245,19 @@ describe('WorkflowService.syncWorkspaceFromRemote — every failure is an outcom
     const message = (out as { error: string }).error;
     expect(message).toContain('and 9 more files');
     expect(emit.mock.calls[0][0]).toMatchObject({ reason: message, conflictedPaths: paths });
+  });
+});
+
+describe('WorkflowService.syncWorkspaceFromRemote — content, not commits', () => {
+  it('HEAD moved across content-identical commits: updated, but nothing announced', async () => {
+    const { svc, prs, emit } = build({ heads: ['aaa', 'bbb'], treeChanged: false });
+    expect(await svc.syncWorkspaceFromRemote('main')).toEqual({
+      branch: 'main',
+      outcome: 'updated',
+      from: 'aaa',
+      to: 'bbb',
+    });
+    expect(emit).not.toHaveBeenCalled();
+    expect(prs.invalidateListCache).not.toHaveBeenCalled();
   });
 });

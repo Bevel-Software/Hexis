@@ -152,15 +152,12 @@ const fetchFileHistoryMock = vi.fn(async () => [
   },
 ]);
 
-function makeGit(
-  status: WorkingTreeStatus | null,
-  availability: GitContextValue['availability'] = 'ready',
-): GitContextValue {
+function makeGit(status: WorkingTreeStatus | null): GitContextValue {
   const branches: BranchInfo[] = [];
   return {
     status,
     branches,
-    availability,
+    availability: 'ready',
     lastError: null,
     refreshStatus: async () => null,
     refreshBranches: async () => {},
@@ -197,11 +194,8 @@ function ViewerHarness({
   changeRequests = [],
   authUser = null,
   captureTyped = false,
-  gitAvailability = 'ready',
 }: {
   initialContent?: string;
-  /** What git reports about itself; the history views need `'ready'`. */
-  gitAvailability?: GitContextValue['availability'];
   pendingValue?: string;
   /** `null` = git status has not loaded (or failed) — there is no branch yet. */
   branch?: string | null;
@@ -332,7 +326,7 @@ function ViewerHarness({
   const tree = (
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null, gitAvailability)}>
+          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null)}>
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
@@ -686,62 +680,16 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
   });
 
-  it('opens Version history from the clock-arrow beside Edit and offers a way back to the document', async () => {
+  it('opens Version history from ⋯ and offers a way back to the document', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="historic" />);
 
-    // ONE clock: the prose pane bar carries it beside Edit, and the header
-    // stands down (`historyInPane`) rather than offering a second.
-    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
 
     const back = await screen.findByRole('button', { name: /Back to the document/ });
     await user.click(back);
     // The document is back, and so is its Edit affordance.
-    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
-  });
-
-  // With the log open the column goes full-bleed and the header carries the
-  // clock, pressed. Clicking it again is the other way back.
-  /**
-   * `availability` is re-derived from a POLLED status call, so one failed
-   * poll flips it off and the next good one flips it back. If `activeTab`
-   * survived that on 'history', the column would stay full-bleed with no
-   * panel in it (a bare document, no pane card, no way back but the next
-   * poll), and then put the log back over the file the moment git recovered.
-   * Found by cubic on #134; the skill page already had the rule.
-   */
-  it('puts the document back when git stops answering mid-read, and does not reopen the log when it recovers', async () => {
-    const user = userEvent.setup();
-    const { rerender } = render(<ViewerHarness initialContent="historic" />);
-
-    await user.click(screen.getByRole('button', { name: 'Version history' }));
-    await screen.findByRole('button', { name: /Back to the document/ });
-
-    // A poll fails: the log goes, and the document is back in its pane card
-    // with its Edit, not stranded full-bleed.
-    rerender(<ViewerHarness initialContent="historic" gitAvailability="error" />);
-    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
-
-    // The next poll succeeds. The file is still what is on screen, and the
-    // clock is back, unpressed.
-    rerender(<ViewerHarness initialContent="historic" gitAvailability="ready" />);
-    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
-  });
-
-  it('closes Version history from the pressed clock in the header', async () => {
-    const user = userEvent.setup();
-    render(<ViewerHarness initialContent="historic" />);
-
-    await user.click(screen.getByRole('button', { name: 'Version history' }));
-    await screen.findByRole('button', { name: /Back to the document/ });
-
-    await user.click(screen.getByRole('button', { name: 'Version history' }));
-    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
   });
 

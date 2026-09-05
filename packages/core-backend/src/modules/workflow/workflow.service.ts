@@ -473,9 +473,41 @@ export class WorkflowService implements IWorkflowService {
     return this.git.fetch(workspaceId);
   }
 
+  /**
+   * `git pull` on a workspace, plus the one announcement a pull owes the rest
+   * of the process.
+   *
+   * A pull rewrites a working tree without going through the write routes or
+   * the commit pipeline, so it emits neither of the signals those produce —
+   * and the catalogs that scan the DEFAULT branch's tree (skills, tool
+   * manuals, the plugin index) are keyed to exactly that tree. Every path that
+   * pulls the default workspace therefore has to say so, or those catalogs
+   * keep serving the pre-pull scan for the rest of their TTL: a merge landing
+   * an approved skill, the recovery ladder after a non-fast-forward push, and
+   * a user's update-from-remote alike. Routing every pull through here makes
+   * that ONE mechanism — "the default branch's tree changed" — instead of a
+   * separate special case per event. (The remote sync, `syncWorkspaceFromRemote`,
+   * pulls directly: it owes the same announcement to every branch and per
+   * file, and makes it from the same `treeChanged` verdict.)
+   *
+   * Announced only after the pull RESOLVES, and only when it CHANGED the
+   * tree's content: a pull that threw left the tree as it was, and so did an
+   * "already up to date" pull or one that landed only content-identical
+   * commits — dropping every catalog and making every attached browser
+   * refetch its file tree for a change that did not happen buys a re-scan
+   * and nothing else. The pull itself reports the change, since it is the
+   * only code that can observe it under the workspace mutex.
+   */
+  private async pullWorkspace(workspaceId: string): Promise<void> {
+    const { treeChanged } = await this.git.pull(workspaceId);
+    if (treeChanged && branchForWorkspaceId(workspaceId) === DEFAULT_BRANCH) {
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId, branch: DEFAULT_BRANCH });
+    }
+  }
+
   async updateFromRemote(workspaceId: string, user?: AuthUser): Promise<void> {
     try {
-      await this.git.pull(workspaceId);
+      await this.pullWorkspace(workspaceId);
     } catch (err) {
       if (err instanceof PullRebaseConflictError) {
         await this.queuePullConflictRecovery(workspaceId, err, user);
@@ -506,8 +538,13 @@ export class WorkflowService implements IWorkflowService {
       this.noteGitSyncFailed(workspaceId, branch, err);
       return { branch, outcome: 'error', error: message };
     }
+    // Not `pullWorkspace`: that announces the default branch's tree to the
+    // catalogs, which is one of the things a sync owes, but a sync also owes
+    // every open browser on ANY branch its tree and its files, so it does the
+    // whole announcement itself below — from the same `treeChanged` verdict.
+    let treeChanged: boolean;
     try {
-      await this.git.pull(workspaceId);
+      ({ treeChanged } = await this.git.pull(workspaceId));
     } catch (err) {
       if (err instanceof PullRebaseConflictError) {
         // Same path as `updateFromRemote`: the rebase was aborted inside
@@ -536,10 +573,16 @@ export class WorkflowService implements IWorkflowService {
     try {
       after = await this.git.headSha(workspaceId);
       if (after === before) return { branch, outcome: 'up-to-date', to: after };
+      // HEAD moved, so the branch reports `updated` — but the announcement
+      // keys on the pull's own verdict about CONTENT: commits that left the
+      // tree identical (an empty commit, a rebase replayed to the same
+      // result) are nothing for a browser to refetch or a catalog to drop.
+      if (!treeChanged) return { branch, outcome: 'updated', from: before, to: after };
       // Announce the new tree. The tree event alone already refreshes every
       // open file explorer and, on the default branch, drops the skill / tool /
-      // plugin catalogues (`create-core-services.ts`); the CR list caches the
-      // touched paths it resolved against the old tree, so drop that too.
+      // plugin catalogues (`catalog-cache-invalidation.ts`); the CR list
+      // caches the touched paths it resolved against the old tree, so drop
+      // that too.
       this.prs.invalidateListCache();
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
     } catch (err) {
@@ -899,7 +942,7 @@ export class WorkflowService implements IWorkflowService {
         let recoveryError: unknown = null;
         if (looksLikeNonFastForward) {
           try {
-            await this.git.pull(workspaceId);
+            await this.pullWorkspace(workspaceId);
             await this.git.push(workspaceId, user);
             recovered = true;
             this.noteGitSyncOk(workspaceId, branch);
@@ -1233,7 +1276,7 @@ export class WorkflowService implements IWorkflowService {
       let recoveryError: unknown = null;
       if (looksLikeNonFastForward) {
         try {
-          await this.git.pull(workspaceId);
+          await this.pullWorkspace(workspaceId);
           await this.git.push(workspaceId, user, opts);
           recovered = true;
           this.noteGitSyncOk(workspaceId, branch);
@@ -1841,7 +1884,7 @@ export class WorkflowService implements IWorkflowService {
     // refs, but the restore commits from the working tree — a stale tree
     // would push non-fast-forward and fail loudly anyway; this just makes
     // that rare.
-    await this.git.pull(ws.id).catch(() => undefined);
+    await this.pullWorkspace(ws.id).catch(() => undefined);
 
     // The verb acts on the request as it is NOW — never a cached file list.
     const paths = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2352,7 +2395,7 @@ export class WorkflowService implements IWorkflowService {
     try {
       const targetWorkspace = await this.workspaceService.getOrCreateForBranch(baseBranch);
       targetWorkspaceId = targetWorkspace.id;
-      await this.git.pull(targetWorkspace.id);
+      await this.pullWorkspace(targetWorkspace.id);
     } catch (err) {
       // Still best-effort for the merge response (the merge already landed
       // on origin) — but a rebase CONFLICT here means the target workspace

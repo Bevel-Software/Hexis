@@ -1584,10 +1584,18 @@ export class GitService implements IGitService {
     });
   }
 
-  async pull(workspaceId: string): Promise<void> {
+  async pull(workspaceId: string): Promise<{ treeChanged: boolean }> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
       const branch = await this.currentBranch(cwd);
+      // For `treeChanged` (see IGitService.pull): TREE ids, not commit ids —
+      // a pull that lands only content-identical commits (an empty commit)
+      // must not read as a content change. Tolerant of an unborn HEAD (a
+      // clone of an empty upstream): "" before + a tree after correctly
+      // reads as changed, "" both sides as not.
+      const treeBefore = await this.git(cwd, ['rev-parse', 'HEAD^{tree}'])
+        .then(({ stdout }) => stdout.trim())
+        .catch(() => '');
       try {
         // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
         // `refreshRemoteBranchRef` for why both halves are load-bearing.
@@ -1648,6 +1656,10 @@ export class GitService implements IGitService {
         throw err;
       }
       this.accessControl?.invalidate(workspaceId);
+      const treeAfter = await this.git(cwd, ['rev-parse', 'HEAD^{tree}'])
+        .then(({ stdout }) => stdout.trim())
+        .catch(() => '');
+      return { treeChanged: treeAfter !== treeBefore };
     });
   }
 

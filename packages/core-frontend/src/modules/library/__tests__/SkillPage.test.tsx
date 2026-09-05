@@ -1171,17 +1171,16 @@ describe('SkillPage: deciding on a change', () => {
    * A skill is a file in the repository, and this page is the ONLY surface it
    * has: the shell routes every default-branch `Plugins/` URL here
    * (`isLibraryLocation`) and the Knowledge tree does not list `Plugins/` at
-   * all, so a Version history button missing here means the git log for every
-   * skill in the deployment is unreachable — the audit trail the product is
-   * sold on, available for Knowledge pages and for nothing else. The button
-   * is the clock-arrow beside Edit in the file bar, the same placement the
-   * Knowledge pane uses.
+   * all, so a `⋯` missing here means the git log for every skill in the
+   * deployment is unreachable — the audit trail the product is sold on,
+   * available for Knowledge pages and for nothing else.
    */
   describe('version history', () => {
     it('opens the log for the file on screen, at its workspace path', async () => {
       renderPage(false);
 
-      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
 
       // The path the panel asks git about is the workspace-relative one the
       // Knowledge viewer would hand it — kbDirName included. Getting this
@@ -1197,33 +1196,11 @@ describe('SkillPage: deciding on a change', () => {
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
     });
 
-    /**
-     * The file bar leaves with the file, and the clock with it; the history
-     * view draws the same clock pressed beside its Back link, so the control
-     * that opened the view is still on screen and is the other way back.
-     */
-    it('keeps a pressed clock on screen while the log is open, and it closes the log', async () => {
-      renderPage(false);
-
-      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
-      await screen.findByText(/^Timeline:/);
-
-      const pressed = screen.getByRole('button', { name: 'Version history' });
-      expect(pressed).toHaveAttribute('aria-pressed', 'true');
-
-      fireEvent.click(pressed);
-      expect(screen.queryByText(/^Timeline:/)).toBeNull();
-      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Version history' })).not.toHaveAttribute(
-        'aria-pressed',
-        'true',
-      );
-    });
-
     it('does not follow you to another file of the skill', async () => {
       renderPage(false);
 
-      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
       await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md');
 
       // A tab switch is a switch of file, and history is a lens on ONE file.
@@ -1257,11 +1234,11 @@ describe('SkillPage: deciding on a change', () => {
 
       fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
-      expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
 
       // It comes back the moment the draft is gone.
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-      expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: 'More actions' })).toBeInTheDocument();
     });
 
     /**
@@ -1273,7 +1250,8 @@ describe('SkillPage: deciding on a change', () => {
     it('closes for good when git stops answering mid-read', async () => {
       const bus = makeFakeBus();
       const { rerender } = renderPage(false, [], [], bus);
-      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
       await screen.findByText(/^Timeline:/);
 
       // A poll fails: the log goes away, and so does its trigger.
@@ -1284,7 +1262,57 @@ describe('SkillPage: deciding on a change', () => {
       rerender(harness(bus, git));
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
       expect(screen.queryByText(/^Timeline:/)).toBeNull();
-      expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'More actions' })).toBeInTheDocument();
+    });
+
+    /**
+     * The MENU flag needs the same treatment as the log's, and it is a
+     * separate flag: the trigger and its panel both live behind
+     * `historyAvailable`, so an open menu unmounts with them and leaves its
+     * flag set behind an element nobody can see. Found by cubic on #103.
+     */
+    it('does not spring the menu back open when git recovers', async () => {
+      const bus = makeFakeBus();
+      const { rerender } = renderPage(false, [], [], bus);
+      const trigger = await screen.findByRole('button', { name: 'More actions' });
+      fireEvent.click(trigger);
+      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
+
+      // A poll fails while the menu is OPEN — trigger and panel go together.
+      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+
+      // The next poll succeeds. The trigger is back, and it is CLOSED.
+      rerender(harness(bus, git));
+      const back = await screen.findByRole('button', { name: 'More actions' });
+      expect(back).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
+    });
+
+    /**
+     * `editing` is the same state by a second door, and it is reachable
+     * without a mouse: `useDismissableMenu` dismisses on outside POINTERDOWN,
+     * so tabbing from the open menu to Edit and pressing Enter never dismisses
+     * it. Cancel then used to hand the menu back open over the file.
+     */
+    it('does not spring the menu back open when the editor closes', async () => {
+      accessMock.result = {
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      };
+      renderPage(true);
+      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
+
+      // Reached by keyboard, so no outside pointerdown ever dismissed the menu.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      const back = await screen.findByRole('button', { name: 'More actions' });
+      expect(back).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
     });
 
     it('has no trigger at all when git cannot answer', async () => {
@@ -1293,10 +1321,10 @@ describe('SkillPage: deciding on a change', () => {
         availability: 'loading',
       } as GitContextValue);
 
-      // No log means no button — a clock that opens onto nothing is worse
-      // than none.
+      // Version history is the whole menu, so no log means no `⋯` — an
+      // overflow opening onto an empty panel is worse than no overflow.
       expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
     });
   });
 });

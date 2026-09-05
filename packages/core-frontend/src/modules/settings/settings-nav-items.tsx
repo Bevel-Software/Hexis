@@ -76,7 +76,7 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     section: 'admin',
     order: 10,
     icon: <Users size={15} />,
-    label: 'App roles',
+    label: 'Roles & Members',
     path: '/roles-and-members',
   },
   {
@@ -84,7 +84,7 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     section: 'admin',
     order: 15,
     icon: <UsersRound size={15} />,
-    label: 'Groups & Members',
+    label: 'Groups',
     path: '/directory-groups',
   },
   {

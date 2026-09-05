@@ -43,7 +43,7 @@ interface SelfRemoveTarget {
 }
 
 /**
- * App roles (formerly Roles & Members), routed standalone at `/roles-and-members` (below the
+ * Roles & Members, routed standalone at `/roles-and-members` (below the
  * persistent toolbar). Admin-gated: non-admins get a clear "Admins only"
  * state instead of the roster (the backend enforces the same gate on every
  * roles endpoint — this is presentation, not the security boundary).
@@ -115,7 +115,7 @@ export function AdminRolesPage() {
 
   if (!isAdmin) {
     return (
-      <PageShell title="App roles">
+      <PageShell title="Roles & Members">
         <div className="text-sm text-ink-muted">
           Admins only. Ask an admin if you need a membership changed.
         </div>
@@ -124,7 +124,7 @@ export function AdminRolesPage() {
   }
 
   return (
-    <PageShell title="App roles">
+    <PageShell title="Roles & Members">
       <p className="mb-3 text-xs text-ink-muted leading-snug">
         Roles are defined by the app — what each one unlocks is fixed. Manage
         who holds them: add people by email, or assign a group.
@@ -603,7 +603,7 @@ function RoleCard({
         >
           <p className="text-sm text-ink">
             Grants keep working — the name stays; it just becomes a group. Manage its
-            members on the Groups & Members page afterwards.
+            members on the Groups page afterwards.
           </p>
         </ConfirmDialog>
       )}
