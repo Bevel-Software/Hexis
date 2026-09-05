@@ -30,8 +30,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@utcp/code-mode": "^1.2.13",
-    "@utcp/http": "^1.1.11",
-    "@utcp/mcp": "^1.1.6",
+    "@utcp/http": "^1.1.12",
+    "@utcp/mcp": "^1.1.7",
     "@utcp/sdk": "^1.1.1"
   },
   "devDependencies": {
