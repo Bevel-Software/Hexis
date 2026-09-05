@@ -35,7 +35,13 @@ export class MarketplaceCompilerService {
     private readonly skillService: ISkillService,
     private readonly links: PluginLinkIndex,
     private readonly kbDirName: string,
-    private readonly marketplace: { name: string; owner: string; description?: string },
+    private readonly marketplace: {
+      name: string;
+      owner: string;
+      description?: string;
+      /** The hosted MCP endpoint to ship in the skills plugin (URL only). */
+      knowledgeBaseMcp?: { name: string; url: string };
+    },
     private readonly source: PluginSource = new NativePluginSource(),
   ) {}
 

@@ -5,7 +5,6 @@ import {
   PLUGIN_MCP_FILE,
   PLUGIN_MANIFEST_SCHEMA,
   PLUGIN_MCP_SCHEMA,
-  SKILLS_DIR,
   pluginManifestName,
   pluginOfPath,
 } from '@bevel-software/platform-shared';
@@ -35,8 +34,11 @@ import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
  *   plugins/<slug>/…                     one per plugin the caller may read
  *                                        anything of: inline + linked skills,
  *                                        the portable half of mcp.json
- *   plugins/skills-<scope>/…             one per top-level Skills/ folder, so
- *                                        standalone skills are installable
+ *   plugins/skills/…                     every readable skill no plugin above
+ *                                        ships — how a standalone skill, or one
+ *                                        only in plugins the caller cannot see,
+ *                                        is still one install away — plus the
+ *                                        knowledge base's own MCP endpoint
  *   plugins/hexis-all/…                  a bundle whose only content is a
  *                                        dependency on every plugin above —
  *                                        Claude Code installs them all from
@@ -70,6 +72,16 @@ export interface MarketplaceOptions {
   sourceCommit: string;
   /** The name of the one-install bundle plugin. */
   bundleName?: string;
+  /** The name of the leftovers plugin holding skills no other plugin ships. */
+  skillsPluginName?: string;
+  /**
+   * This deployment's hosted MCP endpoint — the knowledge base as a tool.
+   * Shipped in the leftovers plugin's `mcp.json` so an agent that installs
+   * from the marketplace can read the knowledge its skills refer to. URL only,
+   * never a credential: the endpoint challenges with OAuth metadata, and the
+   * client signs the person in on first use.
+   */
+  knowledgeBaseMcp?: { name: string; url: string };
 }
 
 export interface CompileInput {
@@ -96,6 +108,7 @@ export interface VirtualTree {
 }
 
 const BUNDLE_NAME = 'hexis-all';
+const SKILLS_PLUGIN_NAME = 'skills';
 const NEVER_SHIPPED = new Set(['access.md', '.bevelignore']);
 
 export async function compileMarketplace(input: CompileInput): Promise<VirtualTree> {
@@ -120,8 +133,10 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     description?: string;
     version?: string;
     skills: SkillSummary[];
-    /** Source folder for mcp.json (real plugins only). */
+    /** Source folder (real plugins only). */
     folder?: string;
+    /** The portable `mcpServers` map to ship, when the plugin has servers. */
+    mcp?: Record<string, Record<string, unknown>>;
   }
   const out: PluginOut[] = [];
 
@@ -152,38 +167,44 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       version: typeof manifest?.version === 'string' ? manifest.version : undefined,
       skills: dedup,
       folder: plugin.folder,
+      mcp: mcp ?? undefined,
     });
-    if (mcp !== null) {
-      const text = `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: mcp }, null, 2)}\n`;
-      put(`plugins/${slug}/${PLUGIN_MCP_FILE}`, text);
-      put(`plugins/${slug}/.mcp.json`, `${JSON.stringify({ mcpServers: mcp }, null, 2)}\n`);
-    }
   }
 
-  // 2. Synthetic scope plugins: one per top-level folder under Skills/, holding
-  //    every readable skill beneath it — how a skill in no plugin gets installed.
-  const byScope = new Map<string, SkillSummary[]>();
-  for (const s of readableSkills.values()) {
-    const segments = s.path.split('/');
-    if (segments[0] !== SKILLS_DIR) continue;
-    // `Skills/<skill>` (no scope folder) lands in the root scope.
-    const scope = segments.length > 2 ? segments[1] : '';
-    byScope.set(scope, [...(byScope.get(scope) ?? []), s]);
-  }
-  for (const [scope, list] of [...byScope.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const slug = scope ? `skills-${pluginManifestName(scope)}` : 'skills';
+  // 2. The leftovers plugin: every readable skill that no plugin above ships.
+  //    Agents install plugins, not loose skills, so a skill in no plugin — or
+  //    only in plugins this caller cannot see anything of — still has to be one
+  //    install away. ONE plugin per caller, not one per scope: there is nothing
+  //    to choose between (the caller may read all of it) and the bundle installs
+  //    it regardless, so scope plugins would only add names and duplicate what
+  //    the real plugins already carry.
+  //    It also carries the knowledge base's own MCP endpoint (URL only — the
+  //    client's OAuth flow signs the person in), so an agent installing from
+  //    the marketplace can read the knowledge its skills point at. With the
+  //    endpoint configured the plugin exists even for a caller with no
+  //    leftover skill: the knowledge is the point.
+  const covered = new Set(out.flatMap((p) => p.skills.map((s) => s.path)));
+  const leftovers = [...readableSkills.values()].filter((s) => !covered.has(s.path));
+  const kbMcp = options.knowledgeBaseMcp
+    ? { [options.knowledgeBaseMcp.name]: { type: 'streamable-http', url: options.knowledgeBaseMcp.url } }
+    : undefined;
+  if (leftovers.length > 0 || kbMcp) {
+    const slug = options.skillsPluginName ?? SKILLS_PLUGIN_NAME;
     if (out.some((p) => p.slug === slug)) {
-      warnings.push(`scope plugin "${slug}" collides with a plugin's manifest name — scope skipped`);
-      continue;
+      warnings.push(`the skills plugin "${slug}" collides with a plugin's manifest name — standalone skills not shipped`);
+    } else {
+      out.push({
+        slug,
+        displayName: 'Skills',
+        description: kbMcp
+          ? 'Every skill you may read that no other plugin here ships, and the knowledge base as an MCP server'
+          : 'Every skill you may read that no other plugin here ships',
+        skills: dedupeByName(leftovers, (s, other) =>
+          warnings.push(`${slug}: "${s.name}" at ${s.path} shares its name with ${other.path} — left out`),
+        ),
+        mcp: kbMcp,
+      });
     }
-    out.push({
-      slug,
-      displayName: scope ? `Skills · ${scope}` : 'Skills',
-      description: scope ? `Every shared skill under ${SKILLS_DIR}/${scope}` : `Shared skills at the ${SKILLS_DIR} root`,
-      skills: dedupeByName(list, (s, other) =>
-        warnings.push(`${slug}: "${s.name}" at ${s.path} shares its name with ${other.path} — left out`),
-      ),
-    });
   }
 
   // 3. Materialise every plugin: the three manifests + copied skill folders.
@@ -198,6 +219,10 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     vendor.description = p.description ?? p.displayName;
     put(`${base}/.claude-plugin/plugin.json`, `${JSON.stringify(vendor, null, 2)}\n`);
     put(`${base}/.codex-plugin/plugin.json`, `${JSON.stringify(vendor, null, 2)}\n`);
+    if (p.mcp) {
+      put(`${base}/${PLUGIN_MCP_FILE}`, `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: p.mcp }, null, 2)}\n`);
+      put(`${base}/.mcp.json`, `${JSON.stringify({ mcpServers: p.mcp }, null, 2)}\n`);
+    }
     for (const s of p.skills) {
       await copySkill(kbRoot, s, `${base}/skills/${s.name}`, put);
     }

@@ -23,6 +23,14 @@ import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.ste
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
 
+/** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
+function mcpEndpointUrl(publicBackendUrl: string): string {
+  const url = new URL('/api/mcp', publicBackendUrl);
+  url.username = '';
+  url.password = '';
+  return url.toString();
+}
+
 /** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
 function parseDomainList(raw: string): string[] {
   return raw
@@ -515,7 +523,16 @@ export async function createCoreServices(
     skillService,
     pluginLinkIndex,
     kbDirName,
-    { name: 'hexis', owner: 'Hexis', description: 'Skills and plugins from this knowledge base' },
+    {
+      name: 'hexis',
+      owner: 'Hexis',
+      description: 'Skills and plugins from this knowledge base',
+      // The knowledge base as a tool, shipped in the skills plugin so an
+      // agent installing from the marketplace can read what its skills refer
+      // to. The same address `/api/config` and the OAuth metadata publish,
+      // userinfo stripped; the client's OAuth flow supplies the identity.
+      knowledgeBaseMcp: { name: 'hexis', url: mcpEndpointUrl(config.publicBackendUrl) },
+    },
     pluginSource,
   );
   // Sibling of the workspaces root, like the spill store: one bare repo, one

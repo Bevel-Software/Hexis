@@ -141,7 +141,9 @@ describe('bundle dialect, end to end', () => {
     expect(paths).toContain('plugins/example-plugin/skills/deploy/SKILL.md');
     expect(paths).toContain('plugins/example-plugin/skills/one-skill/SKILL.md');
     expect(paths).toContain('plugins/finance-kit/skills/close-books/SKILL.md');
-    expect(paths).toContain('plugins/skills-departments/skills/team-only/SKILL.md');
+    // The standalone team skill rides in the leftovers plugin; linked ones do not repeat there.
+    expect(paths).toContain('plugins/skills/skills/team-only/SKILL.md');
+    expect(paths).not.toContain('plugins/skills/skills/deploy/SKILL.md');
     const manifest = JSON.parse(tree.files.get('plugins/example-plugin/plugin.json')!.toString());
     expect(manifest).toMatchObject({ name: 'example-plugin', version: '1.3.1', description: 'Example' });
     const mcp = JSON.parse(tree.files.get('plugins/example-plugin/.mcp.json')!.toString());
