@@ -465,7 +465,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
               </span>
             </div>
             {syncResult && (
-              <p role="status" className={`text-detail ${syncResult.ok ? 'text-ok' : 'text-danger'}`}>
+              <p
+                role="status"
+                // One line per failed branch: the server's sentences are
+                // joined with newlines and rendered as such.
+                className={`whitespace-pre-line text-detail ${syncResult.ok ? 'text-ok' : 'text-danger'}`}
+              >
                 {syncResult.error
                   ? syncResult.error
                   : syncResult.ok
@@ -473,7 +478,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                     : (syncResult.results
                         .map((r) => r.error)
                         .filter((e): e is string => !!e)
-                        .join(' ') ||
+                        .join('\n') ||
                       `Not fully synced: ${describeOutcomes(syncResult.results)}.`)}
               </p>
             )}
@@ -833,6 +838,22 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
             );
           })}
 
+
+          {/* When EVERY knowledge-base setting comes from the environment the
+              section above does not render at all, and the sync panel that
+              normally lives inside it would vanish with it. The panel is
+              about the deployment, not about any one editable field, so it
+              gets its own place here in that case. */}
+          {sync && editable.every((s) => s.section !== 'knowledge-base') && (
+            <Surface as="section" tone="surface" radius="lg" elevation="card" className="p-6">
+              <h2 className="text-title font-semibold text-ink">Repository sync</h2>
+              <p className="mt-1 max-w-[60ch] text-detail text-ink-muted">
+                The knowledge-base connection is set by the environment. The sync hook is still
+                yours to wire up and check on here.
+              </p>
+              {renderSyncPanel()}
+            </Surface>
+          )}
 
           {/* A rejected connection stops here rather than at the far side of
               it. Saving these answers would finish setup — the server checks

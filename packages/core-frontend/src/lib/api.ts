@@ -52,11 +52,26 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+export interface AuthFetchOptions {
+  /**
+   * Statuses this endpoint answers with as an ORDINARY result, which must not
+   * be read as the proxy answering for a dead backend. `POST /api/sync` says
+   * 503 when a branch could not be pulled — the backend is up and telling us
+   * so. Only the listed statuses are exempted; a network failure or another
+   * proxy status still signals.
+   */
+  applicationStatuses?: readonly number[];
+}
+
 /**
  * Fetch wrapper that injects the Authorization header from localStorage.
  * On 401 responses, clears the stored token.
  */
-export async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export async function authFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  opts: AuthFetchOptions = {},
+): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -73,7 +88,10 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
     throw err;
   }
 
-  if (PROXY_DOWN_STATUSES.has(response.status)) {
+  if (
+    PROXY_DOWN_STATUSES.has(response.status) &&
+    !opts.applicationStatuses?.includes(response.status)
+  ) {
     signalUnreachable();
   }
 

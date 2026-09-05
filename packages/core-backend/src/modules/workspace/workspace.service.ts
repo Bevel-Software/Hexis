@@ -252,29 +252,53 @@ export class WorkspaceService implements IWorkspaceService {
    * Every branch with a finished clone on disk, whether or not this process
    * has touched it yet. The remote sync reads this: clones survive a restart,
    * and a hook that fires before anyone opens a branch must still find its
-   * clone. Same disk scan as `findAnyWorkspaceId`; half-built directories
-   * (no `.git`) are skipped, as are names that do not decode to a branch.
+   * clone. Same disk scan as `findAnyWorkspaceId`.
+   *
+   * What is listed: directories holding a `<kbDirName>/.git`, whose name is
+   * the encoding of a branch git would accept, and whose bootstrap is not in
+   * flight right now. The in-flight exclusion matters because `git clone`
+   * creates `.git` long before the working tree is checked out — pulling a
+   * clone mid-bootstrap would run git against a half-written tree — and a
+   * clone that is being created this instant is current by definition. A
+   * clone left behind by a crash mid-checkout is NOT distinguished here: the
+   * rest of this service treats a directory with `.git` as a clone too, and
+   * the pull's own errors are how such a tree surfaces.
+   *
+   * A missing root means no clones (nothing has been bootstrapped yet); any
+   * other failure to read it is propagated, so a sync cannot report success
+   * over a root it could not see.
    */
   async listClonedWorkspaces(): Promise<Array<{ id: string; branch: string }>> {
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
     try {
       entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
-    } catch {
-      return [];
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return [];
+      throw err;
     }
     const cloned: Array<{ id: string; branch: string }> = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      const branch = branchForWorkspaceId(entry.name);
+      // Not one of ours unless the name is the encoding of a branch git
+      // accepts: `branchForWorkspaceId` returns a malformed name unchanged, so
+      // the round-trip catches those, and the validator catches a stray
+      // directory whose name merely round-trips.
+      if (workspaceIdForBranch(branch) !== entry.name) continue;
       try {
-        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
+        assertValidBranchName(branch);
       } catch {
         continue;
       }
-      const branch = branchForWorkspaceId(entry.name);
-      // A directory whose name is not the encoding of its own branch is not
-      // one of ours (or is malformed); `branchForWorkspaceId` returns such a
-      // name unchanged, so the round-trip check catches it.
-      if (workspaceIdForBranch(branch) !== entry.name) continue;
+      if (this.inFlightBootstraps.has(branch)) continue;
+      try {
+        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        throw err;
+      }
       cloned.push({ id: entry.name, branch });
     }
     return cloned;

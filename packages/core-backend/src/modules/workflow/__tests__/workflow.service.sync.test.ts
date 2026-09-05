@@ -229,6 +229,9 @@ describe('WorkflowService.syncWorkspaceFromRemote — every failure is an outcom
     } as unknown as GitService;
     const { svc, emit } = buildWithGit(git);
     await expect(svc.syncWorkspaceFromRemote('main')).resolves.toMatchObject({ outcome: 'error' });
+    // The pull ran; it is the read AFTER it that failed.
+    expect(git.pull).toHaveBeenCalledTimes(1);
+    expect(git.headSha).toHaveBeenCalledTimes(2);
     // Origin was fine, so no banner for a local bookkeeping failure.
     expect(emit).not.toHaveBeenCalled();
   });

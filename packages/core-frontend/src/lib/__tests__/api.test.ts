@@ -93,3 +93,35 @@ describe('authFetch transport-failure signalling', () => {
     expect(watcher.seen()).toBe(1);
   });
 });
+
+describe('authFetch application-level statuses', () => {
+  let watcher: ReturnType<typeof watchUnreachable>;
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    watcher = watchUnreachable();
+  });
+  afterEach(() => {
+    watcher.stop();
+  });
+
+  it('a status the caller declares ordinary does not signal, another proxy status still does', async () => {
+    // `POST /api/sync` answers 503 when a branch could not be pulled — the
+    // backend is up and saying so. A 502 is still the proxy answering for a
+    // dead upstream.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('{}', { status: 503 }));
+    await authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] });
+    expect(watcher.seen()).toBe(0);
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 502 }));
+    await authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] });
+    expect(watcher.seen()).toBe(1);
+  });
+
+  it('a network failure on such a call still signals', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await expect(
+      authFetch('/api/sync', { method: 'POST' }, { applicationStatuses: [503] }),
+    ).rejects.toThrow('Failed to fetch');
+    expect(watcher.seen()).toBe(1);
+  });
+});

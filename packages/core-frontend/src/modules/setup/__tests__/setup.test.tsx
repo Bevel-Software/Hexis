@@ -762,7 +762,8 @@ describe('SetupScreen — remote sync panel', () => {
     render(<SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} />);
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Copy the sync address' })).toBeTruthy();
-    // First run has no repository to sync yet — no button, no history.
+    // The 'setup' variant never offers the button or the history, whatever the
+    // record says: on first run the repository behind them is not connected yet.
     expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull();
   });
 
@@ -834,5 +835,27 @@ describe('SetupScreen — remote sync panel', () => {
     await waitFor(() =>
       expect(screen.getByText(/main is not in sync yet: a\.md changed both/)).toBeTruthy(),
     );
+  });
+});
+
+describe('SetupScreen — sync panel when the whole knowledge base is env-set', () => {
+  it('still renders the address and Sync now, in a section of its own', () => {
+    const KB_FROM_ENV: SettingStatus[] = SETTINGS.map((s) =>
+      s.section === 'knowledge-base' ? { ...s, source: 'env', configured: true } : s,
+    );
+    const syncFromEnv: SettingStatus = {
+      key: 'kbSyncSecret', envVar: 'KB_SYNC_SECRET', section: 'knowledge-base', source: 'env', configured: true, secret: true, restartToApply: false,
+    };
+    render(
+      <SetupScreen
+        settings={[...KB_FROM_ENV, syncFromEnv]}
+        sync={{ url: 'https://hexis.example.test/api/sync', last: null }}
+        onSaved={() => {}}
+        variant="settings"
+      />,
+    );
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Repository sync' })).toBeTruthy();
   });
 });
