@@ -18,7 +18,8 @@
 export interface RegistryServer {
   id: string;
   name?: string;
-  config: Record<string, unknown>;
+  /** The server as one `mcp.json` entry — converted, and therefore usable, at parse time. */
+  entry: Record<string, unknown>;
 }
 
 export interface RegistryProfile {
@@ -54,13 +55,14 @@ export function parseRegistry(text: string): McpRegistry {
       warnings.push(`registry.json: server "${raw.id}" is declared twice — the second declaration is ignored`);
       continue;
     }
-    const config = isRecord(raw.config) ? raw.config : configFromFlat(raw);
-    const problem = config ? unusableConfigReason(config) : 'no usable config';
-    if (!config || problem) {
-      warnings.push(`registry.json: server "${raw.id}" ${problem} — skipped`);
+    // Converting IS the validation: a server the registry keeps is one whose
+    // entry a client can run, and nothing decides the transport twice.
+    const converted = mcpEntryOf(isRecord(raw.config) ? raw.config : raw);
+    if ('reason' in converted) {
+      warnings.push(`registry.json: server "${raw.id}" ${converted.reason} — skipped`);
       continue;
     }
-    servers.set(raw.id, { id: raw.id, name: typeof raw.name === 'string' ? raw.name : undefined, config });
+    servers.set(raw.id, { id: raw.id, name: typeof raw.name === 'string' ? raw.name : undefined, entry: converted.entry });
   }
   for (const raw of asArray(root.profiles)) {
     if (!isRecord(raw) || typeof raw.id !== 'string' || !raw.id) {
@@ -81,11 +83,10 @@ export function parseRegistry(text: string): McpRegistry {
 }
 
 /**
- * The `mcpServers` map a profile resolves to, in `mcp.json` terms: a stdio
- * server keeps `command`/`args`/`env`/`cwd`; an http server becomes
- * `type: streamable-http` + `url` (+ literal `headers`). Keyed by server id —
- * the namespace vault secrets bind to, so the same registry server in three
- * plugins shares one credential, which is what a registry means.
+ * The `mcpServers` map a profile resolves to, in `mcp.json` terms. Keyed by
+ * server id — the namespace vault secrets bind to, so the same registry
+ * server in three plugins shares one credential, which is what a registry
+ * means.
  */
 export function expandProfile(
   registry: McpRegistry,
@@ -118,56 +119,54 @@ export function expandProfile(
       warnings.push(`registry.json: profile "${profileId}" selects unknown server "${id}"`);
       continue;
     }
-    mcpServers[id] = toMcpEntry(server.config);
+    mcpServers[id] = server.entry;
   }
   return { mcpServers, warnings };
 }
 
-/** A registry config → one `mcp.json` server entry. */
-function toMcpEntry(config: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  const type = typeof config.type === 'string' ? config.type.toLowerCase() : undefined;
-  if (typeof config.url === 'string' && (type === 'http' || type === 'streamable-http' || type === 'sse' || type === undefined)) {
-    out.type = type === 'sse' ? 'sse' : 'streamable-http';
-    out.url = config.url;
-    if (isRecord(config.headers)) out.headers = config.headers;
-    return out;
-  }
-  out.type = 'stdio';
-  if (typeof config.command === 'string') out.command = config.command;
-  if (Array.isArray(config.args)) out.args = config.args.map(String);
-  if (isRecord(config.env)) out.env = config.env;
-  if (typeof config.cwd === 'string') out.cwd = config.cwd;
-  return out;
-}
-
 /**
- * Why a config cannot become a working `mcp.json` entry, or null when it can:
- * an http-style transport needs a non-empty `url`, anything else needs a
- * non-empty `command`. Compiled as-is, such an entry would fail in every
- * client that installs it.
+ * A registry config → one `mcp.json` server entry, or why there is none.
+ *
+ * The transport is decided ONCE, here: a declared `type` names it, and an
+ * undeclared one is read off the fields — a `url` means http, else a
+ * `command` means stdio. Blank strings are absent, whatever the transport.
+ * An http-style server (`http`, `streamable-http`, `sse`) keeps `url` (+
+ * literal `headers`); a stdio server keeps `command`/`args`/`env`/`cwd`.
  */
-function unusableConfigReason(config: Record<string, unknown>): string | null {
-  const type = typeof config.type === 'string' ? config.type.toLowerCase() : undefined;
-  const url = typeof config.url === 'string' ? config.url.trim() : '';
-  const command = typeof config.command === 'string' ? config.command.trim() : '';
-  // A `url` key that is present but blank would still be preferred by the
-  // converter over a command; refuse it rather than emit an http entry to nowhere.
-  if (typeof config.url === 'string' && !url) return 'has an empty url';
-  if (type === 'http' || type === 'streamable-http' || type === 'sse') {
-    return url ? null : `has transport "${type}" but no url`;
+function mcpEntryOf(config: Record<string, unknown>): { entry: Record<string, unknown> } | { reason: string } {
+  const declared = typeof config.type === 'string' ? config.type.trim().toLowerCase() : undefined;
+  const url = nonBlank(config.url);
+  const command = nonBlank(config.command);
+
+  let transport: 'streamable-http' | 'sse' | 'stdio';
+  if (declared === undefined) {
+    if (url) transport = 'streamable-http';
+    else if (command) transport = 'stdio';
+    else return { reason: 'has neither a url nor a command' };
+  } else if (declared === 'http' || declared === 'streamable-http') {
+    transport = 'streamable-http';
+  } else if (declared === 'sse' || declared === 'stdio') {
+    transport = declared;
+  } else {
+    return { reason: `has an unknown transport "${declared}"` };
   }
-  if (type === 'stdio') return command ? null : 'has transport "stdio" but no command';
-  if (type !== undefined) return `has an unknown transport "${type}"`;
-  return url || command ? null : 'has neither a url nor a command';
+
+  if (transport === 'stdio') {
+    if (!command) return { reason: 'has transport "stdio" but no command' };
+    const entry: Record<string, unknown> = { type: 'stdio', command };
+    if (Array.isArray(config.args)) entry.args = config.args.map(String);
+    if (isRecord(config.env)) entry.env = config.env;
+    if (typeof config.cwd === 'string') entry.cwd = config.cwd;
+    return { entry };
+  }
+  if (!url) return { reason: `has transport "${declared}" but no url` };
+  const entry: Record<string, unknown> = { type: transport, url };
+  if (isRecord(config.headers)) entry.headers = config.headers;
+  return { entry };
 }
 
-function configFromFlat(raw: Record<string, unknown>): Record<string, unknown> | null {
-  const picked: Record<string, unknown> = {};
-  for (const key of ['type', 'url', 'headers', 'command', 'args', 'env', 'cwd']) {
-    if (raw[key] !== undefined) picked[key] = raw[key];
-  }
-  return typeof picked.url === 'string' || typeof picked.command === 'string' ? picked : null;
+function nonBlank(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? v : undefined;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

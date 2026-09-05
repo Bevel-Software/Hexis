@@ -108,16 +108,25 @@ describe('KbPluginSource — bundles', () => {
           { id: 'jira', config: { command: 'npx', args: ['-y', 'jira-mcp'] } },
           { id: 'jira', config: { command: 'something-else' } },
           { id: 'no-url', config: { type: 'http' } },
+          { id: 'blank-url', config: { url: '  ' } },
           { id: 'odd', config: { type: 'grpc', url: 'https://x' } },
+          // A stray blank url beside a real command is still a stdio server.
+          { id: 'launch', config: { type: 'stdio', command: 'run-it', url: '' } },
+          { id: 'untyped-launch', config: { command: 'run-it', url: '' } },
         ],
-        profiles: [{ id: 'global', servers: ['jira', 'no-url', 'odd'] }],
+        profiles: [{ id: 'global', servers: ['jira', 'no-url', 'blank-url', 'odd', 'launch', 'untyped-launch'] }],
       }),
     );
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const example = plugins.find((p) => p.name === 'example-plugin')!;
-    expect(example.mcpServers).toEqual({ jira: { type: 'stdio', command: 'npx', args: ['-y', 'jira-mcp'] } });
+    expect(example.mcpServers).toEqual({
+      jira: { type: 'stdio', command: 'npx', args: ['-y', 'jira-mcp'] },
+      launch: { type: 'stdio', command: 'run-it' },
+      'untyped-launch': { type: 'stdio', command: 'run-it' },
+    });
     expect(warnings.some((w) => w.includes('"jira" is declared twice'))).toBe(true);
     expect(warnings.some((w) => w.includes('"no-url" has transport "http" but no url'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"blank-url" has neither a url nor a command'))).toBe(true);
     expect(warnings.some((w) => w.includes('"odd" has an unknown transport'))).toBe(true);
   });
 
