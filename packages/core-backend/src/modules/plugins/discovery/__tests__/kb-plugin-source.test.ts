@@ -139,7 +139,8 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('Plugins/GTM/access.md', '---\n---\nread:\n  - everyone\n');
     await write('Plugins/GTM/skills/outreach/SKILL.md', '---\ndescription: x\n---\n');
     await write('Plugins/GTM/skills/outreach/plugin.json', '{"name":"not-a-plugin"}');
-    // A pre-manifest folder (access.md only) directly under the root.
+    // A pre-manifest folder (access.md only) directly under the root: NOT a
+    // plugin to discovery — the boot step gives it a manifest first.
     await write('Plugins/Legacy/access.md', '---\n---\nread:\n  - everyone\n');
     // A bundle three folders down, and a native manifest two folders down.
     await write('Plugins/functional/cluster/example/plugin.bundle.json', JSON.stringify({ name: 'example', sourceSkillRoots: ['Skills/x'] }));
@@ -149,24 +150,19 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('Plugins/Both/plugin.bundle.json', JSON.stringify({ name: 'both-bundle', sourceSkillRoots: ['Skills/y'] }));
     // A deeper folder that is only a container: walked through, never a plugin.
     await write('Plugins/teams/empty-container/README.md', 'nothing here');
-    // A level-one folder with only an mcp.json — a plugin whose manifest never
-    // got written, which the tool scanner has always read.
-    await write('Plugins/Servers/mcp.json', JSON.stringify({ mcpServers: { x: { type: 'stdio', command: 'x' } } }));
     // A level-one scope that carries an access.md of its own AND plugins
     // beneath: a container, not a plugin.
     await write('Plugins/functional/access.md', '---\n---\nread:\n  - everyone\n');
 
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     // Folders are visited in locale order (case-insensitive), depth first.
+    // Position means nothing: only the two files make a plugin.
     expect(plugins.map((p) => [p.name, p.folder, p.linksAreManaged, p.exists])).toEqual([
       ['Both', 'Plugins/Both', true, false],
       ['example', 'Plugins/functional/cluster/example', false, true],
       ['GTM', 'Plugins/GTM', true, true],
-      ['Legacy', 'Plugins/Legacy', true, true],
-      ['Servers', 'Plugins/Servers', true, false],
       ['deep', 'Plugins/teams/deep', true, false],
     ]);
-    expect(plugins.find((p) => p.name === 'Servers')?.mcpServers).toEqual({ x: { type: 'stdio', command: 'x' } });
     expect(plugins.find((p) => p.name === 'GTM')?.linkedRoots).toEqual(['Skills/Eng']);
     expect(plugins.find((p) => p.name === 'Both')?.linkedRoots).toEqual([]);
     expect(warnings).toEqual([]);

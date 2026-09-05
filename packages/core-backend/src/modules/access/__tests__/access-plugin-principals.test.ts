@@ -68,10 +68,12 @@ describe('plugin principals', () => {
     return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
   }
 
+  // A plugin IS a folder with a manifest; its access.md is its roster.
   const BASE = {
     'roles.yaml': ROLES_YAML,
     'groups.yaml': GROUPS_YAML,
     'access.md': '---\nwrite:\n  - Admin\n---\n',
+    'Plugins/GTM/plugin.json': '{"name":"gtm"}',
     'Plugins/GTM/access.md': pluginAccessMd(
       'read:\n  - Sales Team\n  - Ali <ali@x.io>\nwrite:\n  - Engineer\nowner:\n  - Owen <owen@x.io>\n',
     ),
@@ -155,6 +157,7 @@ describe('plugin principals', () => {
     it('a plugin readable by everyone yields a public principal', async () => {
       const svc = await makeService({
         ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
         'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
         'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/Open/read\n',
       });
@@ -168,6 +171,7 @@ describe('plugin principals', () => {
         ...BASE,
         // Frontmatter `read: everyone` is discoverability of the FILE. The body
         // denies Sue, and points at another plugin's token.
+        'Plugins/Narrow/plugin.json': '{"name":"narrow"}',
         'Plugins/Narrow/access.md': pluginAccessMd(
           'read:\n  - Sales Team\n  - deny Sue <sue@x.io>\n  - plugin/GTM/read\nwrite:\n  - Admin\n',
         ),
@@ -204,10 +208,25 @@ describe('plugin principals', () => {
       expect(readers.principals).toContainEqual({ name: 'plugin/GTM/read', kind: 'plugin' });
     });
 
+    it('a plugin nested deeper than the root gets its principals too — a plugin is a folder with a manifest', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/teams/Deep/plugin.json': '{"name":"deep"}',
+        'Plugins/teams/Deep/access.md': pluginAccessMd('read:\n  - Ali <ali@x.io>\n'),
+        // A scope folder's own access.md is NOT a roster: no manifest beside it.
+        'Plugins/teams/access.md': '---\n---\nread:\n  - everyone\n',
+        'Skills/S/x/access.md': '---\n---\nread:\n  - plugin/Deep/read\n  - plugin/teams/read\n',
+      });
+      expect(await svc.canRead(workspaceId, 'ali@x.io', 'Skills/S/x/SKILL.md')).toBe(true);
+      expect(await svc.canRead(workspaceId, 'mallory@x.io', 'Skills/S/x/SKILL.md')).toBe(false);
+    });
+
     it('kbPrincipals lists plugin folders once each, personal folders excluded', async () => {
       const svc = await makeService({
         ...BASE,
+        'Plugins/Ops/plugin.json': '{"name":"ops"}',
         'Plugins/Ops/access.md': pluginAccessMd('read:\n  - Admin\n'),
+        'Plugins/personal-abc123/plugin.json': '{"name":"personal-abc123"}',
         'Plugins/personal-abc123/access.md': '---\n---\nread:\n  - Ali <ali@x.io>\n',
       });
       const { plugins } = await svc.kbPrincipals(workspaceId);

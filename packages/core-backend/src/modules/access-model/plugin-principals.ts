@@ -1,4 +1,4 @@
-import { PLUGINS_DIR, pluginManifestName } from '@bevel-software/platform-shared';
+import { pluginManifestName } from '@bevel-software/platform-shared';
 import {
   EVERYONE_CANONICAL,
   PLUGIN_TOKEN_PREFIX,
@@ -51,12 +51,22 @@ import {
 export function synthesizePluginPrincipals(
   index: RolesIndex,
   accessFiles: ReadonlyMap<string, AccessFile>,
-  pluginsDir: string = PLUGINS_DIR,
+  /**
+   * The repo-relative folders that ARE plugins — the ones carrying a
+   * `plugin.json` — as the model loader saw them. A plugin is a folder with
+   * a manifest, at any depth; its access.md is its roster. Nothing else's is.
+   */
+  pluginDirs: ReadonlySet<string>,
 ): void {
-  for (const file of accessFiles.values()) {
-    const folder = pluginFolderOf(file.dir, pluginsDir);
-    if (folder === null) continue;
+  const claimed = new Set<string>();
+  for (const dir of [...pluginDirs].sort()) {
+    const file = accessFiles.get(dir);
+    if (!file) continue; // a plugin without rules has no roster
+    const folder = dir.split('/').pop() ?? dir;
     const slug = pluginManifestName(folder);
+    // Two plugins with one name: discovery keeps the first by path, so do we.
+    if (claimed.has(slug)) continue;
+    claimed.add(slug);
     for (const verb of PLUGIN_TOKEN_VERBS) {
       const { emails, everyone } = holdersOf(index, file, verb);
       const key = pluginPrincipalKey(slug, verb);
@@ -80,12 +90,6 @@ export function synthesizePluginPrincipals(
       }
     }
   }
-}
-
-/** `Plugins/<Name>` → `<Name>`; anything else (deeper, elsewhere, the root) → null. */
-function pluginFolderOf(dir: string, pluginsDir: string): string | null {
-  const segments = dir.split('/').filter(Boolean);
-  return segments.length === 2 && segments[0] === pluginsDir ? segments[1] : null;
 }
 
 /** The verbs whose grants confer `verb` on the plugin (the superset fold). */

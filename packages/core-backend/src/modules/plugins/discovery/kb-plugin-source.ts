@@ -11,13 +11,11 @@ import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bu
  *
  *   plugin.json          → a native plugin (this platform's layout)
  *   plugin.bundle.json   → a bundle (the customer dialect, read-only)
- *   a folder directly    → a native plugin, manifest or not, PROVIDED nothing
- *   under the root         beneath it is a plugin — the layout this platform
- *                          has always read (provisioning seeds `access.md`
- *                          first; an `mcp.json` may sit beside a manifest that
- *                          never got written); a level-one folder that holds
- *                          plugins deeper down is a scope, not a plugin, even
- *                          when it carries an `access.md` of its own
+ *
+ * Nothing else is a plugin. A folder's POSITION means nothing: the legacy
+ * rule "everything directly under the root is a plugin" is retired by the
+ * `plugin-manifests` boot step, which writes the manifest into every such
+ * folder once, so this walker never has to guess.
  *
  * A folder that IS a plugin is not descended into (its `skills/` are its
  * own); every other folder is. When a folder carries both files the manifest
@@ -74,11 +72,7 @@ export class KbPluginSource implements PluginSource {
         .sort((a, b) => a.name.localeCompare(b.name))) {
         beneath += await visit(path.join(dir, entry.name), relFolder ? `${relFolder}/${entry.name}` : entry.name);
       }
-      if (beneath > 0 || isRoot || relFolder.includes('/')) return beneath;
-      // Directly under the root, nothing plugin-shaped beneath: a native plugin
-      // without a manifest — the shape this platform has always read.
-      claim(await readNativePlugin(dir, folder, relFolder, warnings));
-      return 1;
+      return beneath;
     };
 
     await visit(root, '');

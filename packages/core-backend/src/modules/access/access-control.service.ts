@@ -13,7 +13,7 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { PLUGINS_DIR, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
@@ -1429,13 +1429,15 @@ export class AccessControlService implements IAccessControl {
     // must not 500 the entire editor; admins can still write `access.md`
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
-    await this.collectAccessFiles(repoDir, '', accessFiles);
+    const pluginDirs = new Set<string>();
+    await this.collectAccessFiles(repoDir, '', accessFiles, pluginDirs);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
-    // folder's own access.md — after groups merged (so their rosters expand
-    // through the finished index) and before the unknown-role sweep below
-    // (so a grant naming one counts as known).
-    synthesizePluginPrincipals(rolesParsed.index, accessFiles, PLUGINS_DIR);
+    // folder's own access.md — a plugin being a folder with a manifest, at
+    // any depth — after groups merged (so their rosters expand through the
+    // finished index) and before the unknown-role sweep below (so a grant
+    // naming one counts as known).
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, pluginDirs);
 
     // Validate role refs against roles.yaml. `everyone` is a built-in role and
     // is valid without a roles.yaml entry. Unknown refs are dropped from the
@@ -1469,6 +1471,8 @@ export class AccessControlService implements IAccessControl {
     absDir: string,
     relDir: string,
     out: Map<string, AccessFile>,
+    /** Folders under the plugins root carrying a manifest — the plugins, for principal synthesis. */
+    pluginDirs?: Set<string>,
   ): Promise<void> {
     let entries;
     try {
@@ -1485,7 +1489,14 @@ export class AccessControlService implements IAccessControl {
       const abs = path.join(absDir, entry.name);
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        await this.collectAccessFiles(abs, rel, out);
+        await this.collectAccessFiles(abs, rel, out, pluginDirs);
+      } else if (
+        pluginDirs &&
+        entry.isFile() &&
+        entry.name === PLUGIN_MANIFEST_FILE &&
+        relDir.startsWith(`${PLUGINS_DIR}/`)
+      ) {
+        pluginDirs.add(relDir);
       } else if (entry.isFile() && entry.name === 'access.md') {
         const text = await fs.readFile(abs, 'utf-8');
         const parsed = parseAccessFile(text, rel);
@@ -1645,7 +1656,10 @@ export class AccessControlService implements IAccessControl {
    * `'error'` when git failed: a model built without its access files is
    * not the model, and the caller must not cache it as one.
    */
-  private async listAccessFilesAtRef(repoDir: string, ref: string): Promise<string[] | 'error'> {
+  private async listAccessFilesAtRef(
+    repoDir: string,
+    ref: string,
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
     try {
       const { stdout } = await execFileAsync(
         'git',
@@ -1653,12 +1667,16 @@ export class AccessControlService implements IAccessControl {
         { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
       );
       const out: string[] = [];
+      const pluginDirs: string[] = [];
       for (const line of stdout.split('\n')) {
         const p = line.trim();
         if (!p) continue;
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
+        else if (p.startsWith(`${PLUGINS_DIR}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
+          pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
+        }
       }
-      return out;
+      return { accessFiles: out, pluginDirs };
     } catch {
       return 'error';
     }
@@ -1812,7 +1830,7 @@ export class AccessControlService implements IAccessControl {
       console.warn(`[access@${tag}] listing access.md files failed; refusing to decide from a partial tree`);
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
-    for (const p of listed) {
+    for (const p of listed.accessFiles) {
       const text = await read(p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
@@ -1822,6 +1840,11 @@ export class AccessControlService implements IAccessControl {
       // duplicates, but be defensive.
       accessFiles.set(parsed.file.dir, parsed.file);
     }
+
+    // Mirror `loadModel`: plugin principals from the plugins the ref carries,
+    // so a PR-time verdict on a skill granted to `plugin/<Name>/write` counts
+    // the plugin's writers exactly as the working tree would.
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, new Set(listed.pluginDirs));
 
     // Mirror `loadModel`: drop entries whose role ref is unknown to roles.yaml,
     // while preserving the built-in `everyone` role.

@@ -192,6 +192,8 @@ describe('manual namespaces are unique, not merely manual names', () => {
    */
   async function writeMcpServer(folder: string, serverName: string): Promise<void> {
     await mkdir(join(pluginsDir(), folder), { recursive: true });
+    // A plugin is a folder with a manifest; the servers ride in its mcp.json.
+    await writeFile(join(pluginsDir(), folder, 'plugin.json'), `{"name":"${folder.toLowerCase()}"}`);
     await writeFile(
       join(pluginsDir(), folder, 'mcp.json'),
       JSON.stringify({ mcpServers: { [serverName]: { type: 'streamable-http', url: 'https://v.example/mcp' } } }),

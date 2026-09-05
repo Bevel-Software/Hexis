@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
-  PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   isPersonalPluginFolder,
   linkedSkillRoots,
@@ -244,22 +243,18 @@ export class PluginLinksService {
         { kind: 'read-only-links' },
       );
     }
-    if (links.folder !== `${PLUGINS_DIR}/${trimmed}`) {
-      // The plugin principal (`plugin/<Name>/read`) is synthesised for folders
-      // DIRECTLY under the plugins root; a native plugin nested deeper reads
-      // and compiles like any other, but a grant naming it would resolve to
-      // nobody — so linking through hexis stops here rather than share nothing.
-      throw new PluginLinkError(
-        `${trimmed} sits at ${links.folder}; only plugins directly under ${PLUGINS_DIR}/ can link skills through hexis.`,
-        409,
-        { kind: 'nested-plugin' },
-      );
-    }
     return trimmed;
   }
 
-  private async requirePluginWrite(wsId: string, user: AuthUser, folder: string): Promise<void> {
-    if (!(await this.accessControl.canWrite(wsId, user.email, `${PLUGINS_DIR}/${folder}`))) {
+  /** The repo-relative folder of a known plugin (any depth). */
+  private async folderOf(plugin: string): Promise<string> {
+    const links = (await this.links.membership()).byPlugin.get(plugin);
+    if (!links) throw new PluginLinkError('Unknown plugin', 404, { kind: 'unknown-plugin' });
+    return links.folder;
+  }
+
+  private async requirePluginWrite(wsId: string, user: AuthUser, plugin: string): Promise<void> {
+    if (!(await this.accessControl.canWrite(wsId, user.email, await this.folderOf(plugin)))) {
       // Same answer as an unknown plugin, so probing confirms nothing.
       throw new PluginLinkError('Unknown plugin', 404, { kind: 'unknown-plugin' });
     }
@@ -267,9 +262,10 @@ export class PluginLinksService {
 
   private async readManifest(
     wsId: string,
-    folder: string,
+    plugin: string,
   ): Promise<{ manifest: Record<string, unknown>; manifestRel: string }> {
-    const manifestRel = `${this.kbDirName}/${PLUGINS_DIR}/${folder}/${PLUGIN_MANIFEST_FILE}`;
+    const folder = await this.folderOf(plugin);
+    const manifestRel = `${this.kbDirName}/${folder}/${PLUGIN_MANIFEST_FILE}`;
     const abs = path.join(await this.workspaceService.getWorkspacePath(wsId), manifestRel);
     let manifest: Record<string, unknown> | null = null;
     try {
@@ -280,7 +276,10 @@ export class PluginLinksService {
     } catch {
       /* absent or unparsable — a pre-manifest folder gets a fresh minimal manifest */
     }
-    return { manifest: manifest ?? (JSON.parse(renderPluginManifest(folder)) as Record<string, unknown>), manifestRel };
+    return {
+      manifest: manifest ?? (JSON.parse(renderPluginManifest(path.posix.basename(folder))) as Record<string, unknown>),
+      manifestRel,
+    };
   }
 
   private changed(wsId: string): void {

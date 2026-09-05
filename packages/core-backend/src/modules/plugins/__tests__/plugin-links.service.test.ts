@@ -202,6 +202,20 @@ describe('PluginLinksService', () => {
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/GTM/read');
   });
 
+  it('a plugin nested below the root links like any other — position means nothing', async () => {
+    await write('Plugins/teams/Deep/plugin.json', '{\n  "name": "deep"\n}\n');
+    await write('Plugins/teams/Deep/access.md', '---\n---\nread:\n  - Sam <sam@x.io>\nwrite:\n  - Mia <mia@x.io>\n');
+    await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
+    access.invalidate(wsId);
+    index.invalidate();
+
+    await svc.link(manager, 'Deep', 'Skills/Eng/rollback');
+    expect(JSON.parse(await read('Plugins/teams/Deep/plugin.json')).extensions['software.bevel.hexis'].skills).toEqual(['Skills/Eng/rollback']);
+    expect(await read('Skills/Eng/rollback/access.md')).toContain('plugin/Deep/read');
+    expect(await access.canRead(wsId, member.email, 'Skills/Eng/rollback/SKILL.md')).toBe(true);
+    expect(await index.pluginsOf('Skills/Eng/rollback')).toEqual([{ name: 'Deep', linked: true, granted: true }]);
+  });
+
   it('a skill inside a plugin folder is inline membership, never a link', async () => {
     await write('Plugins/GTM/skills/outreach/SKILL.md', '---\ndescription: Reach out.\n---\n');
     skills.invalidate();

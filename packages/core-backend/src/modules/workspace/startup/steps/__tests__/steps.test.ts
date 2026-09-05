@@ -7,6 +7,7 @@ import path from 'node:path';
 import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
+import { PluginManifestsStep } from '../plugin-manifests.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
@@ -319,6 +320,49 @@ describe('buildSeedTree', () => {
     // The generated paths — what the runner force-adds past a template .gitignore.
     expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
+  });
+});
+
+describe('PluginManifestsStep', () => {
+  it('writes plugin.json into legacy plugin folders on every branch, and leaves scopes and real plugins alone', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Legacy shapes: access.md only; mcp.json only; a bare skill tree.
+      'Plugins/GTM/access.md': '---\n---\nread:\n  - everyone\n',
+      'Plugins/GTM/outreach/SKILL.md': '---\ndescription: x\n---\n',
+      'Plugins/Servers/mcp.json': '{"mcpServers":{}}',
+      'Plugins/Bare/deploy/SKILL.md': '---\ndescription: y\n---\n',
+      // Already a plugin, both shapes.
+      'Plugins/Modern/plugin.json': '{"name":"modern"}',
+      'Plugins/functional/cluster/example/plugin.bundle.json': '{"name":"example"}',
+      // A scope with rules of its own above a bundle: not a plugin.
+      'Plugins/functional/access.md': '---\n---\nread:\n  - everyone\n',
+      // Nothing plugin-shaped at all.
+      'Plugins/notes/README.md': 'just a folder',
+    });
+
+    await makeRunner([new PluginManifestsStep()]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      for (const legacy of ['GTM', 'Servers', 'Bare']) {
+        const manifest = JSON.parse(await fs.readFile(path.join(dir, `Plugins/${legacy}/plugin.json`), 'utf8'));
+        expect(manifest.name).toBe(legacy.toLowerCase());
+      }
+      expect(await exists(dir, 'Plugins/functional/plugin.json')).toBe(false);
+      expect(await exists(dir, 'Plugins/notes/plugin.json')).toBe(false);
+      expect(await fs.readFile(path.join(dir, 'Plugins/Modern/plugin.json'), 'utf8')).toBe('{"name":"modern"}');
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Add plugin manifests to 3 legacy plugin folders');
+    expect(log).toContain('Plugins/GTM: plugin.json written');
+
+    // Idempotent: nothing left to write on the next boot.
+    await makeRunner([new PluginManifestsStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one migration commit
   });
 });
 

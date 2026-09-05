@@ -18,6 +18,7 @@ import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
+import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
@@ -302,6 +303,7 @@ export async function createCoreServices(
   // whatever the distribution appends.
   const kbStartupSteps = [
     new GroupsToPluginsStep(),
+    new PluginManifestsStep(),
     new TemplateFilesStep(extraDirs),
     new RolesYamlStep([config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
