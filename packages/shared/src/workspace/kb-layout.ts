@@ -178,6 +178,21 @@ export function currentKbLayout(): KbLayout {
 }
 
 /**
+ * Render the layout placeholders a managed template carries —
+ * `{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}` — with the
+ * names in effect. The packaged `AGENTS.md` and `.bevelignore` are written
+ * this way so a deployment that renamed its roots hands the agent a guide
+ * that names the folders it will actually find. Text without placeholders
+ * passes through unchanged.
+ */
+export function renderKbLayoutPlaceholders(text: string, layout: KbLayout = currentKbLayout()): string {
+  return text
+    .replaceAll('{{knowledgeBaseDir}}', layout.knowledgeBaseDir)
+    .replaceAll('{{skillsDir}}', layout.skillsDir)
+    .replaceAll('{{pluginsDir}}', layout.pluginsDir);
+}
+
+/**
  * The pre-rename name of {@link PLUGINS_DIR}. Referenced ONLY by the migration
  * that renames it — every other consumer should be reading the new name, and a
  * second live spelling is exactly how two layouts start being supported by

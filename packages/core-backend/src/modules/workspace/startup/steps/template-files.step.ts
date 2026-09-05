@@ -1,6 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
+import {
+  KNOWLEDGE_BASE_DIR,
+  PLUGINS_DIR,
+  SKILLS_DIR,
+  renderKbLayoutPlaceholders,
+} from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -205,17 +210,14 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content: Uint8Array | string = await readTemplate(templateDir, rel);
+      let content = await readTemplate(templateDir, rel);
       // The on-disk merge below only runs against an EXISTING ignore file; a
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way.
       if (rel === IGNORE_FILENAME) {
-        content = withIgnorePattern(
-          withIgnorePattern(new TextDecoder().decode(content), 'AGENTS.md'),
-          `${SKILLS_DIR}/`,
-        );
+        content = withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`);
       }
       branch.write(rel, content);
       added.push(rel);
@@ -308,21 +310,29 @@ export class TemplateFilesStep implements OnServerStart {
   }
 }
 
-/** The template's content for `relPath`, bytes as shipped. */
-async function readTemplate(templateDir: string, relPath: string): Promise<Uint8Array> {
-  return fs.readFile(await templateSource(templateDir, relPath));
+/**
+ * The template's content for `relPath`, RENDERED: the managed files name the
+ * three root folders, and a deployment may have renamed those, so the
+ * placeholders the template carries (`{{pluginsDir}}` …) are filled with the
+ * names in effect. Every required file is text; a template without
+ * placeholders passes through unchanged.
+ */
+async function readTemplate(templateDir: string, relPath: string): Promise<string> {
+  return renderKbLayoutPlaceholders(await fs.readFile(await templateSource(templateDir, relPath), 'utf8'));
 }
 
 /**
- * Whether the repo's copy of `relPath` differs from the template's, modulo
- * line endings — a CRLF checkout of identical content must read as "same",
- * or the managed-file refresh would commit churn on every boot forever.
+ * Whether the repo's copy of `relPath` differs from the RENDERED template's,
+ * modulo line endings — a CRLF checkout of identical content must read as
+ * "same", or the managed-file refresh would commit churn on every boot
+ * forever. Rendered, so a renamed root is compared against the guide that
+ * names it, not against the placeholders.
  */
 async function templateDiffers(templateDir: string, repoDir: string, relPath: string): Promise<boolean> {
   const norm = (text: string) => text.replace(/\r\n?/g, '\n');
   const [current, template] = await Promise.all([
     fs.readFile(path.join(repoDir, relPath), 'utf8'),
-    templateSource(templateDir, relPath).then((from) => fs.readFile(from, 'utf8')),
+    readTemplate(templateDir, relPath),
   ]);
   return norm(current) !== norm(template);
 }

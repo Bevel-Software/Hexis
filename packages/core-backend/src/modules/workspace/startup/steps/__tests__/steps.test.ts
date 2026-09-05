@@ -13,6 +13,7 @@ import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
+import { DEFAULT_KB_LAYOUT, configureKbLayout, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,6 +56,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  configureKbLayout({ ...DEFAULT_KB_LAYOUT });
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -110,8 +112,9 @@ async function exists(dir: string, rel: string): Promise<boolean> {
 
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
 
+/** The template as the step writes it under the default layout — placeholders rendered. */
 async function template(name: string): Promise<string> {
-  return fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8');
+  return renderKbLayoutPlaceholders(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT);
 }
 
 /** Every required file + reserved root already present, from the real template. */
@@ -151,6 +154,31 @@ describe('TemplateFilesStep', () => {
       expect(subject).toMatch(/^Add missing KB scaffolding: /);
       expect(subject).toContain('.gitignore');
     }
+  });
+
+  it('renders the managed files with the deployment\'s own root names', async () => {
+    // A deployment that renamed its roots must hand the agent a guide naming
+    // the folders it will find, and an ignore file hiding the real ones.
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+    expect(agents).toContain('plugins/<Plugin>/plugin.json');
+    expect(agents).toContain('`docs/`');
+    expect(agents).not.toContain('{{');
+    expect(agents).not.toContain('KnowledgeBase/');
+    const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    expect(ignore).toContain('plugins/');
+    expect(ignore).toContain('skills/');
+    expect(ignore).not.toContain('Plugins/');
+    expect(await exists(dir, 'docs/.gitkeep')).toBe(true);
+
+    // And a second boot sees the rendered guide as current: no churn commit.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + scaffolding
   });
 
   it('replaces a drifted AGENTS.md, and says so when that is the only change', async () => {
