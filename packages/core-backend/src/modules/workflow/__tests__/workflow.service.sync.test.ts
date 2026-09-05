@@ -244,10 +244,14 @@ describe('WorkflowService.syncWorkspaceFromRemote', () => {
 });
 
 describe('WorkflowService.retireRemoteGoneClone', () => {
-  function buildRetire(opts: { cloned: boolean; stillOnOrigin: boolean }) {
-    const git = { remoteBranchExists: vi.fn(async () => opts.stillOnOrigin) } as unknown as GitService;
+  function buildRetire(opts: { cloned: boolean; stillOnOrigin: boolean; bootstrapping?: boolean }) {
+    const git = {
+      remoteBranchExists: vi.fn(async () => opts.stillOnOrigin),
+      createBranch: vi.fn(async (_ws: string, name: string) => ({ name })),
+    } as unknown as GitService;
     const workspaceService = {
       hasBootstrappedWorkspace: vi.fn(async () => opts.cloned),
+      isBootstrapInFlight: vi.fn(() => opts.bootstrapping === true),
       deleteWorkspace: vi.fn(async () => {}),
     } as unknown as WorkspaceService;
     const svc = new WorkflowService(
@@ -303,5 +307,56 @@ describe('WorkflowService.retireRemoteGoneClone', () => {
     await held;
     await retiring;
     expect(order).toEqual(['released', 'retire-read']);
+  });
+});
+
+describe('WorkflowService.retireRemoteGoneClone — what can bring the branch back', () => {
+  it('backs off while a clone of the branch is being bootstrapped', async () => {
+    const git = { remoteBranchExists: vi.fn(async () => false) } as unknown as GitService;
+    const workspaceService = {
+      hasBootstrappedWorkspace: vi.fn(async () => true),
+      isBootstrapInFlight: vi.fn(() => true),
+      deleteWorkspace: vi.fn(async () => {}),
+    } as unknown as WorkspaceService;
+    const svc = new WorkflowService(
+      {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
+      workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
+      'knowledge-base',
+    );
+    expect(await svc.retireRemoteGoneClone('ali%2Fx')).toBe(false);
+    expect(workspaceService.deleteWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('createBranch holds the same lifecycle lock, so a recreate cannot slip between the origin check and the delete', async () => {
+    const order: string[] = [];
+    const git = {
+      remoteBranchExists: vi.fn(async () => {
+        order.push('retire-checks-origin');
+        return false;
+      }),
+      createBranch: vi.fn(async (_ws: string, name: string) => {
+        order.push('create');
+        return { name, isProtected: false, ahead: 0, behind: 0, hasRemote: true };
+      }),
+    } as unknown as GitService;
+    const workspaceService = {
+      hasBootstrappedWorkspace: vi.fn(async () => true),
+      isBootstrapInFlight: vi.fn(() => false),
+      deleteWorkspace: vi.fn(async () => {
+        order.push('retire-deletes');
+      }),
+    } as unknown as WorkspaceService;
+    const svc = new WorkflowService(
+      {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
+      workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
+      'knowledge-base',
+    );
+    // Retirement enters first; a createBranch for the same name arrives while
+    // it holds the lock and must wait until the delete has happened — never
+    // land between the check and the delete.
+    const retiring = svc.retireRemoteGoneClone('ali%2Fx');
+    const creating = svc.createBranch('main', 'ali/x');
+    await Promise.all([retiring, creating]);
+    expect(order).toEqual(['retire-checks-origin', 'retire-deletes', 'create']);
   });
 });

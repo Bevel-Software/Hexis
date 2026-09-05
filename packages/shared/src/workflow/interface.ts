@@ -45,7 +45,9 @@ export interface IWorkflowService {
   /**
    * Create a new unprotected branch. Protected branches cannot be created
    * via the workflow — the protected set is bootstrapped from the KB repo's
-   * initial state and never grown at runtime.
+   * initial state and never grown at runtime. Holds the branch-lifecycle
+   * lock for `name`, so creation is serialised with the branch's deletion
+   * and with the retirement of a stale clone under that name.
    */
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch>;
   /**
@@ -119,10 +121,12 @@ export interface IWorkflowService {
   syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome>;
   /**
    * Retire the clone of a branch the host has deleted (a `remote-gone`
-   * outcome). Runs under the branch-lifecycle lock — the same one that
-   * serialises creating and deleting the branch in Hexis — and revalidates
-   * against origin first, so a branch recreated in the meantime keeps its
-   * clone. Returns whether the clone was removed.
+   * outcome). Runs under the branch-lifecycle lock — the one `createBranch`
+   * and `deleteBranch` hold, so no Hexis operation can recreate the branch
+   * while the clone is examined and removed — revalidates against origin
+   * first, and backs off while a clone of the branch is being bootstrapped.
+   * A branch recreated in the meantime therefore keeps its clone. Returns
+   * whether the clone was removed.
    */
   retireRemoteGoneClone(workspaceId: string): Promise<boolean>;
   /**

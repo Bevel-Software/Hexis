@@ -298,7 +298,14 @@ export class WorkflowService implements IWorkflowService {
   }
 
   createBranch(workspaceId: string, name: string, fromBase?: string): Promise<Branch> {
-    return this.git.createBranch(workspaceId, name, fromBase);
+    // Under the branch's lifecycle lock, like `deleteBranch` and the
+    // retirement of a clone the host deleted: creating a branch is the one
+    // operation that can bring a "gone" branch back, and the retirement's
+    // "still gone on origin?" check is only a guarantee if nothing can
+    // recreate the branch between that check and the delete.
+    return this.branchLifecycle.run(`branch:${name}`, () =>
+      this.git.createBranch(workspaceId, name, fromBase),
+    );
   }
 
   /**
@@ -521,13 +528,19 @@ export class WorkflowService implements IWorkflowService {
   async retireRemoteGoneClone(workspaceId: string): Promise<boolean> {
     const branch = branchForWorkspaceId(workspaceId);
     const id = workspaceIdForBranch(branch);
-    // The lock `createBranch` and `deleteBranch` take: nothing can bring this
-    // branch back into being while the clone is examined and removed. The
-    // sync's own hold on the clone ended when its outcome was returned, so
-    // the branch is asked about AGAIN here rather than trusted from then —
-    // a recreate that landed in between keeps its clone.
+    // The lock `createBranch` and `deleteBranch` take: no Hexis operation can
+    // bring this branch back into being while the clone is examined and
+    // removed. The sync's own hold on the clone ended when its outcome was
+    // returned, so the branch is asked about AGAIN here rather than trusted
+    // from then — a recreate that landed in between keeps its clone. A clone
+    // being bootstrapped right now is left alone too: it can only be cloning
+    // a branch that exists, so the retirement is already moot. What remains
+    // is a recreate pushed from OUTSIDE Hexis in the milliseconds between the
+    // origin check and the delete, with a bootstrap starting in that same
+    // window; the next sync of that branch clones it fresh.
     return this.branchLifecycle.run(`branch:${branch}`, async () => {
       if (!(await this.workspaceService.hasBootstrappedWorkspace(id))) return false;
+      if (this.workspaceService.isBootstrapInFlight(branch)) return false;
       if (await this.git.remoteBranchExists(branch, branch)) return false;
       await this.workspaceService.deleteWorkspace(id);
       return true;
