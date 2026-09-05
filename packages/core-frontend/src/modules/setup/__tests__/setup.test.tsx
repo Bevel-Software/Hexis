@@ -758,12 +758,32 @@ describe('SetupScreen — remote sync panel', () => {
     },
   };
 
-  it('shows the address a hook calls, in both variants', () => {
+  it('shows the address a hook calls on first run, without a Sync now button', () => {
     render(<SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} />);
     expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Copy the sync address' })).toBeTruthy();
     // First run has no repository to sync yet — no button, no history.
     expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull();
+  });
+
+  it('shows the address on the Deployment page too', () => {
+    render(
+      <SetupScreen settings={[...SETTINGS, SYNC_SETTING]} sync={SYNC} onSaved={() => {}} variant="settings" />,
+    );
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+  });
+
+  it('keeps the panel when the secret is set by the environment', () => {
+    const fromEnv: SettingStatus = { ...SYNC_SETTING, source: 'env', configured: true };
+    render(
+      <SetupScreen settings={[...SETTINGS, fromEnv]} sync={SYNC} onSaved={() => {}} variant="settings" />,
+    );
+    // The secret itself is locked, listed under the environment…
+    expect(screen.getByText('KB_SYNC_SECRET')).toBeTruthy();
+    // …but the address, the history and Sync now are still there.
+    expect(screen.getByText('https://hexis.example.test/api/sync/<branch>')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
   });
 
   it('on the Deployment page: says what the last sync did, and Sync now reports the result', async () => {

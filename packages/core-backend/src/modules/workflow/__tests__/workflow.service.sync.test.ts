@@ -14,9 +14,9 @@ import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
 /**
  * `syncWorkspaceFromRemote` — the per-branch step a remote sync drives.
  * Built on a fake git so the assertions are about the CONTRACT: what gets
- * announced when HEAD moves, what does not when it does not, and — the one
- * rule that differs from every other pull path — that a conflict is reported
- * and never handed to the recovery ladder.
+ * announced when HEAD moves, what does not when it does not, and that a
+ * conflict is both queued for the usual recovery and reported as an outcome —
+ * never a throw.
  */
 function build(opts: {
   heads: string[];
@@ -178,5 +178,69 @@ describe('WorkflowService.syncWorkspaceFromRemote', () => {
     fail = false;
     await svc.syncWorkspaceFromRemote('main');
     expect(kinds(emit)).toEqual(['git-sync-failed', 'git-sync-recovered']);
+  });
+});
+
+function buildWithGit(git: GitService) {
+  const events = { emit: vi.fn() } as unknown as WorkflowEventBus;
+  const svc = new WorkflowService(
+    {} as Database,
+    git,
+    { invalidateListCache: vi.fn() } as unknown as PullRequestService,
+    {} as IReviewWorkflowService,
+    {} as WorkspaceService,
+    {} as IAccessControl,
+    {} as FileLockService,
+    {} as PendingCommitsService,
+    'knowledge-base',
+    events,
+  );
+  return { svc, emit: events.emit as ReturnType<typeof vi.fn> };
+}
+
+describe('WorkflowService.syncWorkspaceFromRemote — every failure is an outcome', () => {
+  it('a failed HEAD read before the pull raises the banner and reports error', async () => {
+    const git = {
+      headSha: vi.fn(async () => {
+        throw new Error('fatal: not a git repository');
+      }),
+      pull: vi.fn(),
+      changedPathsBetween: vi.fn(),
+    } as unknown as GitService;
+    const { svc, emit } = buildWithGit(git);
+    const out = await svc.syncWorkspaceFromRemote('main');
+    expect(out).toMatchObject({ branch: 'main', outcome: 'error' });
+    expect(kinds(emit)).toEqual(['git-sync-failed']);
+    expect(git.pull).not.toHaveBeenCalled();
+  });
+
+  it('a failed HEAD read after a clean pull is an error outcome, never a throw', async () => {
+    let reads = 0;
+    const git = {
+      headSha: vi.fn(async () => {
+        if (reads++ === 0) return 'aaa';
+        throw new Error('EIO');
+      }),
+      pull: vi.fn(async () => {}),
+      changedPathsBetween: vi.fn(),
+    } as unknown as GitService;
+    const { svc, emit } = buildWithGit(git);
+    await expect(svc.syncWorkspaceFromRemote('main')).resolves.toMatchObject({ outcome: 'error' });
+    // Origin was fine, so no banner for a local bookkeeping failure.
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it('a conflict in many files reaches the banner with the SAME sentence as the response', async () => {
+    const paths = Array.from({ length: 12 }, (_, i) => `Plugins/some-long-plugin-name-${i}/SKILL.md`);
+    const { svc, emit } = build({
+      heads: ['aaa'],
+      pull: async () => {
+        throw new PullRebaseConflictError('main', paths, 'CONFLICT');
+      },
+    });
+    const out = await svc.syncWorkspaceFromRemote('main');
+    const message = (out as { error: string }).error;
+    expect(message).toContain('and 9 more files');
+    expect(emit.mock.calls[0][0]).toMatchObject({ reason: message, conflictedPaths: paths });
   });
 });

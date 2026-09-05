@@ -57,6 +57,26 @@ function unique(names: string[]): string[] {
   return [...new Set(names)];
 }
 
+/**
+ * How an invalid explicit entry is echoed back. Only primitives are
+ * stringified: `String(obj)` on a JSON object carrying `"toString": 1` throws
+ * ("Cannot convert object to primitive value"), which would turn a caller's
+ * bad body into our 500.
+ */
+function describeInvalid(entry: unknown): string {
+  if (entry === null) return 'null';
+  switch (typeof entry) {
+    case 'string':
+      return entry.trim() === '' ? '(empty)' : entry;
+    case 'number':
+    case 'boolean':
+    case 'bigint':
+      return String(entry);
+    default:
+      return Array.isArray(entry) ? '(array)' : '(object)';
+  }
+}
+
 export function parseSyncPayload(body: unknown): ParsedSyncPayload {
   if (!isRecord(body)) return { source: 'none', branches: 'all', invalid: [] };
 
@@ -67,7 +87,7 @@ export function parseSyncPayload(body: unknown): ParsedSyncPayload {
     const invalid: string[] = [];
     for (const entry of raw) {
       if (typeof entry !== 'string' || !entry.trim()) {
-        invalid.push(String(entry));
+        invalid.push(describeInvalid(entry));
         continue;
       }
       const name = entry.trim();
@@ -95,12 +115,22 @@ export function parseSyncPayload(body: unknown): ParsedSyncPayload {
     }
   }
 
-  // GitHub / Gitea push (`ref` at the top level) and GitLab push (the same
-  // `ref`, tagged with `object_kind`).
-  if (typeof body.ref === 'string') {
-    const source: SyncPayloadSource = body.object_kind === undefined ? 'github' : 'gitlab';
+  // GitLab events all carry `object_kind`. Only a push (or a tag push, which
+  // names no branch) is a statement about a ref; anything else with a stray
+  // `ref` — a merge request, a pipeline — is not, and takes the "everything"
+  // fallback rather than being read as a push of that ref.
+  if (typeof body.object_kind === 'string') {
+    if (body.object_kind !== 'push' && body.object_kind !== 'tag_push') {
+      return { source: 'none', branches: 'all', invalid: [] };
+    }
     const branch = branchFromRef(body.ref);
-    return { source, branches: branch ? [branch] : [], invalid: [] };
+    return { source: 'gitlab', branches: branch ? [branch] : [], invalid: [] };
+  }
+
+  // GitHub / Gitea push: `ref` at the top level, no `object_kind`.
+  if (typeof body.ref === 'string') {
+    const branch = branchFromRef(body.ref);
+    return { source: 'github', branches: branch ? [branch] : [], invalid: [] };
   }
 
   return { source: 'none', branches: 'all', invalid: [] };

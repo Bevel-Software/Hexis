@@ -15,7 +15,7 @@ import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
 // needs a router and the git context. Neither belongs in this suite: the
 // banner's contract is what it says and which paths it offers, so the hook
 // is replaced with a recorder.
-const openWorkspacePath = vi.fn();
+const { openWorkspacePath } = vi.hoisted(() => ({ openWorkspacePath: vi.fn() }));
 vi.mock('../../workspace/routing/kb-routes', () => ({
   useFileNav: () => ({ openFile: vi.fn(), openWorkspacePath }),
 }));

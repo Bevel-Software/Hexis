@@ -90,3 +90,27 @@ describe('parseSyncPayload', () => {
     });
   });
 });
+
+describe('parseSyncPayload — hostile shapes', () => {
+  it('an explicit entry that cannot be stringified is reported, not thrown', () => {
+    const parsed = parseSyncPayload({ branches: ['main', { toString: 1 }, [1], null] });
+    expect(parsed.branches).toEqual(['main']);
+    expect(parsed.invalid).toEqual(['(object)', '(array)', 'null']);
+  });
+
+  it('a GitLab event that is not a push falls back to everything, even with a stray ref', () => {
+    expect(parseSyncPayload({ object_kind: 'merge_request', ref: 'refs/heads/main' })).toEqual({
+      source: 'none',
+      branches: 'all',
+      invalid: [],
+    });
+  });
+
+  it('a GitLab tag push names nothing to sync', () => {
+    expect(parseSyncPayload({ object_kind: 'tag_push', ref: 'refs/tags/v1' })).toEqual({
+      source: 'gitlab',
+      branches: [],
+      invalid: [],
+    });
+  });
+});

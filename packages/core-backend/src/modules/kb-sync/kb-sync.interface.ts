@@ -58,7 +58,12 @@ export interface SyncWorkflowPort {
   closeChangeRequestsWithDeletedBranches(): Promise<number>;
 }
 
-/** The slice of the workspace module a sync reads: which clones exist. */
+/**
+ * The slice of the workspace module a sync reads: which clones exist ON
+ * DISK. Not the in-memory "seen this process" cache — clones survive a
+ * restart and a hook that fires before anyone has opened a branch must still
+ * find them.
+ */
 export interface SyncWorkspacePort {
-  knownWorkspaces(): Array<{ id: string; branch: string }>;
+  listClonedWorkspaces(): Promise<Array<{ id: string; branch: string }>>;
 }

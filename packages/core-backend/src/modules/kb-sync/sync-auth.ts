@@ -49,6 +49,17 @@ const NO_SECRET =
   'No sync secret is configured. Set KB_SYNC_SECRET (or the setup screen’s sync secret), ' +
   'or call this endpoint with an administrator session.';
 
+/**
+ * Shortest secret the endpoint will honour. The setup screen enforces the
+ * same floor on save; this is the boundary that also covers a secret set
+ * through the environment, which no validator ever sees.
+ */
+export const MIN_SYNC_SECRET_LENGTH = 16;
+
+const SECRET_TOO_SHORT =
+  `The configured sync secret is shorter than ${MIN_SYNC_SECRET_LENGTH} characters and is not ` +
+  'accepted. Set a longer KB_SYNC_SECRET, or call this endpoint with an administrator session.';
+
 /** Constant-time string equality that does not leak the length either. */
 function secretEquals(a: string, b: string): boolean {
   const ha = createHash('sha256').update(a).digest();
@@ -67,7 +78,12 @@ export async function verifySyncCredential(
   input: SyncAuthInput,
   session: SyncSessionVerifier,
 ): Promise<SyncAuthResult> {
-  const secret = input.secret.trim();
+  const configured = input.secret.trim();
+  // A too-short secret is treated as absent for matching purposes and named
+  // as the problem below, so a one-character deployment secret can never be
+  // what lets a caller in.
+  const usable = configured.length >= MIN_SYNC_SECRET_LENGTH;
+  const secret = usable ? configured : '';
   const bearer = input.authorization?.startsWith('Bearer ')
     ? input.authorization.slice('Bearer '.length).trim()
     : '';
@@ -98,7 +114,7 @@ export async function verifySyncCredential(
   // caller's: a hook pointed at an unconfigured endpoint should read "set
   // the secret", not "wrong secret".
   if (!secret && (bearer || input.gitlabToken || input.hubSignature)) {
-    return { ok: false, status: 503, message: NO_SECRET };
+    return { ok: false, status: 503, message: configured ? SECRET_TOO_SHORT : NO_SECRET };
   }
   return {
     ok: false,

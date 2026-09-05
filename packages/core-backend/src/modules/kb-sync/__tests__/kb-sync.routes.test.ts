@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import type { Server } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createKbSyncRoutes } from '../kb-sync.routes.js';
+import { createKbSyncRoutes, isSyncRawBodyPath } from '../kb-sync.routes.js';
 import type { IKbSyncService, SyncResult } from '../kb-sync.interface.js';
 
 const SECRET = 'a-very-long-and-random-sync-secret';
@@ -23,13 +23,21 @@ async function mount(opts: {
   secret?: string;
   result?: SyncResult;
   admin?: boolean;
+  /** Install the production-shaped global JSON parser in front of the router. */
+  globalJson?: boolean;
 }): Promise<{ base: string; sync: ReturnType<typeof vi.fn> }> {
+  // A suite may mount twice in one test; the earlier server must not outlive it.
+  server?.close();
   const sync = vi.fn(async () => opts.result ?? SYNCED);
   const kbSync: IKbSyncService = { sync };
   const app = express();
   // Mirrors production: the global JSON parser skips `/api/sync`, so the
   // router's own raw parser sees the bytes. Installing `express.json()` here
   // would hide exactly the wiring bug the signature path depends on.
+  if (opts.globalJson) {
+    const json = express.json();
+    app.use((req, res, next) => (isSyncRawBodyPath(req.path) ? next() : json(req, res, next)));
+  }
   app.use(
     '/api',
     createKbSyncRoutes({
@@ -216,5 +224,38 @@ describe('POST /api/sync/<branch> — the branch in the URL', () => {
     const res = await post(`${base}/--upload-pack=x`, { headers: { authorization: `Bearer ${SECRET}` } });
     expect(res.status).toBe(400);
     expect(sync).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/sync — behind the production JSON parser', () => {
+  it('the branch route still sees the raw bytes, so a GitHub signature verifies', async () => {
+    const { base, sync } = await mount({ globalJson: true });
+    const body = '{"ref":"refs/heads/main"}';
+    const sig = 'sha256=' + createHmac('sha256', SECRET).update(body).digest('hex');
+    const res = await post(`${base}/main`, {
+      headers: { 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: ['main'] }));
+  });
+
+  it('and so does the bare route', async () => {
+    const { base } = await mount({ globalJson: true });
+    const body = '{"ref":"refs/heads/main"}';
+    const sig = 'sha256=' + createHmac('sha256', SECRET).update(body).digest('hex');
+    const res = await post(base, {
+      headers: { 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('isSyncRawBodyPath covers both shapes and nothing else', () => {
+    expect(isSyncRawBodyPath('/api/sync')).toBe(true);
+    expect(isSyncRawBodyPath('/api/sync/main')).toBe(true);
+    expect(isSyncRawBodyPath('/api/sync/ali/new-skill')).toBe(true);
+    expect(isSyncRawBodyPath('/api/synchronise')).toBe(false);
+    expect(isSyncRawBodyPath('/api/setup/status')).toBe(false);
   });
 });

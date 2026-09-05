@@ -33,7 +33,7 @@ import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.j
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
-import { createKbSyncRoutes } from '../modules/kb-sync/kb-sync.routes.js';
+import { createKbSyncRoutes, isSyncRawBodyPath } from '../modules/kb-sync/kb-sync.routes.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -142,13 +142,13 @@ export async function createCoreServer(
   // parse once the first has run, so without this the 10 MB global limit would
   // shadow the route's larger limit and 413 a large-but-valid upload before it
   // ever reaches the route).
-  // `/api/sync` reads its body as raw bytes: one of its credentials is an
-  // HMAC over exactly what arrived, which a parsed-and-reserialised body
-  // cannot reproduce.
-  const jsonExemptPaths = new Set([...(ext.jsonParserExemptPaths ?? []), '/api/sync']);
+  // The sync routes (`/api/sync` and `/api/sync/<branch>`) read their body as
+  // raw bytes: one of their credentials is an HMAC over exactly what arrived,
+  // which a parsed-and-reserialised body cannot reproduce.
+  const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
   const globalJson = express.json({ limit: '10mb' });
   app.use((req, res, next) => {
-    if (jsonExemptPaths.has(req.path)) return next();
+    if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
   });
 

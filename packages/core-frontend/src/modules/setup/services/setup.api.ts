@@ -1,4 +1,4 @@
-import { authFetch } from '../../../lib/api';
+import { authFetch, getToken } from '../../../lib/api';
 
 /** One configurable setting, as the server describes it. */
 export interface SettingStatus {
@@ -104,7 +104,16 @@ export interface SyncNowResult {
  * hook to.
  */
 export async function syncNow(): Promise<SyncNowResult> {
-  const res = await authFetch('/api/sync', { method: 'POST' });
+  // Plain `fetch` with the session token, not `authFetch`: the endpoint
+  // answers 503 when a branch could not be pulled, which is an ordinary
+  // result here, and `authFetch` reads every 503 as the backend being down —
+  // it would probe /api/health and could raise the maintenance overlay over
+  // a page that is working fine.
+  const token = getToken();
+  const res = await fetch('/api/sync', {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
   let body: unknown;
   try {
     body = await res.json();

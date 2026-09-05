@@ -249,6 +249,38 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Every branch with a finished clone on disk, whether or not this process
+   * has touched it yet. The remote sync reads this: clones survive a restart,
+   * and a hook that fires before anyone opens a branch must still find its
+   * clone. Same disk scan as `findAnyWorkspaceId`; half-built directories
+   * (no `.git`) are skipped, as are names that do not decode to a branch.
+   */
+  async listClonedWorkspaces(): Promise<Array<{ id: string; branch: string }>> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const cloned: Array<{ id: string; branch: string }> = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
+      } catch {
+        continue;
+      }
+      const branch = branchForWorkspaceId(entry.name);
+      // A directory whose name is not the encoding of its own branch is not
+      // one of ours (or is malformed); `branchForWorkspaceId` returns such a
+      // name unchanged, so the round-trip check catches it.
+      if (workspaceIdForBranch(branch) !== entry.name) continue;
+      cloned.push({ id: entry.name, branch });
+    }
+    return cloned;
+  }
+
+  /**
    * Run the clone. When a `referenceRepo` is supplied and the referenced
    * clone fails (e.g. the sibling's object store is corrupt or mid-write),
    * fall back once to a plain network clone so a bad sibling can never

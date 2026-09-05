@@ -470,7 +470,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                   ? syncResult.error
                   : syncResult.ok
                     ? `Synced: ${describeOutcomes(syncResult.results)}.`
-                    : (syncResult.results.find((r) => r.error)?.error ??
+                    : (syncResult.results
+                        .map((r) => r.error)
+                        .filter((e): e is string => !!e)
+                        .join(' ') ||
                       `Not fully synced: ${describeOutcomes(syncResult.results)}.`)}
               </p>
             )}
@@ -816,6 +819,16 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                     </div>
                   </details>
                 )}
+
+                {/* The sync panel normally hangs off the secret's field. When
+                    the secret comes from the environment that field is in the
+                    locked list below, not here — but the address, the last
+                    sync and Sync now are about the deployment, not the secret,
+                    and an admin with an env-set secret needs them just as much. */}
+                {section.id === 'knowledge-base' &&
+                  sync &&
+                  !fields.some((f) => f.key === 'kbSyncSecret') &&
+                  renderSyncPanel()}
               </Surface>
             );
           })}

@@ -73,8 +73,8 @@ opens it, so there is nothing to refresh), `conflict` and `error` (below).
 | --- | --- | --- |
 | `200` | The branch is current | — |
 | `409` | The branch has a **conflict** — commits made in Hexis contradict what landed on the host. Automatic recovery is queued; the body's `error` names the files. See §4 | Yes, later: `200` once recovery or a person has cleared it |
-| `503` | The branch could not be pulled (host unreachable, credential refused), or no sync secret is configured | Yes |
-| `401` | Missing or wrong credential | No |
+| `503` | The branch could not be pulled (host unreachable, credential refused). Also: a secret was presented but none is configured, or the configured one is shorter than 16 characters | Yes |
+| `401` | Missing or wrong credential — including no credential at all on a deployment with no secret set | No |
 | `400` | Not a branch name git accepts, or a body that is not JSON | No |
 
 A `curl --fail` therefore fails exactly when Hexis is not in sync.
@@ -87,6 +87,8 @@ A `curl --fail` therefore fails exactly when Hexis is not in sync.
 name: Sync Hexis
 on:
   push:
+    # Branches only: a tag push has no branch to sync.
+    tags-ignore: ["**"]
 jobs:
   sync:
     runs-on: ubuntu-latest

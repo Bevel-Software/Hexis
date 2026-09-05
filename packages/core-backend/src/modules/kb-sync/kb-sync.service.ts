@@ -1,4 +1,5 @@
 import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
+import { sanitizeError } from '../workflow/sanitize-error.js';
 import type {
   IKbSyncService,
   LastSync,
@@ -92,7 +93,7 @@ export class KbSyncService implements IKbSyncService {
   }
 
   private async run(request: SyncRequest): Promise<SyncResult> {
-    const known = this.workspaces.knownWorkspaces();
+    const known = await this.workspaces.listClonedWorkspaces();
     const byBranch = new Map(known.map((w) => [w.branch, w.id]));
 
     const targets: Array<{ branch: string; id: string | null }> =
@@ -106,7 +107,16 @@ export class KbSyncService implements IKbSyncService {
         results.push({ branch, outcome: 'not-cloned' });
         continue;
       }
-      results.push(await this.workflow.syncWorkspaceFromRemote(id));
+      try {
+        results.push(await this.workflow.syncWorkspaceFromRemote(id));
+      } catch (err) {
+        // The workflow step promises outcomes, not throws — but one broken
+        // clone must never take the other branches, the sweep, or every
+        // coalesced caller down with it, so the promise is enforced here too.
+        const message = sanitizeError(err);
+        console.error(`[sync] unexpected failure syncing "${branch}": ${message}`);
+        results.push({ branch, outcome: 'error', error: message });
+      }
     }
 
     // The host may have deleted a branch (an ADO PR completed with "delete

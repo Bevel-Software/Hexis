@@ -49,6 +49,18 @@ export interface KbSyncRouteDeps {
 /** Cap on a webhook body. ADO's PR payloads run to a few hundred KB. */
 const BODY_LIMIT = '2mb';
 
+/**
+ * Whether a request path belongs to this router and must reach it with its
+ * body UNPARSED. The server's global JSON parser consults this: once that
+ * parser has read the stream, `express.raw` below sees nothing and the
+ * signature credential has no bytes to verify. Both routes share the check,
+ * so the branch form (`/api/sync/<branch>`) is covered as well as the bare
+ * one — an exact-path exemption used to protect only the latter.
+ */
+export function isSyncRawBodyPath(path: string): boolean {
+  return path === '/api/sync' || path.startsWith('/api/sync/');
+}
+
 export function httpStatusFor(result: SyncResult): 200 | 409 | 503 {
   if (result.results.some((r) => r.outcome === 'conflict')) return 409;
   if (result.results.some((r) => r.outcome === 'error')) return 503;

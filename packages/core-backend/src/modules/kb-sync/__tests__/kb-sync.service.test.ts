@@ -13,7 +13,7 @@ function deferred<T>() {
 
 function workspaces(branches: string[]): SyncWorkspacePort {
   return {
-    knownWorkspaces: () => branches.map((branch) => ({ id: encodeURIComponent(branch), branch })),
+    listClonedWorkspaces: async () => branches.map((branch) => ({ id: encodeURIComponent(branch), branch })),
   };
 }
 
@@ -69,19 +69,25 @@ describe('KbSyncService', () => {
 
   it('coalesces everything that arrives mid-run into ONE follow-up carrying the union', async () => {
     const gate = deferred<void>();
-    const calls: string[][] = [];
-    let run = 0;
+    // Each run's branches, in order. The first run parks on `gate` so the
+    // others arrive mid-run; a new run is recognised by its first branch
+    // landing after the gate opened.
+    const calls: string[][] = [['']];
+    let gateOpened = false;
     const workflow: SyncWorkflowPort = {
       syncWorkspaceFromRemote: vi.fn(async (id: string) => {
         const branch = decodeURIComponent(id);
-        if (run === 0 && branch === 'main') await gate.promise;
-        (calls[run] ??= []).push(branch);
+        if (!gateOpened && branch === 'main') {
+          await gate.promise;
+          gateOpened = true;
+          calls[0] = [];
+        } else if (gateOpened && calls.length === 1) {
+          calls.push([]);
+        }
+        calls[calls.length - 1].push(branch);
         return updated(branch);
       }),
-      closeChangeRequestsWithDeletedBranches: vi.fn(async () => {
-        run++;
-        return 0;
-      }),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
     };
     const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
 
@@ -163,5 +169,25 @@ describe('KbSyncService.lastSync', () => {
     gate.resolve();
     await Promise.all([first, second, third]);
     expect(svc.lastSync()?.by).toBe('github-signature, admin@example.com');
+  });
+});
+
+describe('KbSyncService — a throwing branch step', () => {
+  it('becomes an error outcome; the other branches, the sweep and the record all still happen', async () => {
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => {
+        if (id === 'main') throw new Error('fatal: unable to access https://x:ghp_secret@host/r');
+        return updated(decodeURIComponent(id));
+      }),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+    };
+    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x']));
+    const r = await svc.sync({ branches: 'all', by: 'bearer' });
+    expect(r.status).toBe('partial');
+    expect(r.results[0]).toMatchObject({ branch: 'main', outcome: 'error' });
+    expect((r.results[0] as { error: string }).error).not.toContain('ghp_secret');
+    expect(r.results[1]).toEqual(updated('ali/x'));
+    expect(r.changeRequests.closedDeletedBranch).toBe(1);
+    expect(svc.lastSync()?.status).toBe('partial');
   });
 });

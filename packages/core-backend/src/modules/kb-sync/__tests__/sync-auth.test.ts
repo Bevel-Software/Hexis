@@ -100,3 +100,19 @@ describe('verifySyncCredential', () => {
     });
   });
 });
+
+describe('verifySyncCredential — a secret set too short', () => {
+  it('is refused with 503 that says so, even when the caller presents it exactly', async () => {
+    const r = await verifySyncCredential({ secret: 'short', authorization: 'Bearer short' }, session());
+    expect(r).toMatchObject({ ok: false, status: 503 });
+    expect((r as { message: string }).message).toContain('shorter than 16');
+  });
+
+  it('an admin session still works past a too-short secret', async () => {
+    const r = await verifySyncCredential(
+      { secret: 'short', authorization: 'Bearer jwt-ok' },
+      session({ email: 'admin@example.com', admin: true }),
+    );
+    expect(r).toMatchObject({ ok: true });
+  });
+});

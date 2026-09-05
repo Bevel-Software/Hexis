@@ -108,14 +108,25 @@ function isOpenPairViolation(err: unknown): boolean {
  * recovery is under way, and what to do if it does not clear.
  */
 export function syncConflictMessage(branch: string, conflictedPaths: string[]): string {
-  const files = conflictedPaths.length > 0 ? conflictedPaths.join(', ') : 'some files';
-  // Kept short: the banner's `reason` goes through `sanitizeError`, which
-  // clips at 200 characters, and the sentence must survive that whole.
+  // Bounded: the same sentence goes to the response, the banner and the log,
+  // and it must be one sentence in all three whatever the conflict's size.
+  // The full path list rides beside it as `conflictedPaths`.
+  const shown = conflictedPaths.slice(0, SYNC_CONFLICT_FILES_NAMED);
+  const more = conflictedPaths.length - shown.length;
+  const files =
+    conflictedPaths.length === 0
+      ? 'some files'
+      : more > 0
+        ? `${shown.join(', ')} and ${more} more file${more === 1 ? '' : 's'}`
+        : shown.join(', ');
   return (
     `${branch} is not in sync yet: ${files} changed both in Hexis and on the git host. ` +
     `Recovery is queued; if this stays, open the files on ${branch} in Hexis, keep what you want, and save.`
   );
 }
+
+/** How many conflicted files the sync-conflict sentence names before "and N more". */
+const SYNC_CONFLICT_FILES_NAMED = 3;
 
 /** Redact the shared GitHub token from any error string before surfacing it. */
 function redactTokens(msg: string): string {
@@ -484,11 +495,16 @@ export class WorkflowService implements IWorkflowService {
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const id = workspaceIdForBranch(branch);
+    // Every failure below is an OUTCOME, never a throw: the caller runs this
+    // over many clones, and one broken clone must not abort the others.
     let before: string;
     try {
       before = await this.git.headSha(workspaceId);
     } catch (err) {
-      return { branch, outcome: 'error', error: sanitizeError(err) };
+      const message = sanitizeError(err);
+      console.warn(`[sync] could not read HEAD for branch "${branch}": ${message}`);
+      this.noteGitSyncFailed(workspaceId, branch, err);
+      return { branch, outcome: 'error', error: message };
     }
     try {
       await this.git.pull(workspaceId);
@@ -504,7 +520,7 @@ export class WorkflowService implements IWorkflowService {
         await this.queuePullConflictRecovery(workspaceId, err);
         const message = syncConflictMessage(branch, err.conflictedPaths);
         console.warn(`[sync] ${message}`);
-        this.noteGitSyncFailed(workspaceId, branch, new Error(message), err.conflictedPaths);
+        this.noteGitSyncFailed(workspaceId, branch, err, { paths: err.conflictedPaths, message });
         return { branch, outcome: 'conflict', conflictedPaths: err.conflictedPaths, error: message };
       }
       const message = sanitizeError(err);
@@ -516,15 +532,23 @@ export class WorkflowService implements IWorkflowService {
     // it — the condition a `git-sync-failed` banner on this branch was
     // waiting for, whether a sync or a push raised it.
     this.noteGitSyncOk(workspaceId, branch);
-    const after = await this.git.headSha(workspaceId);
-    if (after === before) return { branch, outcome: 'up-to-date', to: after };
-
-    // Announce the new tree. The tree event alone already refreshes every
-    // open file explorer and, on the default branch, drops the skill / tool /
-    // plugin catalogues (`create-core-services.ts`); the CR list caches the
-    // touched paths it resolved against the old tree, so drop that too.
-    this.prs.invalidateListCache();
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+    let after: string;
+    try {
+      after = await this.git.headSha(workspaceId);
+      if (after === before) return { branch, outcome: 'up-to-date', to: after };
+      // Announce the new tree. The tree event alone already refreshes every
+      // open file explorer and, on the default branch, drops the skill / tool /
+      // plugin catalogues (`create-core-services.ts`); the CR list caches the
+      // touched paths it resolved against the old tree, so drop that too.
+      this.prs.invalidateListCache();
+      this.events?.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+    } catch (err) {
+      // The pull landed, so origin is fine and no banner is raised — but the
+      // caller must still hear that this branch's announcement did not happen.
+      const message = sanitizeError(err);
+      console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
+      return { branch, outcome: 'error', error: message };
+    }
     // Per-file events so an open tab on a file the host rewrote refetches
     // instead of showing stale bytes until its next tree refresh. Best-effort
     // and capped: the sync itself succeeded whatever happens here.
@@ -1130,8 +1154,15 @@ export class WorkflowService implements IWorkflowService {
     workspaceId: string,
     branch: string,
     err: unknown,
-    /** Set only by a remote-sync conflict — the files a person must reconcile. */
-    conflictedPaths?: string[],
+    /**
+     * Set only by a remote-sync conflict: the files a person must reconcile,
+     * and the sentence we composed about them. That sentence is ours (branch
+     * name + repo paths, no git stderr), so it goes out verbatim — the same
+     * string the sync response and the log carry — rather than through the
+     * sanitiser, whose 200-character clip would make the banner disagree
+     * with them.
+     */
+    conflict?: { paths: string[]; message: string },
   ): void {
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
@@ -1142,8 +1173,8 @@ export class WorkflowService implements IWorkflowService {
       branch,
       // Git stderr can quote a credentialed URL; the banner is user-facing and
       // the string also lands in client logs, so sanitize before it leaves.
-      reason: sanitizeError(err),
-      ...(conflictedPaths ? { conflictedPaths } : {}),
+      reason: conflict ? conflict.message : sanitizeError(err),
+      ...(conflict ? { conflictedPaths: conflict.paths } : {}),
     });
   }
 

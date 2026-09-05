@@ -107,6 +107,9 @@ export const CORE_SETTINGS: SettingDef[] = [
     envVar: 'KB_SYNC_SECRET',
     section: 'knowledge-base',
     secret: true,
+    // The same floor `sync-auth.ts` enforces at request time (which is what
+    // covers a secret set through the environment); this one just says so
+    // before the save.
     validate: (v) =>
       v.trim().length >= 16 ? null : 'Use at least 16 characters — a random string is best.',
   },
