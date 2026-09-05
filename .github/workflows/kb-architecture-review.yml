@@ -473,9 +473,15 @@ jobs:
                   # summary, not a review — the incident here was a "pass"
                   # whose page narrated the rules in prose and skipped every
                   # required block. Only the section's EXISTENCE is checked;
-                  # its contents belong to the rule nodes.
-                  ro_pattern="<pre[[:space:]][^>]*class=[\"']rule-outputs[\"'][^>]*>[[:space:]]*[^[:space:]<]"
-                  if ! jq -e --arg pat "$ro_pattern" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1; then
+                  # its contents belong to the rule nodes. Two tests, so the
+                  # content's first character never matters (a block may open
+                  # with markup): the section's open tag must be present, and
+                  # the literally-empty form — open tag, whitespace, close
+                  # tag — must not be how it appears.
+                  ro_open="<pre[[:space:]][^>]*class=[\"']rule-outputs[\"'][^>]*>"
+                  ro_empty="${ro_open}[[:space:]]*</pre>"
+                  if ! jq -e --arg pat "$ro_open" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1 \
+                     || jq -e --arg pat "$ro_empty" '(.content? // "") | tostring | test($pat; "i")' page.json >/dev/null 2>&1; then
                     echo "::warning::The one-pager at $branch:$path has no non-empty Rule outputs section — the review's rule blocks are its evidence; marking the check errored."
                     ruleoutputs_ok=0
                   fi
