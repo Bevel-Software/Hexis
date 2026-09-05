@@ -464,15 +464,6 @@ export class WorkspaceService implements IWorkspaceService {
    * meaning the clone rolled back — drop the branch→dir mapping so the
    * next caller re-bootstraps.
    */
-  /**
-   * Whether a clone of `branch` is being created at this moment. Read by the
-   * retirement of a clone the host deleted: a bootstrap in flight means the
-   * branch exists again, so there is nothing stale to remove.
-   */
-  isBootstrapInFlight(branch: string): boolean {
-    return this.inFlightBootstraps.has(branch);
-  }
-
   private async awaitBootstrapOrEvict(branch: string): Promise<void> {
     const pending = this.inFlightBootstraps.get(branch);
     if (!pending) return;
@@ -482,6 +473,15 @@ export class WorkspaceService implements IWorkspaceService {
       this.branchDirs.delete(branch);
       throw err;
     }
+  }
+
+  /**
+   * Whether a clone of `branch` is being created at this moment. Read by the
+   * retirement of a clone the host deleted: a bootstrap in flight means the
+   * branch exists again, so there is nothing stale to remove.
+   */
+  isBootstrapInFlight(branch: string): boolean {
+    return this.inFlightBootstraps.has(branch);
   }
 
   /**
