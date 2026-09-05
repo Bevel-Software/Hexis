@@ -266,9 +266,11 @@ export class WorkspaceService implements IWorkspaceService {
    *
    * A missing root means no clones (nothing has been bootstrapped yet); any
    * other failure to read it is propagated, so a sync cannot report success
-   * over a root it could not see.
+   * over a root it could not see. One entry that cannot be probed (an ACL, a
+   * half-deleted directory) is returned with `unreadable` set rather than
+   * thrown, so it fails as one branch and not as the whole listing.
    */
-  async listClonedWorkspaces(): Promise<Array<{ id: string; branch: string }>> {
+  async listClonedWorkspaces(): Promise<Array<{ id: string; branch: string; unreadable?: string }>> {
     let entries: Array<{ name: string; isDirectory: () => boolean }>;
     try {
       entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
@@ -277,7 +279,7 @@ export class WorkspaceService implements IWorkspaceService {
       if (code === 'ENOENT' || code === 'ENOTDIR') return [];
       throw err;
     }
-    const cloned: Array<{ id: string; branch: string }> = [];
+    const cloned: Array<{ id: string; branch: string; unreadable?: string }> = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       const branch = branchForWorkspaceId(entry.name);
@@ -296,7 +298,12 @@ export class WorkspaceService implements IWorkspaceService {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException | null)?.code;
         if (code === 'ENOENT' || code === 'ENOTDIR') continue;
-        throw err;
+        cloned.push({
+          id: entry.name,
+          branch,
+          unreadable: `Could not read this branch's clone: ${redactError(err)}`,
+        });
+        continue;
       }
       // AFTER the probe, with no await in between: a bootstrap registers
       // itself before it creates `.git`, so any clone whose `.git` was found

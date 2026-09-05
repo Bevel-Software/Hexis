@@ -1,3 +1,4 @@
+import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 
 /** One configurable setting, as the server describes it. */
@@ -15,12 +16,12 @@ export interface SettingStatus {
   restartToApply: boolean;
 }
 
-/** One branch's part in a remote sync, as `POST /api/sync` reports it. */
-export interface SyncBranchOutcome {
-  branch: string;
-  outcome: 'updated' | 'up-to-date' | 'not-cloned' | 'conflict' | 'error';
-  error?: string;
-  conflictedPaths?: string[];
+/** One branch's part in a remote sync, as `POST /api/sync` reports it — the shared union, so this cannot drift from the server. */
+export type SyncBranchOutcome = BranchSyncOutcome;
+
+/** The message a failed branch carries, if its outcome has one. */
+export function syncOutcomeError(r: SyncBranchOutcome): string | undefined {
+  return r.outcome === 'conflict' || r.outcome === 'error' ? r.error : undefined;
 }
 
 /** What the most recent remote sync did — from the server's memory, so "none yet" after a restart. */

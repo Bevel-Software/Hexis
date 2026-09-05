@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { copyToClipboard } from '../../../lib/clipboard';
 import {
   saveSettings,
   syncNow,
+  syncOutcomeError,
   testConnection,
   SettingsProblems,
   type ConnectionTest,
@@ -20,24 +22,21 @@ function CopyValue({ value, label }: { value: string; label: string }) {
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
   }, []);
-  const copy = () => {
-    const done = (next: 'copied' | 'failed') => {
-      setState(next);
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => setState('idle'), 1500);
-    };
-    // The clipboard can be missing (an insecure context) or refuse; say so on
-    // the button rather than pretending.
-    const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined;
-    if (!clipboard) return done('failed');
-    clipboard.writeText(value).then(() => done('copied'), () => done('failed'));
+  const copy = async () => {
+    // `copyToClipboard` answers false for every ordinary reason a copy does
+    // not land (no secure context, no focus, no clipboard at all); the button
+    // says so rather than pretending.
+    const landed = await copyToClipboard(value);
+    setState(landed ? 'copied' : 'failed');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setState('idle'), 1500);
   };
   return (
     <div className="flex flex-wrap items-center gap-2">
       <code className="min-w-0 break-all rounded bg-surface px-2 py-1 font-mono text-meta text-ink">
         {value}
       </code>
-      <Button type="button" variant="outline" size="sm" onClick={copy} aria-label={label}>
+      <Button type="button" variant="outline" size="sm" onClick={() => void copy()} aria-label={label}>
         {state === 'copied' ? 'Copied' : state === 'failed' ? 'Couldn’t copy' : 'Copy'}
       </Button>
     </div>
@@ -47,9 +46,19 @@ function CopyValue({ value, label }: { value: string; label: string }) {
 /** "main updated, ali/x up to date" — the per-branch outcomes as one phrase. */
 function describeOutcomes(results: LastSync['results']): string {
   if (results.length === 0) return 'nothing to sync yet';
-  return results
-    .map((r) => `${r.branch} ${r.outcome === 'up-to-date' ? 'up to date' : r.outcome.replace('-', ' ')}`)
-    .join(', ');
+  const word = (r: LastSync['results'][number]): string => {
+    switch (r.outcome) {
+      case 'up-to-date':
+        return 'up to date';
+      case 'not-cloned':
+        return 'not cloned';
+      case 'remote-gone':
+        return 'deleted on the host';
+      default:
+        return r.outcome;
+    }
+  };
+  return results.map((r) => `${r.branch} ${word(r)}`).join(', ');
 }
 
 /** Copy for each setting: what it is, in the words of someone who has to fill it in. */
@@ -476,7 +485,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                   : syncResult.ok
                     ? `Synced: ${describeOutcomes(syncResult.results)}.`
                     : (syncResult.results
-                        .map((r) => r.error)
+                        .map(syncOutcomeError)
                         .filter((e): e is string => !!e)
                         .join('\n') ||
                       `Not fully synced: ${describeOutcomes(syncResult.results)}.`)}

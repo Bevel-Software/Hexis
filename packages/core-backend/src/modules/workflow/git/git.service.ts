@@ -7,6 +7,7 @@ import type {
   BranchInfo,
   CommitAttribution,
   IGitService,
+  RemoteSyncPullResult,
   PrFileStatus,
   PullRequestFile,
   ShareChangesRequest,
@@ -32,6 +33,7 @@ import {
   WorkflowValidationError,
   ProtectedBranchError,
   PullRebaseConflictError,
+  RemoteBranchGoneError,
 } from '../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -1546,119 +1548,191 @@ export class GitService implements IGitService {
     return `refs/remotes/origin/${branch}`;
   }
 
-  async headSha(workspaceId: string): Promise<string> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const { stdout } = await this.git(cwd, ['rev-parse', 'HEAD']);
-      return stdout.trim();
-    });
+  /** A commit-free tree, for diffing against a HEAD that did not exist yet. */
+  private static readonly EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+  /**
+   * The checked-out branch by its symbolic ref, which an UNBORN HEAD (a clone
+   * of an empty upstream) still has — `rev-parse --abbrev-ref HEAD` does not
+   * resolve there, so the tolerant tree reads below would never be reached.
+   */
+  private async checkedOutBranch(cwd: string): Promise<string> {
+    const { stdout } = await this.git(cwd, ['symbolic-ref', '--short', 'HEAD']);
+    return stdout.trim();
   }
 
-  async changedPathsBetween(workspaceId: string, fromSha: string, toSha: string): Promise<string[]> {
-    for (const sha of [fromSha, toSha]) {
-      if (!/^[0-9a-f]{4,64}$/i.test(sha)) throw new Error(`Invalid commit sha: ${sha}`);
+  /** `git rev-parse --verify` that answers null for a rev that does not resolve (an unborn HEAD). */
+  private async revParseOrNull(cwd: string, rev: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
+      return stdout.trim() || null;
+    } catch {
+      return null;
     }
+  }
+
+  /**
+   * Refresh `refs/remotes/origin/<branch>` for a sync, naming the one failure
+   * that is not "origin unreachable": the branch no longer exists there.
+   */
+  private async refreshRemoteBranchRefForSync(cwd: string, branch: string): Promise<string> {
+    try {
+      return await this.refreshRemoteBranchRef(cwd, branch);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/couldn't find remote ref/i.test(msg)) throw new RemoteBranchGoneError(branch);
+      throw err;
+    }
+  }
+
+  /**
+   * Rebase the checked-out branch onto `remoteRef`, turning a content
+   * conflict into the typed error the workflow layer queues recovery for.
+   * Shared by `pull` and `syncFromRemote` so the two cannot drift.
+   */
+  private async rebaseOntoRemote(cwd: string, branch: string, remoteRef: string): Promise<void> {
+    // An UNBORN HEAD (a clone of an upstream that was empty when cloned) has
+    // nothing to replay and `git rebase` refuses to start from it. Moving the
+    // branch to the remote commit is the whole operation: no tracked files
+    // exist yet, so a hard reset touches nothing anyone wrote.
+    if ((await this.revParseOrNull(cwd, 'HEAD')) === null) {
+      await this.git(cwd, ['reset', '--hard', remoteRef]);
+      return;
+    }
+    try {
+      // `--autostash` is load-bearing for the cooperative push recovery.
+      // Under save=share the working tree is *supposed* to stay clean, but
+      // in practice it can carry modified tracked artifacts (e.g. the
+      // validator regenerates a dashboard HTML on every commit) that the
+      // single-file commit didn't pick up. A rebase without it aborts
+      // outright on those — "cannot rebase: You have unstaged
+      // changes" — which is exactly the failure that strands a diverged
+      // branch in an unrecoverable loop (the retry push stays non-fast-
+      // forward forever). Autostash stashes those modifications, rebases
+      // the local commits onto origin, then reapplies them, so the retry
+      // push can fast-forward. Untracked files don't block rebase and are
+      // left untouched.
+      await this.git(cwd, ['rebase', '--autostash', remoteRef]);
+    } catch (err) {
+      // Capture the contested paths BEFORE the abort wipes the rebase
+      // state — `--diff-filter=U` lists exactly the files whose replay
+      // conflicted. Best-effort: an empty list just means this wasn't a
+      // content conflict (or the probe itself failed) and the raw error
+      // is surfaced unchanged.
+      let conflictedPaths: string[] = [];
+      try {
+        const { stdout } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U']);
+        conflictedPaths = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      } catch {
+        // fall through with an empty list
+      }
+      // A failed rebase leaves the repo in a "REBASE_HEAD" / detached-apply state,
+      // which makes every subsequent git command behave unexpectedly. Return the
+      // working tree to a clean state before surfacing the original error.
+      let abortSucceeded = true;
+      await this.git(cwd, ['rebase', '--abort']).catch(() => {
+        abortSucceeded = false;
+      });
+      if (abortSucceeded && conflictedPaths.length > 0) {
+        // Typed so the workflow layer can queue background recovery — this
+        // divergence never resolves on its own (every retry pull hits the
+        // same conflict) and the unpushed local commits are someone's saved
+        // content stuck violating save=share.
+        //
+        // Gated on the abort succeeding: a failed abort means either no
+        // rebase was ever active (the unmerged paths pre-date this pull —
+        // some earlier operation left the index broken) or the clone is in
+        // a state git itself can't unwind. Queueing recovery there would
+        // point the worker's commitFile at a repo mid-conflict, risking a
+        // commit full of conflict markers — surface the raw error instead
+        // and leave diagnosis to a human.
+        throw new PullRebaseConflictError(
+          branch,
+          conflictedPaths,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Repo-relative paths whose content differs between two commits. Rename-
+   * aware: a renamed file reports both its old and new path, so a viewer
+   * holding the OLD path learns it is gone. Caller holds the mutex.
+   */
+  private async changedPathsBetween(cwd: string, fromSha: string, toSha: string): Promise<string[]> {
+    const { stdout } = await this.git(cwd, [
+      'diff', '--name-status', '-M', '--no-color', '-z', fromSha, toSha,
+    ]);
+    const fields = stdout.split('\0');
+    const paths = new Set<string>();
+    for (let i = 0; i < fields.length; ) {
+      const status = fields[i];
+      if (!status) break;
+      if (status.startsWith('R') || status.startsWith('C')) {
+        if (fields[i + 1]) paths.add(fields[i + 1]);
+        if (fields[i + 2]) paths.add(fields[i + 2]);
+        i += 3;
+      } else {
+        if (fields[i + 1]) paths.add(fields[i + 1]);
+        i += 2;
+      }
+    }
+    return [...paths];
+  }
+
+  async syncFromRemote(workspaceId: string): Promise<RemoteSyncPullResult> {
+    // ONE mutex section for everything the sync reports about this clone.
+    // Bracketing `pull` with separate HEAD reads and a diff took the hold
+    // four times, and a save landing between any two of them was announced
+    // back to its author as a "Git sync" change with the wrong sha.
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
-      // `-M` so a rename shows as one entry; `--name-only` then prints its
-      // destination, and the source is added below so a viewer holding the
-      // OLD path learns it is gone.
-      const { stdout } = await this.git(cwd, [
-        'diff', '--name-status', '-M', '--no-color', '-z', fromSha, toSha,
-      ]);
-      const fields = stdout.split('\0');
-      const paths = new Set<string>();
-      for (let i = 0; i < fields.length; ) {
-        const status = fields[i];
-        if (!status) break;
-        if (status.startsWith('R') || status.startsWith('C')) {
-          if (fields[i + 1]) paths.add(fields[i + 1]);
-          if (fields[i + 2]) paths.add(fields[i + 2]);
-          i += 3;
-        } else {
-          if (fields[i + 1]) paths.add(fields[i + 1]);
-          i += 2;
+      const branch = await this.checkedOutBranch(cwd);
+      const before = await this.revParseOrNull(cwd, 'HEAD');
+      const treeBefore = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
+      let remoteRef: string;
+      try {
+        remoteRef = await this.refreshRemoteBranchRefForSync(cwd, branch);
+      } catch (err) {
+        // An unborn clone whose branch origin does not have either is a fresh
+        // deployment nobody has pushed to yet — nothing to sync, and nothing
+        // to retire. Only a clone that HAD the branch has lost it.
+        if (err instanceof RemoteBranchGoneError && before === null) {
+          return { before: null, after: null, treeChanged: false, changedPaths: [] };
         }
+        throw err;
       }
-      return [...paths];
+      await this.rebaseOntoRemote(cwd, branch, remoteRef);
+      this.accessControl?.invalidate(workspaceId);
+      const after = await this.revParseOrNull(cwd, 'HEAD');
+      const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
+      const treeChanged = treeAfter !== treeBefore;
+      const changedPaths =
+        treeChanged && after
+          ? await this.changedPathsBetween(cwd, before ?? GitService.EMPTY_TREE_SHA, after)
+          : [];
+      return { before, after, treeChanged, changedPaths };
     });
   }
 
   async pull(workspaceId: string): Promise<{ treeChanged: boolean }> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
+      const branch = await this.checkedOutBranch(cwd);
       // For `treeChanged` (see IGitService.pull): TREE ids, not commit ids —
       // a pull that lands only content-identical commits (an empty commit)
       // must not read as a content change. Tolerant of an unborn HEAD (a
       // clone of an empty upstream): "" before + a tree after correctly
       // reads as changed, "" both sides as not.
-      const treeBefore = await this.git(cwd, ['rev-parse', 'HEAD^{tree}'])
-        .then(({ stdout }) => stdout.trim())
-        .catch(() => '');
-      try {
-        // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
-        // `refreshRemoteBranchRef` for why both halves are load-bearing.
-        //
-        // `--autostash` is load-bearing for the cooperative push recovery.
-        // Under save=share the working tree is *supposed* to stay clean, but
-        // in practice it can carry modified tracked artifacts (e.g. the
-        // validator regenerates a dashboard HTML on every commit) that the
-        // single-file commit didn't pick up. A rebase without it aborts
-        // outright on those — "cannot rebase: You have unstaged
-        // changes" — which is exactly the failure that strands a diverged
-        // branch in an unrecoverable loop (the retry push stays non-fast-
-        // forward forever). Autostash stashes those modifications, rebases
-        // the local commits onto origin, then reapplies them, so the retry
-        // push can fast-forward. Untracked files don't block rebase and are
-        // left untouched.
-        const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
-        await this.git(cwd, ['rebase', '--autostash', remoteRef]);
-      } catch (err) {
-        // Capture the contested paths BEFORE the abort wipes the rebase
-        // state — `--diff-filter=U` lists exactly the files whose replay
-        // conflicted. Best-effort: an empty list just means this wasn't a
-        // content conflict (or the probe itself failed) and the raw error
-        // is surfaced unchanged.
-        let conflictedPaths: string[] = [];
-        try {
-          const { stdout } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U']);
-          conflictedPaths = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-        } catch {
-          // fall through with an empty list
-        }
-        // A failed rebase leaves the repo in a "REBASE_HEAD" / detached-apply state,
-        // which makes every subsequent git command behave unexpectedly. Return the
-        // working tree to a clean state before surfacing the original error.
-        let abortSucceeded = true;
-        await this.git(cwd, ['rebase', '--abort']).catch(() => {
-          abortSucceeded = false;
-        });
-        if (abortSucceeded && conflictedPaths.length > 0) {
-          // Typed so the workflow layer can queue background recovery — this
-          // divergence never resolves on its own (every retry pull hits the
-          // same conflict) and the unpushed local commits are someone's saved
-          // content stuck violating save=share.
-          //
-          // Gated on the abort succeeding: a failed abort means either no
-          // rebase was ever active (the unmerged paths pre-date this pull —
-          // some earlier operation left the index broken) or the clone is in
-          // a state git itself can't unwind. Queueing recovery there would
-          // point the worker's commitFile at a repo mid-conflict, risking a
-          // commit full of conflict markers — surface the raw error instead
-          // and leave diagnosis to a human.
-          throw new PullRebaseConflictError(
-            branch,
-            conflictedPaths,
-            err instanceof Error ? err.message : String(err),
-          );
-        }
-        throw err;
-      }
+      const treeBefore = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
+      // Refresh WITHOUT `git pull`, and without touching `FETCH_HEAD` — see
+      // `refreshRemoteBranchRef` for why both halves are load-bearing.
+      const remoteRef = await this.refreshRemoteBranchRef(cwd, branch);
+      await this.rebaseOntoRemote(cwd, branch, remoteRef);
       this.accessControl?.invalidate(workspaceId);
-      const treeAfter = await this.git(cwd, ['rev-parse', 'HEAD^{tree}'])
-        .then(({ stdout }) => stdout.trim())
-        .catch(() => '');
+      const treeAfter = (await this.revParseOrNull(cwd, 'HEAD^{tree}')) ?? '';
       return { treeChanged: treeAfter !== treeBefore };
     });
   }

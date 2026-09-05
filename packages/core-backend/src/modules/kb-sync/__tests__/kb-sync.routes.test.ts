@@ -278,3 +278,20 @@ describe('POST /api/sync — the response marker', () => {
     expect((await post(down.base)).headers.get('x-hexis-sync')).toBe('result');
   });
 });
+
+describe('POST /api/Sync — an odd-cased URL', () => {
+  it('is matched by Express and by the raw-body carve-out alike, so it works exactly like the lower-case one', async () => {
+    const { base, sync } = await mount({ globalJson: true });
+    const oddCase = base.replace('/api/sync', '/api/Sync');
+    const body = '{"ref":"refs/heads/main"}';
+    const sig = 'sha256=' + createHmac('sha256', SECRET).update(body).digest('hex');
+    const res = await post(`${oddCase}/main`, {
+      headers: { 'x-hub-signature-256': sig, 'content-type': 'application/json' },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(sync).toHaveBeenCalledWith(expect.objectContaining({ branches: ['main'] }));
+    expect(isSyncRawBodyPath('/api/Sync')).toBe(true);
+    expect(isSyncRawBodyPath('/API/SYNC/main')).toBe(true);
+  });
+});

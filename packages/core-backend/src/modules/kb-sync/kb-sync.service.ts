@@ -101,21 +101,42 @@ export class KbSyncService implements IKbSyncService {
         ? known.map((w) => ({ branch: w.branch, id: w.id }))
         : request.branches.map((branch) => ({ branch, id: byBranch.get(branch) ?? null }));
 
+    const unreadable = new Map(known.filter((w) => w.unreadable).map((w) => [w.branch, w.unreadable!]));
+
     const results: BranchSyncOutcome[] = [];
     for (const { branch, id } of targets) {
       if (id === null) {
         results.push({ branch, outcome: 'not-cloned' });
         continue;
       }
+      const cannotRead = unreadable.get(branch);
+      if (cannotRead) {
+        results.push({ branch, outcome: 'error', error: cannotRead });
+        continue;
+      }
+      let outcome: BranchSyncOutcome;
       try {
-        results.push(await this.workflow.syncWorkspaceFromRemote(id));
+        outcome = await this.workflow.syncWorkspaceFromRemote(id);
       } catch (err) {
         // The workflow step promises outcomes, not throws — but one broken
         // clone must never take the other branches, the sweep, or every
         // coalesced caller down with it, so the promise is enforced here too.
         const message = sanitizeError(err);
         console.error(`[sync] unexpected failure syncing "${branch}": ${message}`);
-        results.push({ branch, outcome: 'error', error: message });
+        outcome = { branch, outcome: 'error', error: message };
+      }
+      results.push(outcome);
+      if (outcome.outcome === 'remote-gone') {
+        // The host deleted the branch. Left in place, the stale clone would
+        // fail its fetch on every following full sync — and a webhook host
+        // disables a subscription that keeps failing. Best-effort, like the
+        // orphan sweep the branch listing already runs.
+        try {
+          await this.workspaces.deleteWorkspace(id);
+          console.log(`[sync] removed the clone of "${branch}" — deleted on the host`);
+        } catch (err) {
+          console.warn(`[sync] could not remove the clone of "${branch}":`, sanitizeError(err));
+        }
       }
     }
 
@@ -130,7 +151,11 @@ export class KbSyncService implements IKbSyncService {
     }
 
     const clean = results.every(
-      (r) => r.outcome === 'updated' || r.outcome === 'up-to-date' || r.outcome === 'not-cloned',
+      (r) =>
+        r.outcome === 'updated' ||
+        r.outcome === 'up-to-date' ||
+        r.outcome === 'not-cloned' ||
+        r.outcome === 'remote-gone',
     );
     const result: SyncResult = {
       status: clean ? 'synced' : 'partial',

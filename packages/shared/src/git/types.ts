@@ -68,6 +68,18 @@ export interface ValidationReport {
   rawOutput: string;
 }
 
+/** What `IGitService.syncFromRemote` observed under its one hold of the clone. */
+export interface RemoteSyncPullResult {
+  /** HEAD before the pull; null when the clone had no commits yet. */
+  before: string | null;
+  /** HEAD after the pull; null only when origin is still empty too. */
+  after: string | null;
+  /** Whether the working tree's CONTENT differs — tree ids, not commit ids. */
+  treeChanged: boolean;
+  /** Repo-relative paths whose content changed; empty unless `treeChanged`. */
+  changedPaths: string[];
+}
+
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
   listBranches(workspaceId: string, opts?: { freshFetch?: boolean }): Promise<BranchInfo[]>;
@@ -141,14 +153,18 @@ export interface IGitService {
    * drop every catalog cache and reload every attached browser for nothing.
    */
   pull(workspaceId: string): Promise<{ treeChanged: boolean }>;
-  /** The sha the clone's HEAD points at. */
-  headSha(workspaceId: string): Promise<string>;
   /**
-   * Repo-relative paths whose content differs between two commits — what a
-   * pull that moved HEAD from `fromSha` to `toSha` changed on disk. Rename-
-   * aware: a renamed file reports both its old and new path.
+   * The remote sync's pull, observed as ONE serialized operation: where HEAD
+   * was, the pull, where HEAD is, and which repo-relative paths changed
+   * (rename-aware: both ends). `pull` bracketed by separate reads would let a
+   * concurrent save land between them and be announced as the sync's own.
+   *
+   * Tolerant of an unborn HEAD (a clone of an empty upstream): `before` is
+   * null, and paths are diffed against the empty tree. Throws the typed
+   * pull-conflict error like `pull`, and a typed "remote branch gone" error
+   * when origin no longer has the branch at all.
    */
-  changedPathsBetween(workspaceId: string, fromSha: string, toSha: string): Promise<string[]>;
+  syncFromRemote(workspaceId: string): Promise<RemoteSyncPullResult>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set

@@ -754,7 +754,7 @@ describe('SetupScreen — remote sync panel', () => {
       at: Date.UTC(2026, 8, 4, 12, 0, 0),
       by: 'github-signature',
       status: 'synced' as const,
-      results: [{ branch: 'main', outcome: 'updated' as const }],
+      results: [{ branch: 'main', outcome: 'updated' as const, from: 'aaa', to: 'bbb' }],
     },
   };
 

@@ -41,6 +41,7 @@ import type {
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
+  RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { and, eq, or } from 'drizzle-orm';
@@ -66,6 +67,7 @@ import {
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
+  RemoteBranchGoneError,
   WorkflowDomainError,
   WorkflowValidationError,
 } from '../../shared/domain-errors.js';
@@ -527,57 +529,59 @@ export class WorkflowService implements IWorkflowService {
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const id = workspaceIdForBranch(branch);
+    // Two spellings of one workspace id are in circulation — the encoded
+    // directory name (`ali%2Fx`, what the clone listing yields) and the
+    // Express-decoded form (`ali/x`, what every HTTP route hands the git
+    // layer) — and the git layer's mutex keys on the raw string. Speaking the
+    // routes' spelling to git is what puts a webhook's rebase in the same
+    // queue as the author's concurrent save on a slashed branch; the event
+    // bus gets the encoded form, which every SSE consumer canonicalises.
+    const gitId = branch;
     // Every failure below is an OUTCOME, never a throw: the caller runs this
     // over many clones, and one broken clone must not abort the others.
-    let before: string;
+    let pulled: RemoteSyncPullResult;
     try {
-      before = await this.git.headSha(workspaceId);
+      pulled = await this.git.syncFromRemote(gitId);
     } catch (err) {
-      const message = sanitizeError(err);
-      console.warn(`[sync] could not read HEAD for branch "${branch}": ${message}`);
-      this.noteGitSyncFailed(workspaceId, branch, err);
-      return { branch, outcome: 'error', error: message };
-    }
-    // Not `pullWorkspace`: that announces the default branch's tree to the
-    // catalogs, which is one of the things a sync owes, but a sync also owes
-    // every open browser on ANY branch its tree and its files, so it does the
-    // whole announcement itself below — from the same `treeChanged` verdict.
-    let treeChanged: boolean;
-    try {
-      ({ treeChanged } = await this.git.pull(workspaceId));
-    } catch (err) {
+      if (err instanceof RemoteBranchGoneError) {
+        // Not a failure: the host deleted the branch, so there is nothing to
+        // sync and the caller retires the stale clone. No banner — nobody is
+        // editing a branch that no longer exists.
+        console.log(`[sync] branch "${branch}" no longer exists on the host`);
+        return { branch, outcome: 'remote-gone' };
+      }
       if (err instanceof PullRebaseConflictError) {
         // Same path as `updateFromRemote`: the rebase was aborted inside
-        // `pull` (the clone is exactly what it was) and the divergence goes
+        // the pull (the clone is exactly what it was) and the divergence goes
         // to the retry → recovery-agent → escalate ladder, attributed to the
         // recovery bot since no person triggered this. It is still reported
         // as a conflict because it is not resolved at request time — the
         // caller's retry, or the ladder, settles it; the banner clears on the
         // next clean pull or push.
-        await this.queuePullConflictRecovery(workspaceId, err);
+        await this.queuePullConflictRecovery(gitId, err);
         const message = syncConflictMessage(branch, err.conflictedPaths);
         console.warn(`[sync] ${message}`);
-        this.noteGitSyncFailed(workspaceId, branch, err, { paths: err.conflictedPaths, message });
+        this.noteGitSyncFailed(gitId, branch, err, { paths: err.conflictedPaths, message });
         return { branch, outcome: 'conflict', conflictedPaths: err.conflictedPaths, error: message };
       }
       const message = sanitizeError(err);
       console.warn(`[sync] pull failed for branch "${branch}": ${message}`);
-      this.noteGitSyncFailed(workspaceId, branch, err);
+      this.noteGitSyncFailed(gitId, branch, err);
       return { branch, outcome: 'error', error: message };
     }
     // A clean pull is proof origin is reachable and this clone rebases onto
     // it — the condition a `git-sync-failed` banner on this branch was
     // waiting for, whether a sync or a push raised it.
-    this.noteGitSyncOk(workspaceId, branch);
-    let after: string;
+    this.noteGitSyncOk(gitId, branch);
+    const { before, after, treeChanged, changedPaths } = pulled;
+    // Origin still empty (an unborn clone of an unborn upstream), or nothing new.
+    if (after === null || after === before) return { branch, outcome: 'up-to-date', to: after ?? '' };
+    // HEAD moved, so the branch reports `updated` — but the announcement
+    // keys on the pull's own verdict about CONTENT: commits that left the
+    // tree identical (an empty commit, a rebase replayed to the same
+    // result) are nothing for a browser to refetch or a catalog to drop.
+    if (!treeChanged) return { branch, outcome: 'updated', from: before, to: after };
     try {
-      after = await this.git.headSha(workspaceId);
-      if (after === before) return { branch, outcome: 'up-to-date', to: after };
-      // HEAD moved, so the branch reports `updated` — but the announcement
-      // keys on the pull's own verdict about CONTENT: commits that left the
-      // tree identical (an empty commit, a rebase replayed to the same
-      // result) are nothing for a browser to refetch or a catalog to drop.
-      if (!treeChanged) return { branch, outcome: 'updated', from: before, to: after };
       // Announce the new tree. The tree event alone already refreshes every
       // open file explorer and, on the default branch, drops the skill / tool /
       // plugin catalogues (`catalog-cache-invalidation.ts`); the CR list
@@ -585,20 +589,14 @@ export class WorkflowService implements IWorkflowService {
       // that too.
       this.prs.invalidateListCache();
       this.events?.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
-    } catch (err) {
-      // The pull landed, so origin is fine and no banner is raised — but the
-      // caller must still hear that this branch's announcement did not happen.
-      const message = sanitizeError(err);
-      console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
-      return { branch, outcome: 'error', error: message };
-    }
-    // Per-file events so an open tab on a file the host rewrote refetches
-    // instead of showing stale bytes until its next tree refresh. Best-effort
-    // and capped: the sync itself succeeded whatever happens here.
-    try {
-      const paths = await this.git.changedPathsBetween(workspaceId, before, after);
-      if (paths.length <= WorkflowService.SYNC_FILE_EVENT_CAP) {
-        for (const p of paths) {
+      // Per-file events so an open tab on a file the host rewrote refetches
+      // instead of showing stale bytes until its next tree refresh. The paths
+      // were observed under the same hold as the pull, so they are exactly
+      // this sync's — never a save that landed alongside. Capped: a bulk
+      // import would otherwise fan hundreds of events out to say what one
+      // refresh says.
+      if (changedPaths.length <= WorkflowService.SYNC_FILE_EVENT_CAP) {
+        for (const p of changedPaths) {
           this.events?.emit({
             kind: 'file-changed',
             workspaceId: id,
@@ -611,7 +609,11 @@ export class WorkflowService implements IWorkflowService {
         }
       }
     } catch (err) {
-      console.warn(`[sync] could not list changed paths for "${branch}":`, sanitizeError(err));
+      // The pull landed, so origin is fine and no banner is raised — but the
+      // caller must still hear that this branch's announcement did not happen.
+      const message = sanitizeError(err);
+      console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
+      return { branch, outcome: 'error', error: message };
     }
     return { branch, outcome: 'updated', from: before, to: after };
   }

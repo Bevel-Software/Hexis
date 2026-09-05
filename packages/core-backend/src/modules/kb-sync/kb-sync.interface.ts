@@ -65,5 +65,12 @@ export interface SyncWorkflowPort {
  * find them.
  */
 export interface SyncWorkspacePort {
-  listClonedWorkspaces(): Promise<Array<{ id: string; branch: string }>>;
+  /**
+   * `unreadable` names a clone the listing could see but not probe (an ACL,
+   * a half-deleted directory); the sync reports it as that branch's error
+   * rather than letting one bad directory fail every other branch.
+   */
+  listClonedWorkspaces(): Promise<Array<{ id: string; branch: string; unreadable?: string }>>;
+  /** Remove a clone whose branch no longer exists on the host. */
+  deleteWorkspace(workspaceId: string): Promise<void>;
 }

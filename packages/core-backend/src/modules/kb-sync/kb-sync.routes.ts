@@ -69,7 +69,12 @@ export const SYNC_RESPONSE_MARKER = 'result';
  * one — an exact-path exemption used to protect only the latter.
  */
 export function isSyncRawBodyPath(path: string): boolean {
-  return path === '/api/sync' || path.startsWith('/api/sync/');
+  // Case-insensitive, because Express routing is: `/api/Sync` reaches this
+  // router, and if this check said no the global parser would eat the body
+  // first — a signed call would 401 and a bearer call would silently sync
+  // every clone instead of the one in the URL.
+  const lower = path.toLowerCase();
+  return lower === '/api/sync' || lower.startsWith('/api/sync/');
 }
 
 export function httpStatusFor(result: SyncResult): 200 | 409 | 503 {

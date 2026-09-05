@@ -11,9 +11,12 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function workspaces(branches: string[]): SyncWorkspacePort {
+function workspaces(branches: string[], deleted: string[] = []): SyncWorkspacePort {
   return {
     listClonedWorkspaces: async () => branches.map((branch) => ({ id: encodeURIComponent(branch), branch })),
+    deleteWorkspace: async (id: string) => {
+      deleted.push(id);
+    },
   };
 }
 
@@ -189,5 +192,44 @@ describe('KbSyncService — a throwing branch step', () => {
     expect(r.results[1]).toEqual(updated('ali/x'));
     expect(r.changeRequests.closedDeletedBranch).toBe(1);
     expect(svc.lastSync()?.status).toBe('partial');
+  });
+});
+
+describe('KbSyncService — clones the host no longer has, and clones that cannot be read', () => {
+  it('a remote-gone branch is retired, counts as clean, and does not stop the others', async () => {
+    const deleted: string[] = [];
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string): Promise<BranchSyncOutcome> =>
+        id === 'ali%2Fx' ? { branch: 'ali/x', outcome: 'remote-gone' } : updated(decodeURIComponent(id)),
+      ),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 1),
+    };
+    const svc = new KbSyncService(workflow, workspaces(['ali/x', 'main'], deleted));
+    const r = await svc.sync({ branches: 'all' });
+    expect(r.status).toBe('synced');
+    expect(r.results).toEqual([{ branch: 'ali/x', outcome: 'remote-gone' }, updated('main')]);
+    expect(deleted).toEqual(['ali%2Fx']);
+  });
+
+  it('a clone that could not be read is that branch’s error, not everyone’s', async () => {
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => updated(decodeURIComponent(id))),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+    };
+    const port: SyncWorkspacePort = {
+      listClonedWorkspaces: async () => [
+        { id: 'main', branch: 'main' },
+        { id: 'juan%2Fy', branch: 'juan/y', unreadable: "Could not read this branch's clone: EPERM" },
+      ],
+      deleteWorkspace: async () => {},
+    };
+    const svc = new KbSyncService(workflow, port);
+    const r = await svc.sync({ branches: 'all' });
+    expect(r.status).toBe('partial');
+    expect(r.results).toEqual([
+      updated('main'),
+      { branch: 'juan/y', outcome: 'error', error: "Could not read this branch's clone: EPERM" },
+    ]);
+    expect(workflow.syncWorkspaceFromRemote).toHaveBeenCalledTimes(1);
   });
 });

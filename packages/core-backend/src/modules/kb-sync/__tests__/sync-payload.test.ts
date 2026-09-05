@@ -114,3 +114,35 @@ describe('parseSyncPayload — hostile shapes', () => {
     });
   });
 });
+
+describe('parseSyncPayload — deletions', () => {
+  it('a GitHub branch deletion names nothing to sync', () => {
+    expect(parseSyncPayload({ ref: 'refs/heads/ali/x', deleted: true, after: '0'.repeat(40) })).toEqual({
+      source: 'github',
+      branches: [],
+      invalid: [],
+    });
+  });
+
+  it('an Azure DevOps deletion (new object id all zeros) is skipped; a real update beside it is kept', () => {
+    expect(
+      parseSyncPayload({
+        eventType: 'git.push',
+        resource: {
+          refUpdates: [
+            { name: 'refs/heads/ali/x', oldObjectId: 'a'.repeat(40), newObjectId: '0'.repeat(40) },
+            { name: 'refs/heads/main', oldObjectId: 'b'.repeat(40), newObjectId: 'c'.repeat(40) },
+          ],
+        },
+      }),
+    ).toEqual({ source: 'azure-devops', branches: ['main'], invalid: [] });
+  });
+
+  it('a GitLab branch deletion (after all zeros) names nothing to sync', () => {
+    expect(parseSyncPayload({ object_kind: 'push', ref: 'refs/heads/ali/x', after: '0'.repeat(40) })).toEqual({
+      source: 'gitlab',
+      branches: [],
+      invalid: [],
+    });
+  });
+});

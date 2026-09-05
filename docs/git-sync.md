@@ -67,7 +67,9 @@ webhook never fails because of its payload shape.
 
 Other outcomes: `up-to-date` (origin had nothing new), `not-cloned` (Hexis
 has no clone of that branch yet — it clones one the first time someone
-opens it, so there is nothing to refresh), `conflict` and `error` (below).
+opens it, so there is nothing to refresh), `remote-gone` (the branch was
+deleted on the host; Hexis removes its stale clone), `conflict` and `error`
+(below). A push that deletes a branch names nothing to sync.
 
 | Status | Meaning | Retry? |
 | --- | --- | --- |
