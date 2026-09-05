@@ -1,5 +1,5 @@
-import { Navigate, useParams, useSearchParams } from 'react-router-dom';
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useLibrary } from '../state/library-data';
 import { SkillPage } from '../components/skill-page/SkillPage';
@@ -8,9 +8,10 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
 
 /**
  * The library page behind a canonical workspace URL —
- * `/workspace/<default>/<kbDir>/Plugins/<plugin>/<...>` — rendered INSIDE the
- * same `LibraryLayout` route tree as every other library page, so the sidebar
- * is the one the reader already had and nothing remounts on the way in.
+ * `/workspace/<default>/<kbDir>/Plugins/<plugin>/<...>` or
+ * `/workspace/<default>/<kbDir>/Skills/<...>` — rendered INSIDE the same
+ * `LibraryLayout` route tree as every other library page, so the sidebar is
+ * the one the reader already had and nothing remounts on the way in.
  *
  * Resolution is STRUCTURAL, not a catalog lookup: under `Plugins/<plugin>/`, a
  * `*.tool` file is a tool page, the plugin's `mcp.json` is a tool page too
@@ -30,6 +31,7 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
 export function WorkspaceItemRoute() {
   const params = useParams<{ branch: string; '*': string }>();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const splat = params['*'] ?? '';
   const branch = safeDecode(params.branch ?? '');
   const { kbDirName } = useWorkspace();
@@ -38,19 +40,13 @@ export function WorkspaceItemRoute() {
   // Shape re-validation: the route pattern (`:branch/*`) is broader than the
   // shape the shell dispatches here, and a stray URL must not read as a page.
   const segments = splat.split('/').filter(Boolean).map(safeDecode);
-  if (branch !== DEFAULT_BRANCH || segments[1] !== PLUGINS_DIR || segments.length < 3) {
+  const kbRoot = segments[1];
+  if (branch !== DEFAULT_BRANCH || (kbRoot !== PLUGINS_DIR && kbRoot !== SKILLS_DIR) || segments.length < 3) {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
   if (kbDirName !== null && segments[0] !== kbDirName) {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
-
-  const [, , plugin, ...tail] = segments;
-  const last = tail[tail.length - 1];
-  if (!plugin || !last) {
-    return <Navigate to={LIBRARY_ROOT} replace />;
-  }
-  const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
 
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the
@@ -62,6 +58,51 @@ export function WorkspaceItemRoute() {
   const skillPage = (name: string, activeFile: string, provisional: boolean) => (
     <SkillPage key={name} name={name} activeFile={activeFile} provisional={provisional} />
   );
+
+  // The shared-skills root holds skills and the scope folders that own them,
+  // nothing else with a page: no plugin, no tools. The same evidence rules as
+  // below, with the two plugin destinations replaced — a SCOPE folder has no
+  // page of its own (the sidebar's tree is where it is browsed), and a file
+  // filed directly in a scope (its access.md, a stray note) opens as the plain
+  // file it is, in the pane workspace.
+  if (kbRoot === SKILLS_DIR) {
+    const rest = segments.slice(2);
+    const last = rest[rest.length - 1]!;
+    const repoRel = `${SKILLS_DIR}/${rest.join('/')}`;
+    const owner = deepestSkillOwning(data.items, repoRel);
+    if (owner) {
+      const file = repoRel.slice(owner.path.length + 1);
+      return skillPage(owner.id, file || 'SKILL.md', false);
+    }
+    if (last === 'SKILL.md' && rest.length >= 2) {
+      return skillPage(rest[rest.length - 2]!, 'SKILL.md', true);
+    }
+    if (!hasExtension(last) && containsCatalogSkill(data.items, repoRel)) {
+      return <Navigate to={LIBRARY_ROOT} replace />;
+    }
+    const parentRel = repoRel.slice(0, repoRel.length - last.length - 1);
+    if (hasExtension(last) && (rest.length === 1 || containsCatalogSkill(data.items, parentRel))) {
+      // Router STATE, not a different URL: the shell reads `rawFile` to step
+      // past the shape rule into the pane workspace, and a shared link can
+      // never carry state — so nobody lands on the raw view by accident.
+      // Once asked, hold still: the shell is swapping surfaces on that state,
+      // and asking again from here would be a navigation loop.
+      const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
+      if (rawRequested) return null;
+      return <Navigate to={`${location.pathname}${location.search}`} state={{ rawFile: true }} replace />;
+    }
+    if (data.loading) return null;
+    return hasExtension(last)
+      ? skillPage(rest[rest.length - 2]!, last, true)
+      : skillPage(last, 'SKILL.md', true);
+  }
+
+  const [, , plugin, ...tail] = segments;
+  const last = tail[tail.length - 1];
+  if (!plugin || !last) {
+    return <Navigate to={LIBRARY_ROOT} replace />;
+  }
+  const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
 
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
   // ANY depth below `Plugins/` (`walkFiles` over the whole tree), so a manual

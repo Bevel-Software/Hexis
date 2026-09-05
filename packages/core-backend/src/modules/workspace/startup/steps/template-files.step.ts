@@ -217,7 +217,7 @@ export class TemplateFilesStep implements OnServerStart {
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way.
       if (rel === IGNORE_FILENAME) {
-        content = withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`);
+        content = withIgnorePattern(content, 'AGENTS.md');
       }
       branch.write(rel, content);
       added.push(rel);
@@ -235,13 +235,16 @@ export class TemplateFilesStep implements OnServerStart {
     // the operator explicitly choosing to SHOW the file, and hiding it is a
     // default this step provides, not a mandate it re-imposes every boot.
     //
-    // The shared-skills root rides the same merge: it is the Library's, like
-    // `Plugins/`, and a KB whose ignore file predates it would show `Skills/`
-    // in the Knowledge tree and the agent view. Spelled with the CONFIGURED
-    // root name, since a deployment may have renamed it. ONE read-modify-
-    // write for both patterns: two merges would each read the on-disk file
-    // and the second declared write would drop the first's line.
-    added.push(...(await mergeIgnorePatterns(repoDir, branch, ['AGENTS.md', `${SKILLS_DIR}/`])));
+    // The shared-skills root goes the OTHER way. An earlier release hid it
+    // like `Plugins/`; the Skills & Tools sidebar now renders it as a file
+    // tree read from the workspace tree, which the ignore file filters — so a
+    // KB still carrying that rule would show an empty Skills section. The
+    // line that release appended (and its comment) comes out; the Knowledge
+    // explorer never rendered the root and still does not. Spelled with the
+    // CONFIGURED root name, since a deployment may have renamed it. ONE
+    // read-modify-write for both rules: two passes would each read the
+    // on-disk file and the second declared write would lose the first's.
+    added.push(...(await reconcileIgnoreRules(repoDir, branch, { add: ['AGENTS.md'], drop: [`${SKILLS_DIR}/`] })));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
@@ -338,33 +341,72 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
 }
 
 /**
- * Ensure `.bevelignore` carries every `pattern`, declaring the appended content when
- * absent. Returns the paths changed, for the note.
+ * Reconcile the platform's OWN rules in `.bevelignore`: every `add` pattern
+ * guaranteed present as a line, every `drop` pattern taken out. Returns the
+ * paths changed, for the note.
  *
- * APPENDS — never rewrites. The file is the operator's, and every rule
- * already in it is theirs to keep; this adds one line under a comment saying
- * where it came from. Absent file, or a file that already lists the pattern,
- * is a no-op — an absent file means the template's copy (declared in the same
- * step) arrives with the pattern in it.
+ * Never rewrites the rest. The file is the operator's, and every rule already
+ * in it is theirs to keep: adding puts one line under a comment saying where
+ * it came from, and dropping removes exactly the line (and the comment) an
+ * earlier release put there. Absent file is a no-op — it means the template's
+ * copy (declared in the same step) arrives with the right rules in it.
  *
  * Matched line-wise rather than by substring: a rule for `Plugins/AGENTS.md`
  * is not a rule for the root `AGENTS.md`, and treating it as one would leave
  * the mismatch this exists to close.
  */
-async function mergeIgnorePatterns(repoDir: string, branch: KbBranch, patterns: string[]): Promise<string[]> {
+async function reconcileIgnoreRules(
+  repoDir: string,
+  branch: KbBranch,
+  rules: { add: string[]; drop: string[] },
+): Promise<string[]> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
   } catch {
     // No ignore file — the copy declared from the template arrives with the
-    // patterns in it (guaranteed at declaration time, see the required-files
-    // loop above).
+    // right rules in it (guaranteed at declaration time, see the
+    // required-files loop above).
     return [];
   }
-  const merged = patterns.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
+  const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
+  const merged = rules.drop.reduce((text, pattern) => withoutIgnorePattern(text, pattern), added);
   if (merged === current) return [];
   branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];
+}
+
+/** The comment `withIgnorePattern` writes above a line it appends. */
+const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
+
+/** The template line an earlier release shipped above the shared-skills rule. */
+function legacySkillsRuleComment(): string {
+  return `# The shared-skills root is rendered by the Skills & Tools app, like ${PLUGINS_DIR}/.`;
+}
+
+/**
+ * `text` without any line equal to `pattern` — and without the platform's
+ * own comment directly above such a line (the one `withIgnorePattern` writes,
+ * or the template line an earlier release shipped), plus the blank line that
+ * opened the appended block. The rule leaves the way it came in; nothing else
+ * moves. A `!pattern` negation is the operator's and stays.
+ */
+function withoutIgnorePattern(text: string, pattern: string): string {
+  const lines = text.split('\n');
+  if (!lines.some((l) => l.trim() === pattern)) return text;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (line.trim() !== pattern) {
+      kept.push(line);
+      continue;
+    }
+    const above = kept[kept.length - 1]?.trim();
+    if (above === PLATFORM_RULE_COMMENT || above === legacySkillsRuleComment()) {
+      kept.pop();
+      if (above === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
+    }
+  }
+  return kept.join('\n');
 }
 
 /**
