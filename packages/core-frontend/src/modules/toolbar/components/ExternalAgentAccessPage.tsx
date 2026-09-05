@@ -610,7 +610,7 @@ export function ExternalAgentAccessPage() {
                 <div className="text-xs font-medium text-ink mb-1">
                   Skills as native plugins — the marketplace
                 </div>
-                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
+                <p className="text-meta text-ink-muted mb-1 leading-snug">
                   Every skill you may read, compiled into a plugin marketplace served as a git
                   remote. One install brings all of it; a later update fetches what changed.
                   The key stays in the URL because Claude Code refreshes marketplaces without
@@ -621,10 +621,10 @@ export function ExternalAgentAccessPage() {
                   aria-label="Claude Code marketplace command"
                   value={marketplaceCommands(reveal.plaintext).claude}
                   rows={2}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
-                <p className="text-[11px] text-ink-muted mt-2 mb-1 leading-snug">
+                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
                   Codex installs every plugin on add:
                 </p>
                 <textarea
@@ -632,10 +632,10 @@ export function ExternalAgentAccessPage() {
                   aria-label="Codex marketplace command"
                   value={marketplaceCommands(reveal.plaintext).codex}
                   rows={2}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
-                <p className="text-[11px] text-ink-muted mt-2 mb-1 leading-snug">
+                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
                   Any other agent, through the skills CLI:
                 </p>
                 <textarea
@@ -643,7 +643,7 @@ export function ExternalAgentAccessPage() {
                   aria-label="skills CLI command"
                   value={marketplaceCommands(reveal.plaintext).skills}
                   rows={2}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>
