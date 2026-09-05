@@ -12,7 +12,7 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { NativePluginSource } from './discovery/native.source.js';
+import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -58,7 +58,7 @@ export class PluginIndexService implements IPluginIndexService {
      */
     private readonly links?: PluginLinkIndex,
     /** Where plugins come from — native manifests unless a dialect is configured. */
-    private readonly source: PluginSource = new NativePluginSource(),
+    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }

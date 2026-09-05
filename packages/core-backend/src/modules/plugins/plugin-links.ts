@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { DEFAULT_BRANCH, isPersonalPluginFolder, pluginOfPath, skillUnderRoot } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, skillUnderRoot } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -8,7 +8,7 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import { PLUGIN_TOKEN_PREFIX } from '../access-model/access-grammar.js';
 import type { PluginMembership } from './plugins.contract.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { NativePluginSource } from './discovery/native.source.js';
+import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -65,7 +65,7 @@ export class PluginLinkIndex {
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
     now: () => number = Date.now,
-    private readonly source: PluginSource = new NativePluginSource(),
+    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -111,17 +111,20 @@ export class PluginLinkIndex {
       bySkill.set(skillPath, list);
     };
 
-    // Inline skills: the folder the path sits in. Personal folders are places,
-    // not plugins — their skills belong to nobody's plugin.
-    for (const s of skills) {
-      const folder = pluginOfPath(s.path);
-      if (folder !== null && !isPersonalPluginFolder(folder)) {
-        add(s.path, { name: folder, linked: false, granted: true });
-      }
-    }
-
     const discovered = await this.source.discover(kbRoot);
     for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+
+    // Inline skills: the ones sitting INSIDE a plugin's folder, matched by
+    // folder prefix (a plugin may sit at any depth, so the second path
+    // segment says nothing). Personal folders are places, not plugins —
+    // their skills belong to nobody's plugin.
+    const ownerOf = (skillPath: string) =>
+      discovered.plugins.find((p) => !p.personal && skillPath.startsWith(`${p.folder}/`));
+    for (const s of skills) {
+      const owner = ownerOf(s.path);
+      if (owner) add(s.path, { name: owner.name, linked: false, granted: true });
+    }
+
     for (const plugin of discovered.plugins) {
       if (plugin.personal) continue;
       const roots = plugin.linkedRoots;
@@ -145,7 +148,7 @@ export class PluginLinkIndex {
       for (const skillPath of linkedSkills) {
         // A skill that also sits INSIDE this plugin folder is inline, and its
         // inline membership already stands.
-        if (pluginOfPath(skillPath) === plugin.name) continue;
+        if (skillPath.startsWith(`${plugin.folder}/`)) continue;
         // An unmanaged (dialect) link is a plain reference: nothing to grant,
         // nothing to repair — the skill's own scope decides who reads it.
         const granted = plugin.linksAreManaged ? await this.isGranted(wsId, skillPath, token) : true;

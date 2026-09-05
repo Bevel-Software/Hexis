@@ -18,7 +18,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
-import { NativePluginSource } from '../plugins/discovery/native.source.js';
+import { KbPluginSource } from '../plugins/discovery/kb-plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -151,7 +151,7 @@ export class ToolManualService implements IToolManualService {
     private readonly kbDirName: string,
     now: () => number = Date.now,
     /** Where plugins (and their MCP servers) come from — native manifests unless a dialect is configured. */
-    private readonly source: PluginSource = new NativePluginSource(),
+    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }

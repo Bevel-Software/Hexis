@@ -244,6 +244,17 @@ export class PluginLinksService {
         { kind: 'read-only-links' },
       );
     }
+    if (links.folder !== `${PLUGINS_DIR}/${trimmed}`) {
+      // The plugin principal (`plugin/<Name>/read`) is synthesised for folders
+      // DIRECTLY under the plugins root; a native plugin nested deeper reads
+      // and compiles like any other, but a grant naming it would resolve to
+      // nobody — so linking through hexis stops here rather than share nothing.
+      throw new PluginLinkError(
+        `${trimmed} sits at ${links.folder}; only plugins directly under ${PLUGINS_DIR}/ can link skills through hexis.`,
+        409,
+        { kind: 'nested-plugin' },
+      );
+    }
     return trimmed;
   }
 

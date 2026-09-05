@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
-import { BundlePluginSource } from '../bundle.source.js';
+import { KbPluginSource } from '../kb-plugin-source.js';
 
 /**
  * The customer's tree, in their own root names (lowercase `plugins/` and
@@ -26,7 +26,7 @@ const REGISTRY = {
   ],
 };
 
-describe('BundlePluginSource', () => {
+describe('KbPluginSource — bundles', () => {
   let kb: string;
   const write = async (rel: string, text: string) => {
     const abs = path.join(kb, rel);
@@ -62,7 +62,7 @@ describe('BundlePluginSource', () => {
   });
 
   it('finds bundles at any depth and reads them as plugins that link skill roots', async () => {
-    const { plugins, warnings } = await new BundlePluginSource().discover(kb);
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
     expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'unnamed']);
 
@@ -88,7 +88,7 @@ describe('BundlePluginSource', () => {
   });
 
   it('expands mcpProfile through the registry, following extends and reporting unknowns', async () => {
-    const { plugins, warnings } = await new BundlePluginSource().discover(kb);
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const example = plugins.find((p) => p.name === 'example-plugin')!;
     expect(example.mcpServers).toEqual({
       confluence: { type: 'streamable-http', url: 'https://mcp.confluence.example' },
@@ -102,7 +102,7 @@ describe('BundlePluginSource', () => {
 
   it('cuts an extends cycle instead of hanging, and keeps what it collected', async () => {
     await write('plugins/loop/plugin.bundle.json', JSON.stringify({ name: 'loop', mcpProfile: 'loop-a' }));
-    const { plugins, warnings } = await new BundlePluginSource().discover(kb);
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const loop = plugins.find((p) => p.name === 'loop')!;
     expect(loop.mcpServers).toEqual({ 'flat-http': { type: 'streamable-http', url: 'https://flat.example' } });
     expect(warnings.some((w) => w.includes('cycle'))).toBe(true);
@@ -110,8 +110,79 @@ describe('BundlePluginSource', () => {
 
   it('a missing registry leaves the plugins standing, servers-less, with a warning per profile', async () => {
     await fs.rm(path.join(kb, 'configs'), { recursive: true });
-    const { plugins, warnings } = await new BundlePluginSource().discover(kb);
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
     expect(plugins.find((p) => p.name === 'example-plugin')!.mcpServers).toBeNull();
     expect(warnings.some((w) => w.includes('no registry'))).toBe(true);
+  });
+});
+
+describe('KbPluginSource — one walk, both shapes', () => {
+  let kb: string;
+  const write = async (rel: string, text: string) => {
+    const abs = path.join(kb, rel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, text);
+  };
+
+  beforeEach(async () => {
+    kb = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-mixed-'));
+  });
+  afterEach(async () => {
+    configureKbLayout({ ...DEFAULT_KB_LAYOUT });
+    await fs.rm(kb, { recursive: true, force: true });
+  });
+
+  it('reads native manifests and bundles side by side, at any depth, and stops at a plugin folder', async () => {
+    // A native plugin directly under the root, with a skill inside — the
+    // skill folder must not be mistaken for a nested plugin.
+    await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'gtm', extensions: { 'software.bevel.hexis': { skills: ['Skills/Eng'] } } }));
+    await write('Plugins/GTM/access.md', '---\n---\nread:\n  - everyone\n');
+    await write('Plugins/GTM/skills/outreach/SKILL.md', '---\ndescription: x\n---\n');
+    await write('Plugins/GTM/skills/outreach/plugin.json', '{"name":"not-a-plugin"}');
+    // A pre-manifest folder (access.md only) directly under the root.
+    await write('Plugins/Legacy/access.md', '---\n---\nread:\n  - everyone\n');
+    // A bundle three folders down, and a native manifest two folders down.
+    await write('Plugins/functional/cluster/example/plugin.bundle.json', JSON.stringify({ name: 'example', sourceSkillRoots: ['Skills/x'] }));
+    await write('Plugins/teams/deep/plugin.json', JSON.stringify({ name: 'deep' }));
+    // A folder with BOTH files: the manifest wins.
+    await write('Plugins/Both/plugin.json', JSON.stringify({ name: 'both' }));
+    await write('Plugins/Both/plugin.bundle.json', JSON.stringify({ name: 'both-bundle', sourceSkillRoots: ['Skills/y'] }));
+    // A deeper folder that is only a container: walked through, never a plugin.
+    await write('Plugins/teams/empty-container/README.md', 'nothing here');
+    // A level-one folder with only an mcp.json — a plugin whose manifest never
+    // got written, which the tool scanner has always read.
+    await write('Plugins/Servers/mcp.json', JSON.stringify({ mcpServers: { x: { type: 'stdio', command: 'x' } } }));
+    // A level-one scope that carries an access.md of its own AND plugins
+    // beneath: a container, not a plugin.
+    await write('Plugins/functional/access.md', '---\n---\nread:\n  - everyone\n');
+
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    // Folders are visited in locale order (case-insensitive), depth first.
+    expect(plugins.map((p) => [p.name, p.folder, p.linksAreManaged, p.exists])).toEqual([
+      ['Both', 'Plugins/Both', true, false],
+      ['example', 'Plugins/functional/cluster/example', false, true],
+      ['GTM', 'Plugins/GTM', true, true],
+      ['Legacy', 'Plugins/Legacy', true, true],
+      ['Servers', 'Plugins/Servers', true, false],
+      ['deep', 'Plugins/teams/deep', true, false],
+    ]);
+    expect(plugins.find((p) => p.name === 'Servers')?.mcpServers).toEqual({ x: { type: 'stdio', command: 'x' } });
+    expect(plugins.find((p) => p.name === 'GTM')?.linkedRoots).toEqual(['Skills/Eng']);
+    expect(plugins.find((p) => p.name === 'Both')?.linkedRoots).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it('keeps the first of two plugins that share a name and says which was skipped', async () => {
+    await write('Plugins/a/GTM/plugin.json', '{}');
+    await write('Plugins/b/GTM/plugin.json', '{}');
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    expect(plugins.map((p) => p.folder)).toEqual(['Plugins/a/GTM']);
+    expect(warnings).toEqual(['Plugins/b/GTM: plugin name "GTM" is already used by Plugins/a/GTM — plugin skipped']);
+  });
+
+  it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    expect(plugins).toEqual([]);
+    expect(warnings).toEqual([]);
   });
 });

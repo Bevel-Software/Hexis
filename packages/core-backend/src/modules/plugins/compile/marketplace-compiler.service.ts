@@ -8,7 +8,7 @@ import type { ISkillService } from '../../skills/skills.contract.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
 import type { PluginSource } from '../discovery/plugin-source.js';
-import { NativePluginSource } from '../discovery/native.source.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { compileMarketplace, type VirtualTree } from './compile-marketplace.js';
 
 const execFileAsync = promisify(execFile);
@@ -42,7 +42,7 @@ export class MarketplaceCompilerService {
       /** The hosted MCP endpoint to ship in the skills plugin (URL only). */
       knowledgeBaseMcp?: { name: string; url: string };
     },
-    private readonly source: PluginSource = new NativePluginSource(),
+    private readonly source: PluginSource = new KbPluginSource(),
   ) {}
 
   /** The default-branch commit the next compile would read. */

@@ -58,10 +58,7 @@ import {
   PluginLinkIndex,
   PluginLinksService,
   MarketplaceCompilerService,
-  NativePluginSource,
-  BundlePluginSource,
-  DEFAULT_REGISTRY_PATH,
-  type PluginSource,
+  KbPluginSource,
 } from '../modules/plugins/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
@@ -360,17 +357,10 @@ export async function createCoreServices(
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
-  // Where plugins come from: the native layout, or a customer dialect chosen
-  // on the setup screen (see modules/plugins/discovery). One switch, one arm
-  // per dialect — deleting a dialect is deleting its arm.
-  const pluginSource: PluginSource = (() => {
-    switch (settings.resolve('pluginDialect') || 'native') {
-      case 'bundle':
-        return new BundlePluginSource(settings.resolve('mcpRegistryPath') || DEFAULT_REGISTRY_PATH);
-      default:
-        return new NativePluginSource();
-    }
-  })();
+  // Where plugins come from: one walk of the plugins root that reads every
+  // plugin folder in whichever file shape it carries (see
+  // modules/plugins/discovery). Nothing to configure, nothing to document.
+  const pluginSource = new KbPluginSource();
   const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, Date.now, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated

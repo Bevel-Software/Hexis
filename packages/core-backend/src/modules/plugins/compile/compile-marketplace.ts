@@ -6,7 +6,6 @@ import {
   PLUGIN_MANIFEST_SCHEMA,
   PLUGIN_MCP_SCHEMA,
   pluginManifestName,
-  pluginOfPath,
 } from '@bevel-software/platform-shared';
 import { walkFiles } from '../../../shared/fs-walk.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
@@ -148,7 +147,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     const plugin = byName.get(name);
     if (!plugin || plugin.personal || !plugin.exists) continue;
     const manifest = plugin.manifest;
-    const inline = [...readableSkills.values()].filter((s) => pluginOfPath(s.path) === name);
+    const inline = [...readableSkills.values()].filter((s) => s.path.startsWith(`${plugin.folder}/`));
     const linked = links.linkedSkills
       .map((p) => readableSkills.get(p))
       .filter((s): s is SkillSummary => s !== undefined);

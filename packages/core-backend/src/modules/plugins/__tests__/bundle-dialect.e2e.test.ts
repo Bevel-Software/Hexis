@@ -12,7 +12,7 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginIndexService } from '../plugins.service.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService } from '../plugin-links.service.js';
-import { BundlePluginSource } from '../discovery/bundle-dialect/bundle.source.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
 
 /**
@@ -91,7 +91,7 @@ describe('bundle dialect, end to end', () => {
       JSON.stringify({ name: 'finance-kit', sourceSkillRoots: ['skills/departments/business/finance'] }),
     );
 
-    const source = new BundlePluginSource();
+    const source = new KbPluginSource();
     access = new AccessControlService(workspaceService, KB_DIR);
     skills = new SkillService(workspaceService, access, KB_DIR);
     tools = new ToolManualService(workspaceService, access, KB_DIR, Date.now, source);

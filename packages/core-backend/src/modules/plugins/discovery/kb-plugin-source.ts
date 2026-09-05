@@ -1,0 +1,91 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE } from '@bevel-software/platform-shared';
+import type { DiscoveredPlugin, Discovery, PluginSource } from './plugin-source.js';
+import { readNativePlugin } from './native.source.js';
+import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bundle.source.js';
+
+/**
+ * THE plugin source: walk the plugins root to any depth and read every plugin
+ * folder in whichever of the two file shapes it carries.
+ *
+ *   plugin.json          → a native plugin (this platform's layout)
+ *   plugin.bundle.json   → a bundle (the customer dialect, read-only)
+ *   a folder directly    → a native plugin, manifest or not, PROVIDED nothing
+ *   under the root         beneath it is a plugin — the layout this platform
+ *                          has always read (provisioning seeds `access.md`
+ *                          first; an `mcp.json` may sit beside a manifest that
+ *                          never got written); a level-one folder that holds
+ *                          plugins deeper down is a scope, not a plugin, even
+ *                          when it carries an `access.md` of its own
+ *
+ * A folder that IS a plugin is not descended into (its `skills/` are its
+ * own); every other folder is. When a folder carries both files the manifest
+ * wins, so a bundle migrated in place stops being read as a bundle the moment
+ * a `plugin.json` lands beside it. Two plugins with one name keep the first
+ * by path and warn about the second — a name is an identity to people and
+ * URLs, and two folders answering to it would be two plugins with one key.
+ *
+ * No setting picks a dialect. Nothing to configure means nothing to document
+ * and nothing to remove but the `else if` that reads bundles.
+ */
+export class KbPluginSource implements PluginSource {
+  readonly dialect = 'kb';
+
+  async discover(kbRoot: string): Promise<Discovery> {
+    const warnings: string[] = [];
+    const plugins: DiscoveredPlugin[] = [];
+    const root = path.join(kbRoot, PLUGINS_DIR);
+    const registry = await loadRegistry(kbRoot, warnings);
+    const seen = new Map<string, string>();
+
+    const claim = (plugin: DiscoveredPlugin): void => {
+      const twin = seen.get(plugin.name);
+      if (twin) {
+        warnings.push(`${plugin.folder}: plugin name "${plugin.name}" is already used by ${twin} — plugin skipped`);
+        return;
+      }
+      seen.set(plugin.name, plugin.folder);
+      plugins.push(plugin);
+    };
+
+    /** Visit a folder; resolves to how many plugins were found at or beneath it. */
+    const visit = async (dir: string, relFolder: string): Promise<number> => {
+      const folder = relFolder ? `${PLUGINS_DIR}/${relFolder}` : PLUGINS_DIR;
+      const isRoot = relFolder === '';
+      if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE)))) {
+        claim(await readNativePlugin(dir, folder, relFolder, warnings));
+        return 1;
+      }
+      if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE)))) {
+        const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings);
+        if (bundle) claim(bundle);
+        return 1; // unreadable: reported, and still not descended into
+      }
+      let entries: import('node:fs').Dirent[];
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return 0;
+      }
+      let beneath = 0;
+      for (const entry of entries
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .sort((a, b) => a.name.localeCompare(b.name))) {
+        beneath += await visit(path.join(dir, entry.name), relFolder ? `${relFolder}/${entry.name}` : entry.name);
+      }
+      if (beneath > 0 || isRoot || relFolder.includes('/')) return beneath;
+      // Directly under the root, nothing plugin-shaped beneath: a native plugin
+      // without a manifest — the shape this platform has always read.
+      claim(await readNativePlugin(dir, folder, relFolder, warnings));
+      return 1;
+    };
+
+    await visit(root, '');
+    return { plugins, warnings };
+  }
+}
+
+async function isFile(abs: string): Promise<boolean> {
+  return fs.stat(abs).then((s) => s.isFile(), () => false);
+}
