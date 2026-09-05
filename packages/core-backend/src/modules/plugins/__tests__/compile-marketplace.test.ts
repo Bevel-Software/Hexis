@@ -117,10 +117,10 @@ describe('compileMarketplace', () => {
 
     // The leftovers plugin holds what no real plugin ships (pitch), never what
     // one does (deploy is GTM's); the flat copy carries everything once.
-    expect(paths).toContain('plugins/skills/skills/pitch/SKILL.md');
-    expect(paths).not.toContain('plugins/skills/skills/deploy/SKILL.md');
+    expect(paths).toContain('plugins/skills-and-knowledge/skills/pitch/SKILL.md');
+    expect(paths).not.toContain('plugins/skills-and-knowledge/skills/deploy/SKILL.md');
     // …and the knowledge base itself as an MCP server, URL only.
-    expect(json(tree, 'plugins/skills/.mcp.json')).toEqual({
+    expect(json(tree, 'plugins/skills-and-knowledge/.mcp.json')).toEqual({
       mcpServers: { hexis: { type: 'streamable-http', url: 'https://kb.acme.com/api/mcp' } },
     });
     expect(paths).toContain('skills/deploy/SKILL.md');
@@ -128,12 +128,12 @@ describe('compileMarketplace', () => {
     expect(paths).toContain('skills/outreach/SKILL.md');
 
     // The bundle depends on every other plugin; the catalogues list them all.
-    expect(json(tree, 'plugins/hexis-all/.claude-plugin/plugin.json').dependencies.sort()).toEqual(['gtm', 'skills']);
+    expect(json(tree, 'plugins/hexis-all/.claude-plugin/plugin.json').dependencies.sort()).toEqual(['gtm', 'skills-and-knowledge']);
     const claude = json(tree, '.claude-plugin/marketplace.json');
     expect(claude.name).toBe('acme-hexis');
     expect(claude.plugins.map((p: { name: string; source: string }) => [p.name, p.source])).toEqual([
       ['gtm', './plugins/gtm'],
-      ['skills', './plugins/skills'],
+      ['skills-and-knowledge', './plugins/skills-and-knowledge'],
       ['hexis-all', './plugins/hexis-all'],
     ]);
     const codex = json(tree, '.agents/plugins/marketplace.json');
@@ -148,9 +148,9 @@ describe('compileMarketplace', () => {
     const paths = [...tree.files.keys()].sort();
     expect(paths.some((p) => p.startsWith('plugins/gtm/skills/'))).toBe(false);
     expect(paths).toContain('plugins/gtm/.mcp.json'); // portable servers are not access-gated content
-    expect(paths).toContain('plugins/skills/skills/pitch/SKILL.md');
+    expect(paths).toContain('plugins/skills-and-knowledge/skills/pitch/SKILL.md');
     expect(paths.some((p) => p.includes('deploy'))).toBe(false);
-    expect(tree.plugins).toEqual(['gtm', 'skills', 'hexis-all']);
+    expect(tree.plugins).toEqual(['gtm', 'skills-and-knowledge', 'hexis-all']);
   });
 
   it('the everyone audience carries the public subset only', async () => {
@@ -168,9 +168,9 @@ describe('compileMarketplace', () => {
     );
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
     const paths = [...tree.files.keys()];
-    expect(paths.some((p) => p.startsWith('plugins/skills/skills/'))).toBe(false);
-    expect(paths).toContain('plugins/skills/.mcp.json');
-    expect(tree.plugins).toEqual(['gtm', 'skills', 'hexis-all']);
+    expect(paths.some((p) => p.startsWith('plugins/skills-and-knowledge/skills/'))).toBe(false);
+    expect(paths).toContain('plugins/skills-and-knowledge/.mcp.json');
+    expect(tree.plugins).toEqual(['gtm', 'skills-and-knowledge', 'hexis-all']);
   });
 
   it('a name clash inside one plugin keeps the first by path and says so', async () => {

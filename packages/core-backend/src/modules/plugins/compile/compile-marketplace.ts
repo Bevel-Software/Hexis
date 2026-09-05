@@ -34,7 +34,7 @@ import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
  *   plugins/<slug>/…                     one per plugin the caller may read
  *                                        anything of: inline + linked skills,
  *                                        the portable half of mcp.json
- *   plugins/skills/…                     every readable skill no plugin above
+ *   plugins/skills-and-knowledge/…       every readable skill no plugin above
  *                                        ships — how a standalone skill, or one
  *                                        only in plugins the caller cannot see,
  *                                        is still one install away — plus the
@@ -108,7 +108,7 @@ export interface VirtualTree {
 }
 
 const BUNDLE_NAME = 'hexis-all';
-const SKILLS_PLUGIN_NAME = 'skills';
+const SKILLS_PLUGIN_NAME = 'skills-and-knowledge';
 const NEVER_SHIPPED = new Set(['access.md', '.bevelignore']);
 
 export async function compileMarketplace(input: CompileInput): Promise<VirtualTree> {
@@ -195,7 +195,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     } else {
       out.push({
         slug,
-        displayName: 'Skills',
+        displayName: 'Skills and knowledge',
         description: kbMcp
           ? 'Every skill you may read that no other plugin here ships, and the knowledge base as an MCP server'
           : 'Every skill you may read that no other plugin here ships',
