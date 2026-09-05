@@ -69,7 +69,7 @@ Other outcomes: `up-to-date` (origin had nothing new), `not-cloned` (Hexis
 has no clone of that branch yet — it clones one the first time someone
 opens it, so there is nothing to refresh), `remote-gone` (the branch was
 deleted on the host; Hexis removes its stale clone), `conflict` and `error`
-(below). A push that deletes a branch names nothing to sync.
+(below). A push that deletes a branch names it like any push; the sync finds it gone and retires the clone.
 
 | Status | Meaning | Retry? |
 | --- | --- | --- |

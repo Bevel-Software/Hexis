@@ -242,3 +242,66 @@ describe('WorkflowService.syncWorkspaceFromRemote', () => {
     expect(kinds(emit)).toEqual([]);
   });
 });
+
+describe('WorkflowService.retireRemoteGoneClone', () => {
+  function buildRetire(opts: { cloned: boolean; stillOnOrigin: boolean }) {
+    const git = { remoteBranchExists: vi.fn(async () => opts.stillOnOrigin) } as unknown as GitService;
+    const workspaceService = {
+      hasBootstrappedWorkspace: vi.fn(async () => opts.cloned),
+      deleteWorkspace: vi.fn(async () => {}),
+    } as unknown as WorkspaceService;
+    const svc = new WorkflowService(
+      {} as Database, git, {} as PullRequestService, {} as IReviewWorkflowService,
+      workspaceService, {} as IAccessControl, {} as FileLockService, {} as PendingCommitsService,
+      'knowledge-base',
+    );
+    return { svc, git, workspaceService };
+  }
+
+  it('removes the clone when origin still lacks the branch, asking origin again rather than trusting the pull', async () => {
+    const { svc, git, workspaceService } = buildRetire({ cloned: true, stillOnOrigin: false });
+    expect(await svc.retireRemoteGoneClone('ali%2Fx')).toBe(true);
+    expect(git.remoteBranchExists).toHaveBeenCalledWith('ali/x', 'ali/x');
+    expect(workspaceService.deleteWorkspace).toHaveBeenCalledWith('ali%2Fx');
+  });
+
+  it('keeps the clone when the branch is back on origin', async () => {
+    const { svc, workspaceService } = buildRetire({ cloned: true, stillOnOrigin: true });
+    expect(await svc.retireRemoteGoneClone('ali%2Fx')).toBe(false);
+    expect(workspaceService.deleteWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when there is no clone any more', async () => {
+    const { svc, git, workspaceService } = buildRetire({ cloned: false, stillOnOrigin: false });
+    expect(await svc.retireRemoteGoneClone('ali%2Fx')).toBe(false);
+    expect(git.remoteBranchExists).not.toHaveBeenCalled();
+    expect(workspaceService.deleteWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('is serialised with deleteBranch on the same branch — the lifecycle lock', async () => {
+    // A deleteBranch holding `branch:ali/x` must finish before the retirement
+    // examines the clone. Observed through ordering: the retirement's first
+    // read happens after the held section releases.
+    const order: string[] = [];
+    const { svc, workspaceService } = buildRetire({ cloned: true, stillOnOrigin: false });
+    const lifecycle = (svc as unknown as { branchLifecycle: { run<T>(k: string, f: () => Promise<T>): Promise<T> } }).branchLifecycle;
+    let release!: () => void;
+    const held = lifecycle.run('branch:ali/x', () => new Promise<void>((res) => {
+      release = () => {
+        order.push('released');
+        res();
+      };
+    }));
+    (workspaceService.hasBootstrappedWorkspace as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('retire-read');
+      return true;
+    });
+    const retiring = svc.retireRemoteGoneClone('ali%2Fx');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual([]);
+    release();
+    await held;
+    await retiring;
+    expect(order).toEqual(['released', 'retire-read']);
+  });
+});

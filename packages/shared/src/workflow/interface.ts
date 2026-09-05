@@ -118,6 +118,14 @@ export interface IWorkflowService {
    */
   syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome>;
   /**
+   * Retire the clone of a branch the host has deleted (a `remote-gone`
+   * outcome). Runs under the branch-lifecycle lock — the same one that
+   * serialises creating and deleting the branch in Hexis — and revalidates
+   * against origin first, so a branch recreated in the meantime keeps its
+   * clone. Returns whether the clone was removed.
+   */
+  retireRemoteGoneClone(workspaceId: string): Promise<boolean>;
+  /**
    * Hard-reset the workspace's checked-out branch to `origin/<branch>` (fetch
    * first), discarding any local divergence. Break-glass primitive for
    * roles.yaml recovery so the restoring commit can fast-forward on push.

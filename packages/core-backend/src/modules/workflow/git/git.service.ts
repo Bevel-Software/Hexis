@@ -1561,6 +1561,29 @@ export class GitService implements IGitService {
     return stdout.trim();
   }
 
+  /**
+   * Whether origin still has `branch`. `ls-remote --exit-code` answers with
+   * exit status 2 for "no such ref" — the one failure that is a fact about the
+   * branch rather than about reaching the host, which propagates.
+   */
+  async remoteBranchExists(workspaceId: string, branch: string): Promise<boolean> {
+    assertValidBranchName(branch);
+    const cwd = await this.repoDir(workspaceId);
+    try {
+      await this.git(cwd, ['ls-remote', '--exit-code', '--heads', 'origin', `refs/heads/${branch}`]);
+      return true;
+    } catch (err) {
+      if ((err as { exitCode?: number }).exitCode === 2) return false;
+      throw err;
+    }
+  }
+
+  /** Whether origin has ANY branch — an empty repository has none. */
+  private async remoteHasAnyBranch(cwd: string): Promise<boolean> {
+    const { stdout } = await this.git(cwd, ['ls-remote', '--heads', 'origin']);
+    return stdout.trim().length > 0;
+  }
+
   /** `git rev-parse --verify` that answers null for a rev that does not resolve (an unborn HEAD). */
   private async revParseOrNull(cwd: string, rev: string): Promise<string | null> {
     try {
@@ -1654,6 +1677,23 @@ export class GitService implements IGitService {
       }
       throw err;
     }
+    // `--autostash` reapplies the stashed edits AFTER the rebase, and when that
+    // reapply conflicts git exits 0: the clone is left with an unmerged index,
+    // the edits kept in `stash@{0}`, and nothing above has thrown. Read the
+    // index rather than the exit status. The rebase itself landed, so the
+    // branch is at the remote commit; resetting to it drops only the
+    // half-applied stash (still in the stash list) and lets the conflict
+    // travel the same typed path a rebase conflict does.
+    const { stdout: unmergedOut } = await this.git(cwd, ['diff', '--name-only', '--diff-filter=U']);
+    const unmerged = unmergedOut.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (unmerged.length > 0) {
+      await this.git(cwd, ['reset', '--hard', 'HEAD']);
+      throw new PullRebaseConflictError(
+        branch,
+        unmerged,
+        'Reapplying the autostashed working-tree edits conflicted; the edits are kept in git stash.',
+      );
+    }
   }
 
   /**
@@ -1696,10 +1736,12 @@ export class GitService implements IGitService {
       try {
         remoteRef = await this.refreshRemoteBranchRefForSync(cwd, branch);
       } catch (err) {
-        // An unborn clone whose branch origin does not have either is a fresh
-        // deployment nobody has pushed to yet — nothing to sync, and nothing
-        // to retire. Only a clone that HAD the branch has lost it.
-        if (err instanceof RemoteBranchGoneError && before === null) {
+        // An unborn clone whose branch origin does not have either: on a FRESH
+        // deployment (origin has no branch at all) nobody has pushed yet —
+        // nothing to sync, nothing to retire. But an origin that does have
+        // branches and lacks this one has had this branch created and deleted
+        // since the clone was made, and the clone is as stale as any other.
+        if (err instanceof RemoteBranchGoneError && before === null && !(await this.remoteHasAnyBranch(cwd))) {
           return { before: null, after: null, treeChanged: false, changedPaths: [] };
         }
         throw err;

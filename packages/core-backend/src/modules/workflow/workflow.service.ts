@@ -518,6 +518,22 @@ export class WorkflowService implements IWorkflowService {
     }
   }
 
+  async retireRemoteGoneClone(workspaceId: string): Promise<boolean> {
+    const branch = branchForWorkspaceId(workspaceId);
+    const id = workspaceIdForBranch(branch);
+    // The lock `createBranch` and `deleteBranch` take: nothing can bring this
+    // branch back into being while the clone is examined and removed. The
+    // sync's own hold on the clone ended when its outcome was returned, so
+    // the branch is asked about AGAIN here rather than trusted from then —
+    // a recreate that landed in between keeps its clone.
+    return this.branchLifecycle.run(`branch:${branch}`, async () => {
+      if (!(await this.workspaceService.hasBootstrappedWorkspace(id))) return false;
+      if (await this.git.remoteBranchExists(branch, branch)) return false;
+      await this.workspaceService.deleteWorkspace(id);
+      return true;
+    });
+  }
+
   /**
    * Cap on per-path `file-changed` events one sync announces for a branch.
    * Past it the tree event alone carries the news — a bulk import that

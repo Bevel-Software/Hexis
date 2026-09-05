@@ -129,11 +129,13 @@ export class KbSyncService implements IKbSyncService {
       if (outcome.outcome === 'remote-gone') {
         // The host deleted the branch. Left in place, the stale clone would
         // fail its fetch on every following full sync — and a webhook host
-        // disables a subscription that keeps failing. Best-effort, like the
-        // orphan sweep the branch listing already runs.
+        // disables a subscription that keeps failing. The workflow retires it
+        // under the branch-lifecycle lock, after asking origin again, so a
+        // branch recreated since the pull keeps its clone. Best-effort.
         try {
-          await this.workspaces.deleteWorkspace(id);
-          console.log(`[sync] removed the clone of "${branch}" — deleted on the host`);
+          const removed = await this.workflow.retireRemoteGoneClone(id);
+          if (removed) console.log(`[sync] removed the clone of "${branch}" — deleted on the host`);
+          else console.log(`[sync] kept the clone of "${branch}" — it is back on the host, or already gone`);
         } catch (err) {
           console.warn(`[sync] could not remove the clone of "${branch}":`, sanitizeError(err));
         }

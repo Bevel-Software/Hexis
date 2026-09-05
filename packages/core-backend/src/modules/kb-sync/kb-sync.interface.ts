@@ -54,6 +54,11 @@ export interface IKbSyncService {
 /** The slice of the workflow module a sync drives. */
 export interface SyncWorkflowPort {
   syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome>;
+  /**
+   * Retire the clone of a branch the host deleted, under the branch-lifecycle
+   * lock and only if origin still lacks it. Returns whether it was removed.
+   */
+  retireRemoteGoneClone(workspaceId: string): Promise<boolean>;
   /** The existing sweep; returns how many requests it closed. */
   closeChangeRequestsWithDeletedBranches(): Promise<number>;
 }
@@ -71,6 +76,4 @@ export interface SyncWorkspacePort {
    * rather than letting one bad directory fail every other branch.
    */
   listClonedWorkspaces(): Promise<Array<{ id: string; branch: string; unreadable?: string }>>;
-  /** Remove a clone whose branch no longer exists on the host. */
-  deleteWorkspace(workspaceId: string): Promise<void>;
 }

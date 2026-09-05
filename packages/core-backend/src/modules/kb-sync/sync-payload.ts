@@ -57,11 +57,6 @@ function unique(names: string[]): string[] {
   return [...new Set(names)];
 }
 
-/** The all-zero sha every host uses for "this ref no longer exists". */
-function isNullSha(value: unknown): boolean {
-  return typeof value === 'string' && /^0{40}(?:0{24})?$/.test(value);
-}
-
 /**
  * How an invalid explicit entry is echoed back. Only primitives are
  * stringified: `String(obj)` on a JSON object carrying `"toString": 1` throws
@@ -108,10 +103,11 @@ export function parseSyncPayload(body: unknown): ParsedSyncPayload {
     const resource = body.resource;
     if (eventType === 'git.push') {
       const updates = Array.isArray(resource.refUpdates) ? resource.refUpdates : [];
+      // A DELETION (new object id all zeros) names its branch too: syncing it
+      // is what finds the branch gone and retires the stale clone, instead of
+      // leaving it to fail on some unrelated full sync later.
       const branches = updates
-        // A deletion is an update to the null sha: nothing to sync, and the
-        // clone is retired by the sync that next notices the branch is gone.
-        .map((u) => (isRecord(u) && !isNullSha(u.newObjectId) ? branchFromRef(u.name) : null))
+        .map((u) => (isRecord(u) ? branchFromRef(u.name) : null))
         .filter((b): b is string => b !== null);
       return { source: 'azure-devops', branches: unique(branches), invalid: [] };
     }
@@ -130,15 +126,16 @@ export function parseSyncPayload(body: unknown): ParsedSyncPayload {
     if (body.object_kind !== 'push' && body.object_kind !== 'tag_push') {
       return { source: 'none', branches: 'all', invalid: [] };
     }
-    // A branch deletion arrives as a push to the null sha.
-    const branch = isNullSha(body.after) ? null : branchFromRef(body.ref);
+    // A deletion (a push to the null sha) names its branch like any push: the
+    // sync finds it gone and retires the clone.
+    const branch = branchFromRef(body.ref);
     return { source: 'gitlab', branches: branch ? [branch] : [], invalid: [] };
   }
 
   // GitHub / Gitea push: `ref` at the top level, no `object_kind`. A deletion
-  // says so (`deleted: true`) and names nothing to sync.
+  // (`deleted: true`) names its branch like any push, for the same reason.
   if (typeof body.ref === 'string') {
-    const branch = body.deleted === true ? null : branchFromRef(body.ref);
+    const branch = branchFromRef(body.ref);
     return { source: 'github', branches: branch ? [branch] : [], invalid: [] };
   }
 

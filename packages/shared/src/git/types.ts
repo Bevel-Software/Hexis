@@ -162,9 +162,18 @@ export interface IGitService {
    * Tolerant of an unborn HEAD (a clone of an empty upstream): `before` is
    * null, and paths are diffed against the empty tree. Throws the typed
    * pull-conflict error like `pull`, and a typed "remote branch gone" error
-   * when origin no longer has the branch at all.
+   * when origin no longer has the branch — including for an unborn clone,
+   * once origin has any branch at all. The one exception: an unborn clone
+   * against an origin with NO branches (a fresh deployment nobody has pushed
+   * to) resolves to `after: null`, since there is nothing to sync and nothing
+   * stale.
    */
   syncFromRemote(workspaceId: string): Promise<RemoteSyncPullResult>;
+  /**
+   * Whether origin still has `branch` right now (`ls-remote`). Used to
+   * revalidate that a clone is still stale before it is retired.
+   */
+  remoteBranchExists(workspaceId: string, branch: string): Promise<boolean>;
   diffStat(workspaceId: string, base?: string): Promise<string[]>;
   /**
    * Paths in the working tree that the next commit would include — the set

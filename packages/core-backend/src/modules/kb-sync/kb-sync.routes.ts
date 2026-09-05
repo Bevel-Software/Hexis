@@ -71,8 +71,10 @@ export const SYNC_RESPONSE_MARKER = 'result';
 export function isSyncRawBodyPath(path: string): boolean {
   // Case-insensitive, because Express routing is: `/api/Sync` reaches this
   // router, and if this check said no the global parser would eat the body
-  // first — a signed call would 401 and a bearer call would silently sync
-  // every clone instead of the one in the URL.
+  // first. On either form a signed call would then 401 (no bytes to verify).
+  // On the bare form a bearer call would silently sync every clone, since a
+  // body that is no longer a Buffer parses as "no body"; the branch form is
+  // unaffected there, its branch comes from the URL.
   const lower = path.toLowerCase();
   return lower === '/api/sync' || lower.startsWith('/api/sync/');
 }
