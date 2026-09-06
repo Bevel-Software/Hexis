@@ -119,6 +119,17 @@ describe('SkillsTree', () => {
     expect(within(menu).queryByRole('menuitem', { name: /Pin/ })).not.toBeInTheDocument();
   });
 
+  it('hands focus back to the heading when its menu closes on Escape', () => {
+    renderTree('/skills-and-tools');
+    const heading = screen.getByText('Skills').closest('div[tabindex]') as HTMLElement;
+    expect(heading).not.toBeNull();
+    fireEvent.contextMenu(screen.getByText('Skills'));
+    screen.getByRole('menu', { name: 'Actions for Skills' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: 'Actions for Skills' })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(heading);
+  });
+
   it('keeps a right-click anywhere in the section from reaching the nav behind it', () => {
     const onNav = vi.fn();
     const workspace = makeWorkspaceFixture({ fileTree: TREE, kbDirName: KB });

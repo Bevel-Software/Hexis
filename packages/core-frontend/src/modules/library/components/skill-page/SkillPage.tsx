@@ -612,7 +612,9 @@ export function SkillPage({
             those rules are decided. Same call the tool page made. */}
       </header>
 
-      {owned && (
+      {/* Not before the folder is known: Accept grants ON the folder and
+          Manage access opens it, and both are no-ops against ''. */}
+      {owned && skillPath && (
         <AccessRequestsBanner
           plugin={name}
           folders={[skillPath]}

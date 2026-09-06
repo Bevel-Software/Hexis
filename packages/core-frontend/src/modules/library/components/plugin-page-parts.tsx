@@ -7,6 +7,7 @@ import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
 import type { LibraryItem } from '../state/library-data';
 import { removeLibraryItem } from '../services/library.api';
+import { unlinkSkill } from '../services/plugins.api';
 import { LibraryCard } from './LibraryCard';
 
 /**
@@ -200,16 +201,24 @@ export function CardGrid({
  * The "are you sure" a removal deserves: deleting a skill or tool from a
  * plugin takes it from EVERYONE in the plugin, not from a personal shelf, and
  * there is no undo shortcut — the content survives only in git history.
+ *
+ * A LINKED skill is the other case: it lives elsewhere and the plugin only
+ * points at it, so "remove" means unlink — the manifest entry and the
+ * plugin's grant go, the skill stays where it is. Sending a link through the
+ * delete path would delete a shared skill (or be refused by its own rules).
  */
 export function RemoveLibraryItemDialog({
   item,
   place,
+  linked = false,
   onClose,
   onRemoved,
 }: {
   item: LibraryItem;
   /** Where it is being removed from, for the copy: a plugin name, or "your space". */
   place: string;
+  /** The item is in `place` by LINK — remove the link, not the item. `place` is then the plugin. */
+  linked?: boolean;
   onClose(): void;
   /** Fired after the delete lands; the host page reloads and says so. */
   onRemoved(): void;
@@ -222,7 +231,8 @@ export function RemoveLibraryItemDialog({
     setBusy(true);
     setError(null);
     try {
-      await removeLibraryItem(item.path);
+      if (linked) await unlinkSkill(place, item.path);
+      else await removeLibraryItem(item.path);
       onRemoved();
       onClose();
     } catch (err) {
@@ -237,7 +247,7 @@ export function RemoveLibraryItemDialog({
     <Dialog
       open
       onClose={onClose}
-      title={`Remove ${item.name}?`}
+      title={linked ? `Unlink ${item.name}?` : `Remove ${item.name}?`}
       size="md"
       busy={busy}
       footer={
@@ -246,15 +256,17 @@ export function RemoveLibraryItemDialog({
             Cancel
           </Button>
           <Button variant="danger" onClick={() => void remove()} disabled={busy}>
-            {busy ? 'Removing…' : 'Remove'}
+            {busy ? (linked ? 'Unlinking…' : 'Removing…') : linked ? 'Unlink' : 'Remove'}
           </Button>
         </>
       }
     >
       <p className="text-ui text-ink-muted">
-        {item.kind === 'skill'
-          ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
-          : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
+        {linked
+          ? `This removes the link from ${place}. The skill itself stays where it lives; ${place}'s members stop seeing it here.`
+          : item.kind === 'skill'
+            ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
+            : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
       </p>
       {error && (
         <Banner tone="danger" role="alert" className="mt-3">

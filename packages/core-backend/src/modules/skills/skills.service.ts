@@ -76,6 +76,9 @@ export class SkillService implements ISkillService {
     if (file !== undefined) {
       if (!isSafeRelFile(file)) return { ok: false, error: 'invalid_file' };
       const repoPath = `${found.summary.path}/${file}`;
+      // Only a file the catalog LISTS is served: the listing already applied
+      // the ignore rules, so a path that is not in it is one they hid.
+      if (!found.files.includes(repoPath)) return { ok: false, error: 'not_found' };
       try {
         const content = await this.workspaceService.readFile(wsId, `${this.kbDirName}/${repoPath}`);
         return { ok: true, kind: 'file', file: { name, file, path: repoPath, content } };
@@ -144,11 +147,11 @@ export class SkillService implements ISkillService {
         return;
       }
       ignore = await ignore.extendedWith(dir);
-      // A rule may name the skill's own file, not only a folder above it.
-      if (
-        entries.some((e) => e.isFile() && e.name === 'SKILL.md') &&
-        !ignore.isIgnored(path.join(dir, 'SKILL.md'), false)
-      ) {
+      if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
+        // A skill folder is a LEAF whatever the ignore rules say of it: a rule
+        // naming its SKILL.md suppresses the skill, it does not turn the
+        // folder's assets into skills of their own.
+        if (ignore.isIgnored(path.join(dir, 'SKILL.md'), false)) return;
         let raw: string;
         try {
           raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');
@@ -174,7 +177,7 @@ export class SkillService implements ISkillService {
           },
           body: fm.body,
           allowedTools: fm.allowedTools,
-          files: await listBundledFiles(dir, relFolder),
+          files: await listBundledFiles(dir, relFolder, ignore),
         });
         return; // a skill folder is a leaf — its subfolders hold assets, not skills
       }
@@ -191,12 +194,16 @@ export class SkillService implements ISkillService {
     await walk(path.join(kbRoot, SKILLS_DIR), SKILLS_DIR, BevelIgnoreStack.empty());
     await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR, BevelIgnoreStack.empty());
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
-    // resolves it, so it must be unique. Sort by (name, path) for a deterministic
-    // winner, then REFUSE later duplicates via the shared dedup — the same rule
-    // tools use (no silent auto-suffix that would rebind an id under the caller).
+    // resolves it, so it must be unique. Sort by (name, root, path) for a
+    // deterministic winner — the shared root FIRST, since `Skills/` is a
+    // skill's canonical home and a same-named inline copy is the stale one —
+    // then REFUSE later duplicates via the shared dedup — the same rule tools
+    // use (no silent auto-suffix that would rebind an id under the caller).
+    const rootRank = (p: string) => (p === SKILLS_DIR || p.startsWith(`${SKILLS_DIR}/`) ? 0 : 1);
     out.sort(
       (a, b) =>
         a.summary.name.localeCompare(b.summary.name) ||
+        rootRank(a.summary.path) - rootRank(b.summary.path) ||
         a.summary.path.localeCompare(b.summary.path),
     );
     return dedupeById(out, (s) => s.summary.name, (s, id) =>
@@ -287,9 +294,22 @@ export function parseSkillFrontmatter(raw: string): {
   return { description, version, owner, lifecycle, allowedTools, body, frontmatter: data };
 }
 
-/** Repo-root-relative paths of every bundled file under a skill folder (excludes SKILL.md). */
-async function listBundledFiles(dir: string, relFolder: string): Promise<string[]> {
+/**
+ * Repo-root-relative paths of every bundled file under a skill folder
+ * (excludes SKILL.md), under the same ignore rules the walk applied on the
+ * way down — a rule in the skill's own `.bevelignore` or any folder above
+ * hides an asset from the listing, and therefore (see `getSkill`) from
+ * being served.
+ */
+async function listBundledFiles(dir: string, relFolder: string, ignore: BevelIgnoreStack): Promise<string[]> {
+  const hidden = (rel: string): boolean => {
+    const parts = rel.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      if (ignore.isIgnored(path.join(dir, ...parts.slice(0, i)), true)) return true;
+    }
+    return ignore.isIgnored(path.join(dir, ...parts), false);
+  };
   return (await walkFiles(dir, () => true))
-    .filter((rel) => rel !== 'SKILL.md')
+    .filter((rel) => rel !== 'SKILL.md' && !hidden(rel))
     .map((rel) => `${relFolder}/${rel}`);
 }

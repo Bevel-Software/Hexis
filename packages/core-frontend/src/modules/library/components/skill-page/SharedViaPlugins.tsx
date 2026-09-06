@@ -43,13 +43,24 @@ export function SharedViaPlugins({
   const [adding, setAdding] = useState(false);
   const [needsWrite, setNeedsWrite] = useState<'ask' | 'requested' | null>(null);
 
+  // Plugins the caller manages AND whose links this platform writes: a
+  // plugin read from an external format has no link to add or remove here.
   const managed = useMemo(
-    () => new Set(data.pluginSummaries.filter((p) => p.canWrite).map((p) => p.name)),
+    () =>
+      new Set(
+        data.pluginSummaries.filter((p) => p.canWrite && p.linksAreManaged !== false).map((p) => p.name),
+      ),
     [data.pluginSummaries],
   );
+  // A retired skill is never shared onward — the link API refuses it, so the
+  // chooser offers nothing rather than a list of refusals.
+  const retired = useMemo(
+    () => data.items.some((i) => i.kind === 'skill' && i.id === skillName && i.lifecycle === 'retired'),
+    [data.items, skillName],
+  );
   const addable = useMemo(
-    () => [...managed].filter((name) => !memberships.some((m) => m.name === name)).sort(),
-    [managed, memberships],
+    () => (retired ? [] : [...managed].filter((name) => !memberships.some((m) => m.name === name)).sort()),
+    [managed, memberships, retired],
   );
 
   async function run(label: string, op: () => Promise<unknown>, done: string) {

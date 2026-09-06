@@ -103,8 +103,9 @@ export class PluginIndexService implements IPluginIndexService {
       const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-      const folders = await this.scanFolders(kbRoot);
-      if (folders.size === 0) return [];
+      const scanned = await this.scanFolders(kbRoot);
+      if (scanned.size === 0) return [];
+      const folders = new Map([...scanned].map(([name, p]) => [name, p.folders]));
 
       const [skillCounts, toolCounts] = await Promise.all([
         this.countSkills(folders),
@@ -123,6 +124,7 @@ export class PluginIndexService implements IPluginIndexService {
         entries.push({
           name,
           folders: pluginFolders,
+          linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
           toolCount: toolCounts.get(name) ?? 0,
           owners,
@@ -147,13 +149,15 @@ export class PluginIndexService implements IPluginIndexService {
    * source's existence rule (see `DiscoveredPlugin`) — for native plugins,
    * the `access.md` the class doc describes.
    */
-  private async scanFolders(kbRoot: string): Promise<Map<string, string[]>> {
-    const byName = new Map<string, string[]>();
+  private async scanFolders(
+    kbRoot: string,
+  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean }>> {
+    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean }>();
     const discovered = await this.source.discover(kbRoot);
     for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
     for (const plugin of discovered.plugins) {
       if (plugin.personal || !plugin.exists) continue;
-      byName.set(plugin.name, [plugin.folder]);
+      byName.set(plugin.name, { folders: [plugin.folder], linksAreManaged: plugin.linksAreManaged });
     }
     return byName;
   }

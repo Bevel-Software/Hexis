@@ -99,8 +99,8 @@ describe('PluginLinksService', () => {
     expect(manifest.version).toBe('1.0.0'); // untouched
     expect(manifest.extensions['software.bevel.hexis'].skills).toEqual(['Skills/Eng/deploy']);
     const rules = await read('Skills/Eng/deploy/access.md');
-    expect(rules).toContain('plugin/GTM/read');
-    expect(rules).toContain('plugin/GTM/write');
+    expect(rules).toContain('plugin/gtm/read');
+    expect(rules).toContain('plugin/gtm/write');
     expect(commits).toEqual([
       `${KB_DIR}/Plugins/GTM/plugin.json`,
       `${KB_DIR}/Skills/Eng/deploy/access.md`,
@@ -112,6 +112,48 @@ describe('PluginLinksService', () => {
     // And the index reports the membership as linked and granted.
     expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'GTM', linked: true, granted: true }]);
     expect(await index.pluginsOf('Skills/Eng/rollback')).toEqual([]);
+  });
+
+  it('a plugin whose folder is not its own slug links, re-links and unlinks through ONE spelling', async () => {
+    // "Sales Team" folds to the slug "sales-team"; every grant, comparison and
+    // revocation goes through that one canonical key, so a second link adds
+    // nothing and an unlink finds what it wrote.
+    await write(
+      'Plugins/Sales Team/access.md',
+      '---\nread:\n  - everyone\n---\nread:\n  - Sam <sam@x.io>\nwrite:\n  - Mia <mia@x.io>\nowner:\n  - Mia <mia@x.io>\n',
+    );
+    await write('Plugins/Sales Team/plugin.json', '{"name":"sales-team"}');
+    await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
+    access.invalidate(wsId);
+
+    await svc.link(manager, 'Sales Team', 'Skills/Eng/deploy');
+    await svc.link(manager, 'Sales Team', 'Skills/Eng/deploy');
+    const rules = await read('Skills/Eng/deploy/access.md');
+    expect(rules.match(/plugin\/sales-team\/read/g)).toHaveLength(1);
+    expect(rules.match(/plugin\/sales-team\/write/g)).toHaveLength(1);
+    expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
+
+    await svc.unlink(manager, 'Sales Team', 'Skills/Eng/deploy');
+    expect(await read('Skills/Eng/deploy/access.md')).not.toContain('plugin/sales-team');
+    access.invalidate(wsId);
+    expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
+  });
+
+  it('two plugins linking one root at once both land their grants — the root is locked, not only the plugin', async () => {
+    await write(
+      'Plugins/Ops/access.md',
+      '---\nread:\n  - everyone\n---\nread:\n  - Sam <sam@x.io>\nwrite:\n  - Mia <mia@x.io>\nowner:\n  - Mia <mia@x.io>\n',
+    );
+    await write('Plugins/Ops/plugin.json', '{"name":"ops"}');
+    await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
+    access.invalidate(wsId);
+
+    await Promise.all([svc.link(manager, 'GTM', 'Skills/Eng'), svc.link(manager, 'Ops', 'Skills/Eng')]);
+    const rules = await read('Skills/Eng/access.md');
+    expect(rules).toContain('plugin/gtm/read');
+    expect(rules).toContain('plugin/ops/read');
+    expect(rules).toContain('plugin/gtm/write');
+    expect(rules).toContain('plugin/ops/write');
   });
 
   it('refuses with needs-skill-write when the manager cannot edit the skill\'s rules', async () => {
@@ -128,7 +170,7 @@ describe('PluginLinksService', () => {
     access.invalidate(wsId);
     const result = await svc.link(manager, 'GTM', 'Skills/Eng');
     expect(result.skills.sort()).toEqual(['Skills/Eng/deploy', 'Skills/Eng/rollback']);
-    expect(await read('Skills/Eng/access.md')).toContain('plugin/GTM/read');
+    expect(await read('Skills/Eng/access.md')).toContain('plugin/gtm/read');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/rollback/SKILL.md')).toBe(true);
     const m = await index.membership();
     expect(m.byPlugin.get('GTM')?.linkedSkills.sort()).toEqual(['Skills/Eng/deploy', 'Skills/Eng/rollback']);
@@ -163,7 +205,7 @@ describe('PluginLinksService', () => {
     await expect(svc.link(manager, 'GTM', 'Skills/Eng/old-deploy')).rejects.toMatchObject({ status: 422 });
     // The active skill on its own is fine.
     await svc.link(manager, 'GTM', 'Skills/Eng/deploy');
-    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/GTM/read');
+    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/old-deploy/SKILL.md')).toBe(false);
   });
 
@@ -175,7 +217,7 @@ describe('PluginLinksService', () => {
 
     expect(await svc.unlink(manager, 'GTM', 'Skills/Eng/deploy')).toEqual({ root: 'Skills/Eng/deploy', revoked: true });
     expect(JSON.parse(await read('Plugins/GTM/plugin.json')).extensions).toBeUndefined();
-    expect(await read('Skills/Eng/deploy/access.md')).not.toContain('plugin/GTM');
+    expect(await read('Skills/Eng/deploy/access.md')).not.toContain('plugin/gtm');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
     // Revoke lands first, manifest second: a failure between the two leaves
     // the visible half-state (still listed, no grant), never the silent one.
@@ -190,11 +232,11 @@ describe('PluginLinksService', () => {
     // rules down to the read token — the link's write token, which would still
     // let GTM's managers edit, is gone.
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n');
-    await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - plugin/GTM/read\n');
+    await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - plugin/gtm/read\n');
     access.invalidate(wsId);
 
     expect(await svc.unlink(manager, 'GTM', 'Skills/Eng/deploy')).toEqual({ root: 'Skills/Eng/deploy', revoked: false });
-    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/GTM/read');
+    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
     await expect(svc.unlink(manager, 'GTM', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404, payload: { kind: 'not-linked' } });
   });
 
@@ -218,7 +260,7 @@ describe('PluginLinksService', () => {
     await expect(svc.repair(manager, 'GTM', 'Skills/Eng/deploy')).rejects.toBeInstanceOf(PluginLinkError);
     // Eve, who edits the scope, can.
     await svc.repair(editor, 'GTM', 'Skills/Eng/deploy');
-    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/GTM/read');
+    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
   });
 
   it('a plugin nested below the root links like any other — position means nothing', async () => {
@@ -230,7 +272,7 @@ describe('PluginLinksService', () => {
 
     await svc.link(manager, 'Deep', 'Skills/Eng/rollback');
     expect(JSON.parse(await read('Plugins/teams/Deep/plugin.json')).extensions['software.bevel.hexis'].skills).toEqual(['Skills/Eng/rollback']);
-    expect(await read('Skills/Eng/rollback/access.md')).toContain('plugin/Deep/read');
+    expect(await read('Skills/Eng/rollback/access.md')).toContain('plugin/deep/read');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/rollback/SKILL.md')).toBe(true);
     expect(await index.pluginsOf('Skills/Eng/rollback')).toEqual([{ name: 'Deep', linked: true, granted: true }]);
   });

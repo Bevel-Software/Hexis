@@ -84,6 +84,10 @@ export function createPluginsRoutes(
       op: (user: AuthUser, plugin: string, skillPath: string) => Promise<unknown>,
       skillPathOf: (req: express.Request) => unknown,
     ) => {
+      if (!req.userEmail) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
       const user = await resolveUser(req);
       if (!user) {
         res.status(401).json({ error: 'Unauthenticated' });
@@ -184,6 +188,7 @@ export function createPluginsRoutes(
           canRead: member,
           canWrite: manager,
           isOwner: owner,
+          linksAreManaged: g.linksAreManaged,
           skillCount: g.skillCount,
           toolCount: g.toolCount,
           owners: g.owners,

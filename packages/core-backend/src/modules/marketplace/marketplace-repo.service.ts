@@ -110,7 +110,13 @@ export class MarketplaceRepoService {
       const last = await this.readSidecar(namespace);
       const head = await this.headOf(namespace);
       let current = await this.compiler.sourceCommit();
-      if (last === current && head !== null) return { namespace, compiled: false, sourceCommit: current };
+      if (last === current && head !== null) {
+        // Unchanged source is still a served namespace: its HEAD is
+        // reconciled on every fetch, so a crash after an earlier branch update
+        // cannot leave a clone that sees no default branch.
+        await this.ensureHead(namespace);
+        return { namespace, compiled: false, sourceCommit: current };
+      }
 
       // The commit just read is the one the tree is stamped with: a second
       // read that failed would otherwise record a placeholder as the compiled
@@ -194,13 +200,21 @@ export class MarketplaceRepoService {
       };
       const args = ['-C', this.repoDir, 'commit-tree', treeSha, '-m', message, ...(parent ? ['-p', parent] : [])];
       const sha = (await this.git(args, { env: commitEnv })).stdout.trim();
+      // HEAD FIRST, then the branch: a symbolic ref may dangle, a branch
+      // without a HEAD is a clone that checks out nothing. Ordered so that a
+      // crash between the two leaves the recoverable state.
+      await this.ensureHead(namespace);
       await this.git(['-C', this.repoDir, 'update-ref', this.refOf(namespace), sha, ...(parent ? [parent] : [])]);
-      await this.git(['-C', this.repoDir, 'symbolic-ref', `refs/namespaces/${namespace}/HEAD`, this.refOf(namespace)]);
       return sha;
     } finally {
       await fs.rm(scratch, { recursive: true, force: true });
       await fs.rm(indexDir, { recursive: true, force: true });
     }
+  }
+
+  /** Point the namespace's HEAD at its branch — idempotent, and valid before the branch exists. */
+  private async ensureHead(namespace: string): Promise<void> {
+    await this.git(['-C', this.repoDir, 'symbolic-ref', `refs/namespaces/${namespace}/HEAD`, this.refOf(namespace)]);
   }
 
   private sidecarDir(): string {

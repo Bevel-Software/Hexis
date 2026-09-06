@@ -9,6 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { walkFiles } from '../../../shared/fs-walk.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
+import { judgeMcpServerEntry } from '../../tool-manuals/mcp-json-discovery.js';
 import type { SkillSummary } from '../../skills/skills.contract.js';
 import type { LinkMembership } from '../plugin-links.js';
 import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
@@ -158,7 +159,9 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
         `${name}: skill "${s.name}" at ${s.path} shares its name with ${other.path} — the second is left out`,
       ),
     );
-    const mcp = portableMcp(plugin.mcpServers);
+    const mcp = portableMcp(plugin.mcpServers, (name, reason) =>
+      warnings.push(`${plugin.folder}: mcp server "${name}" not shipped — ${reason}`),
+    );
     if (dedup.length === 0 && mcp === null) continue; // nothing this caller may see
     // The slug is ALWAYS sanitised, even when the manifest declares a name: it
     // becomes a path segment in the compiled tree, and a checked-in manifest
@@ -359,28 +362,38 @@ function dedupeByName(
 }
 
 /**
- * The portable half of a plugin's `mcpServers`: transport, url, command,
- * args, env, cwd, and only those headers a client may send verbatim (no
- * `${VAR}` vault references). Null when there is no server to ship.
+ * The portable half of a plugin's `mcpServers`: every entry the ONE
+ * judgement accepts (a name a client can key on, a transport it speaks, the
+ * field that transport needs), normalised, minus what a client cannot use —
+ * `${VAR}` vault references in a url or a header. Null when there is no
+ * server to ship; each server left out is reported with the judgement's
+ * reason, so an omission is diagnosable.
  */
-function portableMcp(servers: Record<string, unknown> | null): Record<string, Record<string, unknown>> | null {
+function portableMcp(
+  servers: Record<string, unknown> | null,
+  leftOut: (name: string, reason: string) => void,
+): Record<string, Record<string, unknown>> | null {
   if (!servers) return null;
   const out: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(servers)) {
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
-    const server = raw as Record<string, unknown>;
-    const entry: Record<string, unknown> = {};
-    for (const key of ['type', 'url', 'command', 'args', 'env', 'cwd'] as const) {
-      if (server[key] !== undefined) entry[key] = server[key];
+    const verdict = judgeMcpServerEntry(name, raw);
+    if (!verdict.ok) {
+      leftOut(name, verdict.reason);
+      continue;
     }
-    if (typeof server.headers === 'object' && server.headers !== null) {
+    const entry = { ...verdict.entry };
+    if (typeof entry.url === 'string' && containsVariableReference(entry.url)) {
+      leftOut(name, 'its url is expanded from the vault, which a client cannot do');
+      continue;
+    }
+    if (typeof entry.headers === 'object' && entry.headers !== null) {
       const headers: Record<string, string> = {};
-      for (const [h, v] of Object.entries(server.headers as Record<string, unknown>)) {
+      for (const [h, v] of Object.entries(entry.headers as Record<string, unknown>)) {
         if (typeof v === 'string' && !containsVariableReference(v)) headers[h] = v;
       }
       if (Object.keys(headers).length > 0) entry.headers = headers;
+      else delete entry.headers;
     }
-    if (typeof entry.url === 'string' && containsVariableReference(entry.url)) continue; // ours to expand, not theirs
     out[name] = entry;
   }
   return Object.keys(out).length > 0 ? out : null;

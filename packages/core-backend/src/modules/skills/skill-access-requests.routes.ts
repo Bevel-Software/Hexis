@@ -78,7 +78,10 @@ export function createSkillAccessRequestRoutes(deps: {
         return;
       }
       const branch = joinBranchFor(user.email, folder);
-      const existing = (await workflow.listChangeRequestsAuthoredBy(user.email)).find(
+      // FRESH: a repeated click must find the request the previous one opened,
+      // and the cached listing can trail it — a miss here would send the
+      // retry into a duplicate refusal.
+      const existing = (await workflow.listChangeRequestsAuthoredBy(user.email, { fresh: true })).find(
         (cr) => cr.state === 'open' && cr.branch === branch,
       );
       if (existing) {
@@ -87,8 +90,12 @@ export function createSkillAccessRequestRoutes(deps: {
       }
       try {
         await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);
-      } catch {
-        // exists (or raced) — proceed against it
+      } catch (err) {
+        // Only the known race is proceeded through — the branch appeared
+        // between the listing and now. Anything else is a real failure, and
+        // writing a proposal onto a branch that was not made would be worse.
+        const message = err instanceof Error ? err.message : String(err);
+        if (!/already exists/i.test(message)) throw err;
       }
       const ws = await workspaceService.getOrCreateForBranch(branch);
       const accessPath = `${kbDirName}/${rulesOf(folder)}`;

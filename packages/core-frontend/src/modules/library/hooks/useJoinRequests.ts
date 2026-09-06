@@ -62,7 +62,11 @@ export function useJoinRequests(
   folder: string | null,
   api: JoinRequestsApi = PLUGIN_JOIN_API,
 ): JoinRequestsState {
-  const [requests, setRequests] = useState<JoinRequest[]>([]);
+  // Keyed by the plugin they came from: a page that moves from skill A to
+  // skill B without unmounting must not show A's requests until B's arrive —
+  // a banner that lets an editor grant A's proposal against B's folder.
+  const [loaded, setLoaded] = useState<{ plugin: string; rows: JoinRequest[] } | null>(null);
+  const requests = loaded?.plugin === plugin ? loaded.rows : [];
   const [revision, setRevision] = useState(0);
   const toast = useLibraryToast();
 
@@ -70,7 +74,7 @@ export function useJoinRequests(
     let cancelled = false;
     api.list(plugin)
       .then((rows) => {
-        if (!cancelled) setRequests(rows);
+        if (!cancelled) setLoaded({ plugin, rows });
       })
       .catch(() => {
         // Silent: a manager surface that fails must not put an error banner in
@@ -100,17 +104,22 @@ export function useJoinRequests(
       }
       // Drop the accepted proposal locally so the row goes immediately; the
       // refetch below is what makes it true.
-      setRequests((rows) =>
-        rows.map((r) =>
-          r.number === request.number
-            ? {
-                ...r,
-                proposals: r.proposals.filter(
-                  (p) => !(p.id === proposal.id && p.verb === proposal.verb),
-                ),
-              }
-            : r,
-        ),
+      setLoaded((cur) =>
+        cur && cur.plugin === plugin
+          ? {
+              ...cur,
+              rows: cur.rows.map((r) =>
+                r.number === request.number
+                  ? {
+                      ...r,
+                      proposals: r.proposals.filter(
+                        (p) => !(p.id === proposal.id && p.verb === proposal.verb),
+                      ),
+                    }
+                  : r,
+              ),
+            }
+          : cur,
       );
       toast(`${proposal.label} now has ${proposal.verb} access.`);
       await api.reconcile(plugin, request.number).catch(() => false);

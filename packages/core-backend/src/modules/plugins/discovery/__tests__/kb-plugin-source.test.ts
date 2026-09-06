@@ -113,8 +113,14 @@ describe('KbPluginSource — bundles', () => {
           // A stray blank url beside a real command is still a stdio server.
           { id: 'launch', config: { type: 'stdio', command: 'run-it', url: '' } },
           { id: 'untyped-launch', config: { command: 'run-it', url: '' } },
+          // The client speaks no sse; shipping it would install a server nothing can use.
+          { id: 'events', config: { type: 'sse', url: 'https://events.example' } },
+          // A name that cannot be a server name (the secret namespace, the route slug).
+          { id: 'Bad Id', config: { command: 'x' } },
         ],
-        profiles: [{ id: 'global', servers: ['jira', 'no-url', 'blank-url', 'odd', 'launch', 'untyped-launch'] }],
+        profiles: [
+          { id: 'global', servers: ['jira', 'no-url', 'blank-url', 'odd', 'launch', 'untyped-launch', 'events', 'Bad Id'] },
+        ],
       }),
     );
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
@@ -125,9 +131,12 @@ describe('KbPluginSource — bundles', () => {
       'untyped-launch': { type: 'stdio', command: 'run-it' },
     });
     expect(warnings.some((w) => w.includes('"jira" is declared twice'))).toBe(true);
-    expect(warnings.some((w) => w.includes('"no-url" has transport "http" but no url'))).toBe(true);
+    // The reasons are the shared judgement's — the same words an mcp.json entry gets.
+    expect(warnings.some((w) => w.includes('"no-url" no url'))).toBe(true);
     expect(warnings.some((w) => w.includes('"blank-url" has neither a url nor a command'))).toBe(true);
-    expect(warnings.some((w) => w.includes('"odd" has an unknown transport'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"odd" unknown type "grpc"'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"events" the MCP client has no `sse` transport'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"Bad Id" the name is the secret namespace'))).toBe(true);
   });
 
   it('cuts an extends cycle instead of hanging, and keeps what it collected', async () => {

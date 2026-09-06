@@ -56,11 +56,11 @@ export class KbPluginSource implements PluginSource {
     const visit = async (dir: string, relFolder: string): Promise<number> => {
       const folder = relFolder ? `${PLUGINS_DIR}/${relFolder}` : PLUGINS_DIR;
       const isRoot = relFolder === '';
-      if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE)))) {
+      if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings))) {
         claim(await readNativePlugin(dir, folder, relFolder, warnings));
         return 1;
       }
-      if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE)))) {
+      if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE), folder, warnings))) {
         const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings);
         if (bundle) claim(bundle);
         return 1; // unreadable: reported, and still not descended into
@@ -68,7 +68,11 @@ export class KbPluginSource implements PluginSource {
       let entries: import('node:fs').Dirent[];
       try {
         entries = await fs.readdir(dir, { withFileTypes: true });
-      } catch {
+      } catch (err) {
+        // Absence is a knowledge base without that folder — ordinary. Any
+        // other failure hides every plugin beneath, and must say so rather
+        // than let the catalog shrink in silence.
+        if (!isAbsence(err)) warnings.push(`${folder}: could not be read — ${describe(err)}`);
         return 0;
       }
       let beneath = 0;
@@ -85,6 +89,21 @@ export class KbPluginSource implements PluginSource {
   }
 }
 
-async function isFile(abs: string): Promise<boolean> {
-  return fs.stat(abs).then((s) => s.isFile(), () => false);
+/** Whether `abs` is a file; a probe that fails for any reason but absence is reported. */
+async function isFile(abs: string, folder: string, warnings: string[]): Promise<boolean> {
+  try {
+    return (await fs.stat(abs)).isFile();
+  } catch (err) {
+    if (!isAbsence(err)) warnings.push(`${folder}: ${path.basename(abs)} could not be read — ${describe(err)}`);
+    return false;
+  }
+}
+
+function isAbsence(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

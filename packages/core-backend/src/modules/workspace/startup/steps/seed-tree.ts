@@ -89,23 +89,37 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
   await walk('');
 }
 
-/** Template files that are TEXT and may carry layout placeholders; anything else is copied byte for byte. */
-const TEXT_TEMPLATE = /(\.(md|markdown|ya?ml|json|txt|template)|(?:^|[/\\])\.[^/\\]+)$/i;
-
 /**
  * Copy one template file (by repo-relative path) into `dest`, creating
  * parents. Text files are RENDERED — the managed guide and the ignore file
  * name the three root folders, which a deployment may have renamed — and a
  * file without placeholders comes out byte-identical to its source.
+ *
+ * "Text" is decided by the BYTES, not the name: strict UTF-8 with no NUL.
+ * A name-based rule mistook a hidden binary for text and re-encoded it;
+ * anything that does not decode is copied byte for byte. Either way the
+ * source's mode survives — a template script keeps its executable bit.
  */
 async function copyTemplateFile(templateDir: string, relPath: string, dest: string): Promise<void> {
   const from = await templateSource(templateDir, relPath);
   const to = path.join(dest, relPath);
   await fs.mkdir(path.dirname(to), { recursive: true });
-  if (TEXT_TEMPLATE.test(relPath)) {
-    await fs.writeFile(to, renderKbLayoutPlaceholders(await fs.readFile(from, 'utf8')), 'utf8');
-  } else {
+  const text = asText(await fs.readFile(from));
+  if (text === null) {
     await fs.copyFile(from, to);
+  } else {
+    await fs.writeFile(to, renderKbLayoutPlaceholders(text), 'utf8');
+  }
+  await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
+}
+
+/** The bytes as text when they ARE text — strict UTF-8, BOM kept, no NUL — else null. */
+function asText(bytes: Buffer): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
   }
 }
 

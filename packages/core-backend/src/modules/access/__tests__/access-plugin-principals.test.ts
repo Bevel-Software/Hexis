@@ -154,6 +154,38 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'sam@x.io', skill)).toBe(true);
     });
 
+    it('a public WRITE principal makes the path writable by everyone — and the eligible set says so', async () => {
+      // A gate that counts approvers must not see "a principal with no
+      // enumerable members" where the truth is "anyone signed in".
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - everyone\n'),
+        'Skills/Common/tips/access.md': '---\n---\nwrite:\n  - plugin/Open/write\n',
+      });
+      const writers = await svc.eligibleWriters(workspaceId, 'Skills/Common/tips/SKILL.md');
+      expect(writers.roles).toContain('everyone');
+      expect(await svc.canWrite(workspaceId, 'nobody@elsewhere.io', 'Skills/Common/tips/SKILL.md')).toBe(true);
+    });
+
+    it('two folders folding to one slug: the first by path claims it, roster or none — a twin never supplies the members', async () => {
+      // Discovery keeps the first folder by path and skips its twin; the
+      // principal follows the same rule, so the twin's roster never becomes
+      // the grant's membership through the back door.
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/a/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/b/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/b/GTM/access.md': pluginAccessMd('read:\n  - Zed <zed@x.io>\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
+      });
+      // Path order is the walk's order: a/GTM comes first, claims the slug
+      // and has no roster — so the principal is EMPTY. Neither the root-level
+      // GTM's Ali nor the later twin's Zed gets in through it.
+      expect(await svc.canRead(workspaceId, 'ali@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
+      expect(await svc.canRead(workspaceId, 'zed@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
+    });
+
     it('a plugin readable by everyone yields a public principal', async () => {
       const svc = await makeService({
         ...BASE,

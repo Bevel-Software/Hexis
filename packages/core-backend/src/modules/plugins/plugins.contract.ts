@@ -51,6 +51,8 @@ export interface PluginSummary {
   name: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /** Whether this platform writes the plugin's links — see `PluginCatalogEntry`. */
+  linksAreManaged: boolean;
   /**
    * Per-caller: the caller can read the FOLDER (membership). Every returned
    * plugin has at least one of `canRead` / `canWrite` / discoverability; a
@@ -94,6 +96,12 @@ export interface PluginSummary {
 export interface PluginCatalogEntry {
   name: string;
   folders: string[];
+  /**
+   * Whether this platform writes the plugin's links (a native `plugin.json`)
+   * — false for a plugin read from an external format, whose links are
+   * edited in that repository and which the link endpoints refuse.
+   */
+  linksAreManaged: boolean;
   skillCount: number;
   toolCount: number;
   owners: ResolvedPrincipals;

@@ -298,6 +298,29 @@ describe('TemplateFilesStep', () => {
     );
   });
 
+  it('seeds a binary template file byte for byte and keeps a script executable — text is what decodes', async () => {
+    const customTemplate = path.join(root, 'custom-template-bytes');
+    // The packaged template as a base, plus two files it does not ship.
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.mkdir(path.join(customTemplate, 'assets'), { recursive: true });
+    await fs.mkdir(path.join(customTemplate, 'scripts'), { recursive: true });
+    // Not UTF-8, and holding a NUL: text by no reading of the bytes. A
+    // name-based rule once sent this through the decoder and changed it.
+    const binary = Buffer.from([0x89, 0x50, 0x00, 0xff, 0xfe, 0x7b, 0x7b, 0x7d, 0x7d]);
+    await fs.writeFile(path.join(customTemplate, 'assets', '.logo.bin'), binary);
+    await fs.writeFile(path.join(customTemplate, 'scripts', 'run.sh'), '#!/bin/sh\necho {{skillsDir}}\n', { mode: 0o755 });
+    // The empty-remote seed is the one path that copies a whole template.
+    const dir = path.join(root, 'seeded-bytes');
+    await fs.mkdir(dir, { recursive: true });
+    await buildSeedTree(customTemplate, [], ['admin@example.com'])(dir);
+
+    expect(await fs.readFile(path.join(dir, 'assets', '.logo.bin'))).toEqual(binary);
+    expect(norm(await fs.readFile(path.join(dir, 'scripts', 'run.sh'), 'utf8'))).toBe('#!/bin/sh\necho Skills\n');
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(path.join(dir, 'scripts', 'run.sh'))).mode & 0o111).not.toBe(0);
+    }
+  });
+
   it("declares a custom template's ignore file without the stale Skills/ rule it still ships", async () => {
     // A KB with NO ignore file gets the template's copy — and a distribution's
     // template may still carry the rule the previous release had. The on-disk

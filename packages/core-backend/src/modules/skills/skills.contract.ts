@@ -10,10 +10,13 @@
 /**
  * One plugin a skill belongs to — by sitting INSIDE the plugin folder
  * (`linked: false`) or by being LINKED from the plugin's manifest
- * (`linked: true`). For a link, `granted` says whether the skill's own access
- * rules name the plugin's `plugin/<Name>/read` principal, which is what makes
- * the link work for the plugin's members; the link service writes that grant
- * with the link, so `false` means a hand edit took it away.
+ * (`linked: true`). For a link, `granted` is the link's HEALTH: whether the
+ * plugin's members can read the skill through it. For a link this platform
+ * manages that is whether the skill's own access rules name the plugin's
+ * `plugin/<Name>/read` principal — the link service writes that grant with
+ * the link, so `false` means a hand edit took it away. A link read from an
+ * external plugin format needs no grant (the skill's own scope decides who
+ * reads it) and is always `true`; the flag never proves a principal exists.
  */
 export interface PluginMembership {
   /** The plugin folder name. */

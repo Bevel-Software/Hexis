@@ -1,4 +1,5 @@
 import { branchSegment } from '../git/branchAuthor.js';
+import { validateFilename } from './filename.js';
 
 /**
  * Top-level layout of the KB repo (inside the `KB_DIR_NAME` clone).
@@ -125,12 +126,14 @@ export const DEFAULT_KB_LAYOUT: Readonly<KbLayout> = Object.freeze({
 export function validateKbRootName(name: string): string | null {
   const v = name.trim();
   if (!v) return 'A folder name is required.';
-  if (v === '.' || v === '..' || v.includes('/') || v.includes('\\')) {
-    return 'Use a single folder name — no slashes.';
-  }
+  if (v.includes('/') || v.includes('\\')) return 'Use a single folder name — no slashes.';
+  // The ONE rule for what a path segment may be called — the same one every
+  // file and folder made through the platform passes (reserved Windows
+  // names, trailing dots, forbidden characters, length) — plus what a ROOT
+  // must not be: dot-prefixed, which every scanner skips as bookkeeping.
+  const asName = validateFilename(v);
+  if (asName) return asName;
   if (v.startsWith('.')) return 'The name can\'t start with a dot.';
-  // eslint-disable-next-line no-control-regex -- control chars cannot be a path segment
-  if (/[\u0000-\u001f\u007f]/.test(v)) return 'The name can\'t contain control characters.';
   return null;
 }
 
@@ -256,9 +259,12 @@ export function normalizeSkillRoot(raw: string): string | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   if (!trimmed || trimmed.includes('\\') || trimmed.startsWith('/')) return null;
-  const segments = trimmed.split('/').filter((s) => s.length > 0);
+  const segments = trimmed.split('/');
+  // Only TRAILING slashes are forgiven; an empty segment anywhere else
+  // (`Skills//deploy`) is a malformed path, not a spelling of a valid one.
+  while (segments.length > 0 && segments[segments.length - 1] === '') segments.pop();
   if (segments.length === 0) return null;
-  if (segments.some((s) => s === '.' || s === '..')) return null;
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) return null;
   return segments.join('/');
 }
 

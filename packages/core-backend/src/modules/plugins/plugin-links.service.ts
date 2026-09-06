@@ -3,7 +3,6 @@ import path from 'node:path';
 import {
   DEFAULT_BRANCH,
   PLUGIN_MANIFEST_FILE,
-  isPersonalPluginFolder,
   linkedSkillRoots,
   normalizeSkillRoot,
   pluginManifestName,
@@ -15,7 +14,7 @@ import {
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { AccessMutationService, accessMdPathForFolder } from '../access/access-mutation.service.js';
-import { PLUGIN_TOKEN_PREFIX } from '../access-model/access-grammar.js';
+import { pluginPrincipalKey } from '../access-model/access-grammar.js';
 import type { Principal } from '../access-model/access-splice.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { ISkillService } from '../skills/skills.contract.js';
@@ -61,10 +60,11 @@ export class PluginLinkError extends Error {
  * Repair re-grants the tokens for a link that exists but whose grant was
  * hand-removed: the amber dot's one action.
  *
- * Every operation is serialised on the plugin's manifest slug (the same key
- * provisioning locks on) and lands as ordinary default-branch commits through
- * the pending-commit driver, so the write gate and the per-user push gate
- * apply exactly as they do to any edit.
+ * Every operation is serialised on BOTH sides it writes — the plugin's
+ * manifest slug (the same key provisioning locks on) and the skill root whose
+ * access.md carries the grant — and lands as ordinary default-branch commits
+ * through the pending-commit driver, so the write gate and the per-user push
+ * gate apply exactly as they do to any edit.
  */
 export class PluginLinksService {
   private readonly locks = new WorkspaceMutex();
@@ -107,7 +107,7 @@ export class PluginLinksService {
         { kind: 'needs-skill-write', root },
       );
     }
-    return this.locks.run(`plugin:${pluginManifestName(folder)}`, async () => {
+    return this.locks.runAll(this.lockKeys(folder, root), async () => {
       const { manifest, manifestRel } = await this.readManifest(wsId, folder);
       const roots = linkedSkillRoots(manifest);
       // Manifest FIRST, grant second — two commits, deliberately in this
@@ -137,7 +137,7 @@ export class PluginLinksService {
     const root = this.rootOrThrow(rawRoot);
     const wsId = linksWorkspaceId();
     await this.requirePluginWrite(wsId, user, folder);
-    return this.locks.run(`plugin:${pluginManifestName(folder)}`, async () => {
+    return this.locks.runAll(this.lockKeys(folder, root), async () => {
       const { manifest, manifestRel } = await this.readManifest(wsId, folder);
       const roots = linkedSkillRoots(manifest);
       if (!roots.includes(root)) {
@@ -187,7 +187,7 @@ export class PluginLinksService {
     // Everything under the lock, the manifest read included: a repair that
     // checked the link and then waited on an unlink would re-grant a root the
     // manifest no longer names.
-    return this.locks.run(`plugin:${pluginManifestName(folder)}`, async () => {
+    return this.locks.runAll(this.lockKeys(folder, root), async () => {
       const { manifest } = await this.readManifest(wsId, folder);
       if (!linkedSkillRoots(manifest).includes(root)) {
         throw new PluginLinkError(`"${root}" is not linked into ${folder}.`, 404, { kind: 'not-linked', root });
@@ -208,11 +208,28 @@ export class PluginLinksService {
 
   // --- internal --------------------------------------------------------------
 
-  /** The two grants a link carries: members read, managers write. */
+  /**
+   * ONE reservation for both sides of a link: the plugin's manifest AND the
+   * skill root's access.md. Two plugins linking the same root write the same
+   * file, and serialising on the plugin alone let them interleave, one splice
+   * overwriting the other's grant. `runAll` takes both keys atomically, so
+   * nothing nests and no ordering discipline is needed.
+   */
+  private lockKeys(folder: string, root: string): string[] {
+    return [`plugin:${pluginManifestName(folder)}`, `root:${root}`];
+  }
+
+  /**
+   * The two grants a link carries: members read, managers write — written as
+   * the CANONICAL keys (slugged name), the spelling every comparison uses, so
+   * a repeated link finds its grant and an unlink finds what to revoke
+   * whatever the folder is called.
+   */
   private tokens(folder: string): Principal[] {
+    const slug = pluginManifestName(folder);
     return [
-      { kind: 'role', role: `${PLUGIN_TOKEN_PREFIX}${folder}/read` },
-      { kind: 'role', role: `${PLUGIN_TOKEN_PREFIX}${folder}/write` },
+      { kind: 'role', role: pluginPrincipalKey(slug, 'read') },
+      { kind: 'role', role: pluginPrincipalKey(slug, 'write') },
     ];
   }
 
@@ -254,10 +271,15 @@ export class PluginLinksService {
     return under.map((s) => s.path);
   }
 
-  /** The exact on-disk plugin folder for `name`, or 404 — personal folders are not plugins. */
+  /**
+   * The exact on-disk plugin folder for `name`, or 404. Personal folders are
+   * not plugins, but that is the MEMBERSHIP's verdict (discovery marks the
+   * `personal-*` prefix personal only directly under the root), not a rule
+   * on the name — a nested plugin may be called anything.
+   */
   private async pluginFolder(name: string): Promise<string> {
     const trimmed = name.trim();
-    if (!trimmed || isPersonalPluginFolder(trimmed) || trimmed.includes('/') || trimmed.includes('\\')) {
+    if (!trimmed || trimmed.includes('/') || trimmed.includes('\\')) {
       throw new PluginLinkError('Unknown plugin', 404, { kind: 'unknown-plugin' });
     }
     const membership = await this.links.membership();

@@ -28,6 +28,7 @@ const pluginsMock = vi.hoisted(() => ({
   listJoinRequests: vi.fn(),
   reconcileJoinRequest: vi.fn(),
   requestPluginAccess: vi.fn(),
+  unlinkSkill: vi.fn(),
 }));
 const libApiMock = vi.hoisted(() => ({ removeLibraryItem: vi.fn() }));
 vi.mock('../services/library.api', async (importOriginal) => ({
@@ -40,6 +41,7 @@ vi.mock('../services/plugins.api', () => ({
   listJoinRequests: pluginsMock.listJoinRequests,
   reconcileJoinRequest: pluginsMock.reconcileJoinRequest,
   requestPluginAccess: pluginsMock.requestPluginAccess,
+  unlinkSkill: pluginsMock.unlinkSkill,
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
@@ -210,6 +212,34 @@ describe('PluginPage', () => {
       expect(libApiMock.removeLibraryItem).toHaveBeenCalledWith('Plugins/GTM/outreach'),
     );
     expect(await screen.findByText(/Removed outreach from GTM/)).toBeInTheDocument();
+  });
+
+  it('removing a LINKED skill unlinks it — the skill stays where it lives', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'deploy',
+          description: 'Ships it.',
+          path: 'Skills/Eng/deploy',
+          plugins: [{ name: 'GTM', linked: true, granted: true }],
+        },
+      ],
+    });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    pluginsMock.unlinkSkill.mockResolvedValue({ root: 'Skills/Eng/deploy', revoked: true });
+    libApiMock.removeLibraryItem.mockClear();
+    renderPlugin('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove deploy' }));
+    expect(await screen.findByText(/removes the link from GTM/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink' }));
+
+    await waitFor(() => expect(pluginsMock.unlinkSkill).toHaveBeenCalledWith('GTM', 'Skills/Eng/deploy'));
+    // Never the delete path: the shared skill is not this plugin's to delete.
+    expect(libApiMock.removeLibraryItem).not.toHaveBeenCalled();
+    expect(await screen.findByText(/Unlinked deploy from GTM/)).toBeInTheDocument();
   });
 
   it('offers no remove affordance to a non-manager', async () => {

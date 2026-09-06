@@ -27,7 +27,9 @@ export function parsePluginPrincipalToken(
   if (!token.toLowerCase().startsWith('plugin/')) return null;
   const rest = token.slice('plugin/'.length);
   const cut = rest.lastIndexOf('/');
-  if (cut <= 0) return null;
+  // Exactly one separator, as the access grammar has it: a nested name is
+  // not a plugin, and showing one would let it be re-submitted as if it were.
+  if (cut <= 0 || rest.slice(0, cut).includes('/')) return null;
   const verb = rest.slice(cut + 1).toLowerCase();
   if (!(PLUGIN_PRINCIPAL_VERBS as readonly string[]).includes(verb)) return null;
   return { plugin: rest.slice(0, cut), verb: verb as PluginPrincipalVerb };

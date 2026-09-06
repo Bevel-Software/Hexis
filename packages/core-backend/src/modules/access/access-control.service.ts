@@ -682,6 +682,11 @@ function eligibleHoldersResolved(
     if (state !== 'grant') continue;
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
+    // A PUBLIC plugin principal (its plugin grants `everyone`) is held by every
+    // signed-in person, so the path is open to everyone: say so in the
+    // eligible set, or a gate counting approvers would see a principal with
+    // no enumerable members and wait forever.
+    if (model.roles.publicKeys?.has(canonical)) addPrincipal(EVERYONE_CANONICAL, 'role');
   }
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on

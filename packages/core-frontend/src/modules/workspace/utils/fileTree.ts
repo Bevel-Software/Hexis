@@ -1,7 +1,5 @@
 import {
   KNOWLEDGE_BASE_DIR,
-  PLUGINS_DIR,
-  SKILLS_DIR,
   reservedRootDirNames,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
@@ -89,7 +87,11 @@ export function suggestedPages(tree: FileTreeEntry | null, limit: number): FileT
       if (entry.name.startsWith('.')) continue;
       if (entry.type === 'file') {
         if (READABLE_PAGE.test(entry.name) && !isAccessRulesFile(entry)) pages.push(entry);
-      } else if (entry.name !== PLUGINS_DIR && entry.name !== SKILLS_DIR) {
+      } else if (level === roots || !KB_ROOT_DIRS.has(entry.name)) {
+        // Below the roots, the reserved SET decides — not two names: a folder
+        // named after any reserved root, at any depth, is the same kind of
+        // thing the root selection above keeps out. The roots themselves are
+        // the selection's own answer (Knowledge is a reserved name too).
         next.push(...(entry.children ?? []));
       }
     }

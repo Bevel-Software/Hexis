@@ -75,7 +75,7 @@ export class MarketplaceCompilerService {
     const sourceCommit = knownCommit ?? (await this.sourceCommit().catch(() => 'unknown'));
     const skills = await this.skillService.listSkills(undefined);
     const membership = await this.links.membership();
-    const { plugins } = await this.source.discover(kbRoot);
+    const { plugins, warnings: discoveryWarnings } = await this.source.discover(kbRoot);
     const readable = await this.readPredicate(wsId, audience, skills.map((s) => `${s.path}/SKILL.md`));
     const tree = await compileMarketplace({
       kbRoot,
@@ -85,7 +85,10 @@ export class MarketplaceCompilerService {
       readable,
       options: { ...this.marketplace, sourceCommit },
     });
-    return { ...tree, sourceCommit };
+    // Discovery's warnings ride with the compile's: a plugin left out for a
+    // malformed manifest or an unresolved MCP profile is otherwise an
+    // omission nobody can diagnose from the tree alone.
+    return { ...tree, warnings: [...discoveryWarnings, ...tree.warnings], sourceCommit };
   }
 
   // --- internal --------------------------------------------------------------

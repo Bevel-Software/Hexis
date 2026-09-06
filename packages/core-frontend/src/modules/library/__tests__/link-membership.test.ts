@@ -77,4 +77,10 @@ describe('membership by link', () => {
     // Inline membership never wears it.
     expect(withLinkHealth(inline, 'GTM').status).toBe(OK);
   });
+
+  it('a broken link never erases a reason the card already shows', () => {
+    const needsTools = { ...shared, status: { state: 'warn' as const, text: 'Needs setup: 1 tool' } };
+    // Ops's link is broken too — but the card's own reason comes first.
+    expect(withLinkHealth(needsTools, 'Ops').status).toBe(needsTools.status);
+  });
 });

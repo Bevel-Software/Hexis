@@ -143,6 +143,32 @@ describe('compileMarketplace', () => {
     expect(tree.warnings).toEqual([]);
   });
 
+  it('ships only mcp servers a client could run, and names each one it leaves out', async () => {
+    await write(
+      'Plugins/GTM/mcp.json',
+      JSON.stringify({
+        mcpServers: {
+          notion: { type: 'streamable-http', url: 'https://mcp.notion.com' },
+          events: { type: 'sse', url: 'https://events.example' },
+          'Bad Name': { type: 'stdio', command: 'x' },
+          empty: { type: 'stdio' },
+        },
+      }),
+    );
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const mcp = json(tree, 'plugins/gtm/mcp.json');
+    expect(Object.keys(mcp.mcpServers)).toEqual(['notion']);
+    expect(tree.warnings.some((w) => w.includes('"events" not shipped') && w.includes('sse'))).toBe(true);
+    expect(tree.warnings.some((w) => w.includes('"Bad Name" not shipped'))).toBe(true);
+    expect(tree.warnings.some((w) => w.includes('"empty" not shipped') && w.includes('no command'))).toBe(true);
+  });
+
+  it("carries discovery's warnings: a manifest naming something other than its folder is said out loud", async () => {
+    await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', version: '2.1.0' }));
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(tree.warnings.some((w) => w.includes('the manifest name is not consulted'))).toBe(true);
+  });
+
   it('for a stranger the plugin keeps only its MCP servers, and the public scope is all that ships', async () => {
     const tree = await compiler.compileFor({ userEmail: 'nobody@elsewhere.io' });
     const paths = [...tree.files.keys()].sort();

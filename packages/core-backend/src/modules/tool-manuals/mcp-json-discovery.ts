@@ -195,6 +195,65 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
  * materialization is a later phase — so a stdio server relying on them will
  * fail to spawn until then; bare-command servers (`npx …`) work today.
  */
+/**
+ * The ONE judgement of an `mcp.json` server entry — its name and its
+ * transport — shared by the manual scanner (which layers the platform's
+ * extension data and its reachability gate on top), the bundle dialect's
+ * registry (whose configs become entries) and the marketplace compiler
+ * (which ships only what a client could run). An entry that fails here fails
+ * everywhere, for one reason; an entry that passes is returned NORMALISED to
+ * the portable shape every consumer emits.
+ */
+export type McpEntryVerdict =
+  | { ok: true; transport: 'stdio' | 'streamable-http'; entry: Record<string, unknown> }
+  | { ok: false; reason: string };
+
+export function judgeMcpServerEntry(name: string, raw: unknown): McpEntryVerdict {
+  if (!SERVER_NAME_RE.test(name)) {
+    return {
+      ok: false,
+      reason: 'the name is the secret namespace and route slug, so it must be lowercase alphanumeric with `_`/`-`',
+    };
+  }
+  if (!isRecord(raw) || typeof raw.type !== 'string') return { ok: false, reason: 'no transport type' };
+  if (raw.type === 'stdio') {
+    if (typeof raw.command !== 'string' || raw.command.length === 0) return { ok: false, reason: 'no command' };
+    const entry: Record<string, unknown> = { type: 'stdio', command: raw.command };
+    if (Array.isArray(raw.args)) entry.args = raw.args.map(String);
+    if (isRecord(raw.env)) entry.env = raw.env;
+    if (typeof raw.cwd === 'string') entry.cwd = raw.cwd;
+    return { ok: true, transport: 'stdio', entry };
+  }
+  if (raw.type === 'sse') {
+    // The pinned `@utcp/mcp` speaks `stdio` and streamable `http` — there
+    // is no sse transport in its schema, so a declaration claiming one either
+    // fails validation or, worse, dials a handshake the server does not
+    // speak. Refusing names the fix; silently rebuilding as http used to
+    // configure exactly that wrong handshake.
+    return {
+      ok: false,
+      reason: 'the MCP client has no `sse` transport — declare the server as `streamable-http` if it supports it',
+    };
+  }
+  if (raw.type === 'streamable-http') {
+    if (typeof raw.url !== 'string' || raw.url.length === 0) return { ok: false, reason: 'no url' };
+    let schemeOk = false;
+    try {
+      const u = new URL(raw.url);
+      schemeOk = u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+      schemeOk = false;
+    }
+    if (!schemeOk) return { ok: false, reason: 'url must be http(s)' };
+    const entry: Record<string, unknown> = { type: 'streamable-http', url: raw.url };
+    if (isRecord(raw.headers)) entry.headers = raw.headers;
+    return { ok: true, transport: 'streamable-http', entry };
+  }
+  // Unknown transport: the spec says an unknown `type` invalidates the
+  // ENTRY, not the file — the caller skips it and keeps its siblings.
+  return { ok: false, reason: `unknown type "${raw.type}"` };
+}
+
 export function descriptorsFromMcpJson(
   pluginFolder: string,
   mcpJsonText: string,
@@ -227,18 +286,14 @@ export function descriptorsFromMcpJson(
   const mcpJsonPath = `${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE}`;
 
   const out: ToolManualDescriptor[] = [];
-  for (const [name, raw] of Object.entries(mcp.mcpServers)) {
-    if (!SERVER_NAME_RE.test(name)) {
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: the name is the secret ` +
-          'namespace and route slug, so it must be lowercase alphanumeric with `_`/`-`.',
-      );
+  for (const [name, rawEntry] of Object.entries(mcp.mcpServers)) {
+    const verdict = judgeMcpServerEntry(name, rawEntry);
+    if (!verdict.ok) {
+      console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ${verdict.reason}.`);
       continue;
     }
-    if (!isRecord(raw) || typeof raw.type !== 'string') {
-      console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no transport type.`);
-      continue;
-    }
+    // Narrowed by the verdict: an entry that passed is a record.
+    const raw = rawEntry as Record<string, unknown>;
     // The extension entry is knowledge-base content too — same zero-trust
     // parse as the rest: a non-object entry reads as "no extension data".
     const ext: HexisMcpServerExtension = isRecord(extensions[name])
@@ -274,91 +329,55 @@ export function descriptorsFromMcpJson(
       ...(variables.length > 0 ? { variables } : {}),
     };
 
-    if (raw.type === 'stdio') {
-      if (typeof raw.command !== 'string' || raw.command.length === 0) {
-        console.warn(`[tool-manuals] skipping stdio server "${name}" in ${mcpJsonPath}: no command.`);
-        continue;
-      }
+    if (verdict.transport === 'stdio') {
+      const entry = verdict.entry;
       out.push({
         ...shared,
         remote: false,
         stdio: {
-          command: raw.command,
-          args: Array.isArray(raw.args) ? raw.args.map(String) : [],
-          env: isRecord(raw.env) ? (raw.env as Record<string, string>) : undefined,
-          cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
+          command: entry.command as string,
+          args: (entry.args as string[] | undefined) ?? [],
+          env: entry.env as Record<string, string> | undefined,
+          cwd: entry.cwd as string | undefined,
         },
       });
       continue;
     }
 
-    if (raw.type === 'sse') {
-      // The pinned `@utcp/mcp` speaks `stdio` and streamable `http` — there
-      // is no sse transport in its schema, so a template claiming one either
-      // fails validation or, worse, dials a handshake the server does not
-      // speak. Refusing here names the fix; silently rebuilding as http used
-      // to configure exactly that wrong handshake.
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: the MCP client has no \`sse\` transport — declare the server as \`streamable-http\` if it supports it.`,
-      );
-      continue;
-    }
-
-    if (raw.type === 'streamable-http') {
-      if (typeof raw.url !== 'string' || raw.url.length === 0) {
-        console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: no url.`);
-        continue;
-      }
-      // Remote-capable servers get the same SSRF gate `.tool` urls pass —
-      // otherwise mcp.json becomes the way to point the backend at loopback,
-      // private ranges, or the cloud metadata endpoint. A `local: true` entry
-      // is exempt because loopback is exactly what local MEANS, and only the
-      // user's own machine ever dials it.
-      // Scheme first, for EVERYONE: `local: true` exempts a server from the
-      // private-network reachability policy, not from being http(s) at all.
-      let schemeOk = false;
+    const url = verdict.entry.url as string;
+    // Remote-capable servers get the same SSRF gate `.tool` urls pass —
+    // otherwise mcp.json becomes the way to point the backend at loopback,
+    // private ranges, or the cloud metadata endpoint. A `local: true` entry
+    // is exempt because loopback is exactly what local MEANS, and only the
+    // user's own machine ever dials it. (The scheme itself was judged for
+    // everyone above: `local: true` exempts a server from the reachability
+    // policy, not from being http(s) at all.)
+    if (ext.local !== true) {
       try {
-        const u = new URL(raw.url);
-        schemeOk = u.protocol === 'http:' || u.protocol === 'https:';
-      } catch {
-        schemeOk = false;
-      }
-      if (!schemeOk) {
-        console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: url must be http(s).`);
+        assertSafeFetchUrl(url, { label: `mcp server "${name}" url` });
+      } catch (err) {
+        console.warn(
+          `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ` +
+            `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
+        );
         continue;
       }
-      if (ext.local !== true) {
-        try {
-          assertSafeFetchUrl(raw.url, { label: `mcp server "${name}" url` });
-        } catch (err) {
-          console.warn(
-            `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ` +
-              `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
-          );
-          continue;
-        }
-      }
-      // Extension headers (auth, `${VAR}` refs) win over mcp.json's literal
-      // ones on a key collision: the portable file cannot carry a credential,
-      // so when both name the same header the extension is the operative one.
-      // Both sides pass the isRecord gate — spreading a malformed non-object
-      // value (a string, say) would scatter its indices into header keys.
-      const headers = {
-        ...(isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {}),
-        ...(isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {}),
-      };
-      out.push({
-        ...shared,
-        url: raw.url,
-        ...(Object.keys(headers).length > 0 ? { headers } : {}),
-        ...(ext.local === true ? { remote: false } : {}),
-      });
-      continue;
     }
-
-    // Unknown transport: the spec says an unknown `type` invalidates the
-    // ENTRY, not the file — skip it, keep its siblings.
-    console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: unknown type "${raw.type}".`);
+    // Extension headers (auth, `${VAR}` refs) win over mcp.json's literal
+    // ones on a key collision: the portable file cannot carry a credential,
+    // so when both name the same header the extension is the operative one.
+    // Both sides pass the isRecord gate — spreading a malformed non-object
+    // value (a string, say) would scatter its indices into header keys.
+    const headers = {
+      ...(isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {}),
+      ...(isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {}),
+    };
+    out.push({
+      ...shared,
+      url,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(ext.local === true ? { remote: false } : {}),
+    });
   }
   return out;
 }

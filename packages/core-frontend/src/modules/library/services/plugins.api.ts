@@ -41,6 +41,13 @@ export interface PluginSummary {
    * enforces this same verdict, so it also decides who sees the affordance.
    */
   isOwner: boolean;
+  /**
+   * Whether this platform writes the plugin's links (a native manifest).
+   * False for a plugin read from an external format — its links are edited
+   * in that repository, and the link endpoints refuse it. Absent from an
+   * older server, which knew only managed plugins.
+   */
+  linksAreManaged?: boolean;
   /** The plugin's TOTALS, not the caller's slice. */
   skillCount: number;
   toolCount: number;

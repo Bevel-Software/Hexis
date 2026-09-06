@@ -250,7 +250,13 @@ function CoreSurfaces() {
     claim('skills-tools');
     return () => claim(null);
   }, [claimsSkills, claim]);
-  return library ? <LibraryRoutes /> : <KnowledgeSurface />;
+  // Mounted here, once, above BOTH surfaces: the Knowledge tree, the tab
+  // strip, the viewer's banner AND the Library's Skills tree all ask the same
+  // question, and a tree rendered outside the provider would read the empty
+  // default and never show a proposed file.
+  return (
+    <OpenChangeRequestsProvider>{library ? <LibraryRoutes /> : <KnowledgeSurface />}</OpenChangeRequestsProvider>
+  );
 }
 
 /**
@@ -272,23 +278,18 @@ function KnowledgeSurface() {
       ),
     [registry],
   );
-  // Mounted here, once, because three separate subtrees ask the same question:
-  // the tree (per row), the tab strip (per tab) and the viewer's banner. A
-  // plain hook per consumer would give every tree row its own request.
   return (
-    <OpenChangeRequestsProvider>
-      {/* The connect-your-agent reminder rides Knowledge's sidebar too, and
-          the shell is where that is decided: `layout` is the app's generic
-          consistency layer and must not name a domain component, so the pill
-          is passed IN from the composition root. The Library passes the same
-          one from `LibraryLayout` — one pill, both surfaces, so a person who
-          skipped the welcome page and stayed in Knowledge still sees it. */}
-      <AppLayout
-        panes={panes}
-        onController={setController}
-        sidebarHeader={<ConnectAgentPill />}
-      />
-    </OpenChangeRequestsProvider>
+    /* The connect-your-agent reminder rides Knowledge's sidebar too, and
+       the shell is where that is decided: `layout` is the app's generic
+       consistency layer and must not name a domain component, so the pill
+       is passed IN from the composition root. The Library passes the same
+       one from `LibraryLayout` — one pill, both surfaces, so a person who
+       skipped the welcome page and stayed in Knowledge still sees it. */
+    <AppLayout
+      panes={panes}
+      onController={setController}
+      sidebarHeader={<ConnectAgentPill />}
+    />
   );
 }
 

@@ -1,5 +1,5 @@
 import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
-import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
 import { useLibrary } from '../state/library-data';
@@ -39,8 +39,10 @@ export function WorkspaceItemRoute() {
   const location = useLocation();
   const splat = params['*'] ?? '';
   const branch = safeDecode(params.branch ?? '');
-  const { kbDirName } = useWorkspace();
+  const { kbDirName, fileTree } = useWorkspace();
   const data = useLibrary();
+  // The workspace tree as a second witness — see `resolveSkillPath`.
+  const witness = (folderRel: string) => folderHasSkillMd(fileTree, kbDirName ? `${kbDirName}/${folderRel}` : null);
 
   // Shape re-validation: the route pattern (`:branch/*`) is broader than the
   // shape the shell dispatches here, and a stray URL must not read as a page.
@@ -66,7 +68,7 @@ export function WorkspaceItemRoute() {
 
   if (kbRoot === SKILLS_DIR) {
     const rest = segments.slice(2);
-    const resolved = resolveSkillPath(data, `${SKILLS_DIR}/${rest.join('/')}`, rest, null);
+    const resolved = resolveSkillPath(data, `${SKILLS_DIR}/${rest.join('/')}`, rest, null, witness);
     switch (resolved.kind) {
       case 'skill':
         return skillPage(resolved.name, resolved.file, resolved.provisional);
@@ -141,7 +143,7 @@ export function WorkspaceItemRoute() {
 
   // `Plugins/<plugin>/SKILL.md` makes the plugin folder itself the skill,
   // which is what the backend's walk would report for it.
-  const resolved = resolveSkillPath(data, repoRel, tail, plugin);
+  const resolved = resolveSkillPath(data, repoRel, tail, plugin, witness);
   switch (resolved.kind) {
     case 'skill':
       return skillPage(resolved.name, resolved.file, resolved.provisional);
@@ -196,18 +198,24 @@ type SkillPathResolution =
  * be a skill's: it sits directly in the root folder (structurally never
  * inside a skill), or its own folder is a known container. A file under an
  * UNKNOWN folder is left alone — that folder is most likely a skill the
- * catalog hasn't caught up with. When nothing positive settled it and the
- * catalog is still loading, WAIT: the evidence may be one render away, and
- * guessing flashes a page for a name that is about to change. Only then is
- * the URL read structurally — a file belongs to the folder holding it, a
- * bare folder names itself — and provisionally, so `SkillPage` must not turn
- * a failed lookup into "doesn't exist" until the catalog has answered.
+ * catalog hasn't caught up with — unless the WORKSPACE TREE, the second
+ * witness, has the folder and shows no `SKILL.md` in it: then it is a
+ * container (a scope with nothing the caller may read beneath) or a loose
+ * file in one, and no catalog can make it a skill. When nothing positive
+ * settled it and the catalog is still loading, WAIT: the evidence may be one
+ * render away, and guessing flashes a page for a name that is about to
+ * change. Only then is the URL read structurally — a file belongs to the
+ * folder holding it, a bare folder names itself — and provisionally, so
+ * `SkillPage` must not turn a failed lookup into "doesn't exist" until the
+ * catalog has answered.
  */
 function resolveSkillPath(
   data: { items: readonly { kind: string; id: string; path: string }[]; loading: boolean },
   repoRel: string,
   tail: readonly string[],
   selfName: string | null,
+  /** Whether a repo-relative folder holds a SKILL.md — true, false, or undefined when the tree cannot say. */
+  witness?: (folderRel: string) => boolean | undefined,
 ): SkillPathResolution {
   const last = tail[tail.length - 1]!;
   const owner = deepestSkillOwning(data.items, repoRel);
@@ -224,6 +232,9 @@ function resolveSkillPath(
   if (hasExtension(last) && (tail.length === 1 || containsCatalogSkill(data.items, parentRel))) {
     return { kind: 'loose-file' };
   }
+  if (witness?.(hasExtension(last) ? parentRel : repoRel) === false) {
+    return hasExtension(last) ? { kind: 'loose-file' } : { kind: 'container' };
+  }
   if (data.loading) return { kind: 'wait' };
   if (hasExtension(last)) {
     return parentName === null
@@ -231,6 +242,28 @@ function resolveSkillPath(
       : { kind: 'skill', name: parentName, file: last, provisional: true };
   }
   return { kind: 'skill', name: last, file: 'SKILL.md', provisional: true };
+}
+
+/**
+ * Whether the folder at `workspaceRel` holds a `SKILL.md`, by the workspace
+ * tree: true or false when the tree has the folder, undefined when it does
+ * not (not loaded, not readable, not on this branch) — an absence that
+ * proves nothing, exactly like the catalog's.
+ */
+function folderHasSkillMd(tree: FileTreeEntry | null, workspaceRel: string | null): boolean | undefined {
+  if (!tree || workspaceRel === null) return undefined;
+  const find = (node: FileTreeEntry): FileTreeEntry | null => {
+    if (node.relativePath === workspaceRel) return node;
+    if (!node.children || !workspaceRel.startsWith(node.relativePath === '.' ? '' : `${node.relativePath}/`)) return null;
+    for (const child of node.children) {
+      const hit = find(child);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const folder = find(tree);
+  if (!folder || folder.type !== 'directory') return undefined;
+  return (folder.children ?? []).some((c) => c.type === 'file' && c.name === 'SKILL.md');
 }
 
 /** Whether a path segment names a file rather than a folder. */

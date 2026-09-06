@@ -59,14 +59,18 @@ export function synthesizePluginPrincipals(
   pluginDirs: ReadonlySet<string>,
 ): void {
   const claimed = new Set<string>();
-  for (const dir of [...pluginDirs].sort()) {
-    const file = accessFiles.get(dir);
-    if (!file) continue; // a plugin without rules has no roster
+  // The same path order discovery walks in, so "first by path" is the same
+  // plugin in both places.
+  for (const dir of [...pluginDirs].sort((a, b) => a.localeCompare(b))) {
     const folder = dir.split('/').pop() ?? dir;
     const slug = pluginManifestName(folder);
-    // Two plugins with one name: discovery keeps the first by path, so do we.
+    // Two plugins with one name: discovery keeps the first by path, so do we —
+    // and the claim is made BEFORE looking for a roster, or a first plugin
+    // without rules would leave its slug to a later twin's roster.
     if (claimed.has(slug)) continue;
     claimed.add(slug);
+    const file = accessFiles.get(dir);
+    if (!file) continue; // a plugin without rules has no roster
     for (const verb of PLUGIN_TOKEN_VERBS) {
       const { emails, everyone } = holdersOf(index, file, verb);
       const key = pluginPrincipalKey(slug, verb);

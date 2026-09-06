@@ -5,6 +5,7 @@ import {
   PLUGIN_MCP_FILE,
   isPersonalPluginFolder,
   linkedSkillRoots,
+  pluginManifestName,
 } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
@@ -26,6 +27,15 @@ export async function readNativePlugin(
   const manifest = parseObject(manifestText);
   if (manifestText !== null && manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
+  }
+  // The FOLDER is the plugin's identity everywhere — the catalog, the
+  // principals, the marketplace slug. A manifest naming something else is
+  // not read as an identity, and the mismatch is said out loud so a grant
+  // written against the manifest's spelling is not a mystery.
+  if (manifest && typeof manifest.name === 'string' && pluginManifestName(manifest.name) !== pluginManifestName(name)) {
+    warnings.push(
+      `${folder}/${PLUGIN_MANIFEST_FILE} names "${manifest.name}" but the folder "${name}" is the plugin's identity — the manifest name is not consulted`,
+    );
   }
   const mcp = parseObject(mcpJsonText);
   const mcpServers =

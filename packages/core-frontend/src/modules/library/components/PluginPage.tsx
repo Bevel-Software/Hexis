@@ -135,6 +135,7 @@ export function PluginPage() {
   );
 
   const skillItems = pluginItems.filter((i) => i.kind === 'skill');
+  const releasedSkillItems = skillItems.filter((i) => !i.pending);
   const toolItems = pluginItems.filter((i) => i.kind === 'integration');
   const attention = attentionOf(data.items, plugin);
   // What the Skills band actually renders. The filter is a VIEW over the band,
@@ -296,11 +297,14 @@ export function PluginPage() {
       {/* Ownership decides readability, the plugin is a view: a linked skill
           the caller may not read is simply absent from their list, and the
           plugin's own total says how many. */}
-      {summary && summary.skillCount > skillItems.length && (
+      {/* Against the RELEASED skills the caller sees: a pending proposal is
+          a card here but not in the plugin's total, and counting it would
+          hide one hidden skill per proposal. */}
+      {summary && summary.skillCount > releasedSkillItems.length && (
         <p className="mb-2 text-detail text-ink-faint">
-          {summary.skillCount - skillItems.length === 1
+          {summary.skillCount - releasedSkillItems.length === 1
             ? '1 skill in this plugin is not shared with you.'
-            : `${summary.skillCount - skillItems.length} skills in this plugin are not shared with you.`}
+            : `${summary.skillCount - releasedSkillItems.length} skills in this plugin are not shared with you.`}
         </p>
       )}
       <PluginItemSections
@@ -411,9 +415,12 @@ export function PluginPage() {
         <RemoveLibraryItemDialog
           item={removing}
           place={plugin}
+          // In this plugin by LINK: the manifest entry goes, the skill stays.
+          linked={removing.plugins?.some((m) => m.name === plugin && m.linked) ?? false}
           onClose={() => setRemoving(null)}
           onRemoved={() => {
-            toast(`Removed ${removing.name} from ${plugin}.`);
+            const wasLinked = removing.plugins?.some((m) => m.name === plugin && m.linked) ?? false;
+            toast(wasLinked ? `Unlinked ${removing.name} from ${plugin}.` : `Removed ${removing.name} from ${plugin}.`);
             // Catalog for the card, plugin index for the counts.
             data.reload();
             data.reloadPlugins();
