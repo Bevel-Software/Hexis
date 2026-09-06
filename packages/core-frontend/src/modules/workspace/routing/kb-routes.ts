@@ -143,7 +143,7 @@ export function useCanonicalFileUrl(workspacePath: string | null): string | null
   return `${window.location.origin}${relative}`;
 }
 
-function safeDecode(s: string): string {
+export function safeDecode(s: string): string {
   try {
     return decodeURIComponent(s);
   } catch {

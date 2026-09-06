@@ -216,8 +216,12 @@ export class TemplateFilesStep implements OnServerStart {
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way.
+      // …and a template still shipping the skills rule an earlier release
+      // had (a distribution's copy, a stale packaged one) must not declare
+      // it: the on-disk reconciliation below never sees a file that was
+      // absent, so the declared content is reconciled here instead.
       if (rel === IGNORE_FILENAME) {
-        content = withIgnorePattern(content, 'AGENTS.md');
+        content = withoutPlatformIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`);
       }
       branch.write(rel, content);
       added.push(rel);
@@ -239,11 +243,14 @@ export class TemplateFilesStep implements OnServerStart {
     // like `Plugins/`; the Skills & Tools sidebar now renders it as a file
     // tree read from the workspace tree, which the ignore file filters — so a
     // KB still carrying that rule would show an empty Skills section. The
-    // line that release appended (and its comment) comes out; the Knowledge
-    // explorer never rendered the root and still does not. Spelled with the
-    // CONFIGURED root name, since a deployment may have renamed it. ONE
-    // read-modify-write for both rules: two passes would each read the
-    // on-disk file and the second declared write would lose the first's.
+    // line that release wrote comes out, recognised by the PLATFORM'S OWN
+    // COMMENT above it — an operator who wrote the same rule by hand keeps
+    // it, for the same reason the negation above is kept: the file is
+    // theirs. The Knowledge explorer never rendered the root and still does
+    // not. Spelled with the CONFIGURED root name, since a deployment may
+    // have renamed it. ONE read-modify-write for both rules: two passes
+    // would each read the on-disk file and the second declared write would
+    // lose the first's.
     added.push(...(await reconcileIgnoreRules(repoDir, branch, { add: ['AGENTS.md'], drop: [`${SKILLS_DIR}/`] })));
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
@@ -348,8 +355,9 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
  * Never rewrites the rest. The file is the operator's, and every rule already
  * in it is theirs to keep: adding puts one line under a comment saying where
  * it came from, and dropping removes exactly the line (and the comment) an
- * earlier release put there. Absent file is a no-op — it means the template's
- * copy (declared in the same step) arrives with the right rules in it.
+ * earlier release put there — never a line the operator wrote. Absent file is
+ * a no-op — it means the template's copy (declared in the same step, and
+ * reconciled the same way at declaration) arrives with the right rules in it.
  *
  * Matched line-wise rather than by substring: a rule for `Plugins/AGENTS.md`
  * is not a rule for the root `AGENTS.md`, and treating it as one would leave
@@ -370,7 +378,7 @@ async function reconcileIgnoreRules(
     return [];
   }
   const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
-  const merged = rules.drop.reduce((text, pattern) => withoutIgnorePattern(text, pattern), added);
+  const merged = rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added);
   if (merged === current) return [];
   branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];
@@ -379,32 +387,38 @@ async function reconcileIgnoreRules(
 /** The comment `withIgnorePattern` writes above a line it appends. */
 const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
 
-/** The template line an earlier release shipped above the shared-skills rule. */
-function legacySkillsRuleComment(): string {
-  return `# The shared-skills root is rendered by the Skills & Tools app, like ${PLUGINS_DIR}/.`;
+/**
+ * The template line an earlier release shipped above the shared-skills rule,
+ * by its stable opening — the line ended by naming the plugins root, which a
+ * deployment may have renamed since.
+ */
+const LEGACY_SKILLS_RULE_COMMENT_PREFIX = '# The shared-skills root is rendered by the Skills & Tools app';
+
+/** Whether a line is a comment the platform wrote above a rule it added. */
+function isPlatformRuleComment(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed === PLATFORM_RULE_COMMENT || trimmed.startsWith(LEGACY_SKILLS_RULE_COMMENT_PREFIX);
 }
 
 /**
- * `text` without any line equal to `pattern` — and without the platform's
- * own comment directly above such a line (the one `withIgnorePattern` writes,
- * or the template line an earlier release shipped), plus the blank line that
- * opened the appended block. The rule leaves the way it came in; nothing else
- * moves. A `!pattern` negation is the operator's and stays.
+ * `text` without the `pattern` lines THE PLATFORM WROTE — the ones sitting
+ * directly under its own comment (the one `withIgnorePattern` writes, or the
+ * template line an earlier release shipped) — and without that comment, plus
+ * the blank line that opened an appended block. Provenance is the comment:
+ * an identical line with no platform comment above it is the operator's and
+ * stays, as does a `!pattern` negation. Nothing else moves.
  */
-function withoutIgnorePattern(text: string, pattern: string): string {
+function withoutPlatformIgnorePattern(text: string, pattern: string): string {
   const lines = text.split('\n');
-  if (!lines.some((l) => l.trim() === pattern)) return text;
   const kept: string[] = [];
   for (const line of lines) {
-    if (line.trim() !== pattern) {
+    const above = kept[kept.length - 1];
+    if (line.trim() !== pattern || above === undefined || !isPlatformRuleComment(above)) {
       kept.push(line);
       continue;
     }
-    const above = kept[kept.length - 1]?.trim();
-    if (above === PLATFORM_RULE_COMMENT || above === legacySkillsRuleComment()) {
-      kept.pop();
-      if (above === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
-    }
+    kept.pop();
+    if (above.trim() === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
   }
   return kept.join('\n');
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
@@ -98,7 +98,45 @@ describe('SkillsTree', () => {
     expect(screen.queryByText('Skills')).not.toBeInTheDocument();
   });
 
-  it("the label's New folder button creates a scope directly under the root", () => {
+  it('takes a drop on its heading — the heading is the root row, so it uploads into Skills/', () => {
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderTree('/skills-and-tools', { dispatchUpload });
+    const dropped = new File(['x'], 'notes.md');
+    fireEvent.drop(screen.getByText('Skills'), {
+      dataTransfer: { getData: () => '', items: undefined, files: [dropped] },
+    });
+    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+  });
+
+  it("opens the folder's menu on the heading, minus what a reserved root must not do", () => {
+    renderTree('/skills-and-tools');
+    fireEvent.contextMenu(screen.getByText('Skills'));
+    const menu = screen.getByRole('menu', { name: 'Actions for Skills' });
+    expect(within(menu).getByRole('menuitem', { name: /New folder/ })).toBeInTheDocument();
+    expect(within(menu).getByRole('menuitem', { name: /Manage access/ })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: /Rename/ })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: /Delete/ })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: /Pin/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps a right-click anywhere in the section from reaching the nav behind it', () => {
+    const onNav = vi.fn();
+    const workspace = makeWorkspaceFixture({ fileTree: TREE, kbDirName: KB });
+    render(
+      <MemoryRouter initialEntries={['/skills-and-tools']}>
+        <WorkspaceContext.Provider value={workspace}>
+          <div onContextMenu={onNav}>
+            <SkillsTree />
+          </div>
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+    fireEvent.contextMenu(screen.getByText('Skills'));
+    fireEvent.contextMenu(screen.getByTestId('skills-tree'));
+    expect(onNav).not.toHaveBeenCalled();
+  });
+
+  it("the heading's New folder button creates a scope directly under the root", () => {
     const createDirectory = vi.fn().mockResolvedValue(undefined);
     renderTree('/skills-and-tools', { createDirectory });
     fireEvent.click(screen.getByRole('button', { name: 'New folder in Skills' }));

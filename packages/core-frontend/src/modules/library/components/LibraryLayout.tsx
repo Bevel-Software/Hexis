@@ -211,7 +211,7 @@ export function LibraryLayout() {
           place — a person who skipped the welcome page and stayed in
           Knowledge still sees it. It renders nothing once onboarding is
           done. */}
-      <SidebarFrame label="Library plugins" header={<ConnectAgentPill />}>
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
         <PluginsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}

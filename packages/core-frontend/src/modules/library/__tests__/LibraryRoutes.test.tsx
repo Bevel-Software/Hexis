@@ -259,7 +259,7 @@ describe('LibraryRoutes', () => {
       },
     ]);
     renderAt('/skills-and-tools');
-    const nav = await screen.findByRole('navigation', { name: 'Library plugins' });
+    const nav = await screen.findByRole('navigation', { name: 'Library navigation' });
     // In the member half, with a zero count — never below the gap as locked.
     expect(await within(nav).findByRole('button', { name: /^Fresh/ })).toBeInTheDocument();
     expect(within(nav).queryByRole('button', { name: 'Fresh (locked)' })).toBeNull();

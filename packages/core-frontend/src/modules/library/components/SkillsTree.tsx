@@ -1,20 +1,16 @@
-import { useMemo, useRef } from 'react';
+import { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { FilePlus, FolderPlus } from 'lucide-react';
 import { DEFAULT_BRANCH, SKILLS_DIR } from '@bevel-software/platform-shared';
-import { IconButton } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { findKbRoot } from '../../workspace/utils/fileTree';
-import { KB_ROUTE_PREFIX, kbFileUrl } from '../../workspace/routing/kb-routes';
+import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import {
   FileTreeNode,
   TreeChrome,
   UploadNotices,
-  type FileTreeNodeControls,
   type TreeNav,
 } from '../../workspace/components/FileExplorer';
-import { SectionLabel } from './PluginsSidebar';
 
 /**
  * The Skills section of the Library's nav: the shared `Skills/` root as a
@@ -22,6 +18,11 @@ import { SectionLabel } from './PluginsSidebar';
  * (new file, new folder, rename, delete, manage access, download), drag to
  * move, drop to upload, the caller's proposed files shown in accent. One tree
  * component in the app, holding a different root.
+ *
+ * The root's row is drawn as the section's HEADING (`FileTreeNode.heading`),
+ * so the heading is a real row: drop files on it to upload into `Skills/`,
+ * hover it for the create buttons and the pickers, right-click it for the
+ * folder's menu. Its scopes sit directly under it at the nav's own indent.
  *
  * Two things differ from Knowledge, and both are the surroundings' (see
  * `TreeChrome`), not the rows':
@@ -32,10 +33,6 @@ import { SectionLabel } from './PluginsSidebar';
  *    exception.
  *  - The current row is the file the URL names, not the pane workspace's
  *    open tab, which the Library never sets.
- *
- * The root's own row is not drawn: the section label is its heading, and the
- * scopes sit directly under it, at the nav's own indent. The label carries
- * the create buttons that row would have had.
  *
  * Renders nothing while the tree is loading or when the caller can read no
  * part of the root — an empty "SKILLS" heading over nothing would be a
@@ -60,48 +57,17 @@ export function SkillsTree() {
     [location.pathname, kbDirName, navigate],
   );
 
-  // The root's row is not drawn, so its create verbs live on the label and
-  // reach the node through its handle.
-  const controls = useRef<FileTreeNodeControls>(null);
-
   if (!root) return null;
 
   return (
     <TreeChrome nav={nav} suggestionOnlyPaths={suggestionOnlyPaths}>
-      <SectionLabel
-        spaced
-        actions={
-          <>
-            <IconButton
-              size={18}
-              title="New file"
-              aria-label={`New file in ${SKILLS_DIR}`}
-              onClick={() => controls.current?.create('file')}
-            >
-              <FilePlus size={13} />
-            </IconButton>
-            <IconButton
-              size={18}
-              title="New folder"
-              aria-label={`New folder in ${SKILLS_DIR}`}
-              onClick={() => controls.current?.create('directory')}
-            >
-              <FolderPlus size={13} />
-            </IconButton>
-          </>
-        }
-      >
-        Skills
-      </SectionLabel>
-      <UploadNotices />
-      <div data-testid="skills-tree">
-        <FileTreeNode
-          entry={root}
-          depth={0}
-          hideRow
-          collapseChildren
-          controls={controls}
-        />
+      {/* A right-click that lands between the tree's rows is the tree's, not
+          the plugin nav's behind it: with nothing wired for the gap the
+          browser's own menu is the honest answer, as in Knowledge. The rows
+          and the heading stop their own events before reaching here. */}
+      <div data-testid="skills-tree" onContextMenu={(e) => e.stopPropagation()}>
+        <UploadNotices />
+        <FileTreeNode entry={root} depth={0} heading="Skills" collapseChildren />
       </div>
     </TreeChrome>
   );
@@ -120,13 +86,4 @@ function activeWorkspacePath(pathname: string, kbDirName: string | null): string
   if (branch !== DEFAULT_BRANCH || rest.length < 2) return null;
   if (kbDirName !== null && rest[0] !== kbDirName) return null;
   return rest.join('/');
-}
-
-/** A malformed escape is a bad link, not a crash — fall back to the raw segment. */
-function safeDecode(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
 }

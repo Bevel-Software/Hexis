@@ -235,7 +235,7 @@ export function PluginsSidebar({
   return (
     <>
         <nav
-          aria-label="Library plugins"
+          aria-label="Library navigation"
           className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto"
           // The nav's empty space is a target too — Knowledge's tree gives its
           // ROOT row a menu holding the create verbs, and this is where the

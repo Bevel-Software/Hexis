@@ -40,7 +40,7 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   return { onSelect };
 }
 
-const nav = () => screen.getByRole('navigation', { name: 'Library plugins' });
+const nav = () => screen.getByRole('navigation', { name: 'Library navigation' });
 
 describe('PluginsSidebar: locked plugins', () => {
   it('names a locked row by its state, with no count in it', () => {

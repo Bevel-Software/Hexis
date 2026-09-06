@@ -96,6 +96,7 @@ function LocationProbe() {
   return (
     <>
       <div aria-label="pathname">{location.pathname}</div>
+      <div aria-label="hash">{location.hash}</div>
       <div aria-label="raw-file">{String(rawFile)}</div>
     </>
   );
@@ -531,6 +532,12 @@ describe('WorkspaceItemRoute', () => {
       // Same URL — the raw view is router state, never a different address.
       expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales/access.md'));
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+    });
+
+    it("carries a scope file's #fragment into the raw view — a heading deep link still lands", async () => {
+      renderAt(`${itemUrl('Skills/Sales/README.md')}#goal`);
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      expect(screen.getByLabelText('hash')).toHaveTextContent('#goal');
     });
 
     it('waits for the catalog rather than guessing a scope is a skill', async () => {

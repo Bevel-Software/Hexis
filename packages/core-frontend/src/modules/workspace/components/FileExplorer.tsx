@@ -2,13 +2,11 @@ import {
   useState,
   useCallback,
   useEffect,
-  useImperativeHandle,
   useMemo,
   useRef,
   createContext,
   useContext,
   type ReactNode,
-  type Ref,
 } from 'react';
 import {
   ChevronRight,
@@ -173,11 +171,6 @@ export interface TreeNav {
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
 const useTreeNav = () => useContext(TreeNavContext);
 
-/** What a headless root's stand-in heading can ask of it — see `FileTreeNode.controls`. */
-export interface FileTreeNodeControls {
-  create(kind: 'file' | 'directory'): void;
-}
-
 /** Depth-first lookup of a tree entry by its exact relativePath. */
 function findEntryByPath(node: FileTreeEntry, path: string): FileTreeEntry | null {
   if (node.relativePath === path) return node;
@@ -202,11 +195,14 @@ function ContextMenu({
   onRename,
   onDownload,
   returnFocusTo,
+  deletable = true,
 }: {
   x: number;
   y: number;
   entry: FileTreeEntry;
   isRoot: boolean;
+  /** False for a folder the platform owns (a reserved root drawn as a heading): no Delete. */
+  deletable?: boolean;
   onClose: () => void;
   onCreateFile?: () => void;
   onCreateFolder?: () => void;
@@ -353,7 +349,7 @@ function ContextMenu({
           <span className="flex items-center gap-2"><Pencil size={14} />Rename</span>
         </MenuItem>
       )}
-      {!isRoot && (
+      {!isRoot && deletable && (
         // Danger tone comes from the primitive, not from a hand-written red.
         <MenuItem role="menuitem" tone="danger" onClick={handleDelete}>
           <span className="flex items-center gap-2"><Trash2 size={14} />Delete</span>
@@ -472,9 +468,8 @@ export function FileTreeNode({
   depth,
   initiallyExpanded,
   collapseChildren,
-  hideRow = false,
+  heading,
   outdent = false,
-  controls,
 }: {
   entry: FileTreeEntry;
   depth: number;
@@ -486,25 +481,26 @@ export function FileTreeNode({
   // reveals the ontologies without cascading them all open).
   collapseChildren?: boolean;
   /**
-   * Render the children and nothing of the row itself: no name, no caret, no
-   * menu, always open, children at THIS depth. For a root whose place a
-   * section label has taken — the Library's Skills tree heads its scopes with
-   * "SKILLS", not with a folder row called Skills under it.
+   * Draw this folder's row as a SECTION HEADING carrying this text, always
+   * open, with its children at the nav's own indent. For a reserved root the
+   * Library heads a section with — "SKILLS" over its scopes, not a folder
+   * row called Skills with the scopes indented under it.
+   *
+   * The heading IS the row, not a label standing in for one: it takes drops,
+   * offers the create buttons and the file/folder pickers, and opens the
+   * folder's menu on right-click — everything the row does, minus what a
+   * reserved root must not do (rename, delete, be dragged, be pinned).
+   * Rendering the label elsewhere and hiding the row here is how a section
+   * ends up without a drop target.
    */
-  hideRow?: boolean;
+  heading?: string;
   /**
    * Draw this node's descendants one indent step to the left. Set by a
-   * headless root for its whole subtree: the children keep their LOGICAL
-   * depth (so what starts open and what starts shut is exactly as under a
-   * drawn root), but sit where the missing row's children would have been.
+   * heading row for its whole subtree: the children keep their LOGICAL depth
+   * (so what starts open and what starts shut is exactly as under a plain
+   * row), but sit where the nav's first level sits.
    */
   outdent?: boolean;
-  /**
-   * The verbs a hidden row's hover buttons would have offered, for the
-   * section label that stands in for it — `create` opens the same inline
-   * input the row's buttons open.
-   */
-  controls?: Ref<FileTreeNodeControls>;
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
@@ -544,16 +540,6 @@ export function FileTreeNode({
   // at which point intent is reset and auto-expand takes over again.
   const [userIntent, setUserIntent] = useState<boolean | null>(null);
   const [creating, setCreating] = useState<'file' | 'directory' | null>(null);
-  useImperativeHandle(
-    controls,
-    () => ({
-      create: (kind) => {
-        setUserIntent(true);
-        setCreating(kind);
-      },
-    }),
-    [],
-  );
   const [renaming, setRenaming] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   // Only the root row uses these refs, but hooks must run unconditionally.
@@ -572,11 +558,12 @@ export function FileTreeNode({
 
   // Resetting `value` after dispatch lets users re-select the same file and
   // still get an `onChange` event the second time around.
+  const pickTarget = entry.relativePath === '.' ? '' : entry.relativePath;
   const handleRootFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = '';
-    if (files.length > 0) dispatchUpload({ kind: 'files', files }, '');
-  }, [dispatchUpload]);
+    if (files.length > 0) dispatchUpload({ kind: 'files', files }, pickTarget);
+  }, [dispatchUpload, pickTarget]);
 
   // Folder picker: each File carries a `webkitRelativePath` like
   // "foldername/sub/file.txt" — we feed those straight into the upload
@@ -592,8 +579,8 @@ export function FileTreeNode({
       file,
       relativePath: file.webkitRelativePath || file.name,
     }));
-    dispatchUpload({ kind: 'paths', items }, '');
-  }, [dispatchUpload]);
+    dispatchUpload({ kind: 'paths', items }, pickTarget);
+  }, [dispatchUpload, pickTarget]);
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -627,7 +614,8 @@ export function FileTreeNode({
     }
   }, [autoTrigger]);
 
-  const isExpanded = hideRow || (userIntent ?? (autoExpanded || (initiallyExpanded ?? depth < 2)));
+  const isHeading = heading !== undefined;
+  const isExpanded = isHeading || (userIntent ?? (autoExpanded || (initiallyExpanded ?? depth < 2)));
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -709,9 +697,101 @@ export function FileTreeNode({
 
   if (entry.type === 'directory') {
     const dirPath = isRoot ? '' : entry.relativePath;
+    // The verbs a folder row offers, built once so the plain row and the
+    // heading row cannot offer different ones.
+    const createButtons = (
+      <>
+        <IconButton
+          size={18}
+          title="New file"
+          aria-label={`New file in ${entry.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setUserIntent(true);
+            setCreating('file');
+          }}
+        >
+          <FilePlus size={13} />
+        </IconButton>
+        <IconButton
+          size={18}
+          title="New folder"
+          aria-label={`New folder in ${entry.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setUserIntent(true);
+            setCreating('directory');
+          }}
+        >
+          <FolderPlus size={13} />
+        </IconButton>
+      </>
+    );
+    const pickerButtons = (
+      <>
+        <IconButton
+          size={18}
+          title="Add files"
+          aria-label="Add files"
+          disabled={isUploading}
+          onClick={handleRootUploadClick}
+        >
+          <Upload size={13} />
+        </IconButton>
+        <input
+          ref={rootFileInputRef}
+          type="file"
+          multiple
+          hidden
+          aria-hidden="true"
+          data-testid="file-explorer-file-input"
+          onChange={handleRootFileChange}
+        />
+        <IconButton
+          size={18}
+          title="Add folder"
+          aria-label="Add folder"
+          disabled={isUploading}
+          onClick={handleRootFolderClick}
+        >
+          <FolderUp size={13} />
+        </IconButton>
+        <input
+          ref={rootFolderInputRef}
+          type="file"
+          multiple
+          webkitdirectory=""
+          hidden
+          aria-hidden="true"
+          data-testid="file-explorer-folder-input"
+          onChange={handleRootFolderChange}
+        />
+      </>
+    );
     return (
       <div>
-        {!hideRow && (
+        {isHeading ? (
+          // The same heading as the Library's `SectionLabel` and the
+          // explorer's "Company Context" — a heading over a list of places —
+          // that happens to be this folder's row: it takes drops, opens the
+          // folder's menu, and shows the row's verbs on hover.
+          <div
+            className={cn(
+              'group/label flex items-center gap-1 rounded-sm px-2.5 pb-1.5 pt-5',
+              dragOver && 'bg-hover ring-1 ring-accent/40',
+            )}
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onContextMenu={handleContextMenu}
+          >
+            <span className="text-label uppercase text-ink-faint">{heading}</span>
+            <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/label:opacity-100">
+              {createButtons}
+              {pickerButtons}
+            </span>
+          </div>
+        ) : (
         <div
           className={cn(
             ROW_CLASS,
@@ -763,72 +843,9 @@ export function FileTreeNode({
             )}
           </button>
           <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
-            <IconButton
-              size={18}
-              title="New file"
-              aria-label={`New file in ${entry.name}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setUserIntent(true);
-                setCreating('file');
-              }}
-            >
-              <FilePlus size={13} />
-            </IconButton>
-            <IconButton
-              size={18}
-              title="New folder"
-              aria-label={`New folder in ${entry.name}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                setUserIntent(true);
-                setCreating('directory');
-              }}
-            >
-              <FolderPlus size={13} />
-            </IconButton>
+            {createButtons}
           </div>
-          {isRoot && (
-            <>
-              <IconButton
-                size={18}
-                title="Add files"
-                aria-label="Add files"
-                disabled={isUploading}
-                onClick={handleRootUploadClick}
-              >
-                <Upload size={13} />
-              </IconButton>
-              <input
-                ref={rootFileInputRef}
-                type="file"
-                multiple
-                hidden
-                aria-hidden="true"
-                data-testid="file-explorer-file-input"
-                onChange={handleRootFileChange}
-              />
-              <IconButton
-                size={18}
-                title="Add folder"
-                aria-label="Add folder"
-                disabled={isUploading}
-                onClick={handleRootFolderClick}
-              >
-                <FolderUp size={13} />
-              </IconButton>
-              <input
-                ref={rootFolderInputRef}
-                type="file"
-                multiple
-                webkitdirectory=""
-                hidden
-                aria-hidden="true"
-                data-testid="file-explorer-folder-input"
-                onChange={handleRootFolderChange}
-              />
-            </>
-          )}
+          {isRoot && pickerButtons}
         </div>
         )}
         {isExpanded && (
@@ -836,10 +853,10 @@ export function FileTreeNode({
             {creating && (
               // Line the input up with the child rows it is about to join:
               // one more indent step (13px), plus the caret slot (13px) and
-              // the row gap (6px) the child's name starts after. A headless
-              // root's children are outdented a step, so only the slot and
-              // the gap remain.
-              <div style={{ paddingLeft: paddingLeft + (hideRow ? 19 : 32) }} className="px-2 py-0.5">
+              // the row gap (6px) the child's name starts after. A heading's
+              // children are outdented a step, so only the slot and the gap
+              // remain.
+              <div style={{ paddingLeft: paddingLeft + (isHeading ? 19 : 32) }} className="px-2 py-0.5">
                 <InlineInput
                   placeholder={creating === 'file' ? 'filename' : 'folder name'}
                   onSubmit={async (name) => {
@@ -873,7 +890,7 @@ export function FileTreeNode({
                 key={child.relativePath}
                 entry={child}
                 depth={depth + 1}
-                outdent={hideRow || outdent}
+                outdent={isHeading || outdent}
                 initiallyExpanded={collapseChildren ? false : undefined}
               />
             ))}
@@ -888,7 +905,9 @@ export function FileTreeNode({
             onClose={() => setContextMenu(null)}
             onCreateFile={() => { setUserIntent(true); setCreating('file'); }}
             onCreateFolder={() => { setUserIntent(true); setCreating('directory'); }}
-            onRename={() => setRenaming(true)}
+            // A reserved root drawn as a heading is the platform's: no rename, no delete.
+            onRename={isHeading ? undefined : () => setRenaming(true)}
+            deletable={!isHeading}
             onDownload={handleDownload}
             returnFocusTo={rowRef}
           />

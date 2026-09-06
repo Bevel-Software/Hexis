@@ -240,17 +240,58 @@ describe('TemplateFilesStep', () => {
     expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
   });
 
-  it("drops the template's own Skills/ rule from a KB seeded by that release, comment included", async () => {
-    // The previous template listed the rule under its own explanatory line.
+  it("drops the template's own Skills/ rule from a KB seeded by that release, comment included — whatever root the comment named", async () => {
+    // The previous template listed the rule under its own explanatory line,
+    // ending with the plugins root's name of the day; a deployment may have
+    // renamed that root since, so the line is known by its opening.
     const scaffold = await fullScaffold();
     scaffold['.bevelignore'] =
-      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Plugins/.\nSkills/\n';
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
+  });
+
+  it("keeps a Skills/ rule the operator wrote themselves — provenance is the platform's comment", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n',
+    );
+  });
+
+  it("declares a custom template's ignore file without the stale Skills/ rule it still ships", async () => {
+    // A KB with NO ignore file gets the template's copy — and a distribution's
+    // template may still carry the rule the previous release had. The on-disk
+    // reconciliation never runs on an absent file, so the declared content
+    // must arrive already reconciled.
+    const customTemplate = path.join(root, 'custom-template-stale');
+    await fs.mkdir(customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    await fs.writeFile(
+      path.join(customTemplate, '.bevelignore'),
+      '# custom\nMyStuff/\n# The shared-skills root is rendered by the Skills & Tools app, like {{pluginsDir}}/.\n{{skillsDir}}/\n',
+      'utf8',
+    );
+    const scaffold = await fullScaffold();
+    delete scaffold['.bevelignore'];
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text).toContain('MyStuff/');
+    expect(text.split('\n').map((l) => l.trim())).not.toContain('Skills/');
+    expect(text).not.toContain('shared-skills root');
   });
 
   it("leaves an operator's !Skills/ negation alone — there is nothing of the platform's to remove", async () => {
