@@ -9,6 +9,11 @@ import { useFileNav } from '../../workspace/routing/kb-routes';
  * The files a remote sync could not reconcile, each a link that opens it.
  * Its own component so the navigation hook is only mounted for the conflict
  * case — the push-failure banner has nothing to open.
+ *
+ * The paths arrive repo-relative; opening one needs the workspace's KB folder
+ * name, which the context holds as null until the workspace has bootstrapped.
+ * A conflict event can arrive before that fetch answers, so until the name is
+ * known the files are listed as text — never as links to `null/<path>`.
  */
 function ConflictFiles({ paths }: { paths: string[] }) {
   const { kbDirName } = useWorkspace();
@@ -17,13 +22,17 @@ function ConflictFiles({ paths }: { paths: string[] }) {
     <ul className="mt-1 ml-5 flex flex-wrap gap-x-3 gap-y-0.5">
       {paths.map((p) => (
         <li key={p}>
-          <button
-            type="button"
-            className="font-mono underline underline-offset-2 hover:text-ink"
-            onClick={() => openWorkspacePath(`${kbDirName}/${p}`)}
-          >
-            {p}
-          </button>
+          {kbDirName ? (
+            <button
+              type="button"
+              className="font-mono underline underline-offset-2 hover:text-ink"
+              onClick={() => openWorkspacePath(`${kbDirName}/${p}`)}
+            >
+              {p}
+            </button>
+          ) : (
+            <span className="font-mono">{p}</span>
+          )}
         </li>
       ))}
     </ul>

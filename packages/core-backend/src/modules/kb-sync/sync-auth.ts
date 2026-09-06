@@ -1,4 +1,5 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+import { timingSafeStringEqual } from '../auth/password-hash.js';
 
 /**
  * Who may call `POST /api/sync`, decided from the request's credentials.
@@ -60,18 +61,11 @@ const SECRET_TOO_SHORT =
   `The configured sync secret is shorter than ${MIN_SYNC_SECRET_LENGTH} characters and is not ` +
   'accepted. Set a longer KB_SYNC_SECRET, or call this endpoint with an administrator session.';
 
-/** Constant-time string equality that does not leak the length either. */
-function secretEquals(a: string, b: string): boolean {
-  const ha = createHash('sha256').update(a).digest();
-  const hb = createHash('sha256').update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
-
 function signatureMatches(secret: string, rawBody: Buffer, header: string): boolean {
   const [scheme, hex] = header.split('=', 2);
   if (scheme !== 'sha256' || !hex) return false;
   const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-  return secretEquals(expected, hex.toLowerCase());
+  return timingSafeStringEqual(expected, hex.toLowerCase());
 }
 
 export async function verifySyncCredential(
@@ -90,10 +84,10 @@ export async function verifySyncCredential(
 
   // A shared secret presented in any of its three shapes.
   if (secret) {
-    if (bearer && secretEquals(bearer, secret)) {
+    if (bearer && timingSafeStringEqual(bearer, secret)) {
       return { ok: true, credential: { kind: 'bearer' } };
     }
-    if (input.gitlabToken && secretEquals(input.gitlabToken.trim(), secret)) {
+    if (input.gitlabToken && timingSafeStringEqual(input.gitlabToken.trim(), secret)) {
       return { ok: true, credential: { kind: 'gitlab-token' } };
     }
     if (input.hubSignature && input.rawBody && signatureMatches(secret, input.rawBody, input.hubSignature.trim())) {

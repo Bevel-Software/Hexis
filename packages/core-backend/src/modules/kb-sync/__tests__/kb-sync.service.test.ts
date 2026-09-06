@@ -105,11 +105,11 @@ describe('KbSyncService', () => {
     const [r1, r2, r3, r4] = await Promise.all([first, second, third, fourth]);
     expect(r1.results.map((r) => r.branch)).toEqual(['main']);
     // One follow-up, the union, in arrival order — and every mid-run caller
-    // got that same result.
+    // answered for the branches IT asked about, never for the others'.
     expect(calls).toEqual([['main'], ['ali/x', 'juan/y']]);
-    expect(r2).toBe(r3);
-    expect(r3).toBe(r4);
-    expect(r2.results.map((r) => r.branch)).toEqual(['ali/x', 'juan/y']);
+    expect(r2.results.map((r) => r.branch)).toEqual(['ali/x']);
+    expect(r3.results.map((r) => r.branch)).toEqual(['juan/y']);
+    expect(r4.results.map((r) => r.branch)).toEqual(['ali/x']);
     expect(workflow.closeChangeRequestsWithDeletedBranches).toHaveBeenCalledTimes(2);
   });
 
@@ -129,9 +129,10 @@ describe('KbSyncService', () => {
     const third = svc.sync({ branches: 'all' });
     gate.resolve();
     await first;
-    const r = await second;
-    expect(await third).toBe(r);
-    expect(r.results.map((x) => x.branch)).toEqual(['main', 'ali/x', 'juan/y']);
+    // The follow-up pulled everything; the "all" caller hears all of it, the
+    // one-branch caller only its branch.
+    expect((await third).results.map((x) => x.branch)).toEqual(['main', 'ali/x', 'juan/y']);
+    expect((await second).results.map((x) => x.branch)).toEqual(['ali/x']);
   });
 });
 
@@ -237,5 +238,33 @@ describe('KbSyncService — clones the host no longer has, and clones that canno
       { branch: 'juan/y', outcome: 'error', error: "Could not read this branch's clone: EPERM" },
     ]);
     expect(workflow.syncWorkspaceFromRemote).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('KbSyncService — a coalesced caller is judged by its own branches', () => {
+  it("branch A's hook is not failed by branch B's conflict in the same follow-up", async () => {
+    const gate = deferred<void>();
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string): Promise<BranchSyncOutcome> => {
+        if (id === 'main') await gate.promise;
+        if (id === 'juan%2Fy') return { branch: 'juan/y', outcome: 'conflict', conflictedPaths: ['a.md'], error: 'msg' };
+        return updated(decodeURIComponent(id));
+      }),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireRemoteGoneClone: vi.fn(async () => true),
+    };
+    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
+    const first = svc.sync({ branches: ['main'] });
+    const hookA = svc.sync({ branches: ['ali/x'] });
+    const hookB = svc.sync({ branches: ['juan/y'] });
+    gate.resolve();
+    await first;
+    const a = await hookA;
+    const b = await hookB;
+    expect(a).toMatchObject({ status: 'synced', results: [updated('ali/x')] });
+    expect(b.status).toBe('partial');
+    expect(b.results.map((r) => r.outcome)).toEqual(['conflict']);
+    // The record keeps the whole follow-up.
+    expect(svc.lastSync()?.results.map((r) => r.branch)).toEqual(['ali/x', 'juan/y']);
   });
 });

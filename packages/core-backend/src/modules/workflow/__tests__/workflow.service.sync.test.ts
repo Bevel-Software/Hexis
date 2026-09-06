@@ -282,31 +282,34 @@ describe('WorkflowService.retireRemoteGoneClone', () => {
     expect(workspaceService.deleteWorkspace).not.toHaveBeenCalled();
   });
 
-  it('is serialised with deleteBranch on the same branch — the lifecycle lock', async () => {
-    // A deleteBranch holding `branch:ali/x` must finish before the retirement
-    // examines the clone. Observed through ordering: the retirement's first
-    // read happens after the held section releases.
+  it('waits for a createBranch of the same name that holds the lifecycle lock', async () => {
+    // Observed through the public API alone: createBranch holds the lock for
+    // as long as its git call is pending, and the retirement's first read
+    // must not happen until that call has released it.
     const order: string[] = [];
-    const { svc, workspaceService } = buildRetire({ cloned: true, stillOnOrigin: false });
-    const lifecycle = (svc as unknown as { branchLifecycle: { run<T>(k: string, f: () => Promise<T>): Promise<T> } }).branchLifecycle;
+    const { svc, git, workspaceService } = buildRetire({ cloned: true, stillOnOrigin: false });
     let release!: () => void;
-    const held = lifecycle.run('branch:ali/x', () => new Promise<void>((res) => {
-      release = () => {
-        order.push('released');
-        res();
-      };
-    }));
+    (git.createBranch as ReturnType<typeof vi.fn>).mockImplementation(
+      () =>
+        new Promise((res) => {
+          release = () => {
+            order.push('create-released');
+            res({ name: 'ali/x' });
+          };
+        }),
+    );
     (workspaceService.hasBootstrappedWorkspace as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       order.push('retire-read');
       return true;
     });
+    const creating = svc.createBranch('main', 'ali/x');
     const retiring = svc.retireRemoteGoneClone('ali%2Fx');
     await new Promise((r) => setTimeout(r, 10));
     expect(order).toEqual([]);
     release();
-    await held;
+    await creating;
     await retiring;
-    expect(order).toEqual(['released', 'retire-read']);
+    expect(order).toEqual(['create-released', 'retire-read']);
   });
 });
 
@@ -358,5 +361,55 @@ describe('WorkflowService.retireRemoteGoneClone — what can bring the branch ba
     const creating = svc.createBranch('main', 'ali/x');
     await Promise.all([retiring, creating]);
     expect(order).toEqual(['retire-checks-origin', 'retire-deletes', 'create']);
+  });
+});
+
+describe('WorkflowService.syncWorkspaceFromRemote — an announcement is owed until delivered', () => {
+  it('a retry after a failed announcement delivers it even though HEAD did not move again', async () => {
+    let head = 'bbb';
+    let pulls = 0;
+    const { svc, prs, emit } = build({
+      sync: async () => {
+        pulls++;
+        // First pull moves HEAD and changes content; later pulls find nothing new.
+        if (pulls === 1) return { before: 'aaa', after: 'bbb', treeChanged: true, changedPaths: ['Docs/a.md'] };
+        return { before: head, after: head, treeChanged: false, changedPaths: [] };
+      },
+    });
+    (prs.invalidateListCache as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('cache exploded');
+    });
+    // 1. The pull lands, the announcement does not: error, and nothing sent.
+    expect(await svc.syncWorkspaceFromRemote('main')).toMatchObject({ outcome: 'error' });
+    expect(emit).not.toHaveBeenCalled();
+
+    // 2. The retry finds HEAD where it left it — and still announces what is owed.
+    head = 'bbb';
+    expect(await svc.syncWorkspaceFromRemote('main')).toEqual({ branch: 'main', outcome: 'up-to-date', to: 'bbb' });
+    expect(kinds(emit)).toEqual(['fs-tree-changed', 'file-changed']);
+    expect(emit.mock.calls[1][0]).toMatchObject({ path: 'knowledge-base/Docs/a.md', newSha: 'bbb' });
+
+    // 3. Delivered once: a further sync announces nothing.
+    await svc.syncWorkspaceFromRemote('main');
+    expect(emit).toHaveBeenCalledTimes(2);
+  });
+
+  it('an owed announcement merges with the next pull\'s own changes', async () => {
+    let pulls = 0;
+    const { svc, prs, emit } = build({
+      sync: async () => {
+        pulls++;
+        if (pulls === 1) return { before: 'aaa', after: 'bbb', treeChanged: true, changedPaths: ['Docs/a.md'] };
+        return { before: 'bbb', after: 'ccc', treeChanged: true, changedPaths: ['Docs/b.md'] };
+      },
+    });
+    (prs.invalidateListCache as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('cache exploded');
+    });
+    await svc.syncWorkspaceFromRemote('main');
+    expect(await svc.syncWorkspaceFromRemote('main')).toEqual({ branch: 'main', outcome: 'updated', from: 'bbb', to: 'ccc' });
+    const paths = emit.mock.calls.filter((c) => (c[0] as { kind: string }).kind === 'file-changed').map((c) => (c[0] as { path: string }).path);
+    expect(paths.sort()).toEqual(['knowledge-base/Docs/a.md', 'knowledge-base/Docs/b.md']);
+    expect(emit.mock.calls[1][0]).toMatchObject({ newSha: 'ccc' });
   });
 });

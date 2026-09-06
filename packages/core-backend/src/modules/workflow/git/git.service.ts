@@ -1615,10 +1615,23 @@ export class GitService implements IGitService {
    */
   private async rebaseOntoRemote(cwd: string, branch: string, remoteRef: string): Promise<void> {
     // An UNBORN HEAD (a clone of an upstream that was empty when cloned) has
-    // nothing to replay and `git rebase` refuses to start from it. Moving the
-    // branch to the remote commit is the whole operation: no tracked files
-    // exist yet, so a hard reset touches nothing anyone wrote.
+    // no commit to replay and `git rebase` refuses to start from it, so the
+    // branch is moved to the remote commit instead. That is only safe while
+    // the index is EMPTY: files staged in an unborn clone are tracked, and a
+    // hard reset would destroy them where the normal path autostashes — and
+    // `git stash` cannot run without an initial commit. So a non-empty index
+    // is refused as a conflict, naming the staged paths, and takes the same
+    // recovery path a rebase conflict does; nothing on disk is touched.
     if ((await this.revParseOrNull(cwd, 'HEAD')) === null) {
+      const { stdout: stagedOut } = await this.git(cwd, ['ls-files', '--cached']);
+      const staged = stagedOut.split('\n').map((l) => l.trim()).filter(Boolean);
+      if (staged.length > 0) {
+        throw new PullRebaseConflictError(
+          branch,
+          staged,
+          'The clone has files staged before its first commit; they cannot be replayed onto the remote branch automatically.',
+        );
+      }
       await this.git(cwd, ['reset', '--hard', remoteRef]);
       return;
     }

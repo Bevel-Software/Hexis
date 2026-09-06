@@ -227,3 +227,19 @@ describe('GitSyncFailedBanner — remote-sync conflict', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+describe('GitSyncFailedBanner — a conflict that arrives before the workspace has bootstrapped', () => {
+  it('lists the files as text, never as links to null/<path>', () => {
+    const bus = renderBanner({ kbDirName: null });
+    const early = {
+      kind: 'git-sync-failed',
+      workspaceId: 'ws-1',
+      branch: 'feat/x',
+      reason: 'conflict',
+      conflictedPaths: ['Docs/a.md'],
+    };
+    bus.emit(early);
+    expect(screen.getByText('Docs/a.md')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Docs/a.md' })).toBeNull();
+  });
+});

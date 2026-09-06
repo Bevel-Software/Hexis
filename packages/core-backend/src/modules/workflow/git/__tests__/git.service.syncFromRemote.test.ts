@@ -200,3 +200,52 @@ describe('GitService.syncFromRemote — the cases git exits 0 on but should not 
     expect(await git.remoteBranchExists('ws', 'ali/x')).toBe(false);
   });
 });
+
+describe('GitService.syncFromRemote — an unborn clone that already holds staged files', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-git-sync3-'));
+  });
+  afterEach(async () => {
+    for (let i = 0; i < 5; i++) {
+      try {
+        await fs.rm(root, { recursive: true, force: true });
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  });
+
+  it('is refused as a typed conflict naming the staged paths; nothing on disk is touched', async () => {
+    const upstream = await bareUpstream(root, false);
+    const workspaceDir = path.join(root, 'ws');
+    const repo = path.join(workspaceDir, 'knowledge-base');
+    await fs.mkdir(workspaceDir, { recursive: true });
+    await runGit(root, ['-c', 'core.autocrlf=false', 'clone', upstream, repo]);
+    await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
+    await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
+    await runGit(repo, ['checkout', '-b', BRANCH]).catch(() => undefined);
+    // Someone wrote and staged a file before the first commit ever existed.
+    await fs.writeFile(path.join(repo, 'Draft.md'), 'not yet committed\n');
+    await runGit(repo, ['add', 'Draft.md']);
+    // Origin gains its first commit meanwhile.
+    const seed = path.join(root, '.first');
+    await fs.mkdir(seed);
+    await runGit(seed, ['init', '-b', BRANCH]);
+    await runGit(seed, ['config', 'user.email', 'other@bevel.test']);
+    await runGit(seed, ['config', 'user.name', 'Other']);
+    await fs.writeFile(path.join(seed, 'README.md'), 'hello\n');
+    await runGit(seed, ['add', '.']);
+    await runGit(seed, ['commit', '-m', 'first']);
+    await runGit(seed, ['push', upstream, BRANCH]);
+    const git = new GitService(stubWorkspaceService({ ws: workspaceDir }), stubWorkflowHooks(), 'knowledge-base');
+
+    await expect(git.syncFromRemote('ws')).rejects.toMatchObject({
+      name: 'PullRebaseConflictError',
+      conflictedPaths: ['Draft.md'],
+    });
+    expect(await fs.readFile(path.join(repo, 'Draft.md'), 'utf8')).toBe('not yet committed\n');
+    expect(await gitOut(repo, ['ls-files', '--cached'])).toBe('Draft.md');
+  });
+});

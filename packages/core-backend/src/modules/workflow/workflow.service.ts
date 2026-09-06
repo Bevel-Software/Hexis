@@ -555,6 +555,15 @@ export class WorkflowService implements IWorkflowService {
    */
   private static readonly SYNC_FILE_EVENT_CAP = 200;
 
+  /**
+   * Announcements a sync still OWES, per workspace: a pull landed but the
+   * events for it could not be sent. The pull is not redone on retry — HEAD
+   * has not moved since — so the announcement cannot be re-derived from sha
+   * movement; it is remembered here and delivered by the next sync of that
+   * workspace, merged with whatever that sync finds.
+   */
+  private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
+
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const id = workspaceIdForBranch(branch);
@@ -603,13 +612,23 @@ export class WorkflowService implements IWorkflowService {
     // waiting for, whether a sync or a push raised it.
     this.noteGitSyncOk(gitId, branch);
     const { before, after, treeChanged, changedPaths } = pulled;
-    // Origin still empty (an unborn clone of an unborn upstream), or nothing new.
-    if (after === null || after === before) return { branch, outcome: 'up-to-date', to: after ?? '' };
-    // HEAD moved, so the branch reports `updated` — but the announcement
-    // keys on the pull's own verdict about CONTENT: commits that left the
-    // tree identical (an empty commit, a rebase replayed to the same
-    // result) are nothing for a browser to refetch or a catalog to drop.
-    if (!treeChanged) return { branch, outcome: 'updated', from: before, to: after };
+    // What this branch reports about ITS clone is decided by the pull alone:
+    // `updated` when HEAD moved, `up-to-date` otherwise.
+    const outcome: BranchSyncOutcome =
+      after === null || after === before
+        ? { branch, outcome: 'up-to-date', to: after ?? '' }
+        : { branch, outcome: 'updated', from: before, to: after };
+    // What it ANNOUNCES is what has changed since the last announcement that
+    // was actually delivered: this pull's content change, if any, plus one an
+    // earlier sync landed but could not send. The announcement keys on the
+    // pull's verdict about CONTENT — commits that left the tree identical are
+    // nothing for a browser to refetch or a catalog to drop.
+    const owed = this.owedAnnouncements.get(id);
+    if (!treeChanged && !owed) return outcome;
+    const announce = {
+      after: after ?? owed?.after ?? '',
+      changedPaths: [...new Set([...(owed?.changedPaths ?? []), ...changedPaths])],
+    };
     try {
       // Announce the new tree. The tree event alone already refreshes every
       // open file explorer and, on the default branch, drops the skill / tool /
@@ -624,14 +643,14 @@ export class WorkflowService implements IWorkflowService {
       // this sync's — never a save that landed alongside. Capped: a bulk
       // import would otherwise fan hundreds of events out to say what one
       // refresh says.
-      if (changedPaths.length <= WorkflowService.SYNC_FILE_EVENT_CAP) {
-        for (const p of changedPaths) {
+      if (announce.changedPaths.length <= WorkflowService.SYNC_FILE_EVENT_CAP) {
+        for (const p of announce.changedPaths) {
           this.events?.emit({
             kind: 'file-changed',
             workspaceId: id,
             branch,
             path: `${this.kbDirName}/${p}`,
-            newSha: after,
+            newSha: announce.after,
             byUserId: 'system',
             byUserName: 'Git sync',
           });
@@ -639,12 +658,16 @@ export class WorkflowService implements IWorkflowService {
       }
     } catch (err) {
       // The pull landed, so origin is fine and no banner is raised — but the
-      // caller must still hear that this branch's announcement did not happen.
+      // caller must hear that this branch's announcement did not happen, and
+      // the announcement stays owed: the retry the error invites will not
+      // move HEAD again, so it must find the debt here rather than in the shas.
+      this.owedAnnouncements.set(id, announce);
       const message = sanitizeError(err);
       console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
       return { branch, outcome: 'error', error: message };
     }
-    return { branch, outcome: 'updated', from: before, to: after };
+    this.owedAnnouncements.delete(id);
+    return outcome;
   }
 
   /**

@@ -16,9 +16,14 @@ import type {
  * Why coalesce: a git host fires several hooks for one event — Azure DevOps
  * sends a push, a PR-updated and a PR-merged within a second of each other —
  * and each would otherwise queue behind the workspace mutex to pull the same
- * tree again. The follow-up carries the union of every request that arrived
- * during the run (an "all" absorbs the rest), and every one of those callers
- * receives the follow-up's result, which by then covers their branch.
+ * tree again. The follow-up pulls the union of every request that arrived
+ * during the run (an "all" absorbs the rest).
+ *
+ * But each caller is answered for the branches IT asked about. The endpoint
+ * promises to fail exactly when the caller's branch is not in sync; a hook
+ * for branch A answered with branch B's conflict would fail the wrong
+ * subscription — and a host that disables subscriptions after repeated
+ * failures would disable the wrong one.
  *
  * Branches are pulled sequentially. N is small (only cloned branches count),
  * the per-clone mutex serialises them anyway, and one slow origin round-trip
@@ -26,13 +31,13 @@ import type {
  */
 export class KbSyncService implements IKbSyncService {
   private inFlight: Promise<unknown> | null = null;
-  private queued: {
-    branches: Set<string> | 'all';
-    by: Set<string>;
-    promise: Promise<SyncResult>;
+  /** Everyone who arrived mid-run, each with what they asked for. */
+  private waiters: Array<{
+    branches: string[] | 'all';
+    by: string | undefined;
     resolve: (r: SyncResult) => void;
     reject: (e: unknown) => void;
-  } | null = null;
+  }> = [];
   private last: LastSync | null = null;
 
   constructor(
@@ -47,29 +52,9 @@ export class KbSyncService implements IKbSyncService {
 
   sync(request: SyncRequest): Promise<SyncResult> {
     if (!this.inFlight) return this.start(request);
-
-    if (!this.queued) {
-      let resolve!: (r: SyncResult) => void;
-      let reject!: (e: unknown) => void;
-      const promise = new Promise<SyncResult>((res, rej) => {
-        resolve = res;
-        reject = rej;
-      });
-      this.queued = {
-        branches: request.branches === 'all' ? 'all' : new Set(request.branches),
-        by: new Set(request.by ? [request.by] : []),
-        promise,
-        resolve,
-        reject,
-      };
-    } else {
-      if (this.queued.branches !== 'all') {
-        if (request.branches === 'all') this.queued.branches = 'all';
-        else for (const b of request.branches) this.queued.branches.add(b);
-      }
-      if (request.by) this.queued.by.add(request.by);
-    }
-    return this.queued.promise;
+    return new Promise<SyncResult>((resolve, reject) => {
+      this.waiters.push({ branches: request.branches, by: request.by, resolve, reject });
+    });
   }
 
   private start(request: SyncRequest): Promise<SyncResult> {
@@ -81,15 +66,59 @@ export class KbSyncService implements IKbSyncService {
     return run;
   }
 
+  /**
+   * Run ONE follow-up for everyone who arrived during the last run: the union
+   * of their branches, then each waiter answered from its own share of the
+   * result — never from another caller's branches.
+   */
   private drain(): void {
-    const next = this.queued;
-    if (!next) return;
-    this.queued = null;
+    if (this.waiters.length === 0) return;
+    const waiters = this.waiters;
+    this.waiters = [];
+
+    const union = new Set<string>();
+    let all = false;
+    const by = new Set<string>();
+    for (const w of waiters) {
+      if (w.branches === 'all') all = true;
+      else for (const b of w.branches) union.add(b);
+      if (w.by) by.add(w.by);
+    }
     const request: SyncRequest = {
-      branches: next.branches === 'all' ? 'all' : [...next.branches],
-      by: next.by.size > 0 ? [...next.by].join(', ') : undefined,
+      branches: all ? 'all' : [...union],
+      by: by.size > 0 ? [...by].join(', ') : undefined,
     };
-    this.start(request).then(next.resolve, next.reject);
+    this.start(request).then(
+      (result) => {
+        for (const w of waiters) w.resolve(KbSyncService.subsetFor(result, w.branches));
+      },
+      (err) => {
+        for (const w of waiters) w.reject(err);
+      },
+    );
+  }
+
+  /** The part of a union run that answers one caller: its branches, and its status over them. */
+  private static subsetFor(result: SyncResult, branches: string[] | 'all'): SyncResult {
+    if (branches === 'all') return result;
+    const wanted = new Set(branches);
+    const results = result.results.filter((r) => wanted.has(r.branch));
+    return {
+      status: KbSyncService.statusOf(results),
+      results,
+      changeRequests: result.changeRequests,
+    };
+  }
+
+  private static statusOf(results: BranchSyncOutcome[]): SyncResult['status'] {
+    const clean = results.every(
+      (r) =>
+        r.outcome === 'updated' ||
+        r.outcome === 'up-to-date' ||
+        r.outcome === 'not-cloned' ||
+        r.outcome === 'remote-gone',
+    );
+    return clean ? 'synced' : 'partial';
   }
 
   private async run(request: SyncRequest): Promise<SyncResult> {
@@ -152,15 +181,8 @@ export class KbSyncService implements IKbSyncService {
       console.warn('[sync] deleted-branch sweep failed:', err instanceof Error ? err.message : err);
     }
 
-    const clean = results.every(
-      (r) =>
-        r.outcome === 'updated' ||
-        r.outcome === 'up-to-date' ||
-        r.outcome === 'not-cloned' ||
-        r.outcome === 'remote-gone',
-    );
     const result: SyncResult = {
-      status: clean ? 'synced' : 'partial',
+      status: KbSyncService.statusOf(results),
       results,
       changeRequests: { closedDeletedBranch },
     };

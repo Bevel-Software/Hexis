@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -73,12 +73,10 @@ describe('WorkspaceService.listClonedWorkspaces — what is not a clone', () => 
     await fs.mkdir(path.join(root, 'main', 'knowledge-base', '.git'), { recursive: true });
     await fs.mkdir(path.join(root, 'ali%2Fx', 'knowledge-base', '.git'), { recursive: true });
     const svc = new WorkspaceService(root, 'https://example.test/kb.git', 'knowledge-base');
-    // Reach into the bootstrap tracker the way `getOrCreateForBranch` does
-    // while a clone is running: `.git` exists, the tree is not checked out yet.
-    (svc as unknown as { inFlightBootstraps: Map<string, Promise<void>> }).inFlightBootstraps.set(
-      'ali/x',
-      new Promise(() => {}),
-    );
+    // While a clone runs, `.git` exists but the tree is not checked out yet.
+    // The listing asks the public predicate, which is stubbed here rather than
+    // the tracker behind it — no public seam can hold a real clone open.
+    vi.spyOn(svc, 'isBootstrapInFlight').mockImplementation((branch) => branch === 'ali/x');
     expect(await svc.listClonedWorkspaces()).toEqual([{ id: 'main', branch: 'main' }]);
   });
 

@@ -309,7 +309,7 @@ export class WorkspaceService implements IWorkspaceService {
       // itself before it creates `.git`, so any clone whose `.git` was found
       // while its bootstrap is running is in this map by now. Checking before
       // the probe left a window where the clone started in between.
-      if (this.inFlightBootstraps.has(branch)) continue;
+      if (this.isBootstrapInFlight(branch)) continue;
       cloned.push({ id: entry.name, branch });
     }
     return cloned;
