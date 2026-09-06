@@ -42,7 +42,7 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   return { onContextMenu, onSelect };
 }
 
-const nav = () => screen.getByRole('navigation', { name: 'Library plugins' });
+const nav = () => screen.getByRole('navigation', { name: 'Library navigation' });
 const rightClick = (el: Element, at = { clientX: 120, clientY: 240 }) =>
   fireEvent.contextMenu(el, at);
 

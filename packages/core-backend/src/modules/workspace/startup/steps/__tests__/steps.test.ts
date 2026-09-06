@@ -171,7 +171,8 @@ describe('TemplateFilesStep', () => {
     expect(agents).not.toContain('KnowledgeBase/');
     const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(ignore).toContain('plugins/');
-    expect(ignore).toContain('skills/');
+    // The skills root stays VISIBLE: the Skills & Tools sidebar reads it from the workspace tree.
+    expect(ignore).not.toContain('skills/');
     expect(ignore).not.toContain('Plugins/');
     expect(await exists(dir, 'docs/.gitkeep')).toBe(true);
 
@@ -215,41 +216,137 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).toContain('MyStuff/'); // the operator's rules survive
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
-    expect(lines).toContain('Skills/'); // and the shared-skills root's
+    expect(lines).not.toContain('Skills/'); // never the skills root — the Library's tree needs it
   });
 
-  it('hides the Skills/ root on an existing KB whose ignore file predates it, keeping every other rule', async () => {
-    // A knowledge base seeded before `Skills/` existed: its ignore file names
-    // `Plugins/` and knows nothing of the new root. The top-up appends the
-    // one line, so the root stays the Library's and out of the agent view.
+  it('drops the Skills/ rule an earlier release appended, and its comment, keeping every other rule', async () => {
+    // A knowledge base whose ignore file was topped up by the release that
+    // hid the skills root: the platform's comment + line sit at the end. The
+    // Skills & Tools sidebar reads that root from the workspace tree now, so
+    // the rule comes out exactly as it went in — nothing of the operator's moves.
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = '# mine\n.git/\nAGENTS.md\nPlugins/\n';
+    scaffold['.bevelignore'] =
+      '# mine\n.git/\nAGENTS.md\nPlugins/\n\n# Added by the platform: the conventions doc is not node content.\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
-    expect(text.startsWith('# mine\n.git/\nAGENTS.md\nPlugins/\n')).toBe(true);
-    expect(text.split('\n').map((l) => l.trim())).toContain('Skills/');
-    // Idempotent: a second boot has nothing to add.
+    expect(text).toBe('# mine\n.git/\nAGENTS.md\nPlugins/\n');
+    // Idempotent: a second boot has nothing to change.
     await makeRunner([new TemplateFilesStep()]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
   });
 
-  it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
-    // Appending the positive rule after the negation would WIN under ordered
-    // matching and silently defeat the operator's stated choice to show it.
+  it("drops the template's own Skills/ rule from a KB seeded by that release, comment included — whatever root the comment named", async () => {
+    // The previous template listed the rule under its own explanatory line,
+    // ending with the plugins root's name of the day; a deployment may have
+    // renamed that root since, so the line is known by its opening.
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nSkills/\n';
+    scaffold['.bevelignore'] =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
+  });
+
+  it('recognises the legacy comment for a renamed plugins root with a space in its name', async () => {
+    // The name between the fixed opening and closing is judged by the one
+    // root-name rule the platform has, so every name it could have rendered
+    // there is recognised — and nothing a root cannot be called is.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like My Plugins/.\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
+  });
+
+  it("keeps an operator's Skills/ rule whose own comment merely opens like the platform's", async () => {
+    // Provenance is the platform's EXACT comment. A comment that begins the
+    // same way and goes on differently was never written by the platform.
+    const scaffold = await fullScaffold();
+    const text =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, and I hide it anyway\nSkills/\n';
+    scaffold['.bevelignore'] = text;
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(text);
+  });
+
+  it("keeps a Skills/ rule the operator wrote themselves — provenance is the platform's comment", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      '# operator wants the doc visible\n!AGENTS.md\nSkills/\n',
+      'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n',
+    );
+  });
+
+  it("declares a custom template's ignore file without the stale Skills/ rule it still ships", async () => {
+    // A KB with NO ignore file gets the template's copy — and a distribution's
+    // template may still carry the rule the previous release had. The on-disk
+    // reconciliation never runs on an absent file, so the declared content
+    // must arrive already reconciled.
+    const customTemplate = path.join(root, 'custom-template-stale');
+    await fs.mkdir(customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    await fs.writeFile(
+      path.join(customTemplate, '.bevelignore'),
+      '# custom\nMyStuff/\n# The shared-skills root is rendered by the Skills & Tools app, like {{pluginsDir}}/.\n{{skillsDir}}/\n',
+      'utf8',
+    );
+    const scaffold = await fullScaffold();
+    delete scaffold['.bevelignore'];
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text).toContain('MyStuff/');
+    expect(text.split('\n').map((l) => l.trim())).not.toContain('Skills/');
+    expect(text).not.toContain('shared-skills root');
+  });
+
+  it("leaves an operator's !Skills/ negation alone — there is nothing of the platform's to remove", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\nPlugins/\n!Skills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n!Skills/\n');
+  });
+
+  it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
+    // Appending the positive rule after the negation would WIN under ordered
+    // matching and silently defeat the operator's stated choice to show it.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nPlugins/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      '# operator wants the doc visible\n!AGENTS.md\nPlugins/\n',
     );
   });
 
