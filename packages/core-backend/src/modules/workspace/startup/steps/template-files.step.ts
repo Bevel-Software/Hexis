@@ -5,6 +5,7 @@ import {
   PLUGINS_DIR,
   SKILLS_DIR,
   renderKbLayoutPlaceholders,
+  validateKbRootName,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
@@ -388,19 +389,38 @@ async function reconcileIgnoreRules(
 const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
 
 /**
- * The template line an earlier release shipped above the shared-skills rule —
- * the WHOLE line, anchored at both ends. Its one variable is the plugins
- * root's name (a single path segment, which a deployment may have renamed
- * since); everything else is fixed. A looser match (an opening, a substring)
- * would accept lines the platform never wrote, and a line the platform never
- * wrote is the operator's.
+ * The template line an earlier release shipped above the shared-skills rule,
+ * split around its one variable: the plugins root's name, which a deployment
+ * may have renamed since. Everything else is fixed.
  */
-const LEGACY_SKILLS_RULE_COMMENT = /^# The shared-skills root is rendered by the Skills & Tools app, like [^/\s]+\/\.$/;
+const LEGACY_SKILLS_RULE_COMMENT_OPENING = '# The shared-skills root is rendered by the Skills & Tools app, like ';
+const LEGACY_SKILLS_RULE_COMMENT_CLOSING = '/.';
 
-/** Whether a line is EXACTLY a comment the platform wrote above a rule it added. */
+/**
+ * Whether a line is EXACTLY a comment the platform wrote above a rule it
+ * added. For the legacy template line that means the fixed opening, the
+ * fixed closing, and between them a name the platform could have rendered
+ * there — judged by the ONE rule that decides what a root may be called
+ * (`validateKbRootName`), not by a second grammar written here: a hand-made
+ * character class either admits names the validator refuses, or refuses
+ * names it admits (a space, say), and either way a line the platform did
+ * write would be left standing. A looser match (an opening, a substring)
+ * errs the other way and takes a line the operator wrote.
+ */
 function isPlatformRuleComment(line: string): boolean {
   const trimmed = line.trim();
-  return trimmed === PLATFORM_RULE_COMMENT || LEGACY_SKILLS_RULE_COMMENT.test(trimmed);
+  if (trimmed === PLATFORM_RULE_COMMENT) return true;
+  if (
+    !trimmed.startsWith(LEGACY_SKILLS_RULE_COMMENT_OPENING) ||
+    !trimmed.endsWith(LEGACY_SKILLS_RULE_COMMENT_CLOSING)
+  ) {
+    return false;
+  }
+  const name = trimmed.slice(
+    LEGACY_SKILLS_RULE_COMMENT_OPENING.length,
+    trimmed.length - LEGACY_SKILLS_RULE_COMMENT_CLOSING.length,
+  );
+  return name === name.trim() && validateKbRootName(name) === null;
 }
 
 /**

@@ -255,6 +255,21 @@ describe('TemplateFilesStep', () => {
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
   });
 
+  it('recognises the legacy comment for a renamed plugins root with a space in its name', async () => {
+    // The name between the fixed opening and closing is judged by the one
+    // root-name rule the platform has, so every name it could have rendered
+    // there is recognised — and nothing a root cannot be called is.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like My Plugins/.\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
+  });
+
   it("keeps an operator's Skills/ rule whose own comment merely opens like the platform's", async () => {
     // Provenance is the platform's EXACT comment. A comment that begins the
     // same way and goes on differently was never written by the platform.
