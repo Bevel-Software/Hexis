@@ -319,6 +319,11 @@ export function ExternalAgentAccessPage() {
                   The key stays in the URL: Claude Code refreshes marketplaces in the background
                   without credential helpers. Revoke the key here to cut the agent off.
                 </p>
+                <p className="text-meta text-ink-muted leading-snug">
+                  Run the command in the Claude Code CLI. The plugin screens in Claude Desktop
+                  and claude.ai accept only GitHub, GitLab and Bitbucket remotes and refuse
+                  this one as an unsupported host.
+                </p>
               </div>
             </details>
 
@@ -626,7 +631,9 @@ export function ExternalAgentAccessPage() {
                     Every skill you may read, compiled into a plugin marketplace served as a git
                     remote. One install brings all of it; a later update fetches what changed.
                     The key stays in the URL because Claude Code refreshes marketplaces without
-                    credential helpers.
+                    credential helpers. Run the command in the Claude Code CLI: the plugin
+                    screens in Claude Desktop and claude.ai accept only GitHub, GitLab and
+                    Bitbucket remotes.
                   </p>
                   <textarea
                     readOnly
