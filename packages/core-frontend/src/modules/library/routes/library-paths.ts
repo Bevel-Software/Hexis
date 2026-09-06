@@ -1,4 +1,4 @@
-import { DEFAULT_BRANCH, PLUGINS_DIR, pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, pluginOfPath, isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { matchPath } from 'react-router-dom';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
@@ -143,8 +143,8 @@ export function isLibraryLocation(pathname: string): boolean {
   return (
     segments[0] === 'workspace' &&
     segments[1] === DEFAULT_BRANCH &&
-    segments[3] === PLUGINS_DIR &&
-    segments.length >= 6 // workspace/<branch>/<kbDir>/Plugins/<plugin>/<item>
+    ((segments[3] === PLUGINS_DIR && segments.length >= 6) || // workspace/<branch>/<kbDir>/Plugins/<plugin>/<item>
+      (segments[3] === SKILLS_DIR && segments.length >= 5)) // workspace/<branch>/<kbDir>/Skills/<skill or scope>/…
   );
 }
 

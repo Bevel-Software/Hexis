@@ -1,10 +1,42 @@
 import { authFetch } from '../../lib/api';
 import { GitApiError, handleApiResponse } from '../git/services/git.api';
 
-/** A collective grantee with WHAT it is — role (capability) or group (audience). */
+/**
+ * A collective grantee with WHAT it is — role (capability), group (audience),
+ * or plugin (everyone holding a verb on a plugin folder: the name is the
+ * `plugin/<Name>/<verb>` token).
+ */
 export interface ResolvedPrincipal {
   name: string;
-  kind: 'role' | 'group';
+  kind: 'role' | 'group' | 'plugin';
+}
+
+/** The verbs a plugin principal can stand for — each is its own grantee. */
+export type PluginPrincipalVerb = 'read' | 'write' | 'owner';
+export const PLUGIN_PRINCIPAL_VERBS: readonly PluginPrincipalVerb[] = ['read', 'write', 'owner'];
+
+/** How a plugin principal is spelled in access rules and resolver output. */
+export function pluginPrincipalToken(plugin: string, verb: PluginPrincipalVerb): string {
+  return `plugin/${plugin}/${verb}`;
+}
+
+/** The parts of a `plugin/<Name>/<verb>` token, or null when it is not one. */
+export function parsePluginPrincipalToken(
+  token: string,
+): { plugin: string; verb: PluginPrincipalVerb } | null {
+  if (!token.toLowerCase().startsWith('plugin/')) return null;
+  const rest = token.slice('plugin/'.length);
+  const cut = rest.lastIndexOf('/');
+  if (cut <= 0) return null;
+  const verb = rest.slice(cut + 1).toLowerCase();
+  if (!(PLUGIN_PRINCIPAL_VERBS as readonly string[]).includes(verb)) return null;
+  return { plugin: rest.slice(0, cut), verb: verb as PluginPrincipalVerb };
+}
+
+/** "GTM · readers" — the human spelling of a plugin principal. */
+export function pluginPrincipalLabel(plugin: string, verb: PluginPrincipalVerb): string {
+  const who = verb === 'read' ? 'readers' : verb === 'write' ? 'writers' : 'owners';
+  return `${plugin} · ${who}`;
 }
 
 export interface AccessEligible {
@@ -113,7 +145,9 @@ export function asInheritedError(err: unknown): InheritedRevokeError | null {
 export type Principal =
   | { kind: 'user'; email: string; displayName: string }
   | { kind: 'role'; role: string }
-  | { kind: 'group'; group: string };
+  | { kind: 'group'; group: string }
+  /** Everyone holding `verb` on the plugin folder — written as `plugin/<Name>/<verb>`. */
+  | { kind: 'plugin'; plugin: string; verb: PluginPrincipalVerb };
 
 /** Verbs the share dialog can grant. */
 export type GrantVerb = 'read' | 'write' | 'owner' | 'download';
@@ -129,6 +163,12 @@ export interface SuggestResponse {
   roles?: string[];
   /** Active-source groups. A name shared with a role is offered as BOTH. */
   groups?: string[];
+  /**
+   * Plugin FOLDER names the caller can discover; each stands for three
+   * grantable principals (`plugin/<Name>/read|write|owner`). Not `plugins`,
+   * which was the retired alias of `roles`.
+   */
+  pluginPrincipals?: string[];
   people?: { name: string; email: string }[];
   /** True when the query was too short to return people (roles/groups still shown). */
   peopleWithheld?: boolean;

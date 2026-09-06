@@ -15,10 +15,10 @@ import {
 import {
   DEFAULT_BRANCH,
   PLUGINS_DIR,
-  PLUGIN_MANIFEST_FILE,
-  PLUGIN_MCP_FILE,
 } from '@bevel-software/platform-shared';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
+import type { PluginSource } from '../plugins/discovery/plugin-source.js';
+import { KbPluginSource } from '../plugins/discovery/kb-plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -150,6 +150,8 @@ export class ToolManualService implements IToolManualService {
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
     now: () => number = Date.now,
+    /** Where plugins (and their MCP servers) come from — native manifests unless a dialect is configured. */
+    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -657,27 +659,13 @@ export class ToolManualService implements IToolManualService {
     // shape. Listed BEFORE the `.tool` files: on a name collision (a legacy
     // mcp `.tool` the migration has not converted yet), the shared dedup keeps
     // the first occurrence, and the authoritative source must be the one kept.
+    // The plugins (and their mcp.json text) come from the configured source, so
+    // a dialect that expands servers from a registry lands here unchanged.
     const parsed: ToolManualDescriptor[] = [];
-    let pluginFolders: string[] = [];
-    try {
-      pluginFolders = (await fs.readdir(root, { withFileTypes: true }))
-        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-        .map((e) => e.name)
-        .sort();
-    } catch {
-      /* no Plugins/ root — nothing to scan */
-    }
-    for (const folder of pluginFolders) {
-      let mcpJson: string;
-      try {
-        mcpJson = await fs.readFile(path.join(root, folder, PLUGIN_MCP_FILE), 'utf-8');
-      } catch {
-        continue; // no mcp.json is the common case, not an error
-      }
-      const pluginJson = await fs
-        .readFile(path.join(root, folder, PLUGIN_MANIFEST_FILE), 'utf-8')
-        .catch(() => null);
-      parsed.push(...descriptorsFromMcpJson(folder, mcpJson, pluginJson));
+    const discovered = await this.source.discover(kbRoot);
+    for (const plugin of discovered.plugins) {
+      if (plugin.mcpJsonText === null) continue; // no servers is the common case, not an error
+      parsed.push(...descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText));
     }
 
     for (const f of files) {

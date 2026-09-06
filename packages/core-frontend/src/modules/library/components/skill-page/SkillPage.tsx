@@ -36,6 +36,11 @@ import { changeAuthorName, formatWhen } from '../../../change-requests/utils/aut
 import { ownersTextOf } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
+import { SharedViaPlugins } from './SharedViaPlugins';
+import { AccessRequestsBanner } from '../AccessRequestsBanner';
+import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
+import { listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
+import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
@@ -135,6 +140,23 @@ export function SkillPage({
   const skill = detail.skill;
   const skillPath = skill?.path ?? '';
   const prefix = `${skillPath}/`;
+
+  /** Every plugin holding this skill, from the catalog's decoration. */
+  const memberships = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugins ?? [],
+    [data.items, name],
+  );
+  /**
+   * Write-access requests on this skill, for its editors. The endpoint answers
+   * `[]` to everyone else, so the fetch is unconditional and the banner hides
+   * itself; `owned` only spares a pointless call.
+   */
+  const skillRequestsApi = useMemo<JoinRequestsApi>(
+    () => ({ list: listSkillAccessRequests, reconcile: reconcileSkillAccessRequest }),
+    [],
+  );
+  const accessRequests = useJoinRequests(name, skillPath || null, skillRequestsApi);
+  const [manageOpen, setManageOpen] = useState(false);
 
   /**
    * Who has to say yes. A skill has no owner of its own — it inherits its plugin
@@ -590,7 +612,45 @@ export function SkillPage({
             those rules are decided. Same call the tool page made. */}
       </header>
 
+      {owned && (
+        <AccessRequestsBanner
+          plugin={name}
+          folders={[skillPath]}
+          requests={accessRequests.requests}
+          onManage={() => setManageOpen(true)}
+          onAccept={(r, p) => void accessRequests.accept(r, p)}
+          onDecline={(r) => void accessRequests.decline(r)}
+        />
+      )}
+      {manageOpen && kbDirName && skillPath && (
+        <ManageAccessDialog
+          // The Library speaks the DEFAULT branch: a skill's rules are edited
+          // where the catalog reads them, whatever branch the ambient
+          // workspace happens to be on.
+          workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+          entry={{ name, relativePath: `${kbDirName}/${skillPath}`, type: 'directory' }}
+          onClose={() => {
+            setManageOpen(false);
+            accessRequests.reload();
+            data.reload();
+          }}
+        />
+      )}
+
       <IntegrationsSection needed={needed} onConnect={() => navigate('/connect')} />
+
+      {skill && (
+        <SharedViaPlugins
+          skillName={name}
+          skillPath={skillPath}
+          memberships={memberships}
+          owned={owned}
+          onChanged={() => {
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
+      )}
 
       <SkillFileTabs
         files={files}

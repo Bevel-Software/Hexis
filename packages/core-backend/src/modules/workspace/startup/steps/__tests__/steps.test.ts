@@ -7,11 +7,13 @@ import path from 'node:path';
 import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
+import { PluginManifestsStep } from '../plugin-manifests.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
+import { DEFAULT_KB_LAYOUT, configureKbLayout, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 
 const execFileAsync = promisify(execFile);
 
@@ -54,6 +56,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  configureKbLayout({ ...DEFAULT_KB_LAYOUT });
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -109,8 +112,9 @@ async function exists(dir: string, rel: string): Promise<boolean> {
 
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
 
+/** The template as the step writes it under the default layout — placeholders rendered. */
 async function template(name: string): Promise<string> {
-  return fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8');
+  return renderKbLayoutPlaceholders(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT);
 }
 
 /** Every required file + reserved root already present, from the real template. */
@@ -122,6 +126,7 @@ async function fullScaffold(): Promise<Record<string, string>> {
     '.gitignore': await template('gitignore.template'),
     'KnowledgeBase/.gitkeep': '',
     'Plugins/.gitkeep': '',
+    'Skills/.gitkeep': '',
   };
 }
 
@@ -144,10 +149,36 @@ describe('TemplateFilesStep', () => {
       // Reserved roots materialize as <dir>/.gitkeep.
       expect(await exists(dir, 'KnowledgeBase/.gitkeep')).toBe(true);
       expect(await exists(dir, 'Plugins/.gitkeep')).toBe(true);
+      expect(await exists(dir, 'Skills/.gitkeep')).toBe(true);
       const subject = (await git(dir, ['log', '--format=%s', '-1'])).trim();
       expect(subject).toMatch(/^Add missing KB scaffolding: /);
       expect(subject).toContain('.gitignore');
     }
+  });
+
+  it('renders the managed files with the deployment\'s own root names', async () => {
+    // A deployment that renamed its roots must hand the agent a guide naming
+    // the folders it will find, and an ignore file hiding the real ones.
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+    expect(agents).toContain('plugins/<Plugin>/plugin.json');
+    expect(agents).toContain('`docs/`');
+    expect(agents).not.toContain('{{');
+    expect(agents).not.toContain('KnowledgeBase/');
+    const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    expect(ignore).toContain('plugins/');
+    expect(ignore).toContain('skills/');
+    expect(ignore).not.toContain('Plugins/');
+    expect(await exists(dir, 'docs/.gitkeep')).toBe(true);
+
+    // And a second boot sees the rendered guide as current: no churn commit.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + scaffolding
   });
 
   it('replaces a drifted AGENTS.md, and says so when that is the only change', async () => {
@@ -184,20 +215,41 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).toContain('MyStuff/'); // the operator's rules survive
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
+    expect(lines).toContain('Skills/'); // and the shared-skills root's
+  });
+
+  it('hides the Skills/ root on an existing KB whose ignore file predates it, keeping every other rule', async () => {
+    // A knowledge base seeded before `Skills/` existed: its ignore file names
+    // `Plugins/` and knows nothing of the new root. The top-up appends the
+    // one line, so the root stays the Library's and out of the agent view.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = '# mine\n.git/\nAGENTS.md\nPlugins/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text.startsWith('# mine\n.git/\nAGENTS.md\nPlugins/\n')).toBe(true);
+    expect(text.split('\n').map((l) => l.trim())).toContain('Skills/');
+    // Idempotent: a second boot has nothing to add.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
   });
 
   it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
     // Appending the positive rule after the negation would WIN under ordered
     // matching and silently defeat the operator's stated choice to show it.
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\n';
+    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      '# operator wants the doc visible\n!AGENTS.md\n',
+      '# operator wants the doc visible\n!AGENTS.md\nSkills/\n',
     );
   });
 
@@ -294,8 +346,51 @@ describe('buildSeedTree', () => {
     expect(await fs.readFile(path.join(dest, 'docs/guide.md'), 'utf8')).toBe('guide');
     expect(await fs.readFile(path.join(dest, 'access.md'), 'utf8')).toBe('policy');
     // The generated paths — what the runner force-adds past a template .gitignore.
-    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'roles.yaml']);
+    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
+  });
+});
+
+describe('PluginManifestsStep', () => {
+  it('writes plugin.json into legacy plugin folders on every branch, and leaves scopes and real plugins alone', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Legacy shapes: access.md only; mcp.json only; a bare skill tree.
+      'Plugins/GTM/access.md': '---\n---\nread:\n  - everyone\n',
+      'Plugins/GTM/outreach/SKILL.md': '---\ndescription: x\n---\n',
+      'Plugins/Servers/mcp.json': '{"mcpServers":{}}',
+      'Plugins/Bare/deploy/SKILL.md': '---\ndescription: y\n---\n',
+      // Already a plugin, both shapes.
+      'Plugins/Modern/plugin.json': '{"name":"modern"}',
+      'Plugins/functional/cluster/example/plugin.bundle.json': '{"name":"example"}',
+      // A scope with rules of its own above a bundle: not a plugin.
+      'Plugins/functional/access.md': '---\n---\nread:\n  - everyone\n',
+      // Nothing plugin-shaped at all.
+      'Plugins/notes/README.md': 'just a folder',
+    });
+
+    await makeRunner([new PluginManifestsStep()]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      for (const legacy of ['GTM', 'Servers', 'Bare']) {
+        const manifest = JSON.parse(await fs.readFile(path.join(dir, `Plugins/${legacy}/plugin.json`), 'utf8'));
+        expect(manifest.name).toBe(legacy.toLowerCase());
+      }
+      expect(await exists(dir, 'Plugins/functional/plugin.json')).toBe(false);
+      expect(await exists(dir, 'Plugins/notes/plugin.json')).toBe(false);
+      expect(await fs.readFile(path.join(dir, 'Plugins/Modern/plugin.json'), 'utf8')).toBe('{"name":"modern"}');
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Add plugin manifests to 3 legacy plugin folders');
+    expect(log).toContain('Plugins/GTM: plugin.json written');
+
+    // Idempotent: nothing left to write on the next boot.
+    await makeRunner([new PluginManifestsStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one migration commit
   });
 });
 

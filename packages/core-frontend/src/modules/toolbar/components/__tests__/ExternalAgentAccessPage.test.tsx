@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
+import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
@@ -56,6 +57,8 @@ beforeEach(() => {
 
 function mount(mcpUrl: string) {
   configureMcpUrl(mcpUrl);
+  // The marketplace remote is served from the same deployment address.
+  configureMarketplaceGitUrl(`${new URL(mcpUrl).origin}/git/marketplace.git`);
   return render(
     <MemoryRouter>
       <ExternalAgentAccessPage />
@@ -137,7 +140,12 @@ describe('the interactive tab: local first, hosted second, each with its own add
   it('keeps each family on its own address', () => {
     mount(PUBLIC_URL);
     for (const value of snippets()) {
-      if (value.includes('hexis')) {
+      if (value.includes('marketplace.git')) {
+        // The marketplace remote is the deployment's own address (with the
+        // key in the userinfo, so the HOST is what survives), never the browser's.
+        expect(value).toContain(new URL(PUBLIC_URL).host);
+        expect(value).not.toContain(window.location.host);
+      } else if (value.includes('hexis')) {
         expect(value).toContain(window.location.origin);
         expect(value).not.toContain(PUBLIC_URL);
       } else {
@@ -231,9 +239,9 @@ describe('the key-bearing snippets quote the deployment too', () => {
     expect(snippets().some((v) => v.includes(KEY))).toBe(false);
     await revealAKey(user);
     expect(snippets().filter((v) => v.includes(KEY))).toHaveLength(
-      // the reveal textarea itself, the three keyed hosted snippets, and the
-      // two local-server (hexis-mcp) snippets
-      6,
+      // the reveal textarea itself, the three keyed hosted snippets, the two
+      // local-server (hexis-mcp) snippets, and the three marketplace commands
+      9,
     );
   });
 });

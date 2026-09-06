@@ -22,6 +22,7 @@ import {
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
   PLUGINS_DIR,
+  SKILLS_DIR,
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
@@ -1098,7 +1099,9 @@ export function FileExplorer() {
     // without it a KB whose only root is Plugins would fail this check, fall
     // back to the flat tree, and show the folder that way instead.
     const plugins = findDir(PLUGINS_DIR);
-    if (!knowledgeBase && !data && !agents && !pipelines && !plugins) return null;
+    // Same for Skills: the Library surface renders it, not this explorer.
+    const skills = findDir(SKILLS_DIR);
+    if (!knowledgeBase && !data && !agents && !pipelines && !plugins && !skills) return null;
     // Any other top-level content folder (e.g. a stray `Legal/`) folds into Knowledge.
     const otherDirs = kids.filter(
       (c) => c.type === 'directory' && !KB_ROOT_DIRS.has(c.name),

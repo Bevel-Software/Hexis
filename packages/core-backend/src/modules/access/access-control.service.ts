@@ -13,7 +13,9 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
+import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
   SYNCED_GROUPS_YAML,
@@ -355,6 +357,19 @@ function resolveAtPath(
   return collapseScopes(resolveScopes(model, verb, relativePath, fileOwn));
 }
 
+/**
+ * Every principal key a caller holds: the tokens their email is a member of,
+ * plus the PUBLIC keys every caller holds regardless (a plugin principal
+ * whose plugin grants `everyone`). Undefined when there is nothing at all,
+ * matching the plain `byEmail.get` the tier-2 check used to read.
+ */
+function principalKeysOf(model: AccessModel, email: string): Set<string> | undefined {
+  const own = model.roles.byEmail.get(email);
+  const pub = model.roles.publicKeys;
+  if (!pub?.size) return own;
+  return new Set([...(own ?? []), ...pub]);
+}
+
 function isAdminEmail(model: AccessModel, email: string): boolean {
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
@@ -411,7 +426,7 @@ function hasPermissionResolved(
     if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) return true;
   }
 
-  const userRoles = model.roles.byEmail.get(email);
+  const userRoles = principalKeysOf(model, email);
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
@@ -659,7 +674,7 @@ function eligibleHoldersResolved(
   // principals, and collapsing them to one would hide the role's live
   // `role/<name>` grant from every consumer of the eligible list.
   const byIdentity = new Map<string, ResolvedPrincipal>();
-  const addPrincipal = (name: string, kind: 'role' | 'group') => {
+  const addPrincipal = (name: string, kind: ResolvedPrincipal['kind']) => {
     const key = `${kind}\0${name.toLowerCase()}`;
     if (!byIdentity.has(key)) byIdentity.set(key, { name, kind });
   };
@@ -1106,14 +1121,17 @@ export class AccessControlService implements IAccessControl {
     return out;
   }
 
-  async kbPrincipals(
-    workspaceId: string,
-  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }> {
+  async kbPrincipals(workspaceId: string): Promise<{
+    roles: string[];
+    groups: string[];
+    plugins: { name: string; folder: string }[];
+    people: { name: string; email: string }[];
+  }> {
     let model: AccessModel;
     try {
       model = await this.loadModel(workspaceId);
     } catch {
-      return { roles: [], groups: [], people: [] };
+      return { roles: [], groups: [], plugins: [], people: [] };
     }
     // Roles = the built-in `everyone` role plus every declared role's display
     // name — ROLE principals only, never groups. Each role is enumerated via
@@ -1125,9 +1143,21 @@ export class AccessControlService implements IAccessControl {
     // direct-access.md edit).
     const roles = [EVERYONE_DISPLAY];
     const groups: string[] = [];
+    // Plugins = the FOLDER names behind the synthesised `plugin/<Name>/<verb>`
+    // principals, once each (three keys share a folder). Personal folders are
+    // plugins to the resolver but not to a person picking a grantee.
+    const plugins = new Map<string, string>();
     for (const [key, principal] of model.roles.byCanonical) {
       if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
       else if (principal.kind === 'group') groups.push(principal.displayName);
+      else if (
+        principal.kind === 'plugin' &&
+        principal.pluginFolder &&
+        principal.pluginDir &&
+        !isPersonalPluginFolder(principal.pluginFolder)
+      ) {
+        plugins.set(principal.pluginFolder, principal.pluginDir);
+      }
     }
     // People = roles.yaml member emails (name-less) ∪ access.md `Name <email>`
     // grants (named). The login-only users table is unioned in by the caller.
@@ -1148,7 +1178,14 @@ export class AccessControlService implements IAccessControl {
       name: name || email.split('@')[0],
       email,
     }));
-    return { roles, groups, people };
+    return {
+      roles,
+      groups,
+      plugins: [...plugins.entries()]
+        .map(([name, folder]) => ({ name, folder }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      people,
+    };
   }
 
   async findEmailByHash(
@@ -1404,7 +1441,15 @@ export class AccessControlService implements IAccessControl {
     // must not 500 the entire editor; admins can still write `access.md`
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
-    await this.collectAccessFiles(repoDir, '', accessFiles);
+    const pluginDirs = new Set<string>();
+    await this.collectAccessFiles(repoDir, '', accessFiles, pluginDirs);
+
+    // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
+    // folder's own access.md — a plugin being a folder with a manifest, at
+    // any depth — after groups merged (so their rosters expand through the
+    // finished index) and before the unknown-role sweep below (so a grant
+    // naming one counts as known).
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, pluginDirs);
 
     // Validate role refs against roles.yaml. `everyone` is a built-in role and
     // is valid without a roles.yaml entry. Unknown refs are dropped from the
@@ -1438,6 +1483,8 @@ export class AccessControlService implements IAccessControl {
     absDir: string,
     relDir: string,
     out: Map<string, AccessFile>,
+    /** Folders under the plugins root carrying a manifest — the plugins, for principal synthesis. */
+    pluginDirs?: Set<string>,
   ): Promise<void> {
     let entries;
     try {
@@ -1454,7 +1501,14 @@ export class AccessControlService implements IAccessControl {
       const abs = path.join(absDir, entry.name);
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        await this.collectAccessFiles(abs, rel, out);
+        await this.collectAccessFiles(abs, rel, out, pluginDirs);
+      } else if (
+        pluginDirs &&
+        entry.isFile() &&
+        entry.name === PLUGIN_MANIFEST_FILE &&
+        relDir.startsWith(`${PLUGINS_DIR}/`)
+      ) {
+        pluginDirs.add(relDir);
       } else if (entry.isFile() && entry.name === 'access.md') {
         const text = await fs.readFile(abs, 'utf-8');
         const parsed = parseAccessFile(text, rel);
@@ -1614,7 +1668,10 @@ export class AccessControlService implements IAccessControl {
    * `'error'` when git failed: a model built without its access files is
    * not the model, and the caller must not cache it as one.
    */
-  private async listAccessFilesAtRef(repoDir: string, ref: string): Promise<string[] | 'error'> {
+  private async listAccessFilesAtRef(
+    repoDir: string,
+    ref: string,
+  ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
     try {
       const { stdout } = await execFileAsync(
         'git',
@@ -1622,12 +1679,16 @@ export class AccessControlService implements IAccessControl {
         { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
       );
       const out: string[] = [];
+      const pluginDirs: string[] = [];
       for (const line of stdout.split('\n')) {
         const p = line.trim();
         if (!p) continue;
         if (p === 'access.md' || p.endsWith('/access.md')) out.push(p);
+        else if (p.startsWith(`${PLUGINS_DIR}/`) && p.endsWith(`/${PLUGIN_MANIFEST_FILE}`)) {
+          pluginDirs.push(p.slice(0, -(PLUGIN_MANIFEST_FILE.length + 1)));
+        }
       }
-      return out;
+      return { accessFiles: out, pluginDirs };
     } catch {
       return 'error';
     }
@@ -1781,7 +1842,7 @@ export class AccessControlService implements IAccessControl {
       console.warn(`[access@${tag}] listing access.md files failed; refusing to decide from a partial tree`);
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
-    for (const p of listed) {
+    for (const p of listed.accessFiles) {
       const text = await read(p);
       if (text === null) continue;
       const parsed = parseAccessFile(text, p);
@@ -1791,6 +1852,11 @@ export class AccessControlService implements IAccessControl {
       // duplicates, but be defensive.
       accessFiles.set(parsed.file.dir, parsed.file);
     }
+
+    // Mirror `loadModel`: plugin principals from the plugins the ref carries,
+    // so a PR-time verdict on a skill granted to `plugin/<Name>/write` counts
+    // the plugin's writers exactly as the working tree would.
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, new Set(listed.pluginDirs));
 
     // Mirror `loadModel`: drop entries whose role ref is unknown to roles.yaml,
     // while preserving the built-in `everyone` role.

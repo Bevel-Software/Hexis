@@ -21,6 +21,12 @@ Database migrations and the knowledge-base maintenance phase run
 automatically while the app boots — no manual steps, but the first start
 after an upgrade can take a little longer.
 
+The maintenance phase commits to the knowledge base on every branch when a
+release needs it. The current steps: rename a legacy `Groups/` root to
+`Plugins/`; create the `Skills/` root and hide it from the Knowledge tree
+like `Plugins/`; write a `plugin.json` into every plugin folder that predates
+the manifest. Each is idempotent, so a second start writes nothing.
+
 **Downgrading is not supported** once a version's migrations have run: an
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.
