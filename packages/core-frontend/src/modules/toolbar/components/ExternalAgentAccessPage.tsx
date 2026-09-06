@@ -320,9 +320,10 @@ export function ExternalAgentAccessPage() {
                   without credential helpers. Revoke the key here to cut the agent off.
                 </p>
                 <p className="text-meta text-ink-muted leading-snug">
-                  Run the command in the Claude Code CLI. The plugin screens in Claude Desktop
-                  and claude.ai accept only GitHub, GitLab and Bitbucket remotes and refuse
-                  this one as an unsupported host.
+                  Add it through Claude Code: the CLI, or the Claude Code section of the
+                  Desktop app's Customize screen. The Chat and Cowork plugin screens accept
+                  only GitHub, GitLab and Bitbucket remotes and refuse this one as an
+                  unsupported host.
                 </p>
               </div>
             </details>
@@ -631,9 +632,9 @@ export function ExternalAgentAccessPage() {
                     Every skill you may read, compiled into a plugin marketplace served as a git
                     remote. One install brings all of it; a later update fetches what changed.
                     The key stays in the URL because Claude Code refreshes marketplaces without
-                    credential helpers. Run the command in the Claude Code CLI: the plugin
-                    screens in Claude Desktop and claude.ai accept only GitHub, GitLab and
-                    Bitbucket remotes.
+                    credential helpers. Add it through Claude Code (the CLI, or the Claude
+                    Code section of the Desktop app's Customize screen): the Chat and Cowork
+                    plugin screens accept only GitHub, GitLab and Bitbucket remotes.
                   </p>
                   <textarea
                     readOnly
