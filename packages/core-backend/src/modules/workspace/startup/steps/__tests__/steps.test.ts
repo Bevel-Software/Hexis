@@ -255,6 +255,21 @@ describe('TemplateFilesStep', () => {
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
   });
 
+  it("keeps an operator's Skills/ rule whose own comment merely opens like the platform's", async () => {
+    // Provenance is the platform's EXACT comment. A comment that begins the
+    // same way and goes on differently was never written by the platform.
+    const scaffold = await fullScaffold();
+    const text =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, and I hide it anyway\nSkills/\n';
+    scaffold['.bevelignore'] = text;
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(text);
+  });
+
   it("keeps a Skills/ rule the operator wrote themselves — provenance is the platform's comment", async () => {
     const scaffold = await fullScaffold();
     scaffold['.bevelignore'] = 'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n';

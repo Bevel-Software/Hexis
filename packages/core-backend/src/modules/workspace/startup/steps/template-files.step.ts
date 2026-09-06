@@ -388,16 +388,19 @@ async function reconcileIgnoreRules(
 const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
 
 /**
- * The template line an earlier release shipped above the shared-skills rule,
- * by its stable opening — the line ended by naming the plugins root, which a
- * deployment may have renamed since.
+ * The template line an earlier release shipped above the shared-skills rule —
+ * the WHOLE line, anchored at both ends. Its one variable is the plugins
+ * root's name (a single path segment, which a deployment may have renamed
+ * since); everything else is fixed. A looser match (an opening, a substring)
+ * would accept lines the platform never wrote, and a line the platform never
+ * wrote is the operator's.
  */
-const LEGACY_SKILLS_RULE_COMMENT_PREFIX = '# The shared-skills root is rendered by the Skills & Tools app';
+const LEGACY_SKILLS_RULE_COMMENT = /^# The shared-skills root is rendered by the Skills & Tools app, like [^/\s]+\/\.$/;
 
-/** Whether a line is a comment the platform wrote above a rule it added. */
+/** Whether a line is EXACTLY a comment the platform wrote above a rule it added. */
 function isPlatformRuleComment(line: string): boolean {
   const trimmed = line.trim();
-  return trimmed === PLATFORM_RULE_COMMENT || trimmed.startsWith(LEGACY_SKILLS_RULE_COMMENT_PREFIX);
+  return trimmed === PLATFORM_RULE_COMMENT || LEGACY_SKILLS_RULE_COMMENT.test(trimmed);
 }
 
 /**
