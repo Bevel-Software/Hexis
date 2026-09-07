@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
 
@@ -88,12 +89,24 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
   await walk('');
 }
 
-/** Copy one template file (by repo-relative path) into `dest`, creating parents. */
+/** Template files that are TEXT and may carry layout placeholders; anything else is copied byte for byte. */
+const TEXT_TEMPLATE = /(\.(md|markdown|ya?ml|json|txt|template)|(?:^|[/\\])\.[^/\\]+)$/i;
+
+/**
+ * Copy one template file (by repo-relative path) into `dest`, creating
+ * parents. Text files are RENDERED — the managed guide and the ignore file
+ * name the three root folders, which a deployment may have renamed — and a
+ * file without placeholders comes out byte-identical to its source.
+ */
 async function copyTemplateFile(templateDir: string, relPath: string, dest: string): Promise<void> {
   const from = await templateSource(templateDir, relPath);
   const to = path.join(dest, relPath);
   await fs.mkdir(path.dirname(to), { recursive: true });
-  await fs.copyFile(from, to);
+  if (TEXT_TEMPLATE.test(relPath)) {
+    await fs.writeFile(to, renderKbLayoutPlaceholders(await fs.readFile(from, 'utf8')), 'utf8');
+  } else {
+    await fs.copyFile(from, to);
+  }
 }
 
 async function exists(p: string): Promise<boolean> {

@@ -1,13 +1,14 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
-import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
 import { walkFiles } from '../../shared/fs-walk.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
+import { BevelIgnoreStack } from '../workspace/bevel-ignore.js';
 import type {
   ISkillService,
   GetSkillResult,
@@ -97,15 +98,20 @@ export class SkillService implements ISkillService {
   private async scan(): Promise<ParsedSkill[]> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // Token first: a merge's `invalidate()` can land while `scanDisk` is still
+    // reading the pre-merge tree, and storing that read afterwards would undo
+    // the drop for a full TTL.
+    const token = this.cache.begin();
     const skills = await this.scanDisk();
-    this.cache.set(skills);
+    this.cache.set(skills, token);
     return skills;
   }
 
   private async scanDisk(): Promise<ParsedSkill[]> {
-    // Ensure the default-branch clone exists, then scan its Plugins/ dir. Any
-    // failure (no workspace, no Plugins/ dir) degrades to an empty catalog — the
-    // manual/tools must never break because skills can't be read.
+    // Ensure the default-branch clone exists, then scan its Skills/ and
+    // Plugins/ roots. Any failure (no workspace, no such dir) degrades to an
+    // empty catalog — the manual/tools must never break because skills can't
+    // be read.
     let wsId: string;
     try {
       wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
@@ -115,20 +121,34 @@ export class SkillService implements ISkillService {
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
     // Skills may be grouped in category subfolders (each carrying its own
-    // access.md), so a SKILL.md can live at any depth under the root. Walk the
-    // tree and treat every folder that directly contains a SKILL.md as a skill;
-    // don't descend past it — its inner files are bundled assets, not nested
-    // skills. The skill name is the leaf folder name; its path is the full
-    // repo-relative folder (e.g. `Plugins/Development/coding-guidelines`).
+    // access.md), so a SKILL.md can live at any depth under either root. Walk
+    // the tree and treat every folder that directly contains a SKILL.md as a
+    // skill; don't descend past it — its inner files are bundled assets, not
+    // nested skills. The skill name is the leaf folder name; its path is the
+    // full repo-relative folder (e.g. `Skills/Engineering/deploy`).
+    //
+    // `.bevelignore` files INSIDE a root are honoured on the way down, the
+    // same layered rules the file tree applies: a repository that carries a
+    // build output beside its source (a `dist/` holding compiled copies of
+    // every skill) would otherwise list each skill twice and refuse the
+    // duplicate — the wrong one, half the time. The REPO-ROOT file is
+    // deliberately not consulted: it is where the template hides `Plugins/`
+    // from the Knowledge tree, and a rule that hides a root from the browser
+    // must not empty the catalog that root exists to feed.
     const out: ParsedSkill[] = [];
-    const walk = async (dir: string, relFolder: string): Promise<void> => {
+    const walk = async (dir: string, relFolder: string, ignore: BevelIgnoreStack): Promise<void> => {
       let entries: import('node:fs').Dirent[];
       try {
         entries = await fs.readdir(dir, { withFileTypes: true });
       } catch {
         return;
       }
-      if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
+      ignore = await ignore.extendedWith(dir);
+      // A rule may name the skill's own file, not only a folder above it.
+      if (
+        entries.some((e) => e.isFile() && e.name === 'SKILL.md') &&
+        !ignore.isIgnored(path.join(dir, 'SKILL.md'), false)
+      ) {
         let raw: string;
         try {
           raw = await fs.readFile(path.join(dir, 'SKILL.md'), 'utf-8');
@@ -144,7 +164,14 @@ export class SkillService implements ISkillService {
         const declared = resolveDeclaredId(fm.frontmatter, path.basename(dir));
         const name = isSafeSkillName(declared) ? declared : path.basename(dir);
         out.push({
-          summary: { name, description: fm.description, version: fm.version, path: relFolder },
+          summary: {
+            name,
+            description: fm.description,
+            version: fm.version,
+            owner: fm.owner,
+            lifecycle: fm.lifecycle,
+            path: relFolder,
+          },
           body: fm.body,
           allowedTools: fm.allowedTools,
           files: await listBundledFiles(dir, relFolder),
@@ -153,10 +180,16 @@ export class SkillService implements ISkillService {
       }
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-        await walk(path.join(dir, entry.name), `${relFolder}/${entry.name}`);
+        const abs = path.join(dir, entry.name);
+        if (ignore.isIgnored(abs, true)) continue;
+        await walk(abs, `${relFolder}/${entry.name}`, ignore);
       }
     };
-    await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR);
+    // Each root starts its own ignore stack (the walk extends it with the
+    // root's own file first). Order is cosmetic: the sort below is by name
+    // then path, so a same-named pair resolves the same way regardless.
+    await walk(path.join(kbRoot, SKILLS_DIR), SKILLS_DIR, BevelIgnoreStack.empty());
+    await walk(path.join(kbRoot, PLUGINS_DIR), PLUGINS_DIR, BevelIgnoreStack.empty());
     // A skill's id (frontmatter `id`/`name`, else folder name) is how getSkill()
     // resolves it, so it must be unique. Sort by (name, path) for a deterministic
     // winner, then REFUSE later duplicates via the shared dedup — the same rule
@@ -209,6 +242,10 @@ function scalarToString(value: unknown): string | undefined {
 export function parseSkillFrontmatter(raw: string): {
   description: string;
   version?: string;
+  /** `metadata.owner` (or a top-level `owner`) — the governance record's owner, verbatim. */
+  owner?: string;
+  /** `metadata.lifecycle` (or top-level) — e.g. `active`, `deprecated`, `retired`; lowercased. */
+  lifecycle?: string;
   allowedTools?: string[];
   body: string;
   /** The parsed frontmatter object (for shared id resolution: `id`/`name`). */
@@ -233,6 +270,11 @@ export function parseSkillFrontmatter(raw: string): {
   const description = typeof data.description === 'string' ? data.description.trim() : '';
   const metadata = (data.metadata ?? {}) as Record<string, unknown>;
   const version = scalarToString(data.version) ?? scalarToString(metadata.version);
+  // The governance record: `metadata.owner` / `metadata.lifecycle` first (the
+  // agentskills convention this catalog reads), a top-level spelling second.
+  const owner = (scalarToString(metadata.owner) ?? scalarToString(data.owner))?.trim() || undefined;
+  const lifecycle =
+    (scalarToString(metadata.lifecycle) ?? scalarToString(data.lifecycle))?.trim().toLowerCase() || undefined;
 
   // `allowed-tools` is a space-separated string (agentskills) or a YAML list.
   const at = data['allowed-tools'];
@@ -242,7 +284,7 @@ export function parseSkillFrontmatter(raw: string): {
       ? at.split(/\s+/).filter(Boolean)
       : undefined;
 
-  return { description, version, allowedTools, body, frontmatter: data };
+  return { description, version, owner, lifecycle, allowedTools, body, frontmatter: data };
 }
 
 /** Repo-root-relative paths of every bundled file under a skill folder (excludes SKILL.md). */

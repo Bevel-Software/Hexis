@@ -17,6 +17,7 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
+import { marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -280,6 +281,53 @@ export function ExternalAgentAccessPage() {
               </div>
             </details>
 
+            <details className="border border-line rounded" data-testid="marketplace-section">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Skills as native plugins (marketplace)
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <p className="text-meta text-ink-muted leading-snug">
+                  Instead of reading skills through the MCP server, an agent can install them
+                  as native plugins. Every skill you may read is compiled into a plugin
+                  marketplace at the git remote below; it needs an external API key from the{' '}
+                  <button
+                    type="button"
+                    onClick={() => setTab('autonomous')}
+                    className="underline text-ink-muted hover:text-ink"
+                  >
+                    Autonomous agents
+                  </button>{' '}
+                  tab, which the key dialog shows filled in.
+                </p>
+                <CopyBlock label="Marketplace git remote" value={marketplaceGitUrl()} rows={2} />
+                <CopyBlock
+                  label="Claude Code (one install, everything you may read)"
+                  value={marketplaceCommands('<external-api-key>').claude}
+                  rows={2}
+                />
+                <CopyBlock
+                  label="Codex"
+                  value={marketplaceCommands('<external-api-key>').codex}
+                  rows={2}
+                />
+                <CopyBlock
+                  label="Any other agent, via the skills CLI"
+                  value={marketplaceCommands('<external-api-key>').skills}
+                  rows={2}
+                />
+                <p className="text-meta text-ink-muted leading-snug">
+                  The key stays in the URL: Claude Code refreshes marketplaces in the background
+                  without credential helpers. Revoke the key here to cut the agent off.
+                </p>
+                <p className="text-meta text-ink-muted leading-snug">
+                  Add it through Claude Code: the CLI, or the Claude Code section of the
+                  Desktop app's Customize screen. The Chat and Cowork plugin screens accept
+                  only GitHub, GitLab and Bitbucket remotes and refuse this one as an
+                  unsupported host.
+                </p>
+              </div>
+            </details>
+
             <p className="text-[11px] text-ink-muted leading-snug">
               Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
               <button
@@ -481,89 +529,141 @@ export function ExternalAgentAccessPage() {
                   {copied ? <Check size={14} /> : <Copy size={14} />}
                 </button>
               </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
+              {/* The SAME three drawers as the interactive tab — local server,
+                  hosted endpoint, marketplace — in the same order and CLOSED,
+                  with the key filled in. The key is the news here; which
+                  config the reader needs is their call, and five config walls
+                  in a row buried the one thing the dialog exists to hand over.
+                  Same summaries as the tab too, so a person who read the tab
+                  first finds the drawer they already picked. */}
+              <details className="border border-line rounded">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                   Desktop agents — the local server (recommended)
+                </summary>
+                <div className="px-3 pb-3 space-y-2">
+                  <p className="text-meta text-ink-muted leading-snug">
+                    For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
+                    Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
+                    Node): the agent gets everything the hosted endpoint serves, plus your
+                    plugins' local-only tools. In Claude Code:
+                  </p>
+                  <textarea
+                    readOnly
+                    value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
+                    rows={3}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <p className="text-meta text-ink-muted leading-snug">
+                    On Windows, prefer the JSON config below — this one-liner assumes a POSIX
+                    shell (macOS, Linux, WSL or Git Bash).
+                  </p>
+                  <p className="text-meta text-ink-muted leading-snug">
+                    Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
+                    similar:
+                  </p>
+                  <textarea
+                    readOnly
+                    value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
+                    rows={13}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
                 </div>
-                <p className="text-meta text-ink-muted mb-1 leading-snug">
-                  For agents that run on your machine: Claude Code, Claude Desktop, Cursor,
-                  Windsurf, Cline and similar. Runs this workspace as a local MCP server (needs
-                  Node): the agent gets everything the hosted endpoint serves, plus your
-                  plugins' local-only tools. In Claude Code:
-                </p>
-                <textarea
-                  readOnly
-                  value={hexisMcpClaudeCommand(workspaceUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-                <p className="text-meta text-ink-muted mt-1 leading-snug">
-                  On Windows, prefer the JSON config below — this one-liner assumes a POSIX
-                  shell (macOS, Linux, WSL or Git Bash).
-                </p>
-                <p className="text-meta text-ink-muted mt-2 mb-1 leading-snug">
-                  Or as a JSON config, for Claude Desktop, Cursor, Windsurf, Cline and
-                  similar:
-                </p>
-                <textarea
-                  readOnly
-                  value={hexisMcpJsonSnippet(workspaceUrl, reveal.plaintext)}
-                  rows={13}
-                  className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
+              </details>
+
+              <details className="border border-line rounded">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                   Web agents and pipelines — the hosted endpoint
+                </summary>
+                <div className="px-3 pb-3 space-y-3">
+                  <div>
+                    <p className="text-meta text-ink-muted mb-1 leading-snug">
+                      For agents that can't run a process on your machine, and for CI where
+                      installing Node is unwanted. Claude Code, via the hosted endpoint:
+                    </p>
+                    <textarea
+                      readOnly
+                      value={claudeCodeCommand(mcpUrl, reveal.plaintext)}
+                      rows={3}
+                      className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium text-ink mb-1">Connect Langdock</div>
+                    <ol className="text-meta text-ink-muted mb-1 leading-snug list-decimal pl-4 space-y-0.5">
+                      <li>In Langdock, open your workspace settings and go to MCP servers → Add server.</li>
+                      <li>Choose <span className="font-medium">HTTP</span> (Streamable HTTP) as the transport.</li>
+                      <li>Give it a name (e.g. <span className="font-medium">Bevel</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
+                      <li>Save, then enable the server in any assistant you want it available in.</li>
+                    </ol>
+                    <textarea
+                      readOnly
+                      value={langdockSnippet(mcpUrl, reveal.plaintext)}
+                      rows={3}
+                      className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium text-ink mb-1">Other agents (JSON config)</div>
+                    <p className="text-meta text-ink-muted mb-1 leading-snug">
+                      The hosted endpoint for most clients that load servers from a JSON config —
+                      when the local server above isn't wanted.
+                    </p>
+                    <textarea
+                      readOnly
+                      value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
+                      rows={11}
+                      className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                    />
+                  </div>
                 </div>
-                <p className="text-meta text-ink-muted mb-1 leading-snug">
-                  For agents that can't run a process on your machine, and for CI where
-                  installing Node is unwanted. Claude Code, via the hosted endpoint:
-                </p>
-                <textarea
-                  readOnly
-                  value={claudeCodeCommand(mcpUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Connect Langdock
+              </details>
+
+              <details className="border border-line rounded">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                  Skills as native plugins — the marketplace
+                </summary>
+                <div className="px-3 pb-3 space-y-2">
+                  <p className="text-meta text-ink-muted leading-snug">
+                    Every skill you may read, compiled into a plugin marketplace served as a git
+                    remote. One install brings all of it; a later update fetches what changed.
+                    The key stays in the URL because Claude Code refreshes marketplaces without
+                    credential helpers. Add it through Claude Code (the CLI, or the Claude
+                    Code section of the Desktop app's Customize screen): the Chat and Cowork
+                    plugin screens accept only GitHub, GitLab and Bitbucket remotes.
+                  </p>
+                  <textarea
+                    readOnly
+                    aria-label="Claude Code marketplace command"
+                    value={marketplaceCommands(reveal.plaintext).claude}
+                    rows={2}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <p className="text-meta text-ink-muted leading-snug">Codex installs every plugin on add:</p>
+                  <textarea
+                    readOnly
+                    aria-label="Codex marketplace command"
+                    value={marketplaceCommands(reveal.plaintext).codex}
+                    rows={2}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                  <p className="text-meta text-ink-muted leading-snug">Any other agent, through the skills CLI:</p>
+                  <textarea
+                    readOnly
+                    aria-label="skills CLI command"
+                    value={marketplaceCommands(reveal.plaintext).skills}
+                    rows={2}
+                    className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
                 </div>
-                <ol className="text-[11px] text-ink-muted mb-1 leading-snug list-decimal pl-4 space-y-0.5">
-                  <li>In Langdock, open your workspace settings and go to MCP servers → Add server.</li>
-                  <li>Choose <span className="font-medium">HTTP</span> (Streamable HTTP) as the transport.</li>
-                  <li>Give it a name (e.g. <span className="font-medium">Bevel</span>), paste the URL below into the server URL field, and add the Authorization header under custom headers.</li>
-                  <li>Save, then enable the server in any assistant you want it available in.</li>
-                </ol>
-                <textarea
-                  readOnly
-                  value={langdockSnippet(mcpUrl, reveal.plaintext)}
-                  rows={3}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
-              <div>
-                <div className="text-xs font-medium text-ink mb-1">
-                  Other agents (JSON config)
-                </div>
-                <p className="text-[11px] text-ink-muted mb-1 leading-snug">
-                  The hosted endpoint for most clients that load servers from a JSON config —
-                  when the local server above isn't wanted.
-                </p>
-                <textarea
-                  readOnly
-                  value={jsonConfigSnippet(mcpUrl, reveal.plaintext)}
-                  rows={11}
-                  className="w-full font-mono text-[11px] bg-sunken border border-line rounded px-2 py-1.5 resize-none"
-                  onFocus={(e) => e.currentTarget.select()}
-                />
-              </div>
+              </details>
             </div>
             <div className="flex justify-end px-4 py-3 border-t border-line">
               <button

@@ -67,9 +67,20 @@ describe('PluginsSidebar', () => {
     expect(row(/^All plugins/)).toHaveAttribute('aria-current', 'false');
   });
 
-  it('heads the plugin rows with what the list is: the set in your MCP', () => {
+  it('heads the plugin rows with what they are: plugins', () => {
     renderSidebar();
-    expect(screen.getByText('Included in your MCP')).toBeInTheDocument();
+    expect(screen.getByText('Plugins')).toBeInTheDocument();
+    expect(screen.queryByText('Included in your MCP')).not.toBeInTheDocument();
+  });
+
+  it('renders the Skills section it is handed between the lenses and the plugins', () => {
+    renderSidebar({ skillsTree: <div data-testid="skills-tree">tree</div> });
+    const tree = screen.getByTestId('skills-tree');
+    const owned = screen.getByRole('button', { name: /^Owned by me/ });
+    const plugins = screen.getByText('Plugins');
+    // Document order: Owned by me → the tree → the Plugins heading.
+    expect(owned.compareDocumentPosition(tree) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tree.compareDocumentPosition(plugins) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("leads the plugins with the caller's own space", () => {

@@ -83,6 +83,7 @@ function makeGit(overrides: Partial<{
     }),
     pull: vi.fn().mockImplementation(async () => {
       if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      return { treeChanged: true };
     }),
   } as unknown as GitService;
 }

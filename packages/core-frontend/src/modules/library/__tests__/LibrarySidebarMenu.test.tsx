@@ -142,7 +142,7 @@ function renderLibrary(path = '/skills-and-tools') {
   );
 }
 
-const nav = () => screen.getByRole('navigation', { name: 'Library plugins' });
+const nav = () => screen.getByRole('navigation', { name: 'Library navigation' });
 const menuItems = () =>
   within(screen.getByRole('menu'))
     .getAllByRole('menuitem')
