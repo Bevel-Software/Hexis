@@ -65,6 +65,8 @@ export interface ProvisionCommitDriver {
 export interface ProvisionedPlugin {
   /** The folder name under `Plugins/` (not the full path). */
   folder: string;
+  /** The plugin's identity — the manifest name written for it. */
+  name: string;
   /** False when an ensure found the folder already there. */
   created: boolean;
 }
@@ -156,7 +158,7 @@ export class PluginProvisionService {
         );
       }
       await this.provision(user, name, pluginAccessMd(user));
-      return { folder: name, created: true };
+      return { folder: name, name: pluginManifestName(name), created: true };
     });
   }
 
@@ -168,7 +170,7 @@ export class PluginProvisionService {
     const folder = personalPluginFolderName(user.id);
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       if ((await this.existingFolder(folder)) !== null) {
-        return { folder, created: false };
+        return { folder, name: pluginManifestName(folder), created: false };
       }
       try {
         await this.provision(user, folder, personalAccessMd(user));
@@ -177,11 +179,11 @@ export class PluginProvisionService {
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
         if (err instanceof PluginProvisionError && err.status === 409) {
-          return { folder, created: false };
+          return { folder, name: pluginManifestName(folder), created: false };
         }
         throw err;
       }
-      return { folder, created: true };
+      return { folder, name: pluginManifestName(folder), created: true };
     });
   }
 

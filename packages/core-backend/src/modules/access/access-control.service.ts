@@ -13,7 +13,9 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginFolder,
+  pluginIdentityOf,
+} from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
@@ -275,6 +277,19 @@ interface AccessScope {
  * `hasPermissionResolved`). `collapseScopes` flattens this into the
  * closest-wins-per-principal view the display helpers use.
  */
+/** A manifest's parsed object, or null for absent, unparsable or not-an-object text. */
+function parseManifestText(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveScopes(
   model: AccessModel,
   verb: Verb,
@@ -1163,11 +1178,11 @@ export class AccessControlService implements IAccessControl {
       else if (principal.kind === 'group') groups.push(principal.displayName);
       else if (
         principal.kind === 'plugin' &&
-        principal.pluginFolder &&
+        principal.pluginName &&
         principal.pluginDir &&
-        !isPersonalPluginFolder(principal.pluginFolder)
+        !isPersonalPluginFolder(principal.pluginName)
       ) {
-        plugins.set(principal.pluginFolder, principal.pluginDir);
+        plugins.set(principal.pluginName, principal.pluginDir);
       }
     }
     // People = roles.yaml member emails (name-less) ∪ access.md `Name <email>`
@@ -1452,7 +1467,7 @@ export class AccessControlService implements IAccessControl {
     // must not 500 the entire editor; admins can still write `access.md`
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
-    const pluginDirs = new Set<string>();
+    const pluginDirs = new Map<string, string>();
     await this.collectAccessFiles(repoDir, '', accessFiles, pluginDirs);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
@@ -1494,8 +1509,8 @@ export class AccessControlService implements IAccessControl {
     absDir: string,
     relDir: string,
     out: Map<string, AccessFile>,
-    /** Folders under the plugins root carrying a manifest — the plugins, for principal synthesis. */
-    pluginDirs?: Set<string>,
+    /** Folders under the plugins root carrying a manifest → the plugin's identity, for principal synthesis. */
+    pluginDirs?: Map<string, string>,
   ): Promise<void> {
     let entries;
     try {
@@ -1519,7 +1534,7 @@ export class AccessControlService implements IAccessControl {
         entry.name === PLUGIN_MANIFEST_FILE &&
         relDir.startsWith(`${PLUGINS_DIR}/`)
       ) {
-        pluginDirs.add(relDir);
+        pluginDirs.set(relDir, pluginIdentityOf(parseManifestText(await fs.readFile(abs, 'utf-8').catch(() => null)), entry.name === PLUGIN_MANIFEST_FILE ? path.posix.basename(relDir) : relDir));
       } else if (entry.isFile() && entry.name === 'access.md') {
         const text = await fs.readFile(abs, 'utf-8');
         const parsed = parseAccessFile(text, rel);
@@ -1865,9 +1880,15 @@ export class AccessControlService implements IAccessControl {
     }
 
     // Mirror `loadModel`: plugin principals from the plugins the ref carries,
-    // so a PR-time verdict on a skill granted to `plugin/<Name>/write` counts
-    // the plugin's writers exactly as the working tree would.
-    synthesizePluginPrincipals(rolesParsed.index, accessFiles, new Set(listed.pluginDirs));
+    // each under the identity its manifest AT THAT REF declares, so a PR-time
+    // verdict on a skill granted to `plugin/<name>/write` counts the plugin's
+    // writers exactly as the working tree would.
+    const pluginIdentities = new Map<string, string>();
+    for (const dir of listed.pluginDirs) {
+      const manifest = parseManifestText(await read(`${dir}/${PLUGIN_MANIFEST_FILE}`));
+      pluginIdentities.set(dir, pluginIdentityOf(manifest, path.posix.basename(dir)));
+    }
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, pluginIdentities);
 
     // Mirror `loadModel`: drop entries whose role ref is unknown to roles.yaml,
     // while preserving the built-in `everyone` role.

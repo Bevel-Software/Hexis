@@ -163,12 +163,12 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       warnings.push(`${plugin.folder}: mcp server "${name}" not shipped — ${reason}`),
     );
     if (dedup.length === 0 && mcp === null) continue; // nothing this caller may see
-    // The slug is ALWAYS sanitised, even when the manifest declares a name: it
-    // becomes a path segment in the compiled tree, and a checked-in manifest
-    // is repository content, not trusted input. The same folding the
-    // provisioner applies (`[a-z0-9.-]`, no runs, no leading dots) leaves
-    // nothing that can be a separator or a parent reference.
-    const slug = pluginManifestName(typeof manifest?.name === 'string' && manifest.name ? manifest.name : name);
+    // The plugin's identity IS the marketplace slug. Folded once more here
+    // all the same: it becomes a path segment in the compiled tree, and a
+    // checked-in manifest is repository content, not trusted input — the
+    // folding (`[a-z0-9.-]`, no runs, no leading dots) leaves nothing that
+    // can be a separator or a parent reference.
+    const slug = pluginManifestName(name);
     if (RESERVED_SLUGS.has(slug)) {
       warnings.push(`${plugin.folder}: manifest name "${slug}" is reserved by the marketplace and cannot be a plugin — plugin skipped`);
       continue;
@@ -179,7 +179,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     }
     out.push({
       slug,
-      displayName: typeof manifest?.displayName === 'string' ? manifest.displayName : name,
+      displayName: plugin.displayName,
       description: typeof manifest?.description === 'string' ? manifest.description : undefined,
       version: typeof manifest?.version === 'string' ? manifest.version : undefined,
       skills: dedup,

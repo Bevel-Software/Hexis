@@ -106,6 +106,7 @@ export async function readBundlePlugin(
 
   return {
     name,
+    displayName: typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : name,
     folder,
     relFolder,
     // The same rule as the native reader: a reserved personal folder directly

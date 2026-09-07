@@ -259,14 +259,15 @@ describe('plugin principals', () => {
   });
 
   describe('display', () => {
-    it('eligibleReaders reports the token as a plugin-kind principal with the folder\'s casing', async () => {
+    it('eligibleReaders reports the token as a plugin-kind principal spelled by the identity, whatever the grant wrote', async () => {
       const svc = await makeService({
         ...BASE,
-        'Skills/Eng/deploy/access.md': '---\n---\nread:\n  - plugin/gtm/read\n',
+        // The folder's casing — how grants were written before the manifest became the identity.
+        'Skills/Eng/deploy/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
       });
       const readers = await svc.eligibleReaders(workspaceId, 'Skills/Eng/deploy');
       expect(readers.restricted).toBe(true);
-      expect(readers.principals).toContainEqual({ name: 'plugin/GTM/read', kind: 'plugin' });
+      expect(readers.principals).toContainEqual({ name: 'plugin/gtm/read', kind: 'plugin' });
     });
 
     it('a plugin nested deeper than the root gets its principals too — a plugin is a folder with a manifest', async () => {
@@ -291,9 +292,10 @@ describe('plugin principals', () => {
         'Plugins/personal-abc123/access.md': '---\n---\nread:\n  - Ali <ali@x.io>\n',
       });
       const { plugins } = await svc.kbPrincipals(workspaceId);
+      // Named by identity — the manifest — with the folder beside it.
       expect(plugins).toEqual([
-        { name: 'GTM', folder: 'Plugins/GTM' },
-        { name: 'Ops', folder: 'Plugins/Ops' },
+        { name: 'gtm', folder: 'Plugins/GTM' },
+        { name: 'ops', folder: 'Plugins/Ops' },
       ]);
     });
   });

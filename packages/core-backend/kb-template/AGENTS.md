@@ -44,13 +44,22 @@ any scope folder that needs its own rules). `{{pluginsDir}}/` has a layout the
 platform reads:
 
 ```text
-{{pluginsDir}}/<Plugin>/plugin.json                  the manifest (Agent Plugins) — what makes the folder a plugin
+{{pluginsDir}}/<Plugin>/plugin.json                  the manifest (Agent Plugins) — what makes the folder a plugin; its `name` is the plugin's identity
 {{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md      a skill that lives inside the plugin
 {{pluginsDir}}/<Plugin>/mcp.json                     MCP servers (authoritative)
 {{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/  `.tool` manuals
 {{pluginsDir}}/<Plugin>/access.md                    who can read/write the plugin
 {{pluginsDir}}/personal-<user-id>/…                  one per person: private
 ```
+
+**The manifest's `name` is the plugin.** It is a kebab-case identifier
+(`sales-team`), and it is what every grant spells (`plugin/sales-team/read`),
+what the URLs and the catalog key on, and what the compiled marketplace
+publishes the plugin as. `displayName` is what people see it called ("Sales
+Team"); absent, the folder name is shown. Rename a plugin from its page in the
+app: an identifier change rewrites every grant that names it, in one commit —
+editing `name` by hand leaves those grants pointing at a plugin that no longer
+exists.
 
 **A plugin LINKS shared skills rather than containing them.** Its manifest
 lists skill paths under `extensions["software.bevel.hexis"].skills` — each
@@ -149,11 +158,13 @@ Write access to any path is governed by `roles.yaml` (who has which role) and
   = `product team`). The reserved name `deny` cannot be used, and neither can
   names starting with `role/` or `plugin/` — those spellings are tokens in
   access entries (below).
-- **Plugins are grantable principals.** `plugin/<Name>/read`,
-  `plugin/<Name>/write` and `plugin/<Name>/owner` in any access file mean
-  everyone who currently holds that verb on the plugin `<Name>`, derived live
-  from the plugin's own `access.md`. This is how a shared skill is made
-  visible to a plugin's members: `read: plugin/GTM/read` on the skill's folder.
+- **Plugins are grantable principals.** `plugin/<name>/read`,
+  `plugin/<name>/write` and `plugin/<name>/owner` in any access file mean
+  everyone who currently holds that verb on the plugin whose manifest `name`
+  is `<name>`, derived live from the plugin's own `access.md`. Any spelling
+  folds to the identifier (`plugin/GTM/read` and `plugin/gtm/read` are one
+  principal). This is how a shared skill is made visible to a plugin's
+  members: `read: plugin/gtm/read` on the skill's folder.
   Adding or removing someone on the plugin changes what they can read
   everywhere the token is granted, with no copying.
 - **Access rules** live in `access.md` files, which carry **two blocks with two

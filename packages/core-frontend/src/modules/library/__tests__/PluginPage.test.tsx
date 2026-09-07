@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
@@ -29,6 +29,7 @@ const pluginsMock = vi.hoisted(() => ({
   reconcileJoinRequest: vi.fn(),
   requestPluginAccess: vi.fn(),
   unlinkSkill: vi.fn(),
+  renamePlugin: vi.fn(),
 }));
 const libApiMock = vi.hoisted(() => ({ removeLibraryItem: vi.fn() }));
 vi.mock('../services/library.api', async (importOriginal) => ({
@@ -42,6 +43,7 @@ vi.mock('../services/plugins.api', () => ({
   reconcileJoinRequest: pluginsMock.reconcileJoinRequest,
   requestPluginAccess: pluginsMock.requestPluginAccess,
   unlinkSkill: pluginsMock.unlinkSkill,
+  renamePlugin: pluginsMock.renamePlugin,
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
@@ -195,6 +197,7 @@ describe('PluginPage', () => {
     pluginsMock.listJoinRequests.mockResolvedValue([]);
     pluginsMock.reconcileJoinRequest.mockResolvedValue(false);
     pluginsMock.requestPluginAccess.mockResolvedValue(undefined);
+    pluginsMock.renamePlugin.mockReset();
   });
 
   it('lets a plugin MANAGER remove a skill, behind a confirm that says who loses it', async () => {
@@ -277,6 +280,54 @@ describe('PluginPage', () => {
     expect(screen.queryByTestId('library-card-skill-roadmap')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Skills' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools' })).toBeInTheDocument();
+  });
+
+  it('is titled by the display name with the folder beneath it, and found by its identity', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'Go To Market' })]);
+    renderPlugin('gtm');
+    expect(await screen.findByRole('heading', { name: 'Go To Market', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('Plugins/GTM')).toBeInTheDocument();
+    // The folder's skill files under the identity, not under the folder name.
+    expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
+  });
+
+  it('offers Rename plugin to a MANAGER, and moves to the new identity once the rename lands', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    pluginsMock.renamePlugin.mockResolvedValue({ name: 'go-to-market', displayName: 'GTM', rewritten: [] });
+    renderPlugin('gtm');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: 'go-to-market' } });
+    // Changing the identifier is a rename of a principal — the dialog says so before the click.
+    expect(within(dialog).getByText(/Every grant of/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename' }));
+
+    await waitFor(() =>
+      expect(pluginsMock.renamePlugin).toHaveBeenCalledWith('gtm', { name: 'go-to-market', displayName: 'GTM' }),
+    );
+    // The identity is the URL: the page moves to the plugin's new address.
+    await waitFor(() => expect(href()).toBe('/skills-and-tools/plugins/go-to-market'));
+  });
+
+  it('refuses an identifier that is not kebab-case before asking the server', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: 'Go To Market' } });
+    expect(within(dialog).getByText(/Lowercase letters, digits and single hyphens/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
+    expect(pluginsMock.renamePlugin).not.toHaveBeenCalled();
+  });
+
+  it('shows no Rename plugin to a non-manager', async () => {
+    renderPlugin('GTM'); // gtm() defaults to canWrite: false
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    await screen.findByRole('menu');
+    expect(screen.queryByRole('menuitem', { name: 'Rename plugin' })).toBeNull();
   });
 
   it('opens an mcp-declared tool card at its `?server=` URL, not the bare file URL', async () => {

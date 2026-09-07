@@ -7,6 +7,8 @@ import { useToolPage } from '../../hooks/useToolPage';
 import { useToolSource } from '../../hooks/useToolSource';
 import { McpServerSection } from './McpServerSection';
 import { libraryHomeForItemPath, LIBRARY_ROOT } from '../../routes/library-paths';
+import { useLibrary } from '../../state/library-data';
+import { pluginLabel, pluginNameForPath } from '../../utils/plugin-summary';
 import { readOAuthFragment } from '../../utils/oauth-fragment';
 import type { ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
@@ -71,7 +73,13 @@ export function ToolPage({
   // Same rule as the skill page: back goes to the page the tool LIVES on —
   // its plugin, or the personal page — never to a root the reader may not
   // have come from. Falls back to the root while the tool is still loading.
-  const home = libraryHomeForItemPath(page.tool?.path ?? '');
+  const data = useLibrary();
+  const toolPath = page.tool?.path ?? '';
+  const home = libraryHomeForItemPath(
+    toolPath,
+    toolPath ? pluginNameForPath(toolPath, data.pluginSummaries) : undefined,
+    (n) => pluginLabel(n, data.pluginSummaries),
+  );
   const backLink = (
     <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
       {`‹ ${home.label}`}

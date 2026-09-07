@@ -1,4 +1,35 @@
+import { isPersonalPluginFolder, pluginOfPath } from '@bevel-software/platform-shared';
 import type { PluginPrincipals, PluginSummary } from '../services/plugins.api';
+
+/**
+ * The plugin a repository path sits in, by IDENTITY: the summary whose
+ * folder holds the path (deepest wins, so a nested plugin beats the scope
+ * around it). Before the summaries have loaded — or for a path under a
+ * folder the catalog does not list — the folder name stands in, which is
+ * what every plugin was called before the manifest became the identity. A
+ * personal folder is a place, not a plugin: null.
+ */
+export function pluginNameForPath(
+  repoPath: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'folders'>[],
+): string | null {
+  const folder = pluginOfPath(repoPath);
+  if (folder === null || isPersonalPluginFolder(folder)) return null;
+  let best: { name: string; length: number } | null = null;
+  for (const s of summaries) {
+    for (const f of s.folders) {
+      if ((repoPath === f || repoPath.startsWith(`${f}/`)) && (!best || f.length > best.length)) {
+        best = { name: s.name, length: f.length };
+      }
+    }
+  }
+  return best?.name ?? folder;
+}
+
+/** What a plugin is called on screen — its display name, else its identity. */
+export function pluginLabel(name: string, summaries: readonly Pick<PluginSummary, 'name' | 'displayName'>[]): string {
+  return summaries.find((s) => s.name === name)?.displayName || name;
+}
 
 /**
  * How a plugin describes its membership in prose.

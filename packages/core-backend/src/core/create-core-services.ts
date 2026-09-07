@@ -56,6 +56,7 @@ import {
   JoinRequestsService,
   PluginLinkIndex,
   PluginLinksService,
+  PluginRenameService,
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
@@ -152,6 +153,7 @@ export interface CoreServices {
   pluginLinkIndex: PluginLinkIndex;
   /** Link / unlink / repair shared skills into plugins. */
   pluginLinksService: PluginLinksService;
+  pluginRenameService: PluginRenameService;
   /** Source layout → distribution layout, for one audience. */
   marketplaceCompiler: MarketplaceCompilerService;
   /** The bare repository the per-user marketplace git endpoint serves from. */
@@ -505,6 +507,20 @@ export async function createCoreServices(
     kbDirName,
     eventBus,
     () => pluginIndexService.invalidate(),
+  );
+  // A rename rewrites grants across the knowledge base in one batch commit,
+  // then drops every cache that keyed on the old identity.
+  const pluginRenameService = new PluginRenameService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    pluginSource,
+    kbDirName,
+    eventBus,
+    () => {
+      pluginIndexService.invalidate();
+      pluginLinkIndex.invalidate();
+    },
   );
   // Source → distribution. The marketplace's identity is fixed for now; the
   // per-user git endpoint and any mirror both compile through this.
@@ -883,6 +899,7 @@ export async function createCoreServices(
     joinRequestsService,
     pluginLinkIndex,
     pluginLinksService,
+    pluginRenameService,
     marketplaceCompiler,
     marketplaceRepo,
     authService,

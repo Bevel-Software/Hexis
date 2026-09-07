@@ -92,7 +92,7 @@ describe('PluginLinksService', () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
 
-    const result = await svc.link(manager, 'GTM', 'Skills/Eng/deploy');
+    const result = await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
     expect(result).toEqual({ root: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
 
     const manifest = JSON.parse(await read('Plugins/GTM/plugin.json'));
@@ -110,14 +110,15 @@ describe('PluginLinksService', () => {
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
     expect(await access.canWrite(wsId, manager.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
     // And the index reports the membership as linked and granted.
-    expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'GTM', linked: true, granted: true }]);
+    expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'gtm', linked: true, granted: true }]);
     expect(await index.pluginsOf('Skills/Eng/rollback')).toEqual([]);
   });
 
   it('a plugin whose folder is not its own slug links, re-links and unlinks through ONE spelling', async () => {
-    // "Sales Team" folds to the slug "sales-team"; every grant, comparison and
-    // revocation goes through that one canonical key, so a second link adds
-    // nothing and an unlink finds what it wrote.
+    // The folder "Sales Team" is only where the plugin lives; its manifest
+    // name "sales-team" is the plugin. Every grant, comparison and revocation
+    // goes through that one key, so a second link adds nothing and an unlink
+    // finds what it wrote.
     await write(
       'Plugins/Sales Team/access.md',
       '---\nread:\n  - everyone\n---\nread:\n  - Sam <sam@x.io>\nwrite:\n  - Mia <mia@x.io>\nowner:\n  - Mia <mia@x.io>\n',
@@ -126,14 +127,14 @@ describe('PluginLinksService', () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
 
-    await svc.link(manager, 'Sales Team', 'Skills/Eng/deploy');
-    await svc.link(manager, 'Sales Team', 'Skills/Eng/deploy');
+    await svc.link(manager, 'sales-team', 'Skills/Eng/deploy');
+    await svc.link(manager, 'sales-team', 'Skills/Eng/deploy');
     const rules = await read('Skills/Eng/deploy/access.md');
     expect(rules.match(/plugin\/sales-team\/read/g)).toHaveLength(1);
     expect(rules.match(/plugin\/sales-team\/write/g)).toHaveLength(1);
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
 
-    await svc.unlink(manager, 'Sales Team', 'Skills/Eng/deploy');
+    await svc.unlink(manager, 'sales-team', 'Skills/Eng/deploy');
     expect(await read('Skills/Eng/deploy/access.md')).not.toContain('plugin/sales-team');
     access.invalidate(wsId);
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
@@ -148,7 +149,7 @@ describe('PluginLinksService', () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
 
-    await Promise.all([svc.link(manager, 'GTM', 'Skills/Eng'), svc.link(manager, 'Ops', 'Skills/Eng')]);
+    await Promise.all([svc.link(manager, 'gtm', 'Skills/Eng'), svc.link(manager, 'ops', 'Skills/Eng')]);
     const rules = await read('Skills/Eng/access.md');
     expect(rules).toContain('plugin/gtm/read');
     expect(rules).toContain('plugin/ops/read');
@@ -157,7 +158,7 @@ describe('PluginLinksService', () => {
   });
 
   it('refuses with needs-skill-write when the manager cannot edit the skill\'s rules', async () => {
-    await expect(svc.link(manager, 'GTM', 'Skills/Eng/deploy')).rejects.toMatchObject({
+    await expect(svc.link(manager, 'gtm', 'Skills/Eng/deploy')).rejects.toMatchObject({
       status: 409,
       payload: { kind: 'needs-skill-write' },
     });
@@ -168,16 +169,16 @@ describe('PluginLinksService', () => {
   it('a folder of skills links every skill beneath it with one grant on the folder', async () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
-    const result = await svc.link(manager, 'GTM', 'Skills/Eng');
+    const result = await svc.link(manager, 'gtm', 'Skills/Eng');
     expect(result.skills.sort()).toEqual(['Skills/Eng/deploy', 'Skills/Eng/rollback']);
     expect(await read('Skills/Eng/access.md')).toContain('plugin/gtm/read');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/rollback/SKILL.md')).toBe(true);
     const m = await index.membership();
-    expect(m.byPlugin.get('GTM')?.linkedSkills.sort()).toEqual(['Skills/Eng/deploy', 'Skills/Eng/rollback']);
+    expect(m.byPlugin.get('gtm')?.linkedSkills.sort()).toEqual(['Skills/Eng/deploy', 'Skills/Eng/rollback']);
   });
 
   it('is fail-closed on the plugin side: a non-manager, or an unknown plugin, gets the same 404', async () => {
-    await expect(svc.link(member, 'GTM', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404 });
+    await expect(svc.link(member, 'gtm', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404 });
     await expect(svc.link(manager, 'Ghost', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404 });
     await expect(svc.link(manager, 'personal-abc', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404 });
   });
@@ -185,11 +186,11 @@ describe('PluginLinksService', () => {
   it('rejects a root that holds no released skill, and a path that could escape the repo', async () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
-    await expect(svc.link(manager, 'GTM', 'Skills/Nowhere')).rejects.toMatchObject({
+    await expect(svc.link(manager, 'gtm', 'Skills/Nowhere')).rejects.toMatchObject({
       status: 422,
       payload: { kind: 'no-skills' },
     });
-    await expect(svc.link(manager, 'GTM', '../etc')).rejects.toMatchObject({ status: 422, payload: { kind: 'bad-root' } });
+    await expect(svc.link(manager, 'gtm', '../etc')).rejects.toMatchObject({ status: 422, payload: { kind: 'bad-root' } });
   });
 
   it('refuses a root that holds a retired skill anywhere beneath it — the grant would reach it', async () => {
@@ -198,13 +199,13 @@ describe('PluginLinksService', () => {
     access.invalidate(wsId);
     skills.invalidate();
 
-    await expect(svc.link(manager, 'GTM', 'Skills/Eng')).rejects.toMatchObject({
+    await expect(svc.link(manager, 'gtm', 'Skills/Eng')).rejects.toMatchObject({
       status: 422,
       payload: { kind: 'retired-skills', retired: ['Skills/Eng/old-deploy'] },
     });
-    await expect(svc.link(manager, 'GTM', 'Skills/Eng/old-deploy')).rejects.toMatchObject({ status: 422 });
+    await expect(svc.link(manager, 'gtm', 'Skills/Eng/old-deploy')).rejects.toMatchObject({ status: 422 });
     // The active skill on its own is fine.
-    await svc.link(manager, 'GTM', 'Skills/Eng/deploy');
+    await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/old-deploy/SKILL.md')).toBe(false);
   });
@@ -212,10 +213,10 @@ describe('PluginLinksService', () => {
   it('unlink removes the entry and revokes the tokens when the actor may edit the skill', async () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
-    await svc.link(manager, 'GTM', 'Skills/Eng/deploy');
+    await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
     commits.length = 0;
 
-    expect(await svc.unlink(manager, 'GTM', 'Skills/Eng/deploy')).toEqual({ root: 'Skills/Eng/deploy', revoked: true });
+    expect(await svc.unlink(manager, 'gtm', 'Skills/Eng/deploy')).toEqual({ root: 'Skills/Eng/deploy', revoked: true });
     expect(JSON.parse(await read('Plugins/GTM/plugin.json')).extensions).toBeUndefined();
     expect(await read('Skills/Eng/deploy/access.md')).not.toContain('plugin/gtm');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
@@ -227,7 +228,7 @@ describe('PluginLinksService', () => {
   it('unlink leaves the grant in place when the actor may not edit the skill — and says so', async () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
-    await svc.link(manager, 'GTM', 'Skills/Eng/deploy');
+    await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
     // Eve takes Mia's write on the scope away, and hand-edits the skill's own
     // rules down to the read token — the link's write token, which would still
     // let GTM's managers edit, is gone.
@@ -235,31 +236,31 @@ describe('PluginLinksService', () => {
     await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - plugin/gtm/read\n');
     access.invalidate(wsId);
 
-    expect(await svc.unlink(manager, 'GTM', 'Skills/Eng/deploy')).toEqual({ root: 'Skills/Eng/deploy', revoked: false });
+    expect(await svc.unlink(manager, 'gtm', 'Skills/Eng/deploy')).toEqual({ root: 'Skills/Eng/deploy', revoked: false });
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
-    await expect(svc.unlink(manager, 'GTM', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404, payload: { kind: 'not-linked' } });
+    await expect(svc.unlink(manager, 'gtm', 'Skills/Eng/deploy')).rejects.toMatchObject({ status: 404, payload: { kind: 'not-linked' } });
   });
 
   it('a hand-removed grant shows as not granted, and repair puts it back', async () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
     access.invalidate(wsId);
-    await svc.link(manager, 'GTM', 'Skills/Eng/deploy');
+    await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
 
     await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - Sam <sam@x.io>\n');
     access.invalidate(wsId);
     index.invalidate();
-    expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'GTM', linked: true, granted: false }]);
+    expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'gtm', linked: true, granted: false }]);
 
-    await svc.repair(manager, 'GTM', 'Skills/Eng/deploy');
-    expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'GTM', linked: true, granted: true }]);
+    await svc.repair(manager, 'gtm', 'Skills/Eng/deploy');
+    expect(await index.pluginsOf('Skills/Eng/deploy')).toEqual([{ name: 'gtm', linked: true, granted: true }]);
     // Repair is a skill-editor's action, not a plugin-manager's: with both the
     // scope grant and the link's write token gone, Mia may not touch the rules.
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Eve <eve@x.io>\n');
     await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - Sam <sam@x.io>\n');
     access.invalidate(wsId);
-    await expect(svc.repair(manager, 'GTM', 'Skills/Eng/deploy')).rejects.toBeInstanceOf(PluginLinkError);
+    await expect(svc.repair(manager, 'gtm', 'Skills/Eng/deploy')).rejects.toBeInstanceOf(PluginLinkError);
     // Eve, who edits the scope, can.
-    await svc.repair(editor, 'GTM', 'Skills/Eng/deploy');
+    await svc.repair(editor, 'gtm', 'Skills/Eng/deploy');
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
   });
 
@@ -270,17 +271,17 @@ describe('PluginLinksService', () => {
     access.invalidate(wsId);
     index.invalidate();
 
-    await svc.link(manager, 'Deep', 'Skills/Eng/rollback');
+    await svc.link(manager, 'deep', 'Skills/Eng/rollback');
     expect(JSON.parse(await read('Plugins/teams/Deep/plugin.json')).extensions['software.bevel.hexis'].skills).toEqual(['Skills/Eng/rollback']);
     expect(await read('Skills/Eng/rollback/access.md')).toContain('plugin/deep/read');
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/rollback/SKILL.md')).toBe(true);
-    expect(await index.pluginsOf('Skills/Eng/rollback')).toEqual([{ name: 'Deep', linked: true, granted: true }]);
+    expect(await index.pluginsOf('Skills/Eng/rollback')).toEqual([{ name: 'deep', linked: true, granted: true }]);
   });
 
   it('a skill inside a plugin folder is inline membership, never a link', async () => {
     await write('Plugins/GTM/skills/outreach/SKILL.md', '---\ndescription: Reach out.\n---\n');
     skills.invalidate();
     index.invalidate();
-    expect(await index.pluginsOf('Plugins/GTM/skills/outreach')).toEqual([{ name: 'GTM', linked: false, granted: true }]);
+    expect(await index.pluginsOf('Plugins/GTM/skills/outreach')).toEqual([{ name: 'gtm', linked: false, granted: true }]);
   });
 });

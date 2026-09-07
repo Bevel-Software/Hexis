@@ -354,23 +354,53 @@ export const PLUGIN_MANIFEST_SCHEMA = `https://agent-plugins.org/schemas/${AGENT
 export const PLUGIN_MCP_SCHEMA = `https://agent-plugins.org/schemas/${AGENT_PLUGINS_SCHEMA_VERSION}/mcp.schema.json`;
 
 /**
- * A minimal, valid `plugin.json` for a plugin folder.
- *
- * Deliberately only the two required fields. `version`, `license` and the rest
- * are optional metadata about a DISTRIBUTED package, and inventing values for a
- * folder someone just made in the app would be asserting things nobody said —
- * a plugin here is a place a team keeps skills, not something published.
- *
- * The display name is the folder, which is why nothing here carries one: the
- * manifest's `name` is constrained to a lowercase slug, and the field set is
- * closed, so there is no conformant home for "Sales" other than an extension.
+ * The Agent Plugins `name`: a kebab-case identifier — lowercase letters and
+ * digits in hyphen-separated runs, nothing else. It is the plugin's IDENTITY:
+ * what the marketplace publishes it as, what the access principals are
+ * spelled from (`plugin/<name>/<verb>`), what the catalog and the URLs key
+ * on. `pluginManifestName` folds any spelling into one of these.
+ */
+export const PLUGIN_IDENTIFIER_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function isPluginIdentifier(name: unknown): name is string {
+  return typeof name === 'string' && PLUGIN_IDENTIFIER_RE.test(name);
+}
+
+/**
+ * The identity of a plugin folder: the manifest's `name` when it IS an
+ * identifier, else the folder name folded into one. A manifest naming
+ * something that cannot be an identifier is not silently reinterpreted; the
+ * folder stands in, and discovery says so.
+ */
+export function pluginIdentityOf(manifest: Record<string, unknown> | null, folderName: string): string {
+  const declared = manifest?.name;
+  return isPluginIdentifier(declared) ? declared : pluginManifestName(folderName);
+}
+
+/**
+ * What a person sees the plugin called: the manifest's `displayName` (the
+ * vendor field Claude Code shows in its picker; any casing, spaces allowed),
+ * else the folder name — which is what every plugin made before this field
+ * existed was called, so nothing renames itself on upgrade.
+ */
+export function pluginDisplayNameOf(manifest: Record<string, unknown> | null, folderName: string): string {
+  const declared = manifest?.displayName;
+  return typeof declared === 'string' && declared.trim() ? declared.trim() : folderName;
+}
+
+/**
+ * A minimal, valid `plugin.json` for a plugin folder: the identifier the
+ * folder name folds into, and — when the folder is spelled differently — the
+ * folder's spelling as `displayName`, so a client's picker shows "Sales
+ * Team" for `sales-team`. Nothing else: `version`, `license` and the rest
+ * are metadata about a DISTRIBUTED package, and inventing values for a
+ * folder someone just made in the app would be asserting things nobody said.
  */
 export function renderPluginManifest(folderName: string): string {
-  return `${JSON.stringify(
-    { $schema: PLUGIN_MANIFEST_SCHEMA, name: pluginManifestName(folderName) },
-    null,
-    2,
-  )}\n`;
+  const name = pluginManifestName(folderName);
+  const manifest: Record<string, unknown> = { $schema: PLUGIN_MANIFEST_SCHEMA, name };
+  if (folderName !== name) manifest.displayName = folderName;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
 /**

@@ -46,6 +46,20 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
 const row = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('PluginsSidebar', () => {
+  it('shows a plugin by its label and navigates by its identity — locked rows too', () => {
+    const { onSelect } = renderSidebar({
+      plugins: [{ plugin: 'gtm', label: 'Go To Market', count: 3, attention: 0 }],
+      lockedPlugins: [{ name: 'finance', label: 'Finance' }],
+    });
+    fireEvent.click(row(/^Go To Market/));
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'group', plugin: 'gtm' });
+    expect(screen.queryByRole('button', { name: /^gtm/ })).toBeNull();
+
+    fireEvent.click(row('Finance (locked)'));
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'group', plugin: 'finance' });
+    expect(screen.queryByRole('button', { name: /^finance/ })).toBeNull();
+  });
+
   it('leads with All plugins. The Library opens there, so the nav starts there', () => {
     const { onOpenPluginsIndex } = renderSidebar();
     const rows = screen.getAllByRole('button');

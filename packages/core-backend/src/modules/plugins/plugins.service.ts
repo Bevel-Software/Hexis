@@ -123,6 +123,7 @@ export class PluginIndexService implements IPluginIndexService {
         ]);
         entries.push({
           name,
+          displayName: scanned.get(name)?.displayName ?? name,
           folders: pluginFolders,
           linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
@@ -151,13 +152,17 @@ export class PluginIndexService implements IPluginIndexService {
    */
   private async scanFolders(
     kbRoot: string,
-  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean }>> {
-    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean }>();
+  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>> {
+    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>();
     const discovered = await this.source.discover(kbRoot);
     for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
     for (const plugin of discovered.plugins) {
       if (plugin.personal || !plugin.exists) continue;
-      byName.set(plugin.name, { folders: [plugin.folder], linksAreManaged: plugin.linksAreManaged });
+      byName.set(plugin.name, {
+        folders: [plugin.folder],
+        linksAreManaged: plugin.linksAreManaged,
+        displayName: plugin.displayName,
+      });
     }
     return byName;
   }

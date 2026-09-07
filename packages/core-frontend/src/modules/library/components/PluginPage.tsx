@@ -6,10 +6,12 @@ import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
   decodePluginSegment,
+  pathForPlugin,
   pathForPluginsIndex,
   urlForLibraryItem,
 } from '../routes/library-paths';
-import { primaryFolderOf } from '../utils/plugin-summary';
+import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
+import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
@@ -116,6 +118,8 @@ export function PluginPage() {
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
   /** Whether the plugin's own delete confirmation is up. */
   const [deleteOpen, setDeleteOpen] = useState(false);
+  /** Whether the rename dialog is up. */
+  const [renameOpen, setRenameOpen] = useState(false);
 
   const summary = useMemo(
     () => data.pluginSummaries.find((g) => g.name === plugin) ?? null,
@@ -229,10 +233,13 @@ export function PluginPage() {
   }
 
   const primaryFolder = summary ? primaryFolderOf(summary) : null;
+  // What the page CALLS the plugin — its display name. `plugin` stays the
+  // identity: the URL, the grants, the API.
+  const label = pluginLabel(plugin, data.pluginSummaries);
 
   return (
     <div className="pb-14">
-      <PluginBreadcrumb name={plugin} />
+      <PluginBreadcrumb name={label} />
 
       {/* The title row carries the page's one persistent action. `Share` IS
           the manage-access dialog — not a doorway to it. It stays un-gated:
@@ -243,7 +250,16 @@ export function PluginPage() {
           Share stays un-gated: for a non-writer the dialog renders read-only,
           which is exactly what "who is this shared with?" should answer. */}
       <div className="flex items-start justify-between gap-4">
-        <h1 className="mt-1.5 text-display font-semibold">{plugin}</h1>
+        <div className="min-w-0">
+          <h1 className="mt-1.5 text-display font-semibold">{label}</h1>
+          {/* Where it lives — the folder is no longer the name, so it is
+              said beneath it, the way a file path sits under a document title. */}
+          {primaryFolder && (
+            <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
+              {primaryFolder}
+            </p>
+          )}
+        </div>
         <div className="mt-1.5 flex items-center gap-1">
           <ManifestButton kbDirName={kbDirName} folder={plugin} canWrite={summary?.canWrite === true} />
           <PageActions
@@ -260,7 +276,9 @@ export function PluginPage() {
             // route enforces, so the item appears for exactly the people the
             // backend will let through.
             onDelete={summary?.isOwner ? () => setDeleteOpen(true) : undefined}
-            addLabel={`Add a skill or tool to ${plugin}`}
+            // The MANAGER's verb: the same gate as linking and the join banner.
+            onRename={summary?.canWrite ? () => setRenameOpen(true) : undefined}
+            addLabel={`Add a skill or tool to ${label}`}
           />
         </div>
       </div>
@@ -396,6 +414,19 @@ export function PluginPage() {
             data.reloadPlugins();
           }}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {renameOpen && summary && (
+        <RenamePluginDialog
+          plugin={summary}
+          onClose={() => setRenameOpen(false)}
+          onRenamed={(next) => {
+            data.reload();
+            data.reloadPlugins();
+            // The identity is the URL: a renamed plugin lives at a new address.
+            if (next.name !== plugin) navigate(pathForPlugin(next.name));
+          }}
         />
       )}
 

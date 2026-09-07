@@ -13,7 +13,7 @@ import {
   pathForLibraryFilter,
 } from '../routes/library-paths';
 import { isUngrouped, pluginCounts, pluginsOfItem, type LibraryFilter } from '../utils/status';
-import { primaryFolderOf } from '../utils/plugin-summary';
+import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
@@ -113,6 +113,7 @@ export function LibraryLayout() {
       .sort((a, b) => a.localeCompare(b))
       .map((plugin) => ({
         plugin,
+        label: pluginLabel(plugin, pluginSummaries),
         count: counts.get(plugin) ?? 0,
         attention: attentionOf(items, plugin),
       }));
@@ -136,8 +137,8 @@ export function LibraryLayout() {
       // A manager (canWrite via admin-rescue) is not locked out — their plugin
       // belongs with the ones they run, not below the gap.
       .filter((g) => !g.canRead && !g.canWrite && !visible.has(g.name))
-      .map((g) => g.name)
-      .sort((a, b) => a.localeCompare(b));
+      .map((g) => ({ name: g.name, label: g.displayName || g.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
   }, [pluginSummaries, items]);
 
   const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);

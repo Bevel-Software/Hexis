@@ -197,13 +197,13 @@ describe('KbPluginSource — one walk, both shapes', () => {
     // Folders are visited in locale order (case-insensitive), depth first.
     // Position means nothing: only the two files make a plugin.
     expect(plugins.map((p) => [p.name, p.folder, p.linksAreManaged, p.exists])).toEqual([
-      ['Both', 'Plugins/Both', true, false],
+      ['both', 'Plugins/Both', true, false],
       ['example', 'Plugins/functional/cluster/example', false, true],
-      ['GTM', 'Plugins/GTM', true, true],
+      ['gtm', 'Plugins/GTM', true, true],
       ['deep', 'Plugins/teams/deep', true, false],
     ]);
-    expect(plugins.find((p) => p.name === 'GTM')?.linkedRoots).toEqual(['Skills/Eng']);
-    expect(plugins.find((p) => p.name === 'Both')?.linkedRoots).toEqual([]);
+    expect(plugins.find((p) => p.name === 'gtm')?.linkedRoots).toEqual(['Skills/Eng']);
+    expect(plugins.find((p) => p.name === 'both')?.linkedRoots).toEqual([]);
     expect(warnings).toEqual([]);
   });
 
@@ -215,8 +215,23 @@ describe('KbPluginSource — one walk, both shapes', () => {
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     expect(plugins.map((p) => p.folder)).toEqual(['Plugins/a/GTM']);
     expect(warnings).toEqual([
-      'Plugins/b/GTM: plugin name "GTM" is already used by Plugins/a/GTM — plugin skipped',
+      'Plugins/b/GTM: plugin name "gtm" is already used by Plugins/a/GTM — plugin skipped',
       'Plugins/c/gtm: plugin name "gtm" is already used by Plugins/a/GTM — plugin skipped',
+    ]);
+  });
+
+  it('the manifest name is the identity and the folder only the label — unless the name is no identifier', async () => {
+    await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', displayName: 'Go To Market' }));
+    await write('Plugins/Ops/plugin.json', JSON.stringify({ name: 'Not An Identifier' }));
+    await write('Plugins/Plain/plugin.json', '{}');
+    const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
+      ['go-to-market', 'Go To Market', 'Plugins/GTM'],
+      ['ops', 'Ops', 'Plugins/Ops'],
+      ['plain', 'Plain', 'Plugins/Plain'],
+    ]);
+    expect(warnings).toEqual([
+      'Plugins/Ops/plugin.json names "Not An Identifier", which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "ops"',
     ]);
   });
 

@@ -28,6 +28,17 @@ earlier release added for it — the Skills & Tools sidebar shows that root as
 a file tree now); write a `plugin.json` into every plugin folder that predates
 the manifest. Each is idempotent, so a second start writes nothing.
 
+A plugin is named by its manifest: the `name` in `plugin.json` is what the
+marketplace publishes, what the plugin's page address uses, and what grants
+spell (`plugin/<name>/read`). The manifests the maintenance phase writes name
+each folder in slug form (`Sales Team` → `sales-team`), and grants written
+before this release already resolved through that slug, so they keep working.
+If you wrote a manifest by hand whose `name` differs from the folder's slug,
+grants that spelled the folder no longer name that plugin: open the plugin's
+page and rename its identifier to the slug the grants use, or respell the
+grants. The folder name (or the manifest's `displayName`) stays the label
+people see, so nothing is relabelled.
+
 **Downgrading is not supported** once a version's migrations have run: an
 older app cannot read a newer database. To go back, restore the backup you
 took before upgrading.

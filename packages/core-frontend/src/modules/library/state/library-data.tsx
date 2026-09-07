@@ -1,19 +1,23 @@
 import { PR_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
-import { pluginOfPath, isPersonalPluginFolder, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { SKILLS_DIR } from '@bevel-software/platform-shared';
+import { pluginNameForPath } from '../utils/plugin-summary';
 import type { PluginMembership } from '../services/library.api';
 
 /**
- * The plugin a card files under — with personal folders mapped to `null`, the
- * "yours alone" bucket. A personal folder (`Plugins/personal-<id>/`) is where
- * a person's own skills live; it is a place, not a plugin, and the only
- * personal items a caller can ever read are their own (the folder's seeded
- * access.md names nobody else), so `null` here always means "yours".
+ * The plugin a card files under, by IDENTITY — the server's own answer for a
+ * skill it decorated (the inline membership), else the folder resolved
+ * through the plugin summaries (see `pluginNameForPath`). Personal folders
+ * map to `null`, the "yours alone" bucket: a personal folder is a place, not
+ * a plugin, and the only personal items a caller can ever read are their own.
  */
-function displayPluginOf(path: string): string | null {
-  const plugin = pluginOfPath(path);
-  return plugin !== null && isPersonalPluginFolder(plugin) ? null : plugin;
+function pluginOfItem(
+  path: string,
+  memberships: readonly { name: string; linked: boolean }[] | undefined,
+  summaries: readonly PluginSummary[],
+): string | null {
+  return memberships?.find((m) => !m.linked)?.name ?? pluginNameForPath(path, summaries);
 }
 
 /** Under the shared `Skills/` root — owned by a scope, not by a person or a plugin folder. */
@@ -144,7 +148,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
-      plugin: displayPluginOf(s.path),
+      plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
       lifecycle: s.lifecycle,
@@ -171,7 +175,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
-      plugin: displayPluginOf(s.path),
+      plugin: pluginOfItem(s.path, undefined, pluginSummaries),
       shared: isSharedPath(s.path),
       path: s.path,
       version: s.version,
@@ -191,7 +195,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
       owned: t.canWrite,
-      plugin: displayPluginOf(t.path),
+      plugin: pluginOfItem(t.path, undefined, pluginSummaries),
       path: t.path,
       status: toolStatus(t),
     }));
@@ -202,6 +206,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     data.tools,
     data.ownedSkills,
     data.allowedToolsBySkill,
+    pluginSummaries,
   ]);
 
   // The loading flag is raised HERE rather than in the effect: `useState(true)`

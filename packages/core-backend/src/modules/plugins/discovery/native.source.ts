@@ -4,8 +4,10 @@ import {
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   isPersonalPluginFolder,
+  isPluginIdentifier,
   linkedSkillRoots,
-  pluginManifestName,
+  pluginDisplayNameOf,
+  pluginIdentityOf,
 } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
@@ -21,22 +23,23 @@ export async function readNativePlugin(
   relFolder: string,
   warnings: string[],
 ): Promise<DiscoveredPlugin> {
-  const name = path.posix.basename(relFolder);
+  const folderName = path.posix.basename(relFolder);
   const manifestText = await readText(path.join(dir, PLUGIN_MANIFEST_FILE));
   const mcpJsonText = await readText(path.join(dir, PLUGIN_MCP_FILE));
   const manifest = parseObject(manifestText);
   if (manifestText !== null && manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
   }
-  // Two names govern two things. The FOLDER is the plugin's identity for
-  // ACCESS — the catalog, the plugin principals (`plugin/<folder>/<verb>`),
-  // the link grants. The manifest's `name` is what the compiled marketplace
-  // publishes the plugin as, per the plugin spec. When they differ, a grant
-  // written against the published name reaches nobody, so the mismatch is
-  // said out loud.
-  if (manifest && typeof manifest.name === 'string' && pluginManifestName(manifest.name) !== pluginManifestName(name)) {
+  // The manifest's `name` IS the identity — the grants, the URLs, the
+  // marketplace all spell it — when it is an identifier. One that is not
+  // (spaces, capitals) is never silently reinterpreted: the folder stands
+  // in, and the mismatch is said out loud so a grant written against the
+  // manifest's spelling is not a mystery.
+  const name = pluginIdentityOf(manifest, folderName);
+  const displayName = pluginDisplayNameOf(manifest, folderName);
+  if (manifest && typeof manifest.name === 'string' && !isPluginIdentifier(manifest.name)) {
     warnings.push(
-      `${folder}/${PLUGIN_MANIFEST_FILE} names "${manifest.name}" while the folder is "${name}": access principals follow the FOLDER (plugin/${name}/read) — the marketplace publishes it as "${pluginManifestName(manifest.name)}"`,
+      `${folder}/${PLUGIN_MANIFEST_FILE} names "${manifest.name}", which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "${name}"`,
     );
   }
   const mcp = parseObject(mcpJsonText);
@@ -47,10 +50,11 @@ export async function readNativePlugin(
   const exists = await fs.stat(path.join(dir, 'access.md')).then((s) => s.isFile(), () => false);
   return {
     name,
+    displayName,
     folder,
     relFolder,
     // Personal folders sit directly under the root; a deeper `personal-x` is just a name.
-    personal: !relFolder.includes('/') && isPersonalPluginFolder(name),
+    personal: !relFolder.includes('/') && isPersonalPluginFolder(folderName),
     exists,
     manifest,
     manifestText,

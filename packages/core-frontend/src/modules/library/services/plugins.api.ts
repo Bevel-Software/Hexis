@@ -27,8 +27,10 @@ export interface PluginReaders extends PluginPrincipals {
 }
 
 export interface PluginSummary {
-  /** Plugin folder name, e.g. `GTM`. */
+  /** The plugin's identity — its manifest name, e.g. `gtm`. Grants, URLs and the marketplace spell it. */
   name: string;
+  /** What people see it called, e.g. `GTM`. Absent from an older server: show `name`. */
+  displayName?: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
   /** Per-caller: can read the folder (membership). Locked === !canRead. */
@@ -74,7 +76,7 @@ export async function listPlugins(): Promise<PluginSummary[]> {
  * seeded `access.md` before answering, and refuses with its own words —
  * worth surfacing verbatim.
  */
-export async function createPlugin(name: string): Promise<{ folder: string }> {
+export async function createPlugin(name: string): Promise<{ folder: string; name: string }> {
   const res = await authFetch('/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -84,7 +86,28 @@ export async function createPlugin(name: string): Promise<{ folder: string }> {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Couldn't create that plugin.");
   }
-  return (await res.json()) as { folder: string };
+  return (await res.json()) as { folder: string; name: string };
+}
+
+/**
+ * Rename a plugin: its identifier (which rewrites every grant naming it),
+ * its display name, or both. The refusal's message names the reason — a
+ * taken name, a bad identifier, files the caller cannot edit.
+ */
+export async function renamePlugin(
+  name: string,
+  patch: { name?: string; displayName?: string },
+): Promise<{ name: string; displayName: string; rewritten: string[] }> {
+  const res = await authFetch(`/api/plugins/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't rename the plugin.");
+  }
+  return (await res.json()) as { name: string; displayName: string; rewritten: string[] };
 }
 
 /**

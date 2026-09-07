@@ -59,7 +59,9 @@ describe('PluginProvisionService.createPlugin', () => {
 
   it('writes the discoverable template, commits it inline, and drops the access cache', async () => {
     const result = await h.svc.createPlugin(USER, 'GTM');
-    expect(result).toEqual({ folder: 'GTM', created: true });
+    // The folder is where it lives; the name is what it IS (the identity the
+    // page navigates to and the grants spell).
+    expect(result).toEqual({ folder: 'GTM', name: 'gtm', created: true });
 
     const accessMd = await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/access.md'), 'utf-8');
     // Discoverable FILE (frontmatter read: everyone), creator-run FOLDER
@@ -87,7 +89,7 @@ describe('PluginProvisionService.createPlugin', () => {
     expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
   });
 
-  it('writes a conformant plugin.json naming the folder in slug form', async () => {
+  it('writes a conformant plugin.json: the identifier in slug form, the typed name as the display name', async () => {
     await h.svc.createPlugin(USER, 'GTM');
     const manifest = JSON.parse(
       await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/plugin.json'), 'utf-8'),
@@ -95,6 +97,7 @@ describe('PluginProvisionService.createPlugin', () => {
     expect(manifest).toEqual({
       $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
       name: 'gtm',
+      displayName: 'GTM',
     });
     // The schema's `name` pattern is the thing a conformant client refuses on.
     expect(manifest.name).toMatch(/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/);
@@ -118,6 +121,7 @@ describe('PluginProvisionService.createPlugin', () => {
     // A genuinely distinct slug still goes through.
     await expect(h.svc.createPlugin(USER, 'Sales Ops')).resolves.toEqual({
       folder: 'Sales Ops',
+      name: 'sales-ops',
       created: true,
     });
   });
@@ -145,6 +149,7 @@ describe('PluginProvisionService.createPlugin', () => {
     await fs.writeFile(path.join(h.dir, KB, 'Plugins', 'slack.tool'), 'id: slack\n', 'utf-8');
     await expect(h.svc.createPlugin(USER, 'Slack Tool')).resolves.toEqual({
       folder: 'Slack Tool',
+      name: 'slack-tool',
       created: true,
     });
   });
@@ -180,7 +185,7 @@ describe('PluginProvisionService.createPlugin', () => {
     await expect(h.svc.createPlugin(USER, 'GTM')).rejects.toThrow('push refused');
     // The folder is gone again — the next attempt starts clean.
     await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM'))).rejects.toThrow();
-    await expect(h.svc.createPlugin(USER, 'GTM')).resolves.toEqual({ folder: 'GTM', created: true });
+    await expect(h.svc.createPlugin(USER, 'GTM')).resolves.toEqual({ folder: 'GTM', name: 'gtm', created: true });
   });
 });
 
@@ -260,7 +265,7 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     const folder = personalPluginFolderName(USER.id);
 
     const first = await h.svc.ensurePersonalPlugin(USER);
-    expect(first).toEqual({ folder, created: true });
+    expect(first).toEqual({ folder, name: folder, created: true });
     const accessMd = await fs.readFile(
       path.join(h.dir, KB, 'Plugins', folder, 'access.md'),
       'utf-8',
@@ -273,7 +278,7 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     }
 
     const second = await h.svc.ensurePersonalPlugin(USER);
-    expect(second).toEqual({ folder, created: false });
+    expect(second).toEqual({ folder, name: folder, created: false });
     // Idempotent for real: one provision (access.md + plugin.json), one commit.
     expect(h.writeFile).toHaveBeenCalledTimes(2);
     expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);

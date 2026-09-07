@@ -492,6 +492,7 @@ export async function createCoreServer(
     core.kbDirName,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
     core.pluginLinksService,
+    core.pluginRenameService,
   ));
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).

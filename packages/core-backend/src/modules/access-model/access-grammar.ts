@@ -297,8 +297,8 @@ export interface RolesIndex {
       emails: Set<string>;
       groupRefs?: Set<string>;
       kind?: 'role' | 'group' | 'plugin';
-      /** For `kind: 'plugin'`: the plugin FOLDER name the principal derives from. */
-      pluginFolder?: string;
+      /** For `kind: 'plugin'`: the plugin's identity (its manifest name) the principal derives from. */
+      pluginName?: string;
       /** For `kind: 'plugin'`: the repo-relative plugin directory, e.g. `Plugins/GTM`. */
       pluginDir?: string;
     }

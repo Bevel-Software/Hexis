@@ -27,13 +27,13 @@ export interface PluginsSidebarProps {
   filter: LibraryFilter | null;
   /** A row was clicked — the layout navigates; the sidebar owns no state. */
   onSelect(filter: LibraryFilter): void;
-  /** Readable plugins, with their item count and how many integrations need setup. */
-  plugins: { plugin: string; count: number; attention: number }[];
+  /** Readable plugins, with their item count and how many integrations need setup. `label` is what the row shows; `plugin` is the identity it navigates by. */
+  plugins: { plugin: string; label?: string; count: number; attention: number }[];
   /**
    * Plugins the caller cannot read, alphabetical. Rendered after a gap, with a
-   * lock instead of a count.
+   * lock instead of a count. A bare string is a plugin whose label is its name.
    */
-  lockedPlugins: string[];
+  lockedPlugins: (string | { name: string; label: string })[];
   ownedCount: number;
   /**
    * How many of the caller's OWN items are waiting on them. Drives the amber
@@ -208,13 +208,15 @@ export function PluginsSidebar({
    * (a non-member has nothing to fix). The accessible name carries the state in
    * words, so the glyph itself can stay decorative.
    */
-  const lockedRow = (name: string) => {
+  const lockedRow = (locked: string | { name: string; label: string }) => {
+    const name = typeof locked === 'string' ? locked : locked.name;
+    const label = typeof locked === 'string' ? locked : locked.label;
     const target: LibraryFilter = { kind: 'group', plugin: name };
     return (
       <button
         key={`locked:${name}`}
         type="button"
-        aria-label={`${name} (locked)`}
+        aria-label={`${label} (locked)`}
         aria-current={isCurrent(target)}
         className={rowClass(isCurrent(target))}
         onClick={() => onSelect(target)}
@@ -222,9 +224,9 @@ export function PluginsSidebar({
         // reason it gets the same click: a plugin you are not in is still a
         // place, and `Manage access` is exactly the item an admin locked out of
         // one needs. Which verbs are actually true is the layout's call.
-        onContextMenu={(e) => openMenu(e, target, name, e.currentTarget)}
+        onContextMenu={(e) => openMenu(e, target, label, e.currentTarget)}
       >
-        <span className="truncate">{name}</span>
+        <span className="truncate">{label}</span>
         <span className="flex h-4.5 shrink-0 basis-5.5 items-center justify-center text-ink-faint">
           <LockGlyph className="size-3" />
         </span>
@@ -290,11 +292,11 @@ export function PluginsSidebar({
           {/* Your own space leads the plugins, as in the prototype (line 2487):
               it is the one you are always in. */}
           {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
-          {plugins.map(({ plugin, count, attention }) =>
+          {plugins.map(({ plugin, label, count, attention }) =>
             // Amber wins the count slot: a plugin that needs setup is telling you
             // something, and how many items it holds is not the news.
             row(
-              plugin,
+              label ?? plugin,
               { kind: 'group', plugin },
               attention > 0 ? attention : count,
               attention > 0 ? 'pending' : 'count',

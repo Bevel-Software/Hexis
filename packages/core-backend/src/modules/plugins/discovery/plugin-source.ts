@@ -18,11 +18,14 @@
  */
 export interface DiscoveredPlugin {
   /**
-   * The plugin's identity everywhere a person or a URL names it — the folder
-   * name for a native plugin; the bundle's `name` (or its leaf folder) for a
-   * dialect plugin. Unique per source.
+   * The plugin's IDENTITY everywhere a URL, a grant or a marketplace names
+   * it: the manifest's `name` — an Agent Plugins identifier — or the folder
+   * name folded into one when the manifest declares none it can be. A bundle
+   * plugin's is the bundle's `name`. Unique per source.
    */
   name: string;
+  /** What a person sees it called: the manifest's `displayName`, else the folder name. */
+  displayName: string;
   /** Repo-relative folder holding the plugin, e.g. `Plugins/GTM`. */
   folder: string;
   /** The same folder relative to the plugins root, e.g. `GTM` or `functional/x/y`. */

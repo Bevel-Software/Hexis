@@ -232,7 +232,8 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const { status, plugins } = await listPlugins(h.baseUrl);
     expect(status).toBe(200);
-    expect(plugins.map((g) => g.name)).toEqual(['Finance', 'GTM']);
+    // Named by identity (the manifest), labelled by folder.
+    expect(plugins.map((g) => [g.name, g.displayName])).toEqual([['finance', 'Finance'], ['gtm', 'GTM']]);
     expect(plugins[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1 });
     expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0 });
   });
@@ -244,7 +245,7 @@ describe('/api/plugins routes', () => {
     });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.map((g) => g.name)).toEqual(['Finance']);
+    expect(plugins.map((g) => g.name)).toEqual(['finance']);
     expect(plugins[0]).toMatchObject({
       canRead: false,
       canWrite: false,
@@ -257,8 +258,9 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
     const { plugins, raw } = await listPlugins(h.baseUrl);
-    expect(plugins.map((g) => g.name)).toEqual(['Finance']);
-    expect(raw).not.toContain('"name":"GTM"');
+    expect(plugins.map((g) => g.name)).toEqual(['finance']);
+    expect(raw).not.toContain('"name":"gtm"');
+    expect(raw).not.toContain('"GTM"');
     expect(raw).not.toContain('Plugins/GTM');
   });
 
@@ -266,7 +268,7 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.map((g) => g.name)).toEqual(['GTM']);
+    expect(plugins.map((g) => g.name)).toEqual(['gtm']);
     expect(plugins[0]).toMatchObject({ canRead: false, canWrite: true });
   });
 
@@ -277,7 +279,7 @@ describe('/api/plugins routes', () => {
     });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins[0]).toMatchObject({ name: 'GTM', canRead: true, hasRequested: false });
+    expect(plugins[0]).toMatchObject({ name: 'gtm', canRead: true, hasRequested: false });
   });
 
   it('lists the owner verdict per caller — the folder verdict, not the manager one', async () => {
@@ -287,8 +289,8 @@ describe('/api/plugins routes', () => {
     });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'GTM')).toMatchObject({ isOwner: true });
-    expect(plugins.find((g) => g.name === 'Finance')).toMatchObject({ isOwner: false });
+    expect(plugins.find((g) => g.name === 'gtm')).toMatchObject({ isOwner: true });
+    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({ isOwner: false });
   });
 
   it('delete: 404 for unknown AND for a non-owner — a manager included (identical, fail-closed)', async () => {
@@ -300,7 +302,7 @@ describe('/api/plugins routes', () => {
       writable: { [ALI]: ['Plugins/GTM/access.md'] },
     });
     server = h.server;
-    for (const name of ['Nope', 'GTM']) {
+    for (const name of ['Nope', 'gtm']) {
       const res = await fetch(`${h.baseUrl}/api/plugins/${name}`, { method: 'DELETE' });
       expect(res.status, name).toBe(404);
       expect(await res.json()).toEqual({ error: 'Unknown plugin', kind: 'unknown-plugin' });
@@ -308,12 +310,13 @@ describe('/api/plugins routes', () => {
     expect(h.provision.deletePlugin).not.toHaveBeenCalled();
   });
 
-  it('delete: an OWNER deletes through the provision door, by the catalog name', async () => {
+  it('delete: an OWNER deletes through the provision door — found by identity, deleted by folder', async () => {
     const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM`, { method: 'DELETE' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    // Provisioning owns folders, so it is handed the folder, not the name.
     expect(h.provision.deletePlugin).toHaveBeenCalledWith(
       expect.objectContaining({ email: ALI }),
       'GTM',
@@ -325,7 +328,7 @@ describe('/api/plugins routes', () => {
     const { PluginProvisionError } = await import('../plugin-provision.service.js');
     h.provision.deletePlugin.mockRejectedValueOnce(new PluginProvisionError('Unknown plugin', 404));
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM`, { method: 'DELETE' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' });
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'Unknown plugin' });
   });
@@ -335,7 +338,7 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     h.provision.deletePlugin.mockRejectedValueOnce(new Error('push refused'));
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM`, { method: 'DELETE' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' });
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: 'Failed to delete the plugin' });
     error.mockRestore();
@@ -344,7 +347,7 @@ describe('/api/plugins routes', () => {
   it('join-request: 404 for unknown AND for undiscoverable (identical, fail-closed)', async () => {
     const h = await makeHarness({});
     server = h.server;
-    for (const name of ['Nope', 'GTM']) {
+    for (const name of ['Nope', 'gtm']) {
       const res = await fetch(`${h.baseUrl}/api/plugins/${name}/join-request`, { method: 'POST' });
       expect(res.status, name).toBe(404);
       expect(await res.json()).toEqual({ error: 'Unknown plugin', kind: 'unknown-plugin' });
@@ -354,7 +357,7 @@ describe('/api/plugins routes', () => {
   it('join-request: 409 when the caller can already read the folder', async () => {
     const h = await makeHarness({ readable: MEMBER_OF_BOTH });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/Finance/join-request`, { method: 'POST' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(409);
     expect((await res.json()).kind).toBe('already-readable');
   });
@@ -362,10 +365,12 @@ describe('/api/plugins routes', () => {
   it('join-request: branch + splice + commit + CR, on the deterministic join branch', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/Finance/join-request`, { method: 'POST' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, number: 42 });
 
+    // The branch is cut from the FOLDER name, as every join branch before the
+    // manifest became the identity was — so none of them is orphaned.
     const branch = joinBranchFor(ALI, 'Finance');
     expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
     // The write went to the plugin's access.md and added the caller to the
@@ -394,7 +399,7 @@ describe('/api/plugins routes', () => {
       authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/Finance/join-request`, { method: 'POST' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, number: 9 });
     expect(h.workflow.createBranch).not.toHaveBeenCalled();
@@ -417,7 +422,7 @@ describe('/api/plugins routes', () => {
   it('join-requests: a MANAGER gets the service\'s list for the plugin', async () => {
     const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests`);
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ requests: [] });
     expect(h.joinRequests.list).toHaveBeenCalledWith(
@@ -433,7 +438,7 @@ describe('/api/plugins routes', () => {
     // question only the server answers.
     const h = await makeHarness({ readable: MEMBER_OF_BOTH });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests`);
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ requests: [] });
     expect(h.joinRequests.list).not.toHaveBeenCalled();
@@ -442,7 +447,7 @@ describe('/api/plugins routes', () => {
   it('reconcile: 404 for a non-manager — indistinguishable from a missing request', async () => {
     const h = await makeHarness({ readable: MEMBER_OF_BOTH, authoredCrs: [cr({ number: 7 })] });
     server = h.server;
-    const denied = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests/7/reconcile`, {
+    const denied = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests/7/reconcile`, {
       method: 'POST',
     });
     expect(denied.status).toBe(404);
@@ -452,7 +457,7 @@ describe('/api/plugins routes', () => {
   it('reconcile: 404 for a manager when the change request does not exist', async () => {
     const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
-    const missing = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests/999/reconcile`, {
+    const missing = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests/999/reconcile`, {
       method: 'POST',
     });
     expect(missing.status).toBe(404);
@@ -466,7 +471,7 @@ describe('/api/plugins routes', () => {
     });
     (h.joinRequests.reconcile as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests/7/reconcile`, {
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests/7/reconcile`, {
       method: 'POST',
     });
     expect(res.status).toBe(200);
