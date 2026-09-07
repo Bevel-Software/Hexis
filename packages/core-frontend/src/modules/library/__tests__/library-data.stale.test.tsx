@@ -30,12 +30,19 @@ describe('LibraryProvider', () => {
       reload,
     };
     dataMock.useLibraryData.mockReturnValue(data);
+    const { listPlugins } = await import('../services/plugins.api');
+    vi.mocked(listPlugins).mockClear();
     const view = render(<LibraryProvider>x</LibraryProvider>);
+    await act(async () => undefined);
     expect(reload).not.toHaveBeenCalled();
+    expect(listPlugins).toHaveBeenCalledTimes(1);
     await act(async () => {
       window.dispatchEvent(new Event(PR_STALE_EVENT));
     });
     expect(reload).toHaveBeenCalledTimes(1);
+    // A merged change can move plugin links and access: the summaries
+    // refresh with the catalog, not only on a page's own reload.
+    expect(listPlugins).toHaveBeenCalledTimes(2);
     view.unmount();
     await act(async () => {
       window.dispatchEvent(new Event(PR_STALE_EVENT));

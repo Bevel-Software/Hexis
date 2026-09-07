@@ -104,16 +104,7 @@ export interface LibraryContextValue extends LibraryData {
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const data = useLibraryData();
-  // The catalog carries its own view of open change requests (proposals,
-  // review boxes). The shell's change-request provider refreshes on this
-  // event; so does the catalog, or the two would disagree after a proposal
-  // lands or is resolved.
   const { reload } = data;
-  useEffect(() => {
-    const onStale = () => reload();
-    window.addEventListener(PR_STALE_EVENT, onStale);
-    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
-  }, [reload]);
   const [pluginSummaries, setPluginSummaries] = useState<PluginSummary[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(true);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
@@ -228,6 +219,17 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     reload();
     reloadPlugins();
   }, [reload, reloadPlugins]);
+
+  // The catalog carries its own view of open change requests (proposals,
+  // review boxes). The shell's change-request provider refreshes on this
+  // event; so does the whole Library, or the two would disagree after a
+  // proposal lands or is resolved — and a merged change can move plugin
+  // links and access, so the summaries refresh with the catalog here too.
+  useEffect(() => {
+    const onStale = () => reloadAll();
+    window.addEventListener(PR_STALE_EVENT, onStale);
+    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+  }, [reloadAll]);
 
   const value = useMemo(
     (): LibraryContextValue => ({
