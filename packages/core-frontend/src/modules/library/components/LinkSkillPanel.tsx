@@ -32,7 +32,9 @@ export function LinkSkillPanel({
 }) {
   const toast = useLibraryToast();
   const [query, setQuery] = useState('');
-  const [busy, setBusy] = useState<string | null>(null);
+  // What is in flight, and for which skill: the live region names the
+  // operation, so a write-access request is never announced as a link.
+  const [busy, setBusy] = useState<{ id: string; op: 'link' | 'request' } | null>(null);
   /** Per skill: the server said write on the skill is missing / a request is open. */
   const [needsWrite, setNeedsWrite] = useState<Record<string, 'ask' | 'requested'>>({});
 
@@ -47,7 +49,7 @@ export function LinkSkillPanel({
   }, [items, plugin, query]);
 
   async function link(item: LibraryItem) {
-    setBusy(item.id);
+    setBusy({ id: item.id, op: 'link' });
     try {
       const result = await linkSkill(plugin, item.path);
       toast(
@@ -68,7 +70,7 @@ export function LinkSkillPanel({
   }
 
   async function request(item: LibraryItem) {
-    setBusy(item.id);
+    setBusy({ id: item.id, op: 'request' });
     try {
       await requestSkillAccess(item.name);
       setNeedsWrite((m) => ({ ...m, [item.id]: 'requested' }));
@@ -89,7 +91,11 @@ export function LinkSkillPanel({
           "Linking…" too, but a button that goes disabled drops focus, so a
           label change there is never read out; a live region is. */}
       <span role="status" aria-live="polite" aria-label="Link progress" className="sr-only">
-        {busy !== null ? `Linking ${busy}…` : ''}
+        {busy === null
+          ? ''
+          : busy.op === 'link'
+            ? `Linking ${busy.id}…`
+            : `Requesting write access to ${busy.id}…`}
       </span>
       <input
         type="search"
@@ -137,10 +143,10 @@ export function LinkSkillPanel({
                 <Button
                   variant="outline"
                   size="tiny"
-                  disabled={busy === item.id}
+                  disabled={busy !== null}
                   onClick={() => void request(item)}
                 >
-                  Request write access
+                  {busy?.id === item.id ? 'Requesting…' : 'Request write access'}
                 </Button>
               ) : (
                 <Button
@@ -153,7 +159,7 @@ export function LinkSkillPanel({
                       button says so, or a greyed "Link" reads as a page that
                       froze. Same word as the panel beside it: "Creating…";
                       the live region above says it for screen readers. */}
-                  {busy === item.id ? 'Linking…' : 'Link'}
+                  {busy?.id === item.id ? 'Linking…' : 'Link'}
                 </Button>
               )}
             </li>

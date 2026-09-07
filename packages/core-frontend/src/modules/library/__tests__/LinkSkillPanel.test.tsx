@@ -101,4 +101,21 @@ describe('LinkSkillPanel', () => {
     await waitFor(() => expect(api.requestSkillAccess).toHaveBeenCalledWith('deploy'));
     expect(await screen.findByText('Requested')).toBeInTheDocument();
   });
+
+  it('announces a write-access request as a request, never as a link', async () => {
+    api.linkSkill.mockRejectedValue(new NeedsSkillWriteError('Skills/Eng/deploy'));
+    let settle: (v: { number: number }) => void = () => undefined;
+    api.requestSkillAccess.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    renderPanel();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Link' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Request write access' }));
+    // The same live region, the right words for THIS operation.
+    expect(await screen.findByRole('button', { name: 'Requesting…' })).toBeDisabled();
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('Requesting write access to deploy…');
+    expect(screen.getByRole('status', { name: 'Link progress' })).not.toHaveTextContent('Linking');
+
+    settle({ number: 7 });
+    expect(await screen.findByText('Requested')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('');
+  });
 });
