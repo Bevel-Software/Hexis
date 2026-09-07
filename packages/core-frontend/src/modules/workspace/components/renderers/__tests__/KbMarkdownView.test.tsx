@@ -109,3 +109,155 @@ describe('KbMarkdownView', () => {
     expect((container.firstElementChild as HTMLElement).className).not.toContain('overflow-auto');
   });
 });
+
+/**
+ * Images: every state of `KbImage` in the pipeline, driven through the view so
+ * the `resolveImage` prop is proven to reach the override.
+ */
+describe('KbMarkdownView images', () => {
+  const RAW_URL = '/api/workspace/ws-1/file/raw?path=KB%2Fassets%2Fshot.png';
+  const serve = () => ({ src: RAW_URL, path: 'KB/assets/shot.png' });
+
+  it('passes an external image through as written, lazy and without a referrer', () => {
+    const resolveImage = vi.fn(serve);
+    render(
+      <KbMarkdownView
+        source={'![Ext](https://cdn.example.com/a.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={resolveImage}
+      />,
+    );
+    const img = screen.getByRole('img', { name: 'Ext' });
+    expect(img).toHaveAttribute('src', 'https://cdn.example.com/a.png');
+    expect(img).toHaveAttribute('loading', 'lazy');
+    expect(img).toHaveAttribute('referrerpolicy', 'no-referrer');
+    expect(resolveImage).not.toHaveBeenCalled();
+  });
+
+  it('treats a protocol-relative image as external', () => {
+    const resolveImage = vi.fn(serve);
+    render(
+      <KbMarkdownView
+        source={'![Ext](//cdn.example.com/a.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={resolveImage}
+      />,
+    );
+    expect(screen.getByRole('img', { name: 'Ext' })).toHaveAttribute('src', '//cdn.example.com/a.png');
+    expect(resolveImage).not.toHaveBeenCalled();
+  });
+
+  it('says what to do when the sanitizer stripped a data: image', () => {
+    render(
+      <KbMarkdownView
+        source={'![Pasted](data:image/png;base64,iVBORw0KGgo=)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    const placeholder = screen.getByRole('img', { name: /no usable source/ });
+    expect(placeholder.getAttribute('aria-label')).toContain('Pasted');
+    expect(placeholder.getAttribute('aria-label')).toContain('./assets/');
+  });
+
+  it('renders a workspace image as a plain tag when no resolver is injected (the embed)', () => {
+    render(<KbMarkdownView source={'![Shot](./assets/shot.png)\n'} onOpenFile={vi.fn()} />);
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute('src', './assets/shot.png');
+  });
+
+  it("serves a workspace image from the resolver's URL", () => {
+    const resolveImage = vi.fn(serve);
+    render(
+      <KbMarkdownView
+        source={'![Shot](./assets/shot.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={resolveImage}
+      />,
+    );
+    expect(resolveImage).toHaveBeenCalledWith('./assets/shot.png');
+    const img = screen.getByRole('img', { name: 'Shot' });
+    expect(img).toHaveAttribute('src', RAW_URL);
+    expect(img).toHaveAttribute('loading', 'lazy');
+    expect(img).toHaveAttribute('referrerpolicy', 'no-referrer');
+  });
+
+  it('replaces an image that fails to load with a placeholder naming the workspace path', () => {
+    render(
+      <KbMarkdownView
+        source={'![Shot](./assets/shot.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'Shot' }));
+    const placeholder = screen.getByRole('img', { name: /Couldn't load image: KB\/assets\/shot.png/ });
+    // The alt text survives the picture.
+    expect(placeholder.getAttribute('aria-label')).toMatch(/^Shot\./);
+  });
+
+  it('recovers when the source changes after a failure, without a reload', () => {
+    const resolveImage = (src: string) => ({ src: `/raw/${src}`, path: src });
+    const view = (src: string) => (
+      <KbMarkdownView source={`![Shot](${src})\n`} onOpenFile={vi.fn()} resolveImage={resolveImage} />
+    );
+    const { rerender } = render(view('missing.png'));
+    fireEvent.error(screen.getByRole('img', { name: 'Shot' }));
+    expect(screen.getByRole('img', { name: /Couldn't load image/ })).toBeInTheDocument();
+    rerender(view('fixed.png'));
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute('src', '/raw/fixed.png');
+  });
+
+  it("shows the resolver's note instead of fetching when it withholds the bytes", () => {
+    render(
+      <KbMarkdownView
+        source={'![Shot](./assets/shot.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={(src) => ({ src: null, path: src, note: 'Baseline image not shown' })}
+      />,
+    );
+    expect(
+      screen.getByRole('img', { name: /Baseline image not shown: \.\/assets\/shot.png/ }),
+    ).toBeInTheDocument();
+    expect(document.querySelector('img')).toBeNull();
+  });
+
+  it('names the raw source when the resolver cannot place it', () => {
+    render(
+      <KbMarkdownView
+        source={'![Shot](./assets/shot.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={() => null}
+      />,
+    );
+    expect(
+      screen.getByRole('img', { name: /Couldn't load image: \.\/assets\/shot.png/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('routes an inline HTML <img> through the same override', () => {
+    const resolveImage = vi.fn(serve);
+    render(
+      <KbMarkdownView
+        source={'<img src="./assets/shot.png" alt="Inline">\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={resolveImage}
+      />,
+    );
+    expect(resolveImage).toHaveBeenCalledWith('./assets/shot.png');
+    expect(screen.getByRole('img', { name: 'Inline' })).toHaveAttribute('src', RAW_URL);
+  });
+
+  it('keeps alt and title, and leaks no hast node onto the element', () => {
+    render(
+      <KbMarkdownView
+        source={'![Shot](./assets/shot.png "The approval screen")\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    const img = screen.getByRole('img', { name: 'Shot' });
+    expect(img).toHaveAttribute('alt', 'Shot');
+    expect(img).toHaveAttribute('title', 'The approval screen');
+    expect(img.hasAttribute('node')).toBe(false);
+  });
+});

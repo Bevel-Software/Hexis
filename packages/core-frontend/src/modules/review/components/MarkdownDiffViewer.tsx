@@ -8,6 +8,7 @@ import {
   KB_REMARK_PLUGINS,
   KB_DIFF_REHYPE_PLUGINS,
   useKbMarkdownComponents,
+  type KbImageResolver,
 } from '../../workspace/components/renderers/kbMarkdownPipeline';
 
 const MAX_RENDERED_LINES = 5000;
@@ -29,6 +30,15 @@ interface MarkdownDiffViewerProps {
   onOpenFile?: (href: string) => void;
   /** Same contract as {@link onOpenFile}, for bare node-id links. */
   onOpenNodeId?: (id: string) => void;
+  /**
+   * Resolves a workspace image in the diff to the URL that serves it from the
+   * CHECKED-OUT tree. It applies to unchanged and added fragments only; a
+   * removed fragment never fetches (see `DiffPreview`). Omitted → every
+   * workspace image is named rather than shown, which is the honest default
+   * for a view of another revision: the change-request dialog and the file
+   * history pass none.
+   */
+  resolveImage?: KbImageResolver;
   /**
    * Whether this view owns a scroller and its own padding. `true` (the
    * default) keeps the self-contained box the change-request dialog and the
@@ -67,7 +77,7 @@ interface MarkdownDiffViewerProps {
  * routes, which sit outside those providers entirely. A `useNavigate()` in
  * here would be a runtime crash in all three.
  */
-export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, scroll = true }: MarkdownDiffViewerProps) {
+export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, resolveImage, scroll = true }: MarkdownDiffViewerProps) {
   const data = useMemo(() => {
     const baseline = payload.baseline ?? '';
     const current = payload.current ?? '';
@@ -124,6 +134,7 @@ export function MarkdownDiffViewer({ payload, onOpenFile, onOpenNodeId, scroll =
         blocks={data.bodyBlocks}
         onOpenFile={onOpenFile}
         onOpenNodeId={onOpenNodeId}
+        resolveImage={resolveImage}
       />
     </div>
   );
@@ -281,11 +292,35 @@ function DiffPreview({
   blocks,
   onOpenFile,
   onOpenNodeId,
+  resolveImage,
 }: {
   blocks: DisplayBlock[];
   onOpenFile?: (href: string) => void;
   onOpenNodeId?: (id: string) => void;
+  resolveImage?: KbImageResolver;
 }) {
+  // Images, per fragment. The caller's resolver serves the CURRENT tree, which
+  // is right for an unchanged or an added image and wrong for a removed one: a
+  // screenshot replaced under the same name would show the new bytes on both
+  // sides, a picture of no change. Removed fragments therefore never fetch;
+  // they name the file. With no resolver at all (the change-request dialog and
+  // the file history, both views of a revision other than the checked-out
+  // tree) every workspace image is named rather than fetched. Serving bytes at
+  // a ref is the `?ref=` item in TODOS.md. External images pass through on
+  // every side; the pipeline never consults a resolver for those.
+  const liveImages = useMemo<KbImageResolver>(
+    () => resolveImage ?? ((src) => ({ src: null, path: src, note: 'Image not shown' })),
+    [resolveImage],
+  );
+  const baselineImages = useMemo<KbImageResolver>(
+    () => (src) => ({
+      src: null,
+      path: resolveImage?.(src)?.path ?? src,
+      note: 'Baseline image not shown',
+    }),
+    [resolveImage],
+  );
+
   // `'source'`: a diagram whose ```mermaid fence straddles a change boundary
   // reaches the renderer truncated and cannot parse, so the error box would
   // replace the red/green source — the only useful content in that block — on
@@ -298,15 +333,22 @@ function DiffPreview({
     onOpenFile,
     onOpenNodeId,
     onMermaidError: 'source',
+    resolveImage: liveImages,
+  });
+  const baselineComponents = useKbMarkdownComponents({
+    onOpenFile,
+    onOpenNodeId,
+    onMermaidError: 'source',
+    resolveImage: baselineImages,
   });
 
   // Each block is parsed as a standalone document, so the space-escaping that
   // makes `[Foo](Some File.md)` resolve has to be applied per fragment.
-  const fragment = (text: string) => (
+  const fragment = (text: string, fragmentComponents = components) => (
     <Markdown
       remarkPlugins={KB_REMARK_PLUGINS}
       rehypePlugins={KB_DIFF_REHYPE_PLUGINS}
-      components={components}
+      components={fragmentComponents}
     >
       {escapeSpacesInLinkDestinations(text)}
     </Markdown>
@@ -322,7 +364,7 @@ function DiffPreview({
           <div key={i} className="my-2">
             {block.removed.length > 0 && (
               <div className="bg-red-50 border-l-2 border-red-700 px-3 py-1 rounded-sm">
-                {fragment(block.removed.join('\n'))}
+                {fragment(block.removed.join('\n'), baselineComponents)}
               </div>
             )}
             {block.added.length > 0 && (

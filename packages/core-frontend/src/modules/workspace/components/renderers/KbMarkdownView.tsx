@@ -6,6 +6,7 @@ import {
   KB_REMARK_PLUGINS,
   KB_REHYPE_PLUGINS,
   useKbMarkdownComponents,
+  type KbImageResolver,
 } from './kbMarkdownPipeline';
 
 // A frontmatter value that is a single markdown link, e.g.
@@ -100,6 +101,13 @@ interface KbMarkdownViewProps {
    * rehype-slug anchor id. Omit it (e.g. in the embed) to hide the buttons.
    */
   headingLink?: (slug: string) => string;
+  /**
+   * Resolves a workspace image `src` (`./assets/x.png`) to the URL that serves
+   * it, or to the reason it will not be shown. The caller knows the workspace
+   * and the file this document is; the view does not. Omit it (the embed) and
+   * images render as plain `<img>` tags. See `KbImage` in the pipeline.
+   */
+  resolveImage?: KbImageResolver;
   /** Optional container ref (used by the file viewer for deep-link scroll). */
   containerRef?: Ref<HTMLDivElement>;
   /**
@@ -124,14 +132,15 @@ interface KbMarkdownViewProps {
  * frontmatter panel, with navigation injected via `onOpenFile` so it carries no
  * dependency on workspace routing or context.
  */
-export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, containerRef, scroll = true, className }: KbMarkdownViewProps) {
+export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, resolveImage, containerRef, scroll = true, className }: KbMarkdownViewProps) {
   const { data: frontmatter, body } = useMemo(() => parseFrontmatter(source), [source]);
   // CommonMark rejects unescaped spaces in link destinations, so a KB link like
   // `[Foo](Some File.md)` would render as plain text. Wrap space-bearing
-  // destinations in `<...>` so links to files with spaces resolve.
+  // destinations in `<...>` so links to files with spaces resolve. The same
+  // rule covers an image's `![alt](Some Shot.png)` tail.
   const normalizedBody = useMemo(() => escapeSpacesInLinkDestinations(body), [body]);
 
-  const components = useKbMarkdownComponents({ onOpenFile, onOpenNodeId, headingLink });
+  const components = useKbMarkdownComponents({ onOpenFile, onOpenNodeId, headingLink, resolveImage });
 
   return (
     <div

@@ -154,4 +154,65 @@ describe('MarkdownDiffViewer', () => {
     );
     expect(screen.getByText('visible body text')).toBeInTheDocument();
   });
+
+  /**
+   * The per-fragment image rule. The caller's resolver serves the checked-out
+   * tree, which is the truth for the unchanged and the added side and a lie
+   * for the removed side of a replaced screenshot.
+   */
+  describe('images', () => {
+    const resolveImage = (src: string) => ({ src: `/raw/${src}`, path: `KB/${src}` });
+
+    it('serves an unchanged image through the resolver', () => {
+      render(
+        <MarkdownDiffViewer
+          payload={payload('![Same](same.png)\n', '![Same](same.png)\n')}
+          resolveImage={resolveImage}
+        />,
+      );
+      expect(screen.getByRole('img', { name: 'Same' })).toHaveAttribute('src', '/raw/same.png');
+    });
+
+    it('serves an added image through the resolver', () => {
+      render(
+        <MarkdownDiffViewer
+          payload={payload('text\n', 'text\n\n![Added](added.png)\n')}
+          resolveImage={resolveImage}
+        />,
+      );
+      expect(screen.getByRole('img', { name: 'Added' })).toHaveAttribute('src', '/raw/added.png');
+    });
+
+    it('names a removed image instead of fetching it', () => {
+      const { container } = render(
+        <MarkdownDiffViewer
+          payload={payload('![Old](old.png)\n', 'text\n')}
+          resolveImage={resolveImage}
+        />,
+      );
+      expect(
+        screen.getByRole('img', { name: /Baseline image not shown: KB\/old.png/ }),
+      ).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+    });
+
+    it('names every workspace image when no resolver is supplied (another revision, not this tree)', () => {
+      const { container } = render(
+        <MarkdownDiffViewer payload={payload('![Old](old.png)\n', '![New](new.png)\n')} />,
+      );
+      expect(screen.getByRole('img', { name: /Baseline image not shown: old.png/ })).toBeInTheDocument();
+      expect(screen.getByRole('img', { name: /Image not shown: new.png/ })).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+    });
+
+    it('passes an external image through on either side, resolver or not', () => {
+      render(
+        <MarkdownDiffViewer
+          payload={payload('![Old](https://cdn.example.com/old.png)\n', '![New](https://cdn.example.com/new.png)\n')}
+        />,
+      );
+      expect(screen.getByRole('img', { name: 'Old' })).toHaveAttribute('src', 'https://cdn.example.com/old.png');
+      expect(screen.getByRole('img', { name: 'New' })).toHaveAttribute('src', 'https://cdn.example.com/new.png');
+    });
+  });
 });

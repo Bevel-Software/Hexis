@@ -26,9 +26,10 @@
  * So the diff viewer keeps its own block grouping, frontmatter panel and
  * `prose` wrapper, and consumes only the parts below.
  *
- * NAVIGATION IS INJECTED, NEVER LOOKED UP. Nothing here calls a hook that
- * needs Git/Workspace context or a Router. That is load-bearing in two
- * directions: it keeps the diff viewer mountable from the enterprise `/embed*`
+ * NAVIGATION IS INJECTED, NEVER LOOKED UP, and so is image resolution. Nothing
+ * here calls a hook that needs Git/Workspace context or a Router. That is
+ * load-bearing in two directions: it keeps the diff viewer mountable from the
+ * enterprise `/embed*`
  * routes, which render outside those providers, and it keeps the existing
  * change-request and file-history tests — which render bare, with no Router —
  * passing without acquiring provider wrappers.
@@ -42,6 +43,9 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import rehypeSlug from 'rehype-slug';
 import { CopyAnchorButton } from './CopyAnchorButton';
+import { KbImage, type KbImageResolver } from './KbImage';
+
+export type { KbImageResolver, KbImageSource } from './KbImage';
 
 /**
  * Mermaid's eager core is ~151 KB gzip and is only needed by documents that
@@ -121,6 +125,13 @@ export interface KbMarkdownComponentOptions {
    * block, parse fine, and still render as diagrams.
    */
   onMermaidError?: 'error' | 'source';
+  /**
+   * Resolves a workspace image `src` to a URL the browser can load, or to the
+   * reason it will not be loaded. Omitted (the embed) → images render as plain
+   * `<img>` tags, as they always did. External `http(s)` and `//` sources
+   * never reach it. See {@link KbImage} for every state.
+   */
+  resolveImage?: KbImageResolver;
 }
 
 /**
@@ -132,6 +143,7 @@ export function useKbMarkdownComponents({
   onOpenNodeId,
   headingLink,
   onMermaidError = 'error',
+  resolveImage,
 }: KbMarkdownComponentOptions) {
   return useMemo(() => {
     // One renderer for h1–h6: reads its level from the hast node's tagName,
@@ -215,6 +227,27 @@ export function useKbMarkdownComponents({
         }
         return <a href={href} {...props}>{children}</a>;
       },
+      // Every image, whether from `![alt](src)` or an inline `<img>` that
+      // rehype-raw parsed, goes through `KbImage` and the injected resolver.
+      // Nothing is spread onto the element, so the hast `node` never leaks.
+      img({ src, alt, title, width, height }: {
+        src?: string;
+        alt?: string;
+        title?: string;
+        width?: number | string;
+        height?: number | string;
+      }) {
+        return (
+          <KbImage
+            src={src}
+            alt={alt}
+            title={title}
+            width={width}
+            height={height}
+            resolve={resolveImage}
+          />
+        );
+      },
       pre({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) {
         // Render a mermaid code block as a diagram.
         const child = Array.isArray(children) ? children[0] : children;
@@ -237,5 +270,5 @@ export function useKbMarkdownComponents({
         return <pre {...props}>{children}</pre>;
       },
     };
-  }, [onOpenFile, onOpenNodeId, headingLink, onMermaidError]);
+  }, [onOpenFile, onOpenNodeId, headingLink, onMermaidError, resolveImage]);
 }
