@@ -61,7 +61,7 @@ export async function listFiles(workspaceId: string): Promise<FileTreeEntry> {
  *   gates on the per-path `download:` verb.
  * - `version` is a cache key appended as `&v=`; `0` or undefined adds nothing,
  *   so the URL stays stable (and browser-cacheable) until the file is known to
- *   have changed. See `useImageVersions`.
+ *   have changed. See `useImageRevision`.
  */
 export function rawFileUrl(
   workspaceId: string,

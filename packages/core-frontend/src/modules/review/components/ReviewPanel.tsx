@@ -10,6 +10,7 @@ import {
   stripJunkBeforeKbDir,
 } from '../../workspace/routing/kb-routes';
 import { rawFileUrl } from '../../workspace/services/workspace.api';
+import { useImageRevision } from '../../workspace/hooks/useImageRevision';
 import type { KbImageResolver } from '../../workspace/components/renderers/kbMarkdownPipeline';
 import { pluginOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
@@ -131,13 +132,19 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   // reason above: the working tree IS the diff's new state, so an image the
   // agent added is on disk and can be shown. The viewer applies this to the
   // unchanged and added sides only; a removed image is named, never fetched.
+  // The revision keeps the panel current when the agent replaces a picture
+  // while it is open.
+  const imageRevision = useImageRevision(workspaceId);
   const resolveDiffImage = useCallback<KbImageResolver>(
     (src) => {
       const target = resolveKbHref(src, { basePath: diffPath, kbDirName });
       if (!workspaceId || target?.kind !== 'workspace') return null;
-      return { src: rawFileUrl(workspaceId, target.path), path: target.path };
+      return {
+        src: rawFileUrl(workspaceId, target.path, { version: imageRevision }),
+        path: target.path,
+      };
     },
-    [diffPath, kbDirName, workspaceId],
+    [diffPath, kbDirName, workspaceId, imageRevision],
   );
   const [busy, setBusy] = useState(false);
   // `busy` alone is not re-entrant-safe: two rapid clicks (or a click + a

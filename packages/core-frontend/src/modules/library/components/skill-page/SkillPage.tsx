@@ -21,7 +21,7 @@ import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { useGit } from '../../../git/state/git.context';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
 import { kbFileUrl, resolveKbHref, useNodeIdNav } from '../../../workspace/routing/kb-routes';
-import { useImageVersions } from '../../../workspace/hooks/useImageVersions';
+import { useImageRevision } from '../../../workspace/hooks/useImageRevision';
 import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
@@ -439,22 +439,22 @@ export function SkillPage({
    * Images in the file, served from the DEFAULT branch's workspace: that is
    * the tree this pane renders (`rawOnMain`), and where `headingLink` and the
    * link handler above point. The checked-out branch may be somebody's draft
-   * with another copy of the picture, or none. The version keeps an open page
+   * with another copy of the picture, or none. The revision keeps an open page
    * current when a teammate replaces a screenshot under the same name.
    */
   const skillWorkspaceId = encodeURIComponent(DEFAULT_BRANCH);
-  const imageVersion = useImageVersions(skillWorkspaceId);
+  const imageRevision = useImageRevision(skillWorkspaceId);
   const resolveImage = useCallback<KbImageResolver>(
     (src) => {
       if (!fileWorkspacePath) return null;
       const target = resolveKbHref(src, { basePath: fileWorkspacePath, kbDirName });
       if (target?.kind !== 'workspace') return null;
       return {
-        src: rawFileUrl(skillWorkspaceId, target.path, { version: imageVersion(target.path) }),
+        src: rawFileUrl(skillWorkspaceId, target.path, { version: imageRevision }),
         path: target.path,
       };
     },
-    [fileWorkspacePath, kbDirName, skillWorkspaceId, imageVersion],
+    [fileWorkspacePath, kbDirName, skillWorkspaceId, imageRevision],
   );
 
   /**
