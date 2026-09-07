@@ -38,6 +38,16 @@ export interface MintedExternalApiKey {
 }
 
 /**
+ * How a key is minted. `prefix` picks one of the plaintext prefixes the
+ * service recognises — the tenant's own by default, or another it was built
+ * with (a Claude link's `gho_`); a prefix the service does not know is
+ * refused, since `looksLikeExternalApiKey` would never route it back.
+ */
+export interface MintOptions {
+  prefix?: string;
+}
+
+/**
  * Contract for connection-key (API token) lifecycle. Used by the MCP auth
  * middleware to resolve a Bearer token to a Bevel user, and by the settings
  * UI to mint, list, and revoke keys.
@@ -59,7 +69,7 @@ export interface IExternalApiKeyService {
    * plaintext is **only** returned here — there is no read path that can
    * surface it again.
    */
-  mint(userId: string, label: string): Promise<MintedExternalApiKey>;
+  mint(userId: string, label: string, options?: MintOptions): Promise<MintedExternalApiKey>;
 
   /**
    * Resolve a plaintext token to the owning user. Returns null when the

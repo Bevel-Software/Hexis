@@ -62,6 +62,12 @@ import {
 } from '../modules/plugins/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
+  ClaudeBridgeCredentialsService,
+  ClaudeMarketplaceBridge,
+  DbClaudeBridgeCredentialsStore,
+  CLAUDE_LINK_KEY_PREFIX,
+} from '../modules/marketplace/claude-bridge/index.js';
+import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
   registerBevelSecretsVariableLoader,
@@ -158,6 +164,9 @@ export interface CoreServices {
   marketplaceCompiler: MarketplaceCompilerService;
   /** The bare repository the per-user marketplace git endpoint serves from. */
   marketplaceRepo: MarketplaceRepoService;
+  /** The GitHub-shaped bridge claude.ai and Cowork add the marketplace through. */
+  claudeBridge: ClaudeMarketplaceBridge;
+  claudeBridgeCredentials: ClaudeBridgeCredentialsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -680,7 +689,27 @@ export async function createCoreServices(
   // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
   // over loopback and re-exposes every tool, dispatching calls back through the
   // REST tool surface (so agent logic + metering live there, once).
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix);
+  // Connection keys also come in the shape a Claude link needs (`gho_…`):
+  // the same key, minted by the marketplace bridge below when a person
+  // connects their claude.ai account.
+  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, [
+    CLAUDE_LINK_KEY_PREFIX,
+  ]);
+
+  // The bridge that lets claude.ai and Cowork add the per-user marketplace
+  // as if this deployment were a GitHub Enterprise Server: generated app
+  // credentials an Owner registers once, and the connect flow that turns a
+  // hexis session into a connection key claude.ai holds. Reuses the MCP
+  // flow's signed state and /connect page — see modules/marketplace/claude-bridge.
+  const claudeBridgeCredentials = new ClaudeBridgeCredentialsService(
+    new DbClaudeBridgeCredentialsStore(db, config.secretsEncKey ? new TokenCrypto(config.secretsEncKey) : null),
+  );
+  const claudeBridge = new ClaudeMarketplaceBridge({
+    credentials: claudeBridgeCredentials,
+    keys: externalApiKeyService,
+    stateSecret: config.jwtSecret,
+    publicFrontendUrl: config.publicFrontendUrl,
+  });
   const mcpSessionStore = new McpSessionStore();
   const mcpService = new McpService(
     mcpSessionStore,
@@ -902,6 +931,8 @@ export async function createCoreServices(
     pluginRenameService,
     marketplaceCompiler,
     marketplaceRepo,
+    claudeBridge,
+    claudeBridgeCredentials,
     authService,
     authMiddleware,
     accountErasureService,

@@ -11,6 +11,7 @@ import {
 import type {
   ExternalApiKeySummary,
   IExternalApiKeyService,
+  MintOptions,
   MintedExternalApiKey,
 } from './external-api-key.interface.js';
 
@@ -27,17 +28,31 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
    * @param keyPrefix Tenant-derived plaintext prefix (e.g. `bevel_`) — injected
    *   from {@link AppConfig.externalApiKeyPrefix} so a deploy can brand its keys.
    */
+  /**
+   * @param extraPrefixes Other plaintext prefixes a key may be minted with and
+   *   is routed by — a Claude link's `gho_`, the shape claude.ai expects from
+   *   a GitHub host. Same key, same table, same revocation; only the spelling
+   *   the outside world sees differs.
+   */
   constructor(
     private readonly db: Database,
     private readonly keyPrefix: string,
+    private readonly extraPrefixes: readonly string[] = [],
   ) {}
 
-  /** True if a bearer string carries this tenant's external-API-key prefix. */
+  /** True if a bearer string carries one of this service's key prefixes. */
   looksLikeExternalApiKey(token: string): boolean {
-    return typeof token === 'string' && token.startsWith(this.keyPrefix);
+    return (
+      typeof token === 'string' &&
+      (token.startsWith(this.keyPrefix) || this.extraPrefixes.some((p) => token.startsWith(p)))
+    );
   }
 
-  async mint(userId: string, label: string): Promise<MintedExternalApiKey> {
+  async mint(userId: string, label: string, options: MintOptions = {}): Promise<MintedExternalApiKey> {
+    const prefix = options.prefix ?? this.keyPrefix;
+    if (prefix !== this.keyPrefix && !this.extraPrefixes.includes(prefix)) {
+      throw new Error(`Unknown key prefix "${prefix}"`);
+    }
     const trimmed = (label ?? '').trim();
     if (trimmed.length === 0) {
       throw new InvalidTokenLabelError('Label cannot be empty');
@@ -48,7 +63,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       );
     }
 
-    const plaintext = this.keyPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
+    const plaintext = prefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const tokenHash = hashToken(plaintext);
 
     const [row] = await this.db

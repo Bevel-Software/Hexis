@@ -18,8 +18,18 @@ export interface McpAuthRequestState {
   c: string;
   /** redirect_uri (already validated against the client's registration). */
   r: string;
-  /** PKCE code_challenge (S256 — the SDK authorize handler enforces it). */
-  cc: string;
+  /**
+   * PKCE code_challenge (S256 — the SDK authorize handler enforces it).
+   * Absent only on a Claude-link request (`gh`), whose client is a
+   * confidential one that proves itself with a secret at the token exchange.
+   */
+  cc?: string;
+  /**
+   * A GitHub-shaped authorize request from claude.ai (the marketplace
+   * bridge), not an MCP client: the consent routes hand it to the bridge,
+   * which mints a code of its own instead of the SDK's.
+   */
+  gh?: true;
   /** The client's own `state` parameter, echoed back on the code redirect. */
   s?: string;
   /** Requested scope (space-joined). */
@@ -51,7 +61,8 @@ export function verifyAuthRequest(secret: string, token: string): McpAuthRequest
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   try {
     const parsed = JSON.parse(Buffer.from(body, 'base64url').toString()) as McpAuthRequestState;
-    if (typeof parsed.iat !== 'number' || !parsed.c || !parsed.r || !parsed.cc) return null;
+    if (typeof parsed.iat !== 'number' || !parsed.c || !parsed.r) return null;
+    if (!parsed.cc && parsed.gh !== true) return null;
     const age = Date.now() - parsed.iat;
     if (age > STATE_MAX_AGE_MS || age < -STATE_SKEW_MS) return null;
     return parsed;

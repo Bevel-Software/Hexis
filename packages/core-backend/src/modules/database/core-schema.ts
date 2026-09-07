@@ -490,3 +490,26 @@ export const deploymentSettings = pgTable('deployment_settings', {
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
+
+/**
+ * What this deployment presents to claude.ai as a "GitHub Enterprise Server"
+ * so that Cowork and claude.ai can add the per-user marketplace: the app id,
+ * client id and secrets an Owner pastes into Claude's admin settings. ONE row,
+ * generated on first use, replaced whole on rotate. Secrets are sealed with
+ * the secrets key, as stored settings are — see
+ * `marketplace/claude-bridge/claude-bridge-credentials.service.ts`.
+ */
+export const claudeMarketplaceBridge = pgTable('claude_marketplace_bridge', {
+  id: text('id').primaryKey(),
+  appId: text('app_id').notNull(),
+  clientId: text('client_id').notNull(),
+  /** Sealed. */
+  clientSecret: text('client_secret').notNull(),
+  /** Sealed. */
+  webhookSecret: text('webhook_secret').notNull(),
+  /** Sealed — PKCS#1 PEM. */
+  privateKeyPem: text('private_key_pem').notNull(),
+  publicKeyPem: text('public_key_pem').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  rotatedAt: timestamp('rotated_at'),
+});

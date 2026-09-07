@@ -34,6 +34,11 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { createMarketplaceGitRoutes } from '../modules/marketplace/index.js';
+import {
+  CLAUDE_CLIENT_NAME,
+  createClaudeBridgeAdminRoutes,
+  createClaudeBridgeRoutes,
+} from '../modules/marketplace/claude-bridge/index.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -243,6 +248,22 @@ export async function createCoreServer(
       repo: core.marketplaceRepo,
       keys: core.externalApiKeyService,
       mountPath: '/git',
+    }),
+  );
+
+  // The SAME marketplace as claude.ai and Cowork fetch it: the GitHub-shaped
+  // OAuth pair at /login/oauth/* and the REST calls at /api/v3/*, reading the
+  // same per-user tree by the same connection key. At the app root because
+  // those paths are GitHub's, and ahead of the /api JWT mounts because
+  // Anthropic's backend arrives with a Bearer key, never a session.
+  app.use(
+    createClaudeBridgeRoutes({
+      bridge: core.claudeBridge,
+      keys: core.externalApiKeyService,
+      repo: core.marketplaceRepo,
+      owner: 'git',
+      repoName: core.marketplaceRepo.repoName.replace(/\.git$/, ''),
+      publicUrl: core.config.publicBackendUrl,
     }),
   );
 
@@ -542,6 +563,20 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createOAuthConsentRoutes({
     provider: core.mcpOAuthProvider,
     stateSecret: core.config.jwtSecret,
+    bridge: {
+      isBridgeRequest: (st) => core.claudeBridge.isBridgeRequest(st),
+      clientName: CLAUDE_CLIENT_NAME,
+      completeConsent: (userId, st) => core.claudeBridge.completeConsent(userId, st),
+    },
+  }));
+
+  // What an Owner pastes into Claude's admin settings to register this
+  // deployment as a GitHub Enterprise Server — admins only.
+  app.use('/api', core.authMiddleware, createClaudeBridgeAdminRoutes({
+    credentials: core.claudeBridgeCredentials,
+    isAdmin: (email) => core.adminAccess.isAdmin(email),
+    publicUrl: core.config.publicBackendUrl,
+    marketplaceUrl: marketplaceGitUrl.toString(),
   }));
 
   // JWT-protected overlay routes.
@@ -559,7 +594,11 @@ export async function createCoreServer(
       // MCP client parses as JSON → "expected object, received undefined" and
       // the whole connection fails. A clean 404 lets discovery fall through to
       // the variant we do serve. Same reasoning for stray `/api/*` gets.
-      if (req.path.startsWith('/.well-known/') || req.path.startsWith('/api/')) {
+      if (
+        req.path.startsWith('/.well-known/') ||
+        req.path.startsWith('/api/') ||
+        req.path.startsWith('/login/oauth/')
+      ) {
         res.status(404).json({ error: 'Not found' });
         return;
       }

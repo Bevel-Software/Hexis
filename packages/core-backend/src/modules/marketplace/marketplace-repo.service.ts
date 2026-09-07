@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { VirtualTree } from '../plugins/compile/compile-marketplace.js';
@@ -140,6 +140,64 @@ export class MarketplaceRepoService {
     });
   }
 
+  /**
+   * The caller's namespace and its head commit, compiled if stale — what the
+   * GitHub-shaped REST surface (the Cowork path) reads instead of cloning.
+   */
+  async headFor(user: { id: string; email: string }): Promise<{ namespace: string; sha: string }> {
+    const { namespace } = await this.ensureCompiled(user);
+    const sha = await this.headOf(namespace);
+    if (!sha) throw new Error(`namespace ${namespace} has no head after compiling`);
+    return { namespace, sha };
+  }
+
+  /** One commit as the REST surface describes it. */
+  async describeCommit(sha: string): Promise<{
+    sha: string;
+    tree: string;
+    message: string;
+    authorName: string;
+    authorEmail: string;
+    date: string;
+  }> {
+    assertObjectId(sha);
+    const { stdout } = await this.git(['-C', this.repoDir, 'log', '-1', '--format=%H%n%T%n%an%n%ae%n%aI%n%B', sha]);
+    const [full, tree, authorName, authorEmail, date, ...rest] = stdout.split('\n');
+    return {
+      sha: full ?? sha,
+      tree: tree ?? '',
+      message: rest.join('\n').trim(),
+      authorName: authorName ?? '',
+      authorEmail: authorEmail ?? '',
+      date: date ?? '',
+    };
+  }
+
+  /**
+   * Whether `sha` is the namespace's head or one of its ancestors — the only
+   * commits a caller may read as that namespace. The object store is shared
+   * across everyone, so a sha alone is never enough.
+   */
+  async contains(namespace: string, sha: string): Promise<boolean> {
+    if (!looksLikeObjectId(sha)) return false;
+    const head = await this.headOf(namespace);
+    if (!head) return false;
+    try {
+      await this.git(['-C', this.repoDir, 'merge-base', '--is-ancestor', sha, head]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The tree at `sha` as a zip stream, every path under `prefix/`. Check {@link contains} first. */
+  archiveZip(sha: string, prefix: string): ChildProcess {
+    assertObjectId(sha);
+    return spawn('git', ['-C', this.repoDir, 'archive', '--format=zip', `--prefix=${prefix}/`, sha], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
+
   // --- internal --------------------------------------------------------------
 
   private refOf(namespace: string): string {
@@ -247,4 +305,15 @@ export class MarketplaceRepoService {
   private git(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
     return execFileAsync('git', args, { cwd: opts.cwd, env: opts.env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
   }
+}
+
+function looksLikeObjectId(sha: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha);
+}
+
+function assertObjectId(sha: string): void {
+  // An object id is the only thing these commands accept as a revision — a
+  // ref name, an option, anything git would interpret, is refused before it
+  // reaches the argument list.
+  if (!looksLikeObjectId(sha)) throw new Error(`not an object id: ${sha}`);
 }

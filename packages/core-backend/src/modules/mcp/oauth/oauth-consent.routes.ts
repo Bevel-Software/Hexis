@@ -1,12 +1,22 @@
 import express from 'express';
 import type { BevelOAuthProvider } from './bevel-oauth-provider.js';
-import { verifyAuthRequest } from './oauth-state.js';
+import { verifyAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 import '../../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 
 export interface OAuthConsentRoutesDeps {
   provider: BevelOAuthProvider;
   /** Same HMAC secret the provider signs the authorize state with. */
   stateSecret: string;
+  /**
+   * The Claude marketplace bridge, when the deployment has one: a state it
+   * signed (`gh`) is a person connecting their claude.ai account, and the
+   * code that flow needs is the bridge's, not the SDK's.
+   */
+  bridge?: {
+    isBridgeRequest(st: McpAuthRequestState): boolean;
+    clientName: string;
+    completeConsent(userId: string, st: McpAuthRequestState): Promise<{ redirectTo: string }>;
+  };
 }
 
 /**
@@ -26,6 +36,10 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const raw = typeof req.query.state === 'string' ? req.query.state : '';
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
+    if (deps.bridge?.isBridgeRequest(st)) {
+      res.json({ clientName: deps.bridge.clientName, scope: null, resource: null });
+      return;
+    }
     const client = await deps.provider.clientsStore.getClient(st.c);
     res.json({
       clientName: client?.client_name ?? null,
@@ -43,7 +57,9 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
     try {
-      const { redirectTo } = await deps.provider.issueAuthCode(userId, st);
+      const { redirectTo } = deps.bridge?.isBridgeRequest(st)
+        ? await deps.bridge.completeConsent(userId, st)
+        : await deps.provider.issueAuthCode(userId, st);
       res.json({ redirectTo });
     } catch (err) {
       // Message only — the raw error object can carry sensitive context

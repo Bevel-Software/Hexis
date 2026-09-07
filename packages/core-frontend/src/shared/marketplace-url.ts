@@ -57,6 +57,14 @@ export const MARKETPLACE_NAME = 'hexis';
 export const BUNDLE_PLUGIN = 'hexis-all';
 
 /**
+ * The label on a connection key minted when a person connects their
+ * claude.ai account (Cowork, claude.ai) to this deployment — the backend's
+ * `CLAUDE_LINK_KEY_LABEL`, spelled once more here so the key list can show
+ * those links as what they are.
+ */
+export const CLAUDE_LINK_LABEL = 'Claude (claude.ai and Cowork)';
+
+/**
  * The three one-liners the settings page shows, with the key in the URL —
  * Claude Code's background refresh disables credential helpers, so the key
  * has nowhere else to live. `key` may be a placeholder.
