@@ -308,13 +308,14 @@ describe('the Marketplaces tab', () => {
       { id: 'c1', kind: CLAUDE_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
     ]);
     const user = userEvent.setup();
-    mount(PUBLIC_URL);
+    const first = mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
     await screen.findByText(/Your Claude connections are on the Marketplaces tab/);
+    first.unmount();
 
     listMock.mockRejectedValue(new Error('keys are down'));
     mount(PUBLIC_URL);
-    await user.click(screen.getAllByRole('tab', { name: 'Marketplaces' }).at(-1)!);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     await screen.findByText('keys are down');
     expect(screen.queryByText(/None yet/)).toBeNull();
   });

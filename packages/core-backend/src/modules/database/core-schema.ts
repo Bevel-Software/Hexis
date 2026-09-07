@@ -524,18 +524,22 @@ export const claudeMarketplaceBridge = pgTable('claude_marketplace_bridge', {
  * One-time codes the Claude connect flow issues on the consent page and
  * Anthropic's backend exchanges seconds later — in the database so the
  * replica that issued a code and the replica asked to exchange it agree.
- * ONE live row per person and client (the newest supersedes), spent by a
- * conditional update, swept on the next issue. See
+ *
+ * Keyed by (person, client): "one live code per person and client" is the
+ * table's own rule, not a cleanup's. Issuing upserts the row — the newest
+ * code overwrites the last in one statement — so the table never holds more
+ * than one row per pair and nothing has to sweep it; the code's hash is the
+ * unique lookup an exchange uses, spent by a conditional update. See
  * `marketplace/claude-bridge/claude-bridge-codes.store.ts`.
  */
 export const claudeMarketplaceCodes = pgTable('claude_marketplace_codes', {
-  codeHash: text('code_hash').primaryKey(),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   clientId: text('client_id').notNull(),
+  codeHash: text('code_hash').notNull().unique(),
   redirectUri: text('redirect_uri').notNull(),
   expiresAt: timestamp('expires_at').notNull(),
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (t) => ({
-  byUser: index('claude_marketplace_codes_by_user').on(t.userId),
+  pk: primaryKey({ columns: [t.userId, t.clientId] }),
 }));

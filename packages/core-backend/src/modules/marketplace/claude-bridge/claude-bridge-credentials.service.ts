@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes, randomInt } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
 import { claudeMarketplaceBridge } from '../../database/schema.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
@@ -34,6 +34,11 @@ export interface ClaudeBridgeCredentials {
  * every use, so a rotation on one replica is what every other replica
  * checks the very next exchange. The reads are rare (a connect, an admin
  * page), and a cache would be a second source of truth with no invalidation.
+ *
+ * Both writes are conditional, so two replicas writing at once cannot
+ * disagree about what is stored: creation happens only when no row exists,
+ * and a rotation replaces only the set the caller was looking at. Either way
+ * the caller gets back what the store holds afterwards, never what it sent.
  */
 export interface ClaudeBridgeCredentialsStore {
   load(): Promise<ClaudeBridgeCredentials | null>;
@@ -43,8 +48,13 @@ export interface ClaudeBridgeCredentialsStore {
    * set, and the loser's generated values are simply dropped.
    */
   createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials>;
-  /** Replace the row whole. */
-  replace(creds: ClaudeBridgeCredentials): Promise<void>;
+  /**
+   * Replace the row only while it still carries `expectedClientId`, and
+   * return what is stored afterwards. Two admins rotating at once: the first
+   * write wins, the second finds a different client id, writes nothing, and
+   * is shown the winner's set — the only one Claude will accept.
+   */
+  replaceIfCurrent(expectedClientId: string, creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials>;
 }
 
 const ROW_ID = 'default';
@@ -85,17 +95,21 @@ export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsSt
       .insert(claudeMarketplaceBridge)
       .values({ id: ROW_ID, ...this.seal(creds) })
       .onConflictDoNothing({ target: claudeMarketplaceBridge.id });
-    const stored = await this.load();
-    if (!stored) throw new Error('claude bridge credentials vanished between insert and read');
-    return stored;
+    return this.stored('insert');
   }
 
-  async replace(creds: ClaudeBridgeCredentials): Promise<void> {
-    const sealed = this.seal(creds);
+  async replaceIfCurrent(expectedClientId: string, creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
     await this.db
-      .insert(claudeMarketplaceBridge)
-      .values({ id: ROW_ID, ...sealed })
-      .onConflictDoUpdate({ target: claudeMarketplaceBridge.id, set: sealed });
+      .update(claudeMarketplaceBridge)
+      .set(this.seal(creds))
+      .where(and(eq(claudeMarketplaceBridge.id, ROW_ID), eq(claudeMarketplaceBridge.clientId, expectedClientId)));
+    return this.stored('replace');
+  }
+
+  private async stored(after: string): Promise<ClaudeBridgeCredentials> {
+    const row = await this.load();
+    if (!row) throw new Error(`claude bridge credentials vanished between ${after} and read`);
+    return row;
   }
 
   private seal(creds: ClaudeBridgeCredentials) {
@@ -145,16 +159,15 @@ export class ClaudeBridgeCredentialsService {
   }
 
   /**
-   * New credentials, all of them. Every registration on the Claude side stops
-   * matching at once — the client secret it holds is gone — which is the
-   * point of rotating: the Owner re-enters the new set, and connected users'
-   * tokens (connection keys) are untouched, since those are ours.
+   * New credentials, all of them — replacing the set this call read, and
+   * returning whatever is stored afterwards. Every registration on the
+   * Claude side stops matching at once, which is the point of rotating: the
+   * Owner re-enters the new set, and connected users' tokens (connection
+   * keys) are untouched, since those are ours.
    */
   async rotate(): Promise<ClaudeBridgeCredentials> {
     const current = await this.ensure();
-    const fresh = generateCredentials(current.createdAt);
-    await this.store.replace(fresh);
-    return fresh;
+    return this.store.replaceIfCurrent(current.clientId, generateCredentials(current.createdAt));
   }
 }
 
@@ -178,7 +191,7 @@ function generateCredentials(createdAt: Date | null): ClaudeBridgeCredentials {
   };
 }
 
-/** For tests: the row kept in memory, with the same first-writer-wins rule. */
+/** For tests: the row kept in memory, with the same conditional writes. */
 export class MemoryClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsStore {
   private row: ClaudeBridgeCredentials | null = null;
   async load(): Promise<ClaudeBridgeCredentials | null> {
@@ -188,7 +201,8 @@ export class MemoryClaudeBridgeCredentialsStore implements ClaudeBridgeCredentia
     this.row ??= creds;
     return this.row;
   }
-  async replace(creds: ClaudeBridgeCredentials): Promise<void> {
-    this.row = creds;
+  async replaceIfCurrent(expectedClientId: string, creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+    if (this.row?.clientId === expectedClientId) this.row = creds;
+    return this.row!;
   }
 }

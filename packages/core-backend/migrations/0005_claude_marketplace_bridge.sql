@@ -11,15 +11,16 @@ CREATE TABLE "claude_marketplace_bridge" (
 );
 --> statement-breakpoint
 CREATE TABLE "claude_marketplace_codes" (
-	"code_hash" text PRIMARY KEY NOT NULL,
 	"user_id" uuid NOT NULL,
 	"client_id" text NOT NULL,
+	"code_hash" text NOT NULL,
 	"redirect_uri" text NOT NULL,
 	"expires_at" timestamp NOT NULL,
 	"consumed_at" timestamp,
-	"created_at" timestamp DEFAULT now() NOT NULL
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "claude_marketplace_codes_user_id_client_id_pk" PRIMARY KEY("user_id","client_id"),
+	CONSTRAINT "claude_marketplace_codes_code_hash_unique" UNIQUE("code_hash")
 );
 --> statement-breakpoint
 ALTER TABLE "api_tokens" ADD COLUMN "kind" text DEFAULT 'key' NOT NULL;--> statement-breakpoint
-ALTER TABLE "claude_marketplace_codes" ADD CONSTRAINT "claude_marketplace_codes_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "claude_marketplace_codes_by_user" ON "claude_marketplace_codes" USING btree ("user_id");
+ALTER TABLE "claude_marketplace_codes" ADD CONSTRAINT "claude_marketplace_codes_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;

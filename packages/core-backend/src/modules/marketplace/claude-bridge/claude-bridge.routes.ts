@@ -152,13 +152,20 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
         else res.destroy();
       };
       archive.on('error', (err: Error) => fail(err.message));
-      archive.on('close', (code) => {
-        if (code !== 0 && code !== null) fail(`git archive exited ${code}: ${Buffer.concat(stderr).toString().trim()}`);
-      });
-      // A client that goes away mid-download must not leave git running.
+      // A client that goes away mid-download must not leave git running —
+      // and that kill is the ONE signal exit that is not a failure: git dying
+      // to any other signal left a truncated archive on the wire.
+      let stopped = false;
       const stop = () => {
-        if (archive.exitCode === null && !archive.killed) archive.kill();
+        if (archive.exitCode === null && !archive.killed) {
+          stopped = true;
+          archive.kill();
+        }
       };
+      archive.on('close', (code, signal) => {
+        if (code === 0 || stopped) return;
+        fail(`git archive exited ${code ?? `on ${signal}`}: ${Buffer.concat(stderr).toString().trim()}`);
+      });
       req.on('aborted', stop);
       res.on('close', stop);
       archive.stdout!.pipe(res);

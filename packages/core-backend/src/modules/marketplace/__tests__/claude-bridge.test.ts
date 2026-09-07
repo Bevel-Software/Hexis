@@ -297,15 +297,36 @@ describe('the Claude marketplace bridge', () => {
     expect((await exchange(b.base, good)).status).toBe(400);
   });
 
-  it('keeps at most one live code per person: mashing Finish never grows the store', async () => {
+  it('keeps at most one live code per person: mashing Finish never grows the store, even concurrently', async () => {
     for (let i = 0; i < 5; i++) await approve(a.base, 'alice', `s${i}`);
     await approve(b.base, 'bob');
     expect(shared.codes.size).toBe(2);
-    // Only the newest of alice's codes is live.
-    const creds = await a.credentials.ensure();
-    const latest = await approve(a.base, 'alice', 'last');
+    // Finishes racing each other on two replicas still leave ONE row, and
+    // only the code that landed last is live.
+    const codes = await Promise.all([approve(a.base, 'alice', 'x'), approve(b.base, 'alice', 'y'), approve(a.base, 'alice', 'z')]);
     expect(shared.codes.size).toBe(2);
-    expect((await exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code: latest })).status).toBe(200);
+    const creds = await a.credentials.ensure();
+    const results = await Promise.all(
+      codes.map((code) => exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code })),
+    );
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+  });
+
+  it('two exchanges of one code at the same instant mint exactly one token', async () => {
+    const creds = await a.credentials.ensure();
+    const code = await approve(a.base, 'alice');
+    const body = { client_id: creds.clientId, client_secret: creds.clientSecret, code };
+    const before = shared.keys.byToken.size;
+    const results = await Promise.all([exchange(a.base, body), exchange(b.base, body), exchange(a.base, body)]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 400, 400]);
+    expect(shared.keys.byToken.size).toBe(before + 1);
+  });
+
+  it('a rotation returns what is stored, so two admins rotating at once are shown the same set', async () => {
+    const [x, y] = await Promise.all([a.credentials.rotate(), b.credentials.rotate()]);
+    const stored = await shared.credentials.load();
+    expect(x.clientId).toBe(stored!.clientId);
+    expect(y.clientId).toBe(stored!.clientId);
   });
 
   it('answers the token endpoint in the encoding the client negotiated, failures included', async () => {
