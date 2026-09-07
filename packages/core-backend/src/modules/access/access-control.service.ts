@@ -313,6 +313,17 @@ function resolveScopes(
         set(entry, 'grant');
       }
     }
+    // A PUBLIC plugin principal (its plugin grants `everyone`) is held by
+    // every signed-in person, so a grant to it IS a grant to everyone at this
+    // scope. Folded HERE, where a scope's verdicts are built, so every reader
+    // of them — the permission check, the eligible lists, the `restricted`
+    // flag, the compiler's everyone audience — sees one truth.
+    for (const [key, state] of byRole) {
+      if (state === 'grant' && model.roles.publicKeys?.has(key)) {
+        if (byRole.get(EVERYONE_CANONICAL) !== 'grant') byRole.set(EVERYONE_CANONICAL, 'grant');
+        break;
+      }
+    }
     return { byRole, byEmail, source };
   };
 
@@ -682,11 +693,6 @@ function eligibleHoldersResolved(
     if (state !== 'grant') continue;
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
-    // A PUBLIC plugin principal (its plugin grants `everyone`) is held by every
-    // signed-in person, so the path is open to everyone: say so in the
-    // eligible set, or a gate counting approvers would see a principal with
-    // no enumerable members and wait forever.
-    if (model.roles.publicKeys?.has(canonical)) addPrincipal(EVERYONE_CANONICAL, 'role');
   }
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on

@@ -23,9 +23,10 @@ const WINDOWS_RESERVED_NAMES = new Set([
 
 /** Characters Windows forbids in any filename component. `/` is the path
  *  separator on Unix, included for the same reason. `\` is also a path
- *  separator on Windows. Control chars (0x00–0x1F) are rejected separately. */
+ *  separator on Windows. Control chars (0x00–0x1F and DEL, 0x7F) are rejected
+ *  with them: none of them can be a path segment on any platform. */
 // eslint-disable-next-line no-control-regex
-const FORBIDDEN_CHARS = /[<>:"/\\|?*\x00-\x1F]/;
+const FORBIDDEN_CHARS = /[<>:"/\\|?*\x00-\x1F\x7F]/;
 
 /** Per-component byte limit: NTFS = 255 UTF-16 units, ext4 = 255 bytes,
  *  APFS = 255 UTF-8 bytes. Use UTF-8 bytes — the strictest of the three. */

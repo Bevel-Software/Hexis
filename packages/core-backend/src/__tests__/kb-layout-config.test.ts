@@ -41,6 +41,7 @@ describe('KB layout — validation', () => {
     // The same rule every file and folder name passes: reserved Windows
     // names, forbidden characters, trailing dots and spaces.
     expect(validateKbRootName('CON')).not.toBeNull();
+    expect(validateKbRootName('a\u007fb')).not.toBeNull();
     expect(validateKbRootName('a:b')).not.toBeNull();
     expect(validateKbRootName('name.')).not.toBeNull();
     expect(validateKbRootName('x'.repeat(300))).not.toBeNull();

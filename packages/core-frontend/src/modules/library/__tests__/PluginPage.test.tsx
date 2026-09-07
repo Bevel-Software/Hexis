@@ -242,6 +242,26 @@ describe('PluginPage', () => {
     expect(await screen.findByText(/Unlinked deploy from GTM/)).toBeInTheDocument();
   });
 
+  it('offers no remove for a LINK into a plugin whose links live in an external format', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'deploy',
+          description: 'Ships it.',
+          path: 'Skills/Eng/deploy',
+          plugins: [{ name: 'GTM', linked: true, granted: true }],
+        },
+      ],
+    });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, linksAreManaged: false })]);
+    renderPlugin('GTM');
+    // The inline skill can still be removed; the link cannot be undone here.
+    await screen.findByRole('button', { name: 'Remove outreach' });
+    expect(screen.queryByRole('button', { name: 'Remove deploy' })).toBeNull();
+  });
+
   it('offers no remove affordance to a non-manager', async () => {
     renderPlugin('GTM'); // gtm() defaults to canWrite: false
     await screen.findByText('outreach');

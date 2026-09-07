@@ -381,18 +381,21 @@ function portableMcp(
       leftOut(name, verdict.reason);
       continue;
     }
-    const entry = { ...verdict.entry };
-    if (typeof entry.url === 'string' && containsVariableReference(entry.url)) {
+    if (verdict.transport === 'stdio') {
+      out[name] = { ...verdict.entry };
+      continue;
+    }
+    const entry: Record<string, unknown> = { type: verdict.entry.type, url: verdict.entry.url };
+    if (containsVariableReference(verdict.entry.url)) {
       leftOut(name, 'its url is expanded from the vault, which a client cannot do');
       continue;
     }
-    if (typeof entry.headers === 'object' && entry.headers !== null) {
+    if (verdict.entry.headers) {
       const headers: Record<string, string> = {};
-      for (const [h, v] of Object.entries(entry.headers as Record<string, unknown>)) {
-        if (typeof v === 'string' && !containsVariableReference(v)) headers[h] = v;
+      for (const [h, v] of Object.entries(verdict.entry.headers)) {
+        if (!containsVariableReference(v)) headers[h] = v;
       }
       if (Object.keys(headers).length > 0) entry.headers = headers;
-      else delete entry.headers;
     }
     out[name] = entry;
   }

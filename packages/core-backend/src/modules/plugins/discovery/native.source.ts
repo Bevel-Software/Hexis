@@ -28,13 +28,15 @@ export async function readNativePlugin(
   if (manifestText !== null && manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
   }
-  // The FOLDER is the plugin's identity everywhere — the catalog, the
-  // principals, the marketplace slug. A manifest naming something else is
-  // not read as an identity, and the mismatch is said out loud so a grant
-  // written against the manifest's spelling is not a mystery.
+  // Two names govern two things. The FOLDER is the plugin's identity for
+  // ACCESS — the catalog, the plugin principals (`plugin/<folder>/<verb>`),
+  // the link grants. The manifest's `name` is what the compiled marketplace
+  // publishes the plugin as, per the plugin spec. When they differ, a grant
+  // written against the published name reaches nobody, so the mismatch is
+  // said out loud.
   if (manifest && typeof manifest.name === 'string' && pluginManifestName(manifest.name) !== pluginManifestName(name)) {
     warnings.push(
-      `${folder}/${PLUGIN_MANIFEST_FILE} names "${manifest.name}" but the folder "${name}" is the plugin's identity — the manifest name is not consulted`,
+      `${folder}/${PLUGIN_MANIFEST_FILE} names "${manifest.name}" while the folder is "${name}": access principals follow the FOLDER (plugin/${name}/read) — the marketplace publishes it as "${pluginManifestName(manifest.name)}"`,
     );
   }
   const mcp = parseObject(mcpJsonText);

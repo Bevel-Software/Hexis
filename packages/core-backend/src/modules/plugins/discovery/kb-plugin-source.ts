@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, pluginManifestName } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin, Discovery, PluginSource } from './plugin-source.js';
+import { comparePathComponents } from '../../../shared/path-order.js';
 import { readNativePlugin } from './native.source.js';
 import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bundle.source.js';
 
@@ -78,7 +79,7 @@ export class KbPluginSource implements PluginSource {
       let beneath = 0;
       for (const entry of entries
         .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-        .sort((a, b) => a.name.localeCompare(b.name))) {
+        .sort((a, b) => comparePathComponents(a.name, b.name))) {
         beneath += await visit(path.join(dir, entry.name), relFolder ? `${relFolder}/${entry.name}` : entry.name);
       }
       return beneath;

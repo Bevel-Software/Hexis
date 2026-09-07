@@ -224,16 +224,19 @@ function resolveSkillPath(
     return { kind: 'skill', name: owner.id, file: file || 'SKILL.md', provisional: false };
   }
   const parentName = tail.length >= 2 ? tail[tail.length - 2]! : selfName;
+  const parentRel = repoRel.slice(0, repoRel.length - last.length - 1);
+  // The tree's verdict comes BEFORE any structural reading of the URL: a
+  // folder the tree holds with no SKILL.md in it is no skill, whatever the
+  // path is called — a `SKILL.md` URL into it included.
+  if (witness?.(hasExtension(last) ? parentRel : repoRel) === false) {
+    return hasExtension(last) ? { kind: 'loose-file' } : { kind: 'container' };
+  }
   if (last === 'SKILL.md' && parentName !== null) {
     return { kind: 'skill', name: parentName, file: 'SKILL.md', provisional: true };
   }
   if (!hasExtension(last) && containsCatalogSkill(data.items, repoRel)) return { kind: 'container' };
-  const parentRel = repoRel.slice(0, repoRel.length - last.length - 1);
   if (hasExtension(last) && (tail.length === 1 || containsCatalogSkill(data.items, parentRel))) {
     return { kind: 'loose-file' };
-  }
-  if (witness?.(hasExtension(last) ? parentRel : repoRel) === false) {
-    return hasExtension(last) ? { kind: 'loose-file' } : { kind: 'container' };
   }
   if (data.loading) return { kind: 'wait' };
   if (hasExtension(last)) {

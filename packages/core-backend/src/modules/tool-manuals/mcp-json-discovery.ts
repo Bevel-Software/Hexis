@@ -205,10 +205,40 @@ export function validatedVariables(raw: unknown): ToolVariable[] | null {
  * the portable shape every consumer emits.
  */
 export type McpEntryVerdict =
-  | { ok: true; transport: 'stdio' | 'streamable-http'; entry: Record<string, unknown> }
+  | { ok: true; transport: 'stdio'; entry: PortableStdioEntry }
+  | { ok: true; transport: 'streamable-http'; entry: PortableHttpEntry }
   | { ok: false; reason: string };
 
+/** A stdio server as a client launches it — every field already the type the launcher needs. */
+export interface PortableStdioEntry {
+  type: 'stdio';
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+/** An http server as a client dials it — an endpoint, never a credential. */
+export interface PortableHttpEntry {
+  type: 'streamable-http';
+  url: string;
+  headers?: Record<string, string>;
+}
+
+/** A record whose every value is a string, or null — no coercion, no cast. */
+function stringMap(v: unknown): Record<string, string> | null {
+  if (!isRecord(v)) return null;
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val !== 'string') return null;
+    out[k] = val;
+  }
+  return out;
+}
+
 export function judgeMcpServerEntry(name: string, raw: unknown): McpEntryVerdict {
+  // The name rule (lowercase, alphanumeric first) also keeps every object
+  // prototype key — `__proto__`, `constructor` — out of the plain-object
+  // maps consumers build from these names.
   if (!SERVER_NAME_RE.test(name)) {
     return {
       ok: false,
@@ -218,10 +248,23 @@ export function judgeMcpServerEntry(name: string, raw: unknown): McpEntryVerdict
   if (!isRecord(raw) || typeof raw.type !== 'string') return { ok: false, reason: 'no transport type' };
   if (raw.type === 'stdio') {
     if (typeof raw.command !== 'string' || raw.command.length === 0) return { ok: false, reason: 'no command' };
-    const entry: Record<string, unknown> = { type: 'stdio', command: raw.command };
-    if (Array.isArray(raw.args)) entry.args = raw.args.map(String);
-    if (isRecord(raw.env)) entry.env = raw.env;
-    if (typeof raw.cwd === 'string') entry.cwd = raw.cwd;
+    const entry: PortableStdioEntry = { type: 'stdio', command: raw.command, args: [] };
+    if (raw.args !== undefined) {
+      // A launcher gets the strings it was given, never a stringified object.
+      if (!Array.isArray(raw.args) || !raw.args.every((a) => typeof a === 'string')) {
+        return { ok: false, reason: 'args must be a list of strings' };
+      }
+      entry.args = raw.args;
+    }
+    if (raw.env !== undefined) {
+      const env = stringMap(raw.env);
+      if (env === null) return { ok: false, reason: 'env must be a map of strings' };
+      entry.env = env;
+    }
+    if (raw.cwd !== undefined) {
+      if (typeof raw.cwd !== 'string') return { ok: false, reason: 'cwd must be a string' };
+      entry.cwd = raw.cwd;
+    }
     return { ok: true, transport: 'stdio', entry };
   }
   if (raw.type === 'sse') {
@@ -237,16 +280,23 @@ export function judgeMcpServerEntry(name: string, raw: unknown): McpEntryVerdict
   }
   if (raw.type === 'streamable-http') {
     if (typeof raw.url !== 'string' || raw.url.length === 0) return { ok: false, reason: 'no url' };
-    let schemeOk = false;
+    let parsed: URL;
     try {
-      const u = new URL(raw.url);
-      schemeOk = u.protocol === 'http:' || u.protocol === 'https:';
+      parsed = new URL(raw.url);
     } catch {
-      schemeOk = false;
+      return { ok: false, reason: 'url must be http(s)' };
     }
-    if (!schemeOk) return { ok: false, reason: 'url must be http(s)' };
-    const entry: Record<string, unknown> = { type: 'streamable-http', url: raw.url };
-    if (isRecord(raw.headers)) entry.headers = raw.headers;
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false, reason: 'url must be http(s)' };
+    // A portable entry is an endpoint. A credential belongs in the vault and
+    // reaches a client through the platform, never verbatim in a config that
+    // is compiled into a marketplace and cloned onto every member's machine.
+    if (parsed.username || parsed.password) return { ok: false, reason: 'url must not carry credentials' };
+    const entry: PortableHttpEntry = { type: 'streamable-http', url: raw.url };
+    if (raw.headers !== undefined) {
+      const headers = stringMap(raw.headers);
+      if (headers === null) return { ok: false, reason: 'headers must be a map of strings' };
+      entry.headers = headers;
+    }
     return { ok: true, transport: 'streamable-http', entry };
   }
   // Unknown transport: the spec says an unknown `type` invalidates the
@@ -330,21 +380,12 @@ export function descriptorsFromMcpJson(
     };
 
     if (verdict.transport === 'stdio') {
-      const entry = verdict.entry;
-      out.push({
-        ...shared,
-        remote: false,
-        stdio: {
-          command: entry.command as string,
-          args: (entry.args as string[] | undefined) ?? [],
-          env: entry.env as Record<string, string> | undefined,
-          cwd: entry.cwd as string | undefined,
-        },
-      });
+      const { command, args, env, cwd } = verdict.entry;
+      out.push({ ...shared, remote: false, stdio: { command, args, env, cwd } });
       continue;
     }
 
-    const url = verdict.entry.url as string;
+    const url = verdict.entry.url;
     // Remote-capable servers get the same SSRF gate `.tool` urls pass —
     // otherwise mcp.json becomes the way to point the backend at loopback,
     // private ranges, or the cloud metadata endpoint. A `local: true` entry
@@ -369,7 +410,7 @@ export function descriptorsFromMcpJson(
     // Both sides pass the isRecord gate — spreading a malformed non-object
     // value (a string, say) would scatter its indices into header keys.
     const headers = {
-      ...(isRecord(raw.headers) ? (raw.headers as Record<string, string>) : {}),
+      ...(verdict.entry.headers ?? {}),
       ...(isRecord(ext.headers) ? (ext.headers as Record<string, string>) : {}),
     };
     out.push({

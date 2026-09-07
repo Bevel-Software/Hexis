@@ -112,6 +112,7 @@ export function CardGrid({
   items,
   onOpen,
   onRemove,
+  canRemove,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
@@ -122,6 +123,12 @@ export function CardGrid({
    * card is one <button>, and a button inside a button is not HTML.
    */
   onRemove?(item: LibraryItem): void;
+  /**
+   * Per item, whether the verb would succeed — a link into a plugin whose
+   * links live in an external format cannot be removed here. Absent: every
+   * item. A verb the server would refuse is not offered.
+   */
+  canRemove?(item: LibraryItem): boolean;
 }) {
   return (
     <div
@@ -169,7 +176,7 @@ export function CardGrid({
         );
         // A pending proposal is not IN the place yet — there is nothing to
         // remove; declining it lives with the review.
-        if (!onRemove || item.pending) return card;
+        if (!onRemove || item.pending || (canRemove && !canRemove(item))) return card;
         return (
           // `grid`, not a plain block: the wrapper takes the card's place as
           // the grid item, and only a grid (or flex) container stretches its
@@ -289,6 +296,7 @@ export function PluginItemSections({
   toolItems,
   onOpen,
   onRemove,
+  canRemove,
   emptySkills,
   emptyTools = 'No tools yet.',
   hideEmpty = false,
@@ -300,6 +308,8 @@ export function PluginItemSections({
   onOpen(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
+  /** See {@link CardGrid}. */
+  canRemove?(item: LibraryItem): boolean;
   /**
    * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
    * standard paragraph; a node is trusted to bring its own — the nudge carries
@@ -342,7 +352,7 @@ export function PluginItemSections({
               emptySkills
             )
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} />
+            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
           )}
         </PluginSection>
       )}
@@ -352,7 +362,7 @@ export function PluginItemSections({
           {toolItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptyTools}</p>
           ) : (
-            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} />
+            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
           )}
         </PluginSection>
       )}

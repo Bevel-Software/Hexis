@@ -144,29 +144,43 @@ describe('compileMarketplace', () => {
   });
 
   it('ships only mcp servers a client could run, and names each one it leaves out', async () => {
+    // Written as text, not from an object literal: a literal `__proto__` key
+    // sets the prototype instead of an own property, and the point is a
+    // repository file that CARRIES that key.
     await write(
       'Plugins/GTM/mcp.json',
-      JSON.stringify({
-        mcpServers: {
-          notion: { type: 'streamable-http', url: 'https://mcp.notion.com' },
-          events: { type: 'sse', url: 'https://events.example' },
-          'Bad Name': { type: 'stdio', command: 'x' },
-          empty: { type: 'stdio' },
-        },
-      }),
+      `{"mcpServers": {
+        "notion": { "type": "streamable-http", "url": "https://mcp.notion.com" },
+        "events": { "type": "sse", "url": "https://events.example" },
+        "Bad Name": { "type": "stdio", "command": "x" },
+        "empty": { "type": "stdio" },
+        "creds": { "type": "streamable-http", "url": "https://user:pw@mcp.example" },
+        "badenv": { "type": "stdio", "command": "x", "env": { "A": 1 } },
+        "badargs": { "type": "stdio", "command": "x", "args": [1, "b"] },
+        "badheaders": { "type": "streamable-http", "url": "https://x.example", "headers": { "A": 1 } },
+        "__proto__": { "type": "stdio", "command": "x" }
+      }}`,
     );
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
     const mcp = json(tree, 'plugins/gtm/mcp.json');
     expect(Object.keys(mcp.mcpServers)).toEqual(['notion']);
-    expect(tree.warnings.some((w) => w.includes('"events" not shipped') && w.includes('sse'))).toBe(true);
-    expect(tree.warnings.some((w) => w.includes('"Bad Name" not shipped'))).toBe(true);
-    expect(tree.warnings.some((w) => w.includes('"empty" not shipped') && w.includes('no command'))).toBe(true);
+    const left = (name: string) => tree.warnings.find((w) => w.includes(`"${name}" not shipped`)) ?? '';
+    expect(left('events')).toContain('sse');
+    expect(left('Bad Name')).toContain('name');
+    expect(left('empty')).toContain('no command');
+    expect(left('creds')).toContain('credentials');
+    expect(left('badenv')).toContain('env');
+    expect(left('badargs')).toContain('args');
+    expect(left('badheaders')).toContain('headers');
+    expect(left('__proto__')).toContain('name');
   });
 
   it("carries discovery's warnings: a manifest naming something other than its folder is said out loud", async () => {
     await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', version: '2.1.0' }));
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
-    expect(tree.warnings.some((w) => w.includes('the manifest name is not consulted'))).toBe(true);
+    expect(tree.warnings.some((w) => w.includes('access principals follow the FOLDER (plugin/GTM/read)'))).toBe(true);
+    // And the marketplace does publish it under the manifest's name.
+    expect(tree.plugins).toContain('go-to-market');
   });
 
   it('for a stranger the plugin keeps only its MCP servers, and the public scope is all that ships', async () => {

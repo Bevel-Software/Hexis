@@ -111,9 +111,10 @@ export class MarketplaceRepoService {
       const head = await this.headOf(namespace);
       let current = await this.compiler.sourceCommit();
       if (last === current && head !== null) {
-        // Unchanged source is still a served namespace: its HEAD is
-        // reconciled on every fetch, so a crash after an earlier branch update
-        // cannot leave a clone that sees no default branch.
+        // Unchanged source is still a served namespace: its HEAD is checked
+        // on every fetch (a read) and written only when it is missing, so a
+        // crash after an earlier branch update cannot leave a clone that sees
+        // no default branch — and the cache hit stays a read on a healthy repo.
         await this.ensureHead(namespace);
         return { namespace, compiled: false, sourceCommit: current };
       }
@@ -212,9 +213,19 @@ export class MarketplaceRepoService {
     }
   }
 
-  /** Point the namespace's HEAD at its branch — idempotent, and valid before the branch exists. */
+  /**
+   * Point the namespace's HEAD at its branch — valid before the branch
+   * exists. A read first: the symref is written only when absent or wrong,
+   * so the common path touches nothing.
+   */
   private async ensureHead(namespace: string): Promise<void> {
-    await this.git(['-C', this.repoDir, 'symbolic-ref', `refs/namespaces/${namespace}/HEAD`, this.refOf(namespace)]);
+    const head = `refs/namespaces/${namespace}/HEAD`;
+    const current = await this.git(['-C', this.repoDir, 'symbolic-ref', '--quiet', head]).then(
+      (r) => r.stdout.trim(),
+      () => null,
+    );
+    if (current === this.refOf(namespace)) return;
+    await this.git(['-C', this.repoDir, 'symbolic-ref', head, this.refOf(namespace)]);
   }
 
   private sidecarDir(): string {

@@ -88,14 +88,21 @@ export function createSkillAccessRequestRoutes(deps: {
         res.json({ ok: true, number: existing.number });
         return;
       }
-      try {
-        await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);
-      } catch (err) {
-        // Only the known race is proceeded through — the branch appeared
-        // between the listing and now. Anything else is a real failure, and
-        // writing a proposal onto a branch that was not made would be worse.
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/already exists/i.test(message)) throw err;
+      // The branch may already exist (a request listed as closed, a retry
+      // after a failed open). Existence is PROBED, before and — if creation
+      // fails — after: the race shows up as "already exists" locally or as a
+      // rejected push when origin got there first, and a message is not a
+      // contract. A branch that is there is proceeded against; anything else
+      // is a real failure, and a proposal on a branch that was not made would
+      // be worse than the error.
+      const branchExists = async () =>
+        (await workflow.listBranches(wsId(), { freshFetch: true })).some((b) => b.name === branch);
+      if (!(await branchExists())) {
+        try {
+          await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);
+        } catch (err) {
+          if (!(await branchExists())) throw err;
+        }
       }
       const ws = await workspaceService.getOrCreateForBranch(branch);
       const accessPath = `${kbDirName}/${rulesOf(folder)}`;

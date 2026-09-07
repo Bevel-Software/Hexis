@@ -1,3 +1,4 @@
+import { PR_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
 import { pluginOfPath, isPersonalPluginFolder, SKILLS_DIR } from '@bevel-software/platform-shared';
@@ -99,6 +100,16 @@ export interface LibraryContextValue extends LibraryData {
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const data = useLibraryData();
+  // The catalog carries its own view of open change requests (proposals,
+  // review boxes). The shell's change-request provider refreshes on this
+  // event; so does the catalog, or the two would disagree after a proposal
+  // lands or is resolved.
+  const { reload } = data;
+  useEffect(() => {
+    const onStale = () => reload();
+    window.addEventListener(PR_STALE_EVENT, onStale);
+    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+  }, [reload]);
   const [pluginSummaries, setPluginSummaries] = useState<PluginSummary[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(true);
   const [pluginsError, setPluginsError] = useState<string | null>(null);

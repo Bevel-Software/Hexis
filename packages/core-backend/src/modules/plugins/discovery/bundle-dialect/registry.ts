@@ -14,13 +14,17 @@
  * Pure: parse once, expand many. Unknown ids and cycles are warnings, never
  * throws — a registry typo must not take every plugin down.
  */
-import { judgeMcpServerEntry } from '../../../tool-manuals/mcp-json-discovery.js';
+import {
+  judgeMcpServerEntry,
+  type PortableHttpEntry,
+  type PortableStdioEntry,
+} from '../../../tool-manuals/mcp-json-discovery.js';
 
 export interface RegistryServer {
   id: string;
   name?: string;
-  /** The server as one `mcp.json` entry — converted, and therefore usable, at parse time. */
-  entry: Record<string, unknown>;
+  /** The server as one `mcp.json` entry — judged, and therefore usable, at parse time. */
+  entry: PortableStdioEntry | PortableHttpEntry;
 }
 
 export interface RegistryProfile {
@@ -138,7 +142,10 @@ export function expandProfile(
  * one every `mcp.json` entry meets: a name that can be a server name, a
  * transport the client speaks (no `sse`), the field that transport needs.
  */
-function mcpEntryOf(id: string, config: Record<string, unknown>): { entry: Record<string, unknown> } | { reason: string } {
+function mcpEntryOf(
+  id: string,
+  config: Record<string, unknown>,
+): { entry: PortableStdioEntry | PortableHttpEntry } | { reason: string } {
   const declared = typeof config.type === 'string' ? config.type.trim().toLowerCase() : undefined;
   const url = nonBlank(config.url);
   const command = nonBlank(config.command);

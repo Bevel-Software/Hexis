@@ -127,8 +127,8 @@ describe('KbPluginSource — bundles', () => {
     const example = plugins.find((p) => p.name === 'example-plugin')!;
     expect(example.mcpServers).toEqual({
       jira: { type: 'stdio', command: 'npx', args: ['-y', 'jira-mcp'] },
-      launch: { type: 'stdio', command: 'run-it' },
-      'untyped-launch': { type: 'stdio', command: 'run-it' },
+      launch: { type: 'stdio', command: 'run-it', args: [] },
+      'untyped-launch': { type: 'stdio', command: 'run-it', args: [] },
     });
     expect(warnings.some((w) => w.includes('"jira" is declared twice'))).toBe(true);
     // The reasons are the shared judgement's — the same words an mcp.json entry gets.

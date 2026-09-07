@@ -104,13 +104,28 @@ async function copyTemplateFile(templateDir: string, relPath: string, dest: stri
   const from = await templateSource(templateDir, relPath);
   const to = path.join(dest, relPath);
   await fs.mkdir(path.dirname(to), { recursive: true });
-  const text = asText(await fs.readFile(from));
+  // A binary is spotted from its first bytes (a NUL turns up early in any
+  // real one) and streamed across without ever being read whole; only what
+  // may be text is read in full, and the full decode is still the judge.
+  const text = (await headHasNul(from)) ? null : asText(await fs.readFile(from));
   if (text === null) {
     await fs.copyFile(from, to);
   } else {
     await fs.writeFile(to, renderKbLayoutPlaceholders(text), 'utf8');
   }
   await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
+}
+
+/** Whether the first 8 KiB carry a NUL byte — the cheap half of "is this text". */
+async function headHasNul(file: string): Promise<boolean> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const buf = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    return buf.subarray(0, bytesRead).includes(0);
+  } finally {
+    await handle.close();
+  }
 }
 
 /** The bytes as text when they ARE text — strict UTF-8, BOM kept, no NUL — else null. */

@@ -186,6 +186,35 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'zed@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
     });
 
+    it('a public READ principal makes the path unrestricted — one truth for the flag and the lists', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/Open/read\n',
+      });
+      const readers = await svc.eligibleReaders(workspaceId, 'Skills/Common/tips/SKILL.md');
+      expect(readers.restricted).toBe(false);
+    });
+
+    it('orders twins the way the walk does: component by component, never by the whole string', async () => {
+      // `a/b/GTM` is visited before `a-b/GTM` (the walk sorts each level:
+      // "a" < "a-b"); a whole-string compare would weigh "-" against "/" and
+      // could pick the other one — and with it the other roster.
+      const svc = await makeService({
+        'roles.yaml': ROLES_YAML,
+        'groups.yaml': GROUPS_YAML,
+        'access.md': '---\nwrite:\n  - Admin\n---\n',
+        'Plugins/a/b/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/a/b/GTM/access.md': pluginAccessMd('read:\n  - Ali <ali@x.io>\n'),
+        'Plugins/a-b/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/a-b/GTM/access.md': pluginAccessMd('read:\n  - Zed <zed@x.io>\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
+      });
+      expect(await svc.canRead(workspaceId, 'ali@x.io', 'Skills/Common/tips/SKILL.md')).toBe(true);
+      expect(await svc.canRead(workspaceId, 'zed@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
+    });
+
     it('a plugin readable by everyone yields a public principal', async () => {
       const svc = await makeService({
         ...BASE,

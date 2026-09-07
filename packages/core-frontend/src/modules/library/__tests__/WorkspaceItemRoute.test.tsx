@@ -562,6 +562,22 @@ describe('WorkspaceItemRoute', () => {
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
     });
 
+    it("does not read a SKILL.md URL into a folder the tree shows has none as a skill", async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      const d = (rel: string, children: FileTreeEntry[]): FileTreeEntry => ({
+        name: rel.split('/').pop() ?? rel,
+        relativePath: rel,
+        type: 'directory',
+        children,
+      });
+      const tree = d('.', [
+        d(KB, [d(`${KB}/Skills`, [d(`${KB}/Skills/Sales`, [{ name: 'notes.md', relativePath: `${KB}/Skills/Sales/notes.md`, type: 'file' }])])]),
+      ]);
+      renderAt(itemUrl('Skills/Sales/SKILL.md'), tree);
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+    });
+
     it('waits for the catalog rather than guessing a scope is a skill', async () => {
       dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
       renderAt(itemUrl('Skills/Sales'));

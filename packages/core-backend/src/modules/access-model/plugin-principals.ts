@@ -1,3 +1,4 @@
+import { comparePathComponents } from '../../shared/path-order.js';
 import { pluginManifestName } from '@bevel-software/platform-shared';
 import {
   EVERYONE_CANONICAL,
@@ -60,8 +61,8 @@ export function synthesizePluginPrincipals(
 ): void {
   const claimed = new Set<string>();
   // The same path order discovery walks in, so "first by path" is the same
-  // plugin in both places.
-  for (const dir of [...pluginDirs].sort((a, b) => a.localeCompare(b))) {
+  // plugin in both places — see `comparePathComponents`.
+  for (const dir of [...pluginDirs].sort(comparePathComponents)) {
     const folder = dir.split('/').pop() ?? dir;
     const slug = pluginManifestName(folder);
     // Two plugins with one name: discovery keeps the first by path, so do we —

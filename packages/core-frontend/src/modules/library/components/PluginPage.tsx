@@ -315,6 +315,11 @@ export function PluginPage() {
         // them answer join requests. The backend's per-path gate enforces it
         // for real; this only decides who sees the affordance.
         onRemove={summary?.canWrite ? setRemoving : undefined}
+        // A LINK into a plugin whose links live in an external format cannot
+        // be removed here — the endpoint refuses it — so it is not offered.
+        canRemove={(item) =>
+          summary?.linksAreManaged !== false || !(item.plugins?.some((m) => m.name === plugin && m.linked) ?? false)
+        }
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'
