@@ -5,7 +5,7 @@ import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { Banner, Button, IconButton, Surface } from '../../../shared/components';
+import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -206,36 +206,6 @@ export function FileViewer() {
     fromBranch: string;
     toBranch: string;
   } | null>(null);
-  const historyAvailable = git.availability === 'ready';
-  // Losing the log CLOSES the view, rather than parking `activeTab` on it.
-  // `availability` is re-derived from a polled status call, so one failed
-  // poll flips it off and the next good one flips it back. Left on
-  // 'history', the tab would keep the column full-bleed with no panel in it
-  // (a bare document, no pane card, no way back but the next poll), and then
-  // put the log back over the file the moment git recovered, minutes after
-  // the reader had gone back to reading. Same rule the skill page applies to
-  // its own open flag.
-  if (activeTab !== 'content' && !historyAvailable) setActiveTab('content');
-  /**
-   * Opening the log from the pane bar's clock unmounts the pane bar, and with
-   * it the clock a keyboard user just activated; closing it from the header's
-   * pressed clock hands the column back to prose, which hides the header's
-   * clock again (`historyInPane`). Either way focus would fall to `document`.
-   * So the two clocks hand focus to each other across the swap — the same
-   * rule the skill page applies — and only for a swap the USER made: the tab
-   * resetting because git stopped answering, or because a different file
-   * opened, must not move focus.
-   */
-  const paneClockRef = useRef<HTMLButtonElement>(null);
-  const headerClockRef = useRef<HTMLButtonElement>(null);
-  const focusAfterSwap = useRef<'header' | 'pane' | null>(null);
-  useEffect(() => {
-    const want = focusAfterSwap.current;
-    if (!want) return;
-    focusAfterSwap.current = null;
-    if (want === 'header' && activeTab === 'history') headerClockRef.current?.focus();
-    if (want === 'pane' && activeTab === 'content') paneClockRef.current?.focus();
-  }, [activeTab]);
   const hasUnsavedWork = isManualDirty || manualSaveState === 'saving';
 
   const hasPending = pendingFileContent !== null;
@@ -376,6 +346,59 @@ export function FileViewer() {
   // acquiring + reloading. Renders the button as "Loading…" and
   // disables it so a double-click can't fire two acquires.
   const [isEnteringEdit, setIsEnteringEdit] = useState(false);
+
+  /**
+   * The log, and the clock that opens it, are withdrawn while a draft is
+   * open. Opening the log unmounts the editor; coming back re-mounts it from
+   * its seed, while `proposeBufferRef` still holds the newer keystrokes — so
+   * "Back to the document" would show the old text, and Send proposal would
+   * submit the new text nobody could see. The skill page applies the same
+   * rule (`!editing`) for the same reason. The `isEntering*` beats are in for
+   * the "Loading…" moment between the click and the editor, so the clock
+   * cannot open the log over an editor that is about to mount.
+   */
+  const historyAvailable =
+    git.availability === 'ready' &&
+    !editMode &&
+    !isEnteringEdit &&
+    !proposeMode &&
+    !isEnteringPropose;
+  // Losing the log CLOSES the view, rather than parking `activeTab` on it.
+  // `availability` is re-derived from a polled status call, so one failed
+  // poll flips it off and the next good one flips it back. Left on
+  // 'history', the tab would keep the column full-bleed with no panel in it
+  // (a bare document, no pane card, no way back but the next poll), and then
+  // put the log back over the file the moment git recovered, minutes after
+  // the reader had gone back to reading. Same rule the skill page applies to
+  // its own open flag.
+  //
+  // The LOG only. A comparison is asked for by the chat's "View full
+  // comparison" link, not by a clock this flag withdraws, and the panel
+  // reports git's state itself. Resetting it here too cancelled a click that
+  // landed before the first status poll answered (`availability` starts
+  // 'loading'), with nothing on screen to say so.
+  if (activeTab === 'history' && !historyAvailable) setActiveTab('content');
+  /**
+   * Opening the log from the pane bar's clock unmounts the pane bar, and with
+   * it the clock a keyboard user just activated; closing it hands the column
+   * back to prose, which hides the header's clock again (`historyInPane`).
+   * Either way focus would fall to `document`, so the clocks hand focus to
+   * each other across the swap (`useFocusHandoff`), and only for a swap the
+   * USER made. A full-bleed file has no pane bar: its header clock stays put
+   * and takes the focus instead. Every way out of the log or the comparison
+   * goes through `backToDocument`, so none can forget the handoff.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const headerClockRef = useRef<HTMLButtonElement>(null);
+  const handoff = useFocusHandoff(activeTab);
+  const openHistory = () => {
+    handoff('history', headerClockRef);
+    setActiveTab('history');
+  };
+  const backToDocument = () => {
+    handoff('content', paneClockRef, headerClockRef);
+    setActiveTab('content');
+  };
 
   // Mirror the lock state into edit mode, but only on a transition from
   // "we held the lock" to "we don't" — that's the idle-release /
@@ -1095,10 +1118,7 @@ export function FileViewer() {
       ref={paneClockRef}
       aria-label="Version history"
       title="Version history"
-      onClick={() => {
-        focusAfterSwap.current = 'header';
-        setActiveTab('history');
-      }}
+      onClick={openHistory}
     >
       <History size={14} />
     </IconButton>
@@ -1164,10 +1184,7 @@ export function FileViewer() {
         // While the log is open the column is full-bleed, so the header
         // carries the clock (pressed). A second click on a pressed clock is a
         // request to put the document back, not to open the log again.
-        onOpenHistory={() => {
-          focusAfterSwap.current = activeTab === 'history' ? 'pane' : 'header';
-          setActiveTab((t) => (t === 'history' ? 'content' : 'history'));
-        }}
+        onOpenHistory={activeTab === 'history' ? backToDocument : openHistory}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}
@@ -1179,12 +1196,12 @@ export function FileViewer() {
           route home would be reopening the file. */}
       {activeTab === 'history' && historyAvailable ? (
         <>
-          <BackToDocument onBack={() => setActiveTab('content')} label="Version history" />
+          <BackToDocument onBack={backToDocument} label="Version history" />
           <FileHistoryPanel filePath={openFilePath} />
         </>
-      ) : activeTab === 'compare' && historyAvailable ? (
+      ) : activeTab === 'compare' ? (
         <>
-          <BackToDocument onBack={() => setActiveTab('content')} label="Compare versions" />
+          <BackToDocument onBack={backToDocument} label="Compare versions" />
           <FileComparisonPanel
             filePath={openFilePath}
             initialFrom={comparisonOverride?.fromBranch ?? null}

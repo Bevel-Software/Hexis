@@ -131,6 +131,7 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
 
@@ -698,6 +699,56 @@ describe('FileViewer', () => {
     await user.click(back);
     // The document is back, and so is its Edit affordance.
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // The Back button unmounted with the log. Keyboard focus lands on the
+    // bar's clock, the same handoff the header's pressed clock makes, rather
+    // than falling to `document`.
+    expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+  });
+
+  /**
+   * Opening the log unmounts the editor. Coming back re-mounts it from its
+   * seed, while the buffer Send reads still holds the newer keystrokes: the
+   * page would show one text and submit another. So the clock goes away for
+   * exactly as long as a draft is open, the rule the skill page applies.
+   */
+  it('withdraws Version history while the editor is open, and returns it on Done', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="draft me" />);
+
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  /**
+   * The chat's "View full comparison" link lands whenever the agent answers,
+   * and `availability` starts 'loading' until the first status poll returns.
+   * The comparison is not gated on the log's availability: the panel asks git
+   * itself and reports what it gets. Cancelling the tab here instead dropped
+   * the click with nothing on screen to say so.
+   */
+  it('opens the comparison a chat link asks for before git has answered, and keeps it through a failed poll', async () => {
+    const { rerender } = render(<ViewerHarness initialContent="compared" gitAvailability="loading" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    expect(await screen.findByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+
+    // A poll fails while the comparison is up. It stays up: the reader asked
+    // for it, and only the log closes when git stops answering.
+    rerender(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+    expect(screen.getByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
   });
 
   // With the log open the column goes full-bleed and the header carries the
@@ -996,6 +1047,37 @@ describe('FileViewer: proposing a change without write access', () => {
     // The branch already says exactly this — no write, no empty commit.
     await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument());
     expect(proposeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The seeded case is where the clock did real damage: the editor re-mounts
+   * from `proposeSeed` on the way back from the log, while `proposeBufferRef`
+   * still holds the newer keystrokes — the old text on screen, the new text
+   * sent. No clock while a proposal is open.
+   */
+  it('withdraws Version history while a proposal is open, and returns it on Discard', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
   });
 
   it('discard walks away without sending anything', async () => {

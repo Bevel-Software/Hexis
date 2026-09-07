@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
@@ -319,6 +320,12 @@ function AnchoredMenu({
    */
   onDismiss,
   /**
+   * The control that opened us. Clicks on it are the trigger's own business
+   * (its handler toggles), and Escape returns focus to it. Goes with
+   * `onDismiss`; a stable ref, as `useDismissableMenu` lists it in its deps.
+   */
+  triggerRef,
+  /**
    * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
    * Clamped up to {@link MENU_MIN_WIDTH} either way.
    */
@@ -329,15 +336,12 @@ function AnchoredMenu({
   children,
 }: {
   onDismiss?: () => void;
+  triggerRef?: RefObject<HTMLElement | null>;
   width?: number | 'anchor';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
 }) {
-  // The control that opened us: the anchor's button. Clicks on it are the
-  // trigger's own business (its handler toggles), and Escape returns focus to
-  // it. Resolved in the layout effect below, once the panel is in the DOM.
-  const triggerRef = useRef<HTMLElement | null>(null);
   const dismissable = onDismiss !== undefined;
   // Callers pass a fresh `onDismiss` arrow each render, and the hook lists
   // `onClose` in its effect deps: handed the arrow directly it would tear down
@@ -361,7 +365,6 @@ function AnchoredMenu({
   useLayoutEffect(() => {
     const panel = panelRef.current;
     const anchorEl = panel?.parentElement ?? null;
-    triggerRef.current = anchorEl?.querySelector('button') ?? anchorEl;
     const place = () => {
       const el = panelRef.current;
       const anchor = el?.parentElement?.getBoundingClientRect();
@@ -476,6 +479,11 @@ export function ManageAccessDialog({
   const [mutateError, setMutateError] = useState<string | null>(null);
   // Which existing row's verb checklist is open (one at a time).
   const [openRowKey, setOpenRowKey] = useState<string | null>(null);
+  // The triggers the two verb menus return focus to on Escape. One ref serves
+  // every grantee row: only the OPEN row's trigger carries it (one menu at a
+  // time), so it always names the button whose menu is on screen.
+  const openRowTriggerRef = useRef<HTMLButtonElement>(null);
+  const verbTriggerRef = useRef<HTMLButtonElement>(null);
   // When set, the "Remove from parent?" confirmation is open for this principal.
   // `ancestors` are the granting access.md path(s) (repo-relative, opaque) to
   // echo back on remove-from-parent. `verb` scopes the action to a single verb
@@ -1113,17 +1121,22 @@ export function ManageAccessDialog({
           </span>
         ) : canManage ? (
           <div className="ml-auto shrink-0">
+            {/* Not `disabled={busy}`: the checklist's items freeze while a
+                grant or revoke is in flight, and this button only opens or
+                closes the checklist. Disabled, it could not take focus back
+                on Escape (`.focus()` on a disabled button is a no-op), and
+                focus fell to `document`. */}
             <Button
+              ref={openRowKey === p.key ? openRowTriggerRef : undefined}
               variant="quiet"
               size="sm"
-              disabled={busy}
               onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
               trailingIcon={<ChevronDown size={14} />}
             >
               {summarizeVerbs(p.verbs)}
             </Button>
             {openRowKey === p.key && (
-              <AnchoredMenu onDismiss={() => setOpenRowKey(null)}>
+              <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
                 {TIER_ROLES.map((role) => {
                   const k = ROLE_TO_KEY[role];
                   const checked = p.verbs[k];
@@ -1303,6 +1316,7 @@ export function ManageAccessDialog({
 
               <div className="shrink-0">
                 <Button
+                  ref={verbTriggerRef}
                   variant="outline"
                   size="sm"
                   className="max-w-44"
@@ -1312,7 +1326,7 @@ export function ManageAccessDialog({
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <AnchoredMenu onDismiss={() => setVerbOpen(false)}>
+                  <AnchoredMenu onDismiss={() => setVerbOpen(false)} triggerRef={verbTriggerRef}>
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];

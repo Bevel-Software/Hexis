@@ -668,6 +668,61 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
   });
 
+  /**
+   * The scrim is the dialog's own outside-click. The menu closes on
+   * `mousedown` and pops its modal layer as it unmounts, so by the time the
+   * scrim's `click` fires the dialog is the top layer again — and used to
+   * close on the same gesture, taking the half-filled add row with it.
+   * Escape peels one layer at a time; so does the scrim.
+   */
+  it('a click on the scrim closes the menu and only the menu', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    await user.click(await aliceTrigger());
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+
+    const scrim = screen.getByRole('dialog').parentElement!;
+    await user.click(scrim);
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    // With no menu open, the scrim closes the dialog as it always did.
+    await user.click(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A verb click leaves the checklist open while the grant is in flight, with
+   * every item frozen. The trigger used to freeze too — and `.focus()` on a
+   * disabled button is a no-op, so Escape during that window dropped focus
+   * to `document`. The trigger only opens and closes the checklist; it does
+   * not need to freeze.
+   */
+  it('Escape while a grant is in flight still returns focus to the trigger', async () => {
+    const user = userEvent.setup();
+    let settle!: (view: AccessResponse) => void;
+    api.grantAccess.mockReturnValue(new Promise<AccessResponse>((resolve) => (settle = resolve)));
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await aliceTrigger();
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
+    expect(api.grantAccess).toHaveBeenCalledTimes(1);
+    // In flight: the checklist's items are frozen, the trigger is not.
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeDisabled();
+    expect(trigger).not.toBeDisabled();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+
+    settle(VIEW);
+    await waitFor(() => expect(trigger).not.toBeDisabled());
+  });
+
   it('Escape closes the menu, not the dialog, and returns focus to the trigger', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

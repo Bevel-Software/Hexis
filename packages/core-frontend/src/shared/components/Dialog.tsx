@@ -92,6 +92,14 @@ export function Dialog({
   // nested modal (its own or a hand-rolled one that opts in) can be dismissed
   // without also closing this dialog behind it.
   const isTopLayer = useModalLayer(open);
+  // Whether this dialog was the top layer when the pointer went DOWN on the
+  // scrim. A menu inside the dialog dismisses itself on `mousedown` and pops
+  // its layer as it unmounts, so by the time the scrim's `click` fires the
+  // dialog is topmost again — and would close on the same gesture that
+  // closed the menu, discarding whatever was in progress under it. Escape
+  // peels one layer at a time; so does the scrim. Recorded here rather than
+  // in each menu, so no menu has to learn to defer its own pop.
+  const topLayerAtPointerDown = useRef(false);
 
   // Dialog a11y: move focus into the panel on open, trap focus + Escape closes
   // + restore focus on close.
@@ -147,8 +155,13 @@ export function Dialog({
   return (
     <div
       className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-4"
+      onMouseDown={() => {
+        topLayerAtPointerDown.current = isTopLayer();
+      }}
       onClick={() => {
-        if (busy || !isTopLayer()) return;
+        const wasTop = topLayerAtPointerDown.current;
+        topLayerAtPointerDown.current = false;
+        if (busy || !wasTop || !isTopLayer()) return;
         onClose();
       }}
     >

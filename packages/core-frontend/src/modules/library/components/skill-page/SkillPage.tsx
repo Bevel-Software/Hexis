@@ -12,6 +12,7 @@ import {
   Button,
   IconButton,
   Surface,
+  useFocusHandoff,
 } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
@@ -282,28 +283,20 @@ export function SkillPage({
    * The clock that opens the log sits in the file bar, and the bar unmounts
    * with the file; the pressed clock that closes it sits in the history row,
    * which unmounts with the log. Either way the control a keyboard user just
-   * activated is gone from the DOM, and focus would fall to `document` — the
-   * next Tab starts from the top of the page. So the two clocks hand focus to
-   * each other: opening lands on the pressed clock, closing lands on the bar's.
-   * Only for a swap the USER made (the flag is set by the click handlers);
-   * the log closing because git stopped answering must not move focus.
+   * activated is gone from the DOM, so the two clocks hand focus to each
+   * other (`useFocusHandoff`): opening lands on the pressed clock, closing
+   * lands on the bar's. Only for a swap the USER made; the log closing
+   * because git stopped answering names no target and moves nothing.
    */
   const paneClockRef = useRef<HTMLButtonElement>(null);
   const pressedClockRef = useRef<HTMLButtonElement>(null);
-  const focusAfterSwap = useRef<'pressed' | 'pane' | null>(null);
-  useEffect(() => {
-    const want = focusAfterSwap.current;
-    if (!want) return;
-    focusAfterSwap.current = null;
-    if (want === 'pressed' && viewingHistory) pressedClockRef.current?.focus();
-    if (want === 'pane' && !viewingHistory) paneClockRef.current?.focus();
-  }, [viewingHistory]);
+  const handoff = useFocusHandoff(viewingHistory);
   const openHistory = () => {
-    focusAfterSwap.current = 'pressed';
+    handoff(true, pressedClockRef);
     setHistoryOpen(true);
   };
   const closeHistory = () => {
-    focusAfterSwap.current = 'pane';
+    handoff(false, paneClockRef);
     setHistoryOpen(false);
   };
   /**
