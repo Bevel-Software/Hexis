@@ -1,4 +1,4 @@
-import type { Server } from 'node:http';
+import { get as httpGet, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -9,6 +9,7 @@ import type { AuthService } from '../../auth/auth.service.js';
 import { AccessConfigError } from '../../access-model/access-errors.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
+import { createAuthMiddleware, AUTH_COOKIE_NAME } from '../../auth/auth.middleware.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
 import { FolderTooLargeError, type WorkspaceService } from '../workspace.service.js';
 
@@ -37,6 +38,8 @@ const USER = { id: USER_ID, email: 'alice@example.com', name: 'Alice' };
 const WORKSPACE_ID = 'target-company-state';
 const FILE_BYTES = Buffer.from('hello world');
 const ZIP_BYTES = Buffer.from('PK\x03\x04 fake-zip-bytes');
+/** The one token the stubbed auth service accepts, for the real-middleware cases. */
+const COOKIE_TOKEN = 'cookie-session-token';
 
 interface Harness {
   server: Server;
@@ -51,6 +54,12 @@ async function makeHarness(opts: {
   folderZip?: () => Promise<Buffer> | Buffer;
   /** When set, canDownload rejects with this error instead of returning a bool. */
   canDownloadError?: Error;
+  /**
+   * Mount the real auth middleware (Bearer, else the `bevel_token` cookie)
+   * instead of the userId shim. For the cases about how an `<img>`, which
+   * sends no Authorization header, gets through.
+   */
+  realAuth?: boolean;
 }): Promise<Harness> {
   const canDownload = vi.fn(async () => {
     if (opts.canDownloadError) throw opts.canDownloadError;
@@ -91,6 +100,10 @@ async function makeHarness(opts: {
 
   const authServiceMock: Partial<AuthService> = {
     getUserById: vi.fn(async () => USER),
+    verifyToken: vi.fn((token: string) => {
+      if (token !== COOKIE_TOKEN) throw new Error('bad token');
+      return { userId: USER_ID, email: USER.email };
+    }) as unknown as AuthService['verifyToken'],
   };
   const authService = authServiceMock as AuthService;
 
@@ -99,10 +112,14 @@ async function makeHarness(opts: {
 
   const app = express();
   app.use(express.json());
-  app.use('/api', (req, _res, next) => {
-    (req as any).userId = USER_ID;
-    next();
-  });
+  if (opts.realAuth) {
+    app.use('/api', createAuthMiddleware(authService));
+  } else {
+    app.use('/api', (req, _res, next) => {
+      (req as any).userId = USER_ID;
+      next();
+    });
+  }
   app.use('/api', createWorkspaceRoutes(
     workspaceService,
     authService,
@@ -236,6 +253,69 @@ describe('GET /workspace/:id/file/raw — ?download=1 gated on Download role', (
       `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file/raw?path=${encodeURIComponent('Knowledge/Foo.md')}`,
     );
     expect(res.headers.get('content-security-policy')).toBeNull();
+  });
+});
+
+/**
+ * What makes a markdown image a plain `<img>`: the tag carries only the auth
+ * cookie, and the response is cacheable by that one browser, revalidated with
+ * an ETag, and never stored by a shared cache.
+ */
+describe('GET /workspace/:id/file/raw — caching and cookie auth, for the <img> tags a page emits', () => {
+  let h: Harness | null = null;
+  afterEach(async () => { if (h) await closeServer(h.server); h = null; });
+
+  const inlineUrl = (base: string) =>
+    `${base}/api/workspace/${WORKSPACE_ID}/file/raw?path=${encodeURIComponent('Knowledge/assets/shot.png')}`;
+
+  it('marks an inline response private and revalidated: a shared cache never stores it, a browser asks before reusing it', async () => {
+    h = await makeHarness({ canDownload: false });
+    const res = await fetch(inlineUrl(h.baseUrl));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('private, no-cache');
+  });
+
+  it('marks a download the same way', async () => {
+    h = await makeHarness({ canDownload: true });
+    const res = await fetch(`${inlineUrl(h.baseUrl)}&download=1`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('private, no-cache');
+  });
+
+  it('answers 304 with no body to a matching If-None-Match, so a revisited page costs no bytes', async () => {
+    h = await makeHarness({ canDownload: false });
+    const first = await fetch(inlineUrl(h.baseUrl));
+    const etag = first.headers.get('etag');
+    expect(etag).toBeTruthy();
+    // A plain client for the revalidation. Node's `fetch` adds
+    // `Cache-Control: no-cache` to any conditional request, and Express
+    // honours that by answering in full; a browser revalidating an <img>
+    // sends the If-None-Match alone (or with `max-age=0` on a reload).
+    const again = await new Promise<{ status: number; bytes: number }>((resolve, reject) => {
+      httpGet(inlineUrl(h!.baseUrl), { headers: { 'If-None-Match': etag! } }, (res) => {
+        let bytes = 0;
+        res.on('data', (chunk: Buffer) => { bytes += chunk.length; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, bytes }));
+        res.on('error', reject);
+      }).on('error', reject);
+    });
+    expect(again.status).toBe(304);
+    expect(again.bytes).toBe(0);
+  });
+
+  it('serves a request that carries only the bevel_token cookie, the way an <img> asks', async () => {
+    h = await makeHarness({ canDownload: false, realAuth: true });
+    const res = await fetch(inlineUrl(h.baseUrl), {
+      headers: { cookie: `${AUTH_COOKIE_NAME}=${COOKIE_TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).equals(FILE_BYTES)).toBe(true);
+  });
+
+  it('refuses the same request with no credential at all', async () => {
+    h = await makeHarness({ canDownload: false, realAuth: true });
+    const res = await fetch(inlineUrl(h.baseUrl));
+    expect(res.status).toBe(401);
   });
 });
 

@@ -113,6 +113,15 @@ const int = (description: string): JsonSchema => ({ type: 'integer', description
 const str = (description: string): JsonSchema => ({ type: 'string', description });
 
 /**
+ * Where pictures go, on the two tools that write pages. An agent in core cannot
+ * upload bytes yet (TODOS.md), but it can write the page with the link a person
+ * will satisfy, and this sentence is what keeps every page it writes on the
+ * README's convention: images beside the page, linked relatively.
+ */
+const IMAGE_CONVENTION_NOTE =
+  ' Images: keep them in an `assets/` folder next to the page that uses them and link them with a relative path, e.g. `![Approval screen](./assets/approval-screen.png)`; the page renders them inline.';
+
+/**
  * A path input that names the clone folder. The tools are rooted at the
  * WORKSPACE dir, one level above the git clone, so a path only reaches git
  * when it starts with that folder; an agent that reads `KnowledgeBase/Foo.md`
@@ -622,6 +631,7 @@ export function registerWorkspaceTools(
     name: 'write_file',
     description:
       'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses document formats: Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) and email files (.eml/.msg), whose reads are text EXTRACTIONS that cannot round-trip, and legacy binary Office files (.doc/.ppt/.xls), which cannot be extracted at all; replace such a file by uploading a new version instead.' +
+      IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -664,6 +674,7 @@ export function registerWorkspaceTools(
       'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses document formats: ' +
       'Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) and email files (.eml/.msg), whose reads are text EXTRACTIONS that cannot ' +
       'round-trip, and legacy binary Office files (.doc/.ppt/.xls); replace such a file by uploading a new version instead. Returns `{ count }`.' +
+      IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',

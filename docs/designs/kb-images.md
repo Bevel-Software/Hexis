@@ -3,7 +3,7 @@
 Branch: feat/kb-images (worktree `.claude/worktrees/kb-images`, cut from origin/dev at cdf2cb1)
 Author: Juan V. with Claude
 Date: 2026-09-04
-Status: eng review in progress (Sections 1 done in an earlier session; 2 to 4 below)
+Status: implemented on 2026-09-07 (all ten tasks below; see the commit on feat/kb-images)
 
 ## Problem
 
