@@ -984,7 +984,23 @@ export class AccessControlService implements IAccessControl {
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
     this.ownEntriesCache.delete(workspaceId);
+    this.generation.set(workspaceId, (this.generation.get(workspaceId) ?? 0) + 1);
   }
+
+  /**
+   * Per-workspace generation, bumped by every `invalidate()`. A model load
+   * reads the tree across many awaits, and an invalidation fires exactly when
+   * that tree changes underneath it: the load that started on the old tree
+   * would otherwise store its model AFTER the drop, and every read for the
+   * next TTL would resolve against a tree that is already gone. `loadModel`
+   * takes the generation before its first read and refuses to store a model
+   * fetched under an older one — the caller that started it still gets its
+   * answer, as old as the moment it started, and the next caller reloads.
+   * (The own-entries memo needs no token: it is keyed by the map object a
+   * reader took BEFORE its disk read, and `invalidate()` replaces the map, so
+   * a late store lands in an orphan nobody consults.)
+   */
+  private readonly generation = new Map<string, number>();
 
   /** Memoized `readOwnEntries` for the batch paths; see `ownEntriesCache`. */
   private async cachedOwnEntries(
@@ -1496,6 +1512,8 @@ export class AccessControlService implements IAccessControl {
     if (cached && Date.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
       return cached.model;
     }
+    // Taken before the first read; see `generation`.
+    const generation = this.generation.get(workspaceId) ?? 0;
 
     const repoDir = await this.repoDir(workspaceId);
 
@@ -1587,7 +1605,11 @@ export class AccessControlService implements IAccessControl {
       groupsHealth: activeGroups.health,
       deploymentOwners: this.deploymentOwners,
     };
-    this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+    // An invalidation landed mid-load: this model describes a tree that is
+    // already gone, so it is returned to this caller but never stored.
+    if ((this.generation.get(workspaceId) ?? 0) === generation) {
+      this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+    }
     return model;
   }
 
