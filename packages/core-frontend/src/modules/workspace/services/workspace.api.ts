@@ -47,6 +47,33 @@ export async function listFiles(workspaceId: string): Promise<FileTreeEntry> {
   return res.json();
 }
 
+/**
+ * The URL that serves a workspace file's bytes, `GET /api/workspace/:id/file/raw`.
+ *
+ * One builder for every consumer (the document renderers' fetches, the file
+ * tree's Download, and the `<img>` tags the markdown pipeline emits), so the
+ * route's shape lives in one place. `workspaceId` is already the URL-encoded
+ * branch (see `getOrCreateWorkspace`) and is used verbatim; the path is
+ * encoded as one query value, so `#`, `?`, `%` and spaces in a file name
+ * round-trip.
+ *
+ * - `download` asks for `Content-Disposition: attachment`, which the backend
+ *   gates on the per-path `download:` verb.
+ * - `version` is a cache key appended as `&v=`; `0` or undefined adds nothing,
+ *   so the URL stays stable (and browser-cacheable) until the file is known to
+ *   have changed. See `useImageVersions`.
+ */
+export function rawFileUrl(
+  workspaceId: string,
+  relativePath: string,
+  options: { download?: boolean; version?: number } = {},
+): string {
+  let url = `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(relativePath)}`;
+  if (options.download) url += '&download=1';
+  if (options.version) url += `&v=${options.version}`;
+  return url;
+}
+
 export async function readFile(workspaceId: string, relativePath: string): Promise<string> {
   // `_` cache-bust query parameter. The backend already sends
   // `Cache-Control: no-store` on this route, but intermediate CDNs /

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Presentation } from 'lucide-react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
 import { extractPptxOutline, type PptxSlide } from './pptxOutline';
 import { readBodyCapped } from './readBodyCapped';
@@ -64,7 +65,7 @@ export function PptxRenderer({ filePath }: FileRendererProps) {
     (async () => {
       try {
         const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          rawFileUrl(workspaceId, filePath),
           { signal: abort.signal },
         );
         if (cancelled) return;

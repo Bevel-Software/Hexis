@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import * as XLSX from 'xlsx';
 import {
   WorkspaceContext,
@@ -172,5 +172,17 @@ describe('EmailRenderer', () => {
 
     expect(await screen.findByText('This email is too large to display.')).toBeInTheDocument();
     expect(signal?.aborted).toBe(true);
+  });
+});
+
+/** The URL the viewer asks for is the raw file route, built by `rawFileUrl`. */
+describe('EmailRenderer fetch', () => {
+  it('asks the raw file route for exactly this file', async () => {
+    apiMock.authFetch.mockResolvedValue({ ok: true, arrayBuffer: async () => EML_BYTES });
+    renderEmail('Inbox/numbers.eml');
+    await waitFor(() => expect(apiMock.authFetch).toHaveBeenCalled());
+    expect(apiMock.authFetch.mock.calls[0][0]).toBe(
+      '/api/workspace/ws-1/file/raw?path=Inbox%2Fnumbers.eml',
+    );
   });
 });

@@ -42,6 +42,7 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
+import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
@@ -518,7 +519,7 @@ export function FileTreeNode({
     const isFolder = entry.type === 'directory';
     const url = isFolder
       ? `/api/workspace/${workspaceId}/folder/zip?path=${encodeURIComponent(entry.relativePath)}&download=1`
-      : `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(entry.relativePath)}&download=1`;
+      : rawFileUrl(workspaceId, entry.relativePath, { download: true });
     const savedAs = isFolder ? `${entry.name}.zip` : entry.name;
     try {
       const outcome = await downloadViaBlob(url, savedAs);
