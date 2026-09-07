@@ -27,7 +27,17 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
  * generated from `ADMIN_EMAIL` (see roles-yaml.step.ts), so a repo can't be
  * seeded with a stale hard-coded Admin list.
  */
-export const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
+export const REQUIRED_FILES: readonly string[] = [
+  'access.md',
+  'AGENTS.md',
+  '.bevelignore',
+  '.gitignore',
+  // The deployment preamble every connected agent is told at session start
+  // (see modules/agent-instructions). Seeded ONCE and never refreshed: the
+  // content is the admin's, and the shipped template is one HTML comment, so
+  // a never-edited file sends nothing of its own.
+  'mcp-description.md',
+];
 
 /**
  * Repo-root files the startup phase GENERATES rather than copies — today just

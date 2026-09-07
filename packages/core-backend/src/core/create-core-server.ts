@@ -39,8 +39,10 @@ import {
   SYNC_RESPONSE_HEADER,
 } from '../modules/kb-sync/kb-sync.routes.js';
 import { createMarketplaceGitRoutes } from '../modules/marketplace/index.js';
-import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout, type AuthUser } from '@bevel-software/platform-shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
+import { publicConfig } from './public-config.js';
+import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 
 type ExpressApp = ReturnType<typeof express>;
@@ -198,53 +200,12 @@ export async function createCoreServer(
   marketplaceGitUrl.password = '';
 
   /**
-   * The handful of facts the browser needs BEFORE it can render anything, and
-   * therefore before it can authenticate: the branch model.
-   *
-   * Unauthenticated on purpose. The login screen, the router and every module
-   * that reads `DEFAULT_BRANCH` are loaded before a session exists, so a gated
-   * endpoint could not answer in time. What it discloses is two branch names —
-   * which every change request and every URL already shows to anyone who does
-   * get in — and nothing about the repository they live in.
-   *
-   * This replaces baking the values into the frontend bundle at build time.
-   * One artifact now serves any deployment, and renaming a branch no longer
-   * means a rebuild.
+   * The facts the browser needs before it can render anything, and what a
+   * local bridge learns about this deployment in one request. Unauthenticated
+   * on purpose; see `publicConfig` for what it discloses and why.
    */
   app.get('/api/config', (_req, res) => {
-    res.json({
-      branchModel: {
-        defaultBranch: DEFAULT_BRANCH,
-        protectedBranches: [...PROTECTED_BRANCHES],
-      },
-      /**
-       * The three renameable KB roots, for the same reason as the branch
-       * model: the file tree, the library router and every path rule read
-       * them, and they used to be compile-time constants.
-       */
-      kbLayout: currentKbLayout(),
-      /**
-       * The per-user marketplace git remote (see modules/marketplace). Same
-       * derivation as `mcpUrl`: our address, userinfo stripped — the caller
-       * adds their own connection key.
-       */
-      marketplaceGitUrl: marketplaceGitUrl.toString(),
-      /**
-       * The same value the OAuth metadata publishes (see `mcpResourceUrl`).
-       *
-       * The frontend used to build this from `window.location.origin`, which
-       * is the browser's idea of our address rather than ours. The two agree
-       * on a simple deployment and disagree behind a proxy, on a second
-       * domain, or on an internal hostname — and the one that decides whether
-       * a connection works is this one.
-       *
-       * That was survivable while every surface was copy-paste: a human sees
-       * the host before pasting it. It stops being survivable the moment we
-       * hand the URL to a third party (a connector install link), where
-       * nobody reads it and the failure surfaces inside someone else's UI.
-       */
-      mcpUrl: mcpResourceUrl.toString(),
-    });
+    res.json(publicConfig({ marketplaceGitUrl: marketplaceGitUrl.toString(), mcpUrl: mcpResourceUrl.toString() }));
   });
 
   // The per-user marketplace as a git remote. Outside `/api` and ahead of
@@ -419,6 +380,10 @@ export async function createCoreServer(
     async (userId) => (await core.authService.getUserById(userId))?.email,
     { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
   ));
+  // What every connected agent is told at session start, as the hosted proxy
+  // composes it: read by the local `hexis-mcp` bridge at startup and by the
+  // External agent access card. Same `manualAuth`, same router, as `all-tools`.
+  toolsRouter.use(createAgentInstructionsRoutes(core.manualAuthMiddleware, core.readAgentPreamble));
   // The only core route that returns secret VALUES: a local `.tool`'s declared
   // variables, for the local MCP server that will execute it. It re-reads the
   // declaring knowledge-base file server-side, so the file is the allowlist and

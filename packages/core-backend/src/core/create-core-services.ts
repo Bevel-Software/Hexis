@@ -104,6 +104,7 @@ import {
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
 import { McpSessionStore } from '../modules/mcp/mcp-session-store.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
+import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
 import { BevelOAuthProvider } from '../modules/mcp/oauth/bevel-oauth-provider.js';
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -145,6 +146,12 @@ export interface CoreServices {
   skillService: SkillService;
   pendingSkillsService: PendingSkillsService;
   toolManualService: ToolManualService;
+  /**
+   * Reads the admin's `mcp-description.md` on the default branch with
+   * platform rights: the one reader behind every MCP session's instructions
+   * and `GET /api/agent/instructions`. See modules/agent-instructions.
+   */
+  readAgentPreamble: AgentPreambleReader;
   mcpServerEditService: McpServerEditService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
@@ -673,6 +680,12 @@ export async function createCoreServices(
   // REST tool surface (so agent logic + metering live there, once).
   const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix);
   const mcpSessionStore = new McpSessionStore();
+  // What every connected agent is told at session start: the admin's preamble
+  // at the repository root, read as the platform (the root is default-deny
+  // for readers, and the preamble is a broadcast). One reader, two consumers:
+  // the proxy below composes in-process per session; the agent-facing route
+  // serves the same composition to the local bridge and the frontend card.
+  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName);
   const mcpService = new McpService(
     mcpSessionStore,
     {
@@ -687,6 +700,7 @@ export async function createCoreServices(
       spillStore,
       // For the needs-authorization setup link surfaced to external agents.
       publicFrontendUrl: config.publicFrontendUrl,
+      readAgentPreamble: readPreamble,
     },
     // Pre-dispatch per-user credential check: the vault answers "has this caller
     // set it?" and the manual catalog answers "which user-scoped vars does this
@@ -885,6 +899,7 @@ export async function createCoreServices(
     skillService,
     pendingSkillsService,
     toolManualService,
+    readAgentPreamble: readPreamble,
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,

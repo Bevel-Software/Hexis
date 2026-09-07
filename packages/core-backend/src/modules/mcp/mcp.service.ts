@@ -46,6 +46,13 @@ import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { McpSessionStore } from './mcp-session-store.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
+import {
+  composeAgentInstructions,
+  prefixToolDescription,
+  PREFIXED_TOOLS,
+  type AgentPreambleReader,
+  type ComposedAgentInstructions,
+} from '../agent-instructions/index.js';
 
 /**
  * Configuration for the loopback proxy. `loopbackBaseUrl` is the backend's own
@@ -60,6 +67,14 @@ export interface McpProxyOptions {
   spillStore: SpillStore;
   /** Public web address of the frontend, for the needs-authorization setup link. */
   publicFrontendUrl: string;
+  /**
+   * Reads `mcp-description.md` on the default branch with platform rights
+   * (see modules/agent-instructions). Called once per session so an edit
+   * reaches the next session without a restart. Optional so constructions
+   * that never exercise it (tests) keep working: without it every session
+   * carries the platform header alone.
+   */
+  readAgentPreamble?: AgentPreambleReader;
 }
 
 /**
@@ -182,6 +197,10 @@ export class McpService {
     const manuals = await this.fetchManualTemplates(loopbackBearer);
     const client = await this.buildClient(loopbackBearer, userId, manuals);
     const tools = await this.discoverTools(client, manuals, userId);
+    // What this session tells the model before it acts: the platform header
+    // plus the admin's preamble, read in-process (no ACL applies, so no
+    // loopback hop) and never allowed to fail the session.
+    const agentInstructions = await this.composeAgentInstructions();
     // Confirms the MCP session was built for a connecting client (vs. an
     // in-process agent code-mode client, which never runs createSession) and
     // how many tools discovery yielded before listing/filtering.
@@ -203,7 +222,9 @@ export class McpService {
 
     const server = new Server(
       { name: 'bevel-mcp', version: '0.1.0' },
-      { capabilities: { tools: {}, prompts: {} } },
+      // `instructions` rides the initialize result; clients that honour it
+      // place the text in the model's system prompt without the model acting.
+      { capabilities: { tools: {}, prompts: {} }, instructions: agentInstructions.instructions },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -247,7 +268,16 @@ export class McpService {
           continue;
         }
         seen.add(entry.name);
-        direct.push(entry);
+        // The four knowledge-base tools carry the purpose prefix: the one
+        // pre-call channel every client shows the model, for the clients that
+        // drop the handshake's `instructions`. Applied AFTER the credential
+        // filter above, so a connection-key session's listing carries it too.
+        // Every other tool, meta-tools included, keeps its description as is.
+        direct.push(
+          PREFIXED_TOOLS.has(entry.name)
+            ? { ...entry, description: prefixToolDescription(agentInstructions.toolPrefix, entry.description) }
+            : entry,
+        );
       }
       // Log only when a tool was dropped (name/schema/duplicate) — that's the
       // anomaly worth surfacing, since a downstream client would otherwise hide
@@ -326,6 +356,26 @@ export class McpService {
     });
 
     return { transport, server };
+  }
+
+  /**
+   * The session's instructions and tool prefix. A reader failure (a disk
+   * fault; ENOENT is not one, the reader answers null for that) falls back to
+   * the header alone and the fixed prefix line with a logged warning: a
+   * session never fails to initialise over its preamble.
+   */
+  private async composeAgentInstructions(): Promise<ComposedAgentInstructions> {
+    const read = this.opts.readAgentPreamble;
+    if (!read) return composeAgentInstructions(null);
+    try {
+      return composeAgentInstructions(await read());
+    } catch (err) {
+      console.warn(
+        '[mcp] could not read mcp-description.md; this session gets the platform header alone:',
+        err instanceof Error ? err.message : err,
+      );
+      return composeAgentInstructions(null);
+    }
   }
 
   /** Loopback GET of the default-branch skill catalog (via the `list_skills` tool). */

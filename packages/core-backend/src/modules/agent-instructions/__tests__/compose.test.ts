@@ -1,0 +1,161 @@
+import { describe, expect, it } from 'vitest';
+import {
+  PLATFORM_HEADER,
+  PREAMBLE_CAP,
+  PREAMBLE_TRUNCATION_MARKER,
+  TOOL_PREFIX_CAP,
+  TOOL_PREFIX_LINE,
+  composeAgentInstructions,
+  prefixToolDescription,
+} from '../compose.js';
+
+/**
+ * The composer is pure, so every rule of the two texts is pinned here: what
+ * an absent or empty preamble yields, how comments are withheld, where both
+ * caps cut, and that a cut never splits a character.
+ */
+
+describe('composeAgentInstructions: the handshake text', () => {
+  it('sends the header alone for an absent, empty, whitespace or comment-only preamble', () => {
+    for (const raw of [null, '', '   \n\n', '<!-- notes to myself -->', '<!--\nline one\nline two\n-->\n']) {
+      const out = composeAgentInstructions(raw);
+      expect(out.instructions, JSON.stringify(raw)).toBe(PLATFORM_HEADER);
+      expect(out.toolPrefix).toBe(TOOL_PREFIX_LINE);
+      expect(out.truncated).toBe(false);
+      expect(out.toolPrefixTruncated).toBe(false);
+      expect(out.preambleChars).toBe(0);
+      expect(out.unterminatedComment).toBe(false);
+    }
+  });
+
+  it('is the header, a blank line, then the preamble body', () => {
+    const out = composeAgentInstructions('We sell permits.\n\nLook in Permitting/ first.\n');
+    expect(out.instructions).toBe(`${PLATFORM_HEADER}\n\nWe sell permits.\n\nLook in Permitting/ first.`);
+    expect(out.preambleChars).toBe('We sell permits.\n\nLook in Permitting/ first.'.length);
+  });
+
+  it('hands the two parts and the fixed prefix line back separately, for the card', () => {
+    const out = composeAgentInstructions('We sell permits.');
+    expect(out.header).toBe(PLATFORM_HEADER);
+    expect(out.preamble).toBe('We sell permits.');
+    expect(out.toolPrefixLine).toBe(TOOL_PREFIX_LINE);
+    expect(out.toolPrefix.startsWith(out.toolPrefixLine)).toBe(true);
+    expect(composeAgentInstructions(null).preamble).toBe('');
+    // The preamble part carries the marker when cut, exactly as sent.
+    expect(composeAgentInstructions('x'.repeat(PREAMBLE_CAP + 1)).preamble.endsWith(PREAMBLE_TRUNCATION_MARKER)).toBe(true);
+  });
+
+  it('withholds every HTML comment from both outputs', () => {
+    const out = composeAgentInstructions('<!-- private: do not send -->Public line.<!-- more notes -->\n\nSecond paragraph.');
+    expect(out.instructions).not.toContain('private');
+    expect(out.instructions).not.toContain('more notes');
+    expect(out.instructions).toContain('Public line.');
+    expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} Public line.`);
+    expect(out.unterminatedComment).toBe(false);
+  });
+
+  it('an unterminated comment withholds everything after it and is reported', () => {
+    const out = composeAgentInstructions('Visible.\n\n<!-- forgot to close\nSecret folder names\n');
+    expect(out.instructions).toBe(`${PLATFORM_HEADER}\n\nVisible.`);
+    expect(out.instructions).not.toContain('Secret');
+    expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} Visible.`);
+    expect(out.unterminatedComment).toBe(true);
+  });
+
+  it('sends exactly the cap whole, and cuts one past it with the marker', () => {
+    const exact = 'a'.repeat(PREAMBLE_CAP);
+    const atCap = composeAgentInstructions(exact);
+    expect(atCap.truncated).toBe(false);
+    expect(atCap.instructions).toBe(`${PLATFORM_HEADER}\n\n${exact}`);
+    expect(atCap.instructions).not.toContain('truncated');
+
+    const over = composeAgentInstructions(`${exact}b`);
+    expect(over.truncated).toBe(true);
+    expect(over.instructions).toBe(`${PLATFORM_HEADER}\n\n${exact}\n${PREAMBLE_TRUNCATION_MARKER}`);
+    expect(PREAMBLE_TRUNCATION_MARKER).toContain('6,000');
+    expect(PREAMBLE_TRUNCATION_MARKER).toContain('mcp-description.md');
+  });
+
+  it('reports the count before truncation', () => {
+    const out = composeAgentInstructions('x'.repeat(PREAMBLE_CAP + 1234));
+    expect(out.preambleChars).toBe(PREAMBLE_CAP + 1234);
+    expect(out.truncated).toBe(true);
+  });
+
+  it('counts after comment stripping, not the raw file', () => {
+    const out = composeAgentInstructions('<!-- a very long private note -->Short.');
+    expect(out.preambleChars).toBe('Short.'.length);
+  });
+
+  it('a cut that would split a surrogate pair moves before it', () => {
+    // 5,999 ASCII units, then an astral character (two UTF-16 units): unit
+    // 6,000 is its high surrogate, so the cut must land before it.
+    const raw = `${'a'.repeat(PREAMBLE_CAP - 1)}😀tail`;
+    const out = composeAgentInstructions(raw);
+    expect(out.truncated).toBe(true);
+    const body = out.instructions.slice(PLATFORM_HEADER.length + 2);
+    const sent = body.slice(0, body.indexOf('\n'));
+    expect(sent).toBe('a'.repeat(PREAMBLE_CAP - 1));
+    expect(sent.length).toBe(PREAMBLE_CAP - 1);
+    // Nothing in what was sent is a lone surrogate.
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(out.instructions)).toBe(false);
+  });
+});
+
+describe('composeAgentInstructions: the tool prefix', () => {
+  it('starts with the fixed line, then the first paragraph, collapsed to one line', () => {
+    const out = composeAgentInstructions('Acme builds solar\nfarms in Spain.\n\nSecond paragraph.');
+    expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} Acme builds solar farms in Spain.`);
+    expect(out.toolPrefixChars).toBe(out.toolPrefix.length);
+    expect(out.toolPrefixTruncated).toBe(false);
+  });
+
+  it('skips headings: a heading-led file still yields the first real paragraph', () => {
+    const out = composeAgentInstructions('# Acme knowledge base\n\n## Scope\n\nWhat we know about permits.\n');
+    expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} What we know about permits.`);
+    // A heading directly above text in the same block is dropped, not merged.
+    const tight = composeAgentInstructions('## Scope\nWhat we know about permits.');
+    expect(tight.toolPrefix).toBe(`${TOOL_PREFIX_LINE} What we know about permits.`);
+  });
+
+  it('falls back to the fixed line alone for an empty or heading-only preamble', () => {
+    for (const raw of [null, '', '# Only a title\n\n## And a subtitle']) {
+      expect(composeAgentInstructions(raw).toolPrefix, JSON.stringify(raw)).toBe(TOOL_PREFIX_LINE);
+    }
+  });
+
+  it('CRLF input still yields the first paragraph', () => {
+    const out = composeAgentInstructions('# Title\r\n\r\nFirst paragraph.\r\n\r\nSecond.\r\n');
+    expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} First paragraph.`);
+    expect(out.instructions).toBe(`${PLATFORM_HEADER}\n\n# Title\n\nFirst paragraph.\n\nSecond.`);
+  });
+
+  it('is at most the cap, still starting with the fixed line, and reports the count before the cut', () => {
+    const long = 'w'.repeat(TOOL_PREFIX_CAP * 2);
+    const out = composeAgentInstructions(long);
+    expect(out.toolPrefix.length).toBe(TOOL_PREFIX_CAP);
+    expect(out.toolPrefix.startsWith(TOOL_PREFIX_LINE)).toBe(true);
+    expect(out.toolPrefixTruncated).toBe(true);
+    expect(out.toolPrefixChars).toBe(TOOL_PREFIX_LINE.length + 1 + long.length);
+  });
+
+  it('never splits a surrogate pair at the prefix cap', () => {
+    // Pad so that unit 300 of the prefix is the high surrogate of an astral character.
+    const padding = 'p'.repeat(TOOL_PREFIX_CAP - TOOL_PREFIX_LINE.length - 2);
+    const out = composeAgentInstructions(`${padding}😀zz`);
+    expect(out.toolPrefixTruncated).toBe(true);
+    expect(out.toolPrefix.length).toBe(TOOL_PREFIX_CAP - 1);
+    expect(out.toolPrefix.endsWith(padding)).toBe(true);
+  });
+});
+
+describe('prefixToolDescription', () => {
+  it('is the prefix, a blank line, then the original description', () => {
+    expect(prefixToolDescription('P', 'Read a file.')).toBe('P\n\nRead a file.');
+  });
+
+  it('is the prefix alone for a tool with no description', () => {
+    expect(prefixToolDescription('P', undefined)).toBe('P');
+    expect(prefixToolDescription('P', '')).toBe('P');
+  });
+});

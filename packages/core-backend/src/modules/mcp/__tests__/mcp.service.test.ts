@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,7 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
+import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../../agent-instructions/index.js';
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
@@ -32,6 +33,10 @@ async function setup(deps?: {
   tokenId?: string | null;
   /** Spy for the session-grant reset fired on broken sign-ins. */
   revokeOAuthAccess?: (bearer: string) => Promise<void>;
+  /** The preamble reader wired into the proxy options; absent = header alone. */
+  readAgentPreamble?: () => Promise<string | null>;
+  /** Extra echo tools to register under these names (the four KB tools, in the prefix tests). */
+  extraTools?: string[];
 }) {
   const registry = new ToolRegistry();
   registry.registerExternalTool(
@@ -66,6 +71,12 @@ async function setup(deps?: {
     }),
   );
 
+  for (const name of deps?.extraTools ?? []) {
+    registry.registerExternalTool(
+      toolDef({ name, description: `original ${name} description`, path: `/api/agent/tools/${name}`, inputs: { type: 'object', properties: {} } }),
+    );
+  }
+
   const app = express();
   app.use(express.json());
   const noAuth: express.RequestHandler = (_req, _res, next) => next();
@@ -87,6 +98,7 @@ async function setup(deps?: {
       manualName: 'KNOWLEDGE_BASE',
       spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
       publicFrontendUrl: 'http://localhost:5173',
+      readAgentPreamble: deps?.readAgentPreamble,
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     deps?.secretsVault as any,
@@ -410,5 +422,71 @@ describe('McpService — per-user credential pre-check', () => {
       });
       expect(await toolNames(client)).toEqual(['ask', 'boom', 'call_tool_chain', 'list_tools', 'refy', 'tools_info']);
     });
+  });
+});
+
+describe('McpService — agent instructions', () => {
+  const KB_TOOLS = ['start_session', 'grep', 'list_files', 'read_file'];
+
+  it('sends the header and the preamble as the session\'s instructions', async () => {
+    const client = await setup({ readAgentPreamble: async () => 'Acme builds solar farms.\n\nProjects live in Projects/.' });
+    expect(client.getInstructions()).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.\n\nProjects live in Projects/.`);
+  });
+
+  it('sends the header alone when no reader is wired', async () => {
+    const client = await setup();
+    expect(client.getInstructions()).toBe(PLATFORM_HEADER);
+  });
+
+  it('a throwing reader still yields a session, with the header as its instructions and a warning', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = await setup({
+      readAgentPreamble: async () => {
+        throw Object.assign(new Error('disk'), { code: 'EIO' });
+      },
+      extraTools: KB_TOOLS,
+    });
+    expect(client.getInstructions()).toBe(PLATFORM_HEADER);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('mcp-description.md'), 'disk');
+    // And the four tools carry the fixed line alone.
+    const { tools } = await client.listTools();
+    for (const name of KB_TOOLS) {
+      expect(tools.find((t) => t.name === name)?.description).toBe(`${TOOL_PREFIX_LINE}\n\noriginal ${name} description`);
+    }
+  });
+
+  it('prefixes exactly the four knowledge-base tools; every other description is byte-for-byte unchanged', async () => {
+    const client = await setup({ readAgentPreamble: async () => 'Acme builds solar farms.', extraTools: KB_TOOLS });
+    const { tools } = await client.listTools();
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t.description]));
+    const prefix = `${TOOL_PREFIX_LINE} Acme builds solar farms.`;
+    for (const name of KB_TOOLS) {
+      expect(byName[name], name).toBe(`${prefix}\n\noriginal ${name} description`);
+    }
+    // Regression: the rest, meta-tools included, is untouched.
+    expect(byName.ask).toBe('echo the prompt');
+    expect(byName.boom).toBe('always errors');
+    expect(byName.refy).toBe('has $defs/$ref in its schema');
+    for (const meta of ['call_tool_chain', 'list_tools', 'tools_info']) {
+      expect(byName[meta], meta).not.toContain(TOOL_PREFIX_LINE);
+    }
+  });
+
+  it('a connection-key session with filtered tools still prefixes the four', async () => {
+    // The listing filter registers only ready tools; the fake manual catalog
+    // says every tool is ready, so the four survive it and carry the prefix.
+    const vault = { statusFor: async (_u: string, keys: string[]) => keys.map((key) => ({ key, userConfigured: true })) };
+    const manuals = { userScopedKeysForManual: async () => [{ key: 'KNOWLEDGE_BASE_X', name: 'X', oauth: false }] };
+    const client = await setup({
+      readAgentPreamble: async () => 'Acme.',
+      extraTools: KB_TOOLS,
+      secretsVault: vault,
+      toolManuals: manuals,
+      tokenId: 'tok-1',
+    });
+    const { tools } = await client.listTools();
+    for (const name of KB_TOOLS) {
+      expect(tools.find((t) => t.name === name)?.description.startsWith(`${TOOL_PREFIX_LINE} Acme.`)).toBe(true);
+    }
   });
 });
