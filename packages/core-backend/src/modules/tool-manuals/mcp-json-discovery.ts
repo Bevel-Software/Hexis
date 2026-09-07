@@ -224,10 +224,16 @@ export interface PortableHttpEntry {
   headers?: Record<string, string>;
 }
 
-/** A record whose every value is a string, or null — no coercion, no cast. */
+/**
+ * A record whose every value is a string, or null — no coercion, no cast.
+ * Built without a prototype: the keys are HTTP header and environment
+ * variable names, and a plain object would silently swallow one spelled
+ * `__proto__` (a prototype assignment, not a property) — every accepted key
+ * must come out the other side.
+ */
 function stringMap(v: unknown): Record<string, string> | null {
   if (!isRecord(v)) return null;
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [k, val] of Object.entries(v)) {
     if (typeof val !== 'string') return null;
     out[k] = val;

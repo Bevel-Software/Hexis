@@ -839,6 +839,11 @@ export function ManageAccessDialog({
     }
   }, [workspaceId, repoRelative, entry.relativePath, targetKind, reload]);
 
+  // Whether public read is a LINE somewhere — here or in a parent — that a
+  // revoke of `everyone` can remove. Public through a plugin anyone can read
+  // has no such line: that plugin's own read grant is what ends it.
+  const publicReadSources = lookupSources(data?.sources, 'r:everyone')?.read ?? [];
+
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
   // flip optimistically); a refused revoke (e.g. lock contention) surfaces its
@@ -1420,10 +1425,12 @@ export function ManageAccessDialog({
                 <div className="min-w-0 flex-1">
                   <div className="text-ui text-ink">Anyone can read</div>
                   <div className="text-detail text-ink-muted">
-                    Public: every signed-in user can read this {targetKind}
+                    {publicReadSources.length > 0
+                      ? `Public: every signed-in user can read this ${targetKind}`
+                      : `Public through a plugin anyone can read. Remove that plugin's read grant to restrict this ${targetKind}.`}
                   </div>
                 </div>
-                {canManage && (
+                {canManage && publicReadSources.length > 0 && (
                   <Button
                     variant="danger"
                     size="tiny"

@@ -1,7 +1,30 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { descriptorsFromMcpJson } from '../mcp-json-discovery.js';
+import { descriptorsFromMcpJson, judgeMcpServerEntry } from '../mcp-json-discovery.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('judgeMcpServerEntry', () => {
+  it('keeps every accepted header and env key — one spelled __proto__ included', () => {
+    // Parsed from text, as a repository file is: JSON.parse makes `__proto__`
+    // an own key, and a plain-object copy would turn it into a prototype
+    // assignment and lose it.
+    const http = judgeMcpServerEntry(
+      'vendor',
+      JSON.parse('{"type":"streamable-http","url":"https://x.example","headers":{"__proto__":"p","X-A":"a"}}'),
+    );
+    expect(http.ok).toBe(true);
+    if (!http.ok || http.transport !== 'streamable-http') throw new Error('unreachable');
+    expect(Object.keys(http.entry.headers ?? {}).sort()).toEqual(['X-A', '__proto__']);
+    expect(http.entry.headers?.['__proto__']).toBe('p');
+
+    const stdio = judgeMcpServerEntry(
+      'launch',
+      JSON.parse('{"type":"stdio","command":"run","env":{"__proto__":"p"}}'),
+    );
+    if (!stdio.ok || stdio.transport !== 'stdio') throw new Error('unreachable');
+    expect(stdio.entry.env?.['__proto__']).toBe('p');
+  });
+});
 
 const MANIFEST = JSON.stringify({
   name: 'gtm',

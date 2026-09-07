@@ -130,6 +130,50 @@ describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () =
 });
 
 /**
+ * The "Anyone can read" band offers Remove only when public read is a LINE a
+ * revoke of `everyone` can strip — here or in a parent. Public that comes
+ * from a plugin anyone can read has no such line; the resolver reports no
+ * source for `everyone`, and a Remove there would revoke nothing and leave
+ * the node public without a word.
+ */
+describe('ManageAccessDialog: removing public read', () => {
+  const PUBLIC_VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: true,
+    eligible: { roles: [], users: [] },
+    readers: { restricted: false, roles: [], users: [] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+  });
+
+  it('offers Remove when a file spells the everyone grant', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      sources: { 'r:everyone': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }] } },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Anyone can read');
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+  });
+
+  it('offers no Remove — and says why — when public read comes only through a plugin', async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...PUBLIC_VIEW, sources: { 'r:everyone': {} } } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Anyone can read');
+    expect(screen.getByText(/through a plugin anyone can read/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
+  });
+});
+
+/**
  * Which BRANCH an access edit lands on.
  *
  * The file explorer edits the branch the user is looking at, so the ambient

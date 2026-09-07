@@ -94,9 +94,13 @@ export function createSkillAccessRequestRoutes(deps: {
       // rejected push when origin got there first, and a message is not a
       // contract. A branch that is there is proceeded against; anything else
       // is a real failure, and a proposal on a branch that was not made would
-      // be worse than the error.
+      // be worse than the error. STRICT: the list proves absence, and a
+      // listing that could not fetch proves nothing — it throws instead of
+      // serving refs from before the branch was made (or deleted).
       const branchExists = async () =>
-        (await workflow.listBranches(wsId(), { freshFetch: true })).some((b) => b.name === branch);
+        (await workflow.listBranches(wsId(), { freshFetch: true, strictFetch: true })).some(
+          (b) => b.name === branch,
+        );
       if (!(await branchExists())) {
         try {
           await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);

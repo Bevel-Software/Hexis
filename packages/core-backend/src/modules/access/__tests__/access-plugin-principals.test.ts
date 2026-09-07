@@ -215,6 +215,31 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'zed@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
     });
 
+    it('a public principal is a verdict, not a line: nothing spells everyone, so nothing under that name is removable', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/Open/read\n',
+      });
+      const skill = 'Skills/Common/tips/SKILL.md';
+      expect((await svc.eligibleReaders(workspaceId, skill)).restricted).toBe(false);
+      // A revoke of `everyone` here would strip no line — so no source claims one.
+      expect(await svc.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'everyone' })).toEqual({});
+      // The plugin grant IS the line, and the one whose removal ends public read.
+      expect(await svc.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'plugin/open/read' })).toEqual({
+        read: [{ kind: 'ancestor', path: 'Skills/Common/tips/access.md' }],
+      });
+      // A literal grant, by contrast, is a removable line.
+      const literal = await makeService({
+        ...BASE,
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - everyone\n',
+      });
+      expect(await literal.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'everyone' })).toEqual({
+        read: [{ kind: 'ancestor', path: 'Skills/Common/tips/access.md' }],
+      });
+    });
+
     it('a plugin readable by everyone yields a public principal', async () => {
       const svc = await makeService({
         ...BASE,

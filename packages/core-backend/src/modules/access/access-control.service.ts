@@ -257,12 +257,22 @@ export type ScopeSource = { kind: 'own' } | { kind: 'access-md'; path: string };
  * already folded in (grant-only — see `buildScope`), so `byRole`/`byEmail`
  * hold the *effective* verdict each named principal gets at this one scope.
  *
+ * `byRole` and `byEmail` hold FILE-BACKED entries only — every key is a
+ * token some line in the file spells, which is what makes them the source
+ * of "what can be removed here" (`grantSources`). `everyone` is the one
+ * DERIVED verdict: what an unnamed signed-in caller gets at this scope. It
+ * is the literal `everyone` entry's state, promoted to a grant when the
+ * scope grants a PUBLIC plugin principal (one whose plugin admits everyone,
+ * so everyone holds it). Kept apart from `byRole` on purpose: a synthetic
+ * `everyone` key there would read as a line to revoke that no file has.
+ *
  * `source` identifies the file the scope's rules come from (see `ScopeSource`),
  * so a caller can map a per-scope verdict back to the editable file.
  */
 interface AccessScope {
   byRole: Map<string, GrantState>;
   byEmail: Map<string, GrantState>;
+  everyone: GrantState | undefined;
   source: ScopeSource;
 }
 
@@ -330,16 +340,21 @@ function resolveScopes(
     }
     // A PUBLIC plugin principal (its plugin grants `everyone`) is held by
     // every signed-in person, so a grant to it IS a grant to everyone at this
-    // scope. Folded HERE, where a scope's verdicts are built, so every reader
-    // of them — the permission check, the eligible lists, the `restricted`
-    // flag, the compiler's everyone audience — sees one truth.
-    for (const [key, state] of byRole) {
-      if (state === 'grant' && model.roles.publicKeys?.has(key)) {
-        if (byRole.get(EVERYONE_CANONICAL) !== 'grant') byRole.set(EVERYONE_CANONICAL, 'grant');
-        break;
+    // scope. Derived HERE, where a scope's verdicts are built, so every reader
+    // of the everyone verdict — the permission check, the eligible lists, the
+    // `restricted` flag, the compiler's everyone audience — sees one truth;
+    // and derived into its own field, never into `byRole`, so the entries a
+    // person can remove stay exactly the lines the files hold.
+    let everyone = byRole.get(EVERYONE_CANONICAL);
+    if (everyone !== 'grant') {
+      for (const [key, state] of byRole) {
+        if (state === 'grant' && model.roles.publicKeys?.has(key)) {
+          everyone = 'grant';
+          break;
+        }
       }
     }
-    return { byRole, byEmail, source };
+    return { byRole, byEmail, everyone, source };
   };
 
   const scopes: AccessScope[] = [];
@@ -356,7 +371,7 @@ function resolveScopes(
 
 /** The collapsed closest-wins view: per-principal verdicts with no single
  * source (it's a flattening across scopes). */
-type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail'>;
+type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail' | 'everyone'>;
 
 /**
  * Flatten ordered scopes (closest→farthest) into a single closest-wins
@@ -367,11 +382,13 @@ type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail'>;
 function collapseScopes(scopes: AccessScope[]): CollapsedScope {
   const byRole = new Map<string, GrantState>();
   const byEmail = new Map<string, GrantState>();
+  let everyone: GrantState | undefined;
   for (let i = scopes.length - 1; i >= 0; i--) {
     for (const [k, v] of scopes[i].byRole) byRole.set(k, v);
     for (const [k, v] of scopes[i].byEmail) byEmail.set(k, v);
+    if (scopes[i].everyone !== undefined) everyone = scopes[i].everyone;
   }
-  return { byRole, byEmail };
+  return { byRole, byEmail, everyone };
 }
 
 function resolveAtPath(
@@ -475,9 +492,9 @@ function hasPermissionResolved(
       if (deny) return false;
     }
 
-    // Tier 3 — the built-in `everyone` role.
-    const everyone = scope.byRole.get(EVERYONE_CANONICAL);
-    if (everyone) return everyone === 'grant';
+    // Tier 3 — the built-in `everyone` role (derived: a public plugin
+    // principal granted here counts, see `AccessScope.everyone`).
+    if (scope.everyone) return scope.everyone === 'grant';
 
     // No verdict at this scope — fall through to the next (farther) one.
   }
@@ -641,11 +658,11 @@ function canEveryoneReadResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
-  const { byRole, byEmail } = resolveAtPath(model, 'read', relativePath, fileOwn);
+  const { byEmail, everyone } = resolveAtPath(model, 'read', relativePath, fileOwn);
   // Baseline: an unnamed signed-in user (no email/role entries) reads only via
   // `everyone`. As a single principal, its collapsed verdict is its closest —
   // exactly what that user resolves to.
-  if (byRole.get(EVERYONE_CANONICAL) !== 'grant') return false;
+  if (everyone !== 'grant') return false;
   // Every *named* principal must also still read. A collapsed deny may have
   // been shadowed by a closer-scope `everyone` grant, so re-resolve each
   // candidate through the closeness-first gate rather than trusting the
@@ -686,7 +703,7 @@ function eligibleHoldersResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): { principals: ResolvedPrincipal[]; roles: string[]; users: { name: string; email: string }[] } {
-  const { byRole, byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
+  const { byRole, byEmail, everyone } = resolveAtPath(model, verb, relativePath, fileOwn);
 
   // (kind, display name) → one entry. The `byRole` keys are the merged
   // index's canonical tokens exactly as granted (bare, or the
@@ -709,6 +726,11 @@ function eligibleHoldersResolved(
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
+  // The derived everyone verdict: a public plugin principal granted here
+  // means anyone signed in holds the verb, and a list that counts holders (an
+  // approval gate, a "restricted to" banner) must say so — as `everyone`, the
+  // same row a literal grant produces.
+  if (everyone === 'grant') addPrincipal(EVERYONE_CANONICAL, 'role');
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
   // `roles.yaml` and on any `access.md` is granted to Admin even if the

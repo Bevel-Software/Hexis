@@ -592,6 +592,13 @@ export function createAccessRoutes(
         if (!collectives.has(key)) collectives.set(key, p);
       }
     }
+    // A public node lists no readers, so `everyone` is added by hand: its
+    // sources tell the dialog whether public read is a line here (removable),
+    // a line in a parent, or nothing in any file — public through a plugin
+    // that anyone can read, removed by revoking THAT grant.
+    if (!readers.restricted && !collectives.has(`r:${EVERYONE_CANONICAL}`)) {
+      collectives.set(`r:${EVERYONE_CANONICAL}`, { name: EVERYONE_CANONICAL, kind: 'role' });
+    }
     const userSet = new Map<string, { name: string; email: string }>();
     for (const u of [...eligible.users, ...readers.users, ...owners.users, ...downloaders.users]) {
       if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);

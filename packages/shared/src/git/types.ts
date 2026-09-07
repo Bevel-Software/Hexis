@@ -70,7 +70,7 @@ export interface ValidationReport {
 
 export interface IGitService {
   status(workspaceId: string): Promise<WorkingTreeStatus>;
-  listBranches(workspaceId: string, opts?: { freshFetch?: boolean }): Promise<BranchInfo[]>;
+  listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<BranchInfo[]>;
   createBranch(
     workspaceId: string,
     name: string,

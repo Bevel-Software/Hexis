@@ -40,7 +40,12 @@ import type {
 export interface IWorkflowService {
   // ── Branches ──────────────────────────────────────────────────────────────
 
-  listBranches(workspaceId: string, opts?: { freshFetch?: boolean }): Promise<Branch[]>;
+  /**
+   * `freshFetch` bypasses the fetch TTL; `strictFetch` makes a failed fetch
+   * throw instead of serving the stale refs — for a caller that uses the
+   * list to prove a branch ABSENT (a stale list proves nothing).
+   */
+  listBranches(workspaceId: string, opts?: { freshFetch?: boolean; strictFetch?: boolean }): Promise<Branch[]>;
   /**
    * Create a new unprotected branch. Protected branches cannot be created
    * via the workflow — the protected set is bootstrapped from the KB repo's
