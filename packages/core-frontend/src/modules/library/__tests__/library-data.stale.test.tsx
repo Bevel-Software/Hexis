@@ -11,7 +11,7 @@ const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 vi.mock('../services/plugins.api', () => ({ listPlugins: vi.fn().mockResolvedValue([]) }));
 
-import { LibraryProvider } from '../state/library-data';
+import { LibraryProvider, useLibrary } from '../state/library-data';
 import { PR_STALE_EVENT } from '../../../core/events';
 
 describe('LibraryProvider', () => {
@@ -41,5 +41,43 @@ describe('LibraryProvider', () => {
       window.dispatchEvent(new Event(PR_STALE_EVENT));
     });
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("the context's reload refreshes the plugin summaries with the catalog", async () => {
+    // A page that reloads after a link, a repair or an access edit must get
+    // fresh plugin counts too — the broken-link number lives in the summary.
+    const reload = vi.fn();
+    const data: LibraryData = {
+      loading: false,
+      error: null,
+      skills: [],
+      pendingSkills: [],
+      tools: [],
+      ownedSkills: new Set(),
+      allowedToolsBySkill: new Map(),
+      crs: [],
+      myCrNumbers: new Set(),
+      reload,
+    };
+    dataMock.useLibraryData.mockReturnValue(data);
+    const { listPlugins } = await import('../services/plugins.api');
+    vi.mocked(listPlugins).mockClear();
+    let ctx: ReturnType<typeof useLibrary> | null = null;
+    function Probe() {
+      ctx = useLibrary();
+      return null;
+    }
+    render(
+      <LibraryProvider>
+        <Probe />
+      </LibraryProvider>,
+    );
+    await act(async () => undefined);
+    expect(listPlugins).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      ctx!.reload();
+    });
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(listPlugins).toHaveBeenCalledTimes(2);
   });
 });

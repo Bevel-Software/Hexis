@@ -218,16 +218,28 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     setPluginsRevision((r) => r + 1);
   }, []);
 
+  // ONE reload for the whole Library. The plugin summaries carry counts and
+  // verdicts derived from the same knowledge base as the catalog — how many
+  // skills a plugin holds, how many of its links are broken, who may read
+  // it — so a page that refreshes the catalog after a link, a repair or an
+  // access edit must refresh the summaries too, or the sidebar count and the
+  // plugin page's banner keep the number from before the change.
+  const reloadAll = useCallback(() => {
+    reload();
+    reloadPlugins();
+  }, [reload, reloadPlugins]);
+
   const value = useMemo(
     (): LibraryContextValue => ({
       ...data,
+      reload: reloadAll,
       items,
       pluginSummaries,
       pluginsLoading,
       pluginsError,
       reloadPlugins,
     }),
-    [data, items, pluginSummaries, pluginsLoading, pluginsError, reloadPlugins],
+    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, reloadPlugins],
   );
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;
