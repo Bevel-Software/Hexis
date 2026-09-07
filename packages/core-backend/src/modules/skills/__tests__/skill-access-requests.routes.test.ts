@@ -84,6 +84,32 @@ describe('POST /skills/:name/access-request — the branch probe', () => {
     expect(h.workspaceService.writeFile).toHaveBeenCalledTimes(1);
   });
 
+  it('a create that loses the race proceeds once the fresh re-probe shows the branch', async () => {
+    const branch = joinBranchFor(MIA.email, FOLDER);
+    // Absent on the first probe, present on the second: someone else cut it in between.
+    let probes = 0;
+    const h = await makeHarness(async () => (probes++ === 0 ? [] : [{ name: branch, isDefault: false, isProtected: false }]));
+    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('already exists'));
+    server = h.server;
+    const res = await fetch(h.url, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, number: 42 });
+    expect(h.workflow.listBranches).toHaveBeenCalledTimes(2);
+    expect(h.workspaceService.writeFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('a create that fails with no branch to show for it stops the request — nothing is written on a branch that was not made', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const h = await makeHarness(async () => []);
+    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('origin refused'));
+    server = h.server;
+    const res = await fetch(h.url, { method: 'POST' });
+    expect(res.status).toBe(500);
+    expect(h.workflow.listBranches).toHaveBeenCalledTimes(2);
+    expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+  });
+
   it('a listing that could not prove anything stops the request before a branch or a byte is written', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = await makeHarness(async () => {

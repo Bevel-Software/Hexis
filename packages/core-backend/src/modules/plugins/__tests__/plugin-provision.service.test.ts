@@ -249,8 +249,10 @@ describe('PluginProvisionService.deletePlugin', () => {
       USER,
       { systemAuthorized: true },
     );
-    // Segments only — nothing climbs out of the root; a missing nested folder is unknown.
+    // Segments only — nothing climbs out of the root, and no backslash (a
+    // second separator on Windows); a missing nested folder is unknown.
     await expect(h.svc.deletePlugin(USER, '../etc')).rejects.toMatchObject({ status: 422 });
+    await expect(h.svc.deletePlugin(USER, 'teams\\Deep')).rejects.toMatchObject({ status: 422 });
     await expect(h.svc.deletePlugin(USER, 'teams/Nope')).rejects.toMatchObject({ status: 404 });
   });
 

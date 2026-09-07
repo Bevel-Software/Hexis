@@ -209,10 +209,12 @@ export class PluginProvisionService {
   async deletePlugin(user: AuthUser, rawFolder: string): Promise<void> {
     // The folder's path BELOW the plugins root — `GTM`, or `teams/deep` for a
     // plugin nested where discovery found it. Segments only: nothing that
-    // could climb out of the root.
+    // could climb out of the root, and no backslash — `/` is the one
+    // separator the repository speaks, and a `\` would read as a second one
+    // on Windows and as a name character everywhere else.
     const name = rawFolder.trim();
     const segments = name.split('/');
-    if (!name || segments.some((s) => !s || s === '.' || s === '..')) {
+    if (!name || segments.some((s) => !s || s === '.' || s === '..' || s.includes('\\'))) {
       throw new PluginProvisionError('A plugin needs a name.', 422);
     }
     if (isPersonalPluginDir(`${PLUGINS_DIR}/${name}`)) {
