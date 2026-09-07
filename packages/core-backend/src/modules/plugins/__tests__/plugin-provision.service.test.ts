@@ -251,6 +251,24 @@ describe('PluginProvisionService.deletePlugin', () => {
     await expect(fs.stat(path.join(h.dir, KB, 'Plugins/Ext Id'))).rejects.toThrow();
   });
 
+  it('a hole ANYWHERE in discovery stops a delete — even of a plugin whose own folder was read fine', async () => {
+    await h.svc.createPlugin(USER, 'GTM');
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/Other'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/Other/plugin.json'), '{"name":"other"}');
+    const real = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith(path.join('Other', 'plugin.json'))
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toMatchObject({ status: 503 });
+    } finally {
+      spy.mockRestore();
+    }
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM/plugin.json'))).resolves.toBeDefined();
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1); // the create above only
+  });
+
   it('a manifest that is there but cannot be read stops the delete — never a guessed identity lock', async () => {
     await h.svc.createPlugin(USER, 'GTM');
     const real = fs.readFile;

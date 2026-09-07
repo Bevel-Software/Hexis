@@ -146,9 +146,9 @@ export class PluginProvisionService {
   async createPlugin(user: AuthUser, rawName: string): Promise<ProvisionedPlugin> {
     const name = rawName.trim();
     if (!name) throw new PluginProvisionError('A plugin needs a name.', 422);
-    // eslint-disable-next-line no-control-regex -- NUL and control chars are
-    // exactly what a filesystem path cannot carry; refusing them here keeps
-    // the refusal a 422 instead of the fs layer's 500.
+    // NUL and control chars are exactly what a filesystem path cannot carry;
+    // refusing them here keeps the refusal a 422 instead of the fs layer's 500.
+    // eslint-disable-next-line no-control-regex
     if (/[/\\\u0000-\u001f\u007f]/.test(name) || name === '.' || name === '..' || name.startsWith('.')) {
       throw new PluginProvisionError(
         'A plugin name can\'t contain / or \\ or control characters, or start with a dot.',
@@ -358,16 +358,21 @@ export class PluginProvisionService {
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
   }
 
-  /** The identity discovery gives the plugin at `folder`, or the folder's own slug when it lists none there. */
+  /**
+   * The identity discovery gives the plugin at `folder`, or the folder's own
+   * slug when it lists none there. ONE rule for every write provisioning
+   * makes — create, delete — as for the rename: no write over a discovery
+   * with a hole in it, whether or not the hole is where this plugin lives.
+   * An operation that parks and commits against an identity set it could
+   * not fully see is the class of mistake the rule exists to make impossible.
+   */
   private async discoveredIdentity(folder: string, leaf: string): Promise<string> {
     const { plugins, unreadable } = await this.discovered();
-    const found = plugins.find((p) => p.folder === folder);
-    if (found) return found.name;
-    // Not listed and nothing unreadable: no manifest, no bundle — the folder
-    // is its own identity. Not listed while something was unreadable: the
-    // plugin may be behind the hole, and its identity unknown.
     if (unreadable.length > 0) throw incompleteDiscovery(unreadable);
-    return pluginManifestName(leaf);
+    const found = plugins.find((p) => p.folder === folder);
+    // Not listed and nothing unreadable: no manifest, no bundle — the folder
+    // is its own identity.
+    return found ? found.name : pluginManifestName(leaf);
   }
 
   /** One discovery over the knowledge base checkout. */
