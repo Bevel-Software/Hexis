@@ -102,14 +102,19 @@ export class PluginRenameService {
     }
 
     const nextName = patch.name === undefined ? plugin.name : String(patch.name).trim();
-    if (!isPluginIdentifier(nextName)) {
+    // The rules govern a NEW identifier only. The current one is whatever the
+    // manifest says — a hand-written name that predates a rule (a reserved
+    // prefix, say) must not block a display-name change, and cannot be
+    // "fixed" by a rename that keeps it.
+    const identifierChanges = nextName !== plugin.name;
+    if (identifierChanges && !isPluginIdentifier(nextName)) {
       throw new PluginRenameError(
         'A plugin identifier is lowercase kebab-case: letters, digits and single hyphens, like "sales-team".',
         422,
         { kind: 'bad-name' },
       );
     }
-    if (nextName.startsWith(PERSONAL_PLUGIN_PREFIX)) {
+    if (identifierChanges && nextName.startsWith(PERSONAL_PLUGIN_PREFIX)) {
       throw new PluginRenameError(
         `The "${PERSONAL_PLUGIN_PREFIX}" namespace is reserved for personal folders. Pick another identifier.`,
         422,
@@ -119,7 +124,7 @@ export class PluginRenameService {
     // Taken by SLUG, not by spelling: a bundle may declare a name that is not
     // an identifier, and the marketplace folds every name to its slug — a
     // collision there drops one of the two from the catalog.
-    if (nextName !== plugin.name && plugins.some((p) => p !== plugin && pluginManifestName(p.name) === nextName)) {
+    if (identifierChanges && plugins.some((p) => p !== plugin && pluginManifestName(p.name) === nextName)) {
       throw new PluginRenameError(`A plugin named "${nextName}" already exists.`, 409, { kind: 'name-taken' });
     }
     const folderName = path.posix.basename(plugin.folder);
@@ -135,7 +140,7 @@ export class PluginRenameService {
       { rel: manifestRel, text: `${JSON.stringify(manifest, null, 2)}\n`, before: plugin.manifestText },
     ];
 
-    if (nextName !== plugin.name) {
+    if (identifierChanges) {
       // Every access entry in the knowledge base that names the old
       // principal — in a folder's access.md or in the own frontmatter of any
       // file kind the resolver reads grants from (`.md`, `.tool`, whatever
@@ -167,10 +172,9 @@ export class PluginRenameService {
     // is as much a split principal as a refused commit.
     try {
       for (const w of writes) await this.workspaceService.writeFile(wsId, w.rel, w.text);
-      const summary =
-        nextName === plugin.name
-          ? `Rename plugin ${plugin.name}: display name`
-          : `Rename plugin ${plugin.name} to ${nextName}`;
+      const summary = identifierChanges
+        ? `Rename plugin ${plugin.name} to ${nextName}`
+        : `Rename plugin ${plugin.name}: display name`;
       await this.commits.commitChanges(
         wsId,
         user,

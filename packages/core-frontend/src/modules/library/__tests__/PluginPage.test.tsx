@@ -334,6 +334,21 @@ describe('PluginPage', () => {
     expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
   });
 
+  it('lets a plugin whose identifier already wears the reserved prefix change its display name', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'personal-legacy', displayName: 'Legacy', canWrite: true })]);
+    pluginsMock.renamePlugin.mockResolvedValue({ name: 'personal-legacy', displayName: 'Legacy Team', rewritten: [] });
+    renderPlugin('personal-legacy');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename Legacy' });
+    fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: 'Legacy Team' } });
+    expect(within(dialog).queryByText(/reserved for personal folders/)).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename' }));
+    await waitFor(() =>
+      expect(pluginsMock.renamePlugin).toHaveBeenCalledWith('personal-legacy', { displayName: 'Legacy Team' }),
+    );
+  });
+
   it('offers no Rename plugin for a plugin read from an external format — its repository owns the name', async () => {
     pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', canWrite: true, linksAreManaged: false })]);
     renderPlugin('gtm');

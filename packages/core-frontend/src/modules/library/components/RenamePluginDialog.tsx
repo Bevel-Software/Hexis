@@ -34,16 +34,17 @@ export function RenamePluginDialog({
   const [error, setError] = useState<string | null>(null);
 
   const trimmedName = name.trim();
-  // The same two rules the server applies, so the dialog never submits a
-  // guaranteed refusal: the identifier shape, and the reserved personal prefix.
-  const nameError = !trimmedName
+  const identifierChanges = trimmedName !== plugin.name;
+  // The same two rules the server applies — and, like the server, only to a
+  // NEW identifier: the current one is whatever the manifest says, and a
+  // name that predates a rule must not block a display-name change.
+  const nameError = !identifierChanges || !trimmedName
     ? null
     : !IDENTIFIER_RE.test(trimmedName)
       ? 'Lowercase letters, digits and single hyphens, like sales-team.'
       : trimmedName.startsWith(PERSONAL_PLUGIN_PREFIX)
         ? `"${PERSONAL_PLUGIN_PREFIX}" is reserved for personal folders. Pick another identifier.`
         : null;
-  const identifierChanges = trimmedName !== plugin.name;
   const changed = identifierChanges || displayName.trim() !== (plugin.displayName ?? plugin.name);
   const canSubmit = trimmedName.length > 0 && nameError === null && changed && !busy;
 

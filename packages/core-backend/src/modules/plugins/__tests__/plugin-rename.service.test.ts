@@ -150,6 +150,18 @@ describe('PluginRenameService', () => {
     expect(await manifest()).toEqual({ name: 'gtm', version: '1.0.0' });
   });
 
+  it('judges only a NEW identifier: a plugin whose manifest already wears the reserved prefix can still change its display name', async () => {
+    // Hand-written before the rule existed; the folder is not a personal shelf.
+    await write('Plugins/Legacy/plugin.json', '{"name":"personal-legacy"}');
+    await write('Plugins/Legacy/access.md', GTM_RULES);
+    await svc.rename(manager, 'personal-legacy', { displayName: 'Legacy Team' });
+    expect(JSON.parse(await read('Plugins/Legacy/plugin.json'))).toEqual({ name: 'personal-legacy', displayName: 'Legacy Team' });
+    // Moving it to ANOTHER reserved name is still refused; moving it out of the namespace is fine.
+    await expect(svc.rename(manager, 'personal-legacy', { name: 'personal-other' })).rejects.toMatchObject({ payload: { kind: 'bad-name' } });
+    await svc.rename(manager, 'personal-legacy', { name: 'legacy' });
+    expect(JSON.parse(await read('Plugins/Legacy/plugin.json')).name).toBe('legacy');
+  });
+
   it('is fail-closed: a member, an unknown name, and the folder spelled as a name all get the same 404', async () => {
     for (const [user, name] of [
       [member, 'gtm'],

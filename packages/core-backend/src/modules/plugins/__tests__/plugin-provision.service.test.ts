@@ -283,6 +283,26 @@ describe('PluginProvisionService.deletePlugin', () => {
     expect(h.commits.runPendingCommit).not.toHaveBeenCalled();
   });
 
+  it('a folder that cannot be LISTED is an error, never "unknown plugin" — absence and failure are different answers', async () => {
+    await h.svc.createPlugin(USER, 'GTM');
+    const real = fs.readdir;
+    const spy = vi.spyOn(fs, 'readdir').mockImplementation(((dir: string, opts: unknown) => {
+      if (String(dir).endsWith('Plugins')) {
+        return Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }));
+      }
+      return (real as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts);
+    }) as never);
+    try {
+      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toThrow('EACCES');
+      await expect(h.svc.createPlugin(USER, 'Ops')).rejects.toThrow('EACCES');
+    } finally {
+      spy.mockRestore();
+    }
+    // Nothing moved, nothing committed: the plugin is exactly where it was.
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM/plugin.json'))).resolves.toBeDefined();
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1); // the create above only
+  });
+
   it('never deletes a personal folder through the plugin door', async () => {
     await h.svc.ensurePersonalPlugin(USER);
     const folder = personalPluginFolderName(USER.id);

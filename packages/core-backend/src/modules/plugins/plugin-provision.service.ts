@@ -63,6 +63,23 @@ export interface ProvisionCommitDriver {
   ): Promise<void>;
 }
 
+/**
+ * A directory's entries, or null when there is no such directory. ONLY
+ * absence reads as "nothing there": a listing that fails for any other
+ * reason (permissions, I/O) throws, because "the folder is not there" and
+ * "the folder could not be read" must never collapse into one answer — the
+ * first is a 404 to a caller, the second an outage an operator must see.
+ */
+async function listDirOrAbsent(dir: string): Promise<Array<{ name: string; isDirectory(): boolean }> | null> {
+  try {
+    return await fs.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw err;
+  }
+}
+
 export interface ProvisionedPlugin {
   /** The folder name under `Plugins/` (not the full path). */
   folder: string;
@@ -289,13 +306,8 @@ export class PluginProvisionService {
   private async exactFolderExists(root: string, segments: string[]): Promise<boolean> {
     let dir = root;
     for (const segment of segments) {
-      let entries: Array<{ name: string; isDirectory(): boolean }>;
-      try {
-        entries = await fs.readdir(dir, { withFileTypes: true });
-      } catch {
-        return false;
-      }
-      if (!entries.some((e) => e.isDirectory() && e.name === segment)) return false;
+      const entries = await listDirOrAbsent(dir);
+      if (!entries?.some((e) => e.isDirectory() && e.name === segment)) return false;
       dir = path.join(dir, segment);
     }
     return true;
@@ -305,28 +317,20 @@ export class PluginProvisionService {
   private async existingFolder(name: string): Promise<string | null> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    let children: string[];
-    try {
-      children = await fs.readdir(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
-    } catch {
-      return null; // no Plugins/ root yet — nothing can collide
-    }
+    // No Plugins/ root yet — nothing can collide.
+    const children = await listDirOrAbsent(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
+    if (!children) return null;
     const lower = name.toLowerCase();
-    return children.find((c) => c.toLowerCase() === lower) ?? null;
+    return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
   }
 
   /** An existing PLUGIN FOLDER whose derived manifest name equals `name`'s, or null. */
   private async manifestNameTwin(name: string): Promise<string | null> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    let children: Array<{ name: string; isDirectory(): boolean }>;
-    try {
-      children = await fs.readdir(path.join(wsDir, this.kbDirName, PLUGINS_DIR), {
-        withFileTypes: true,
-      });
-    } catch {
-      return null; // no Plugins/ root yet — nothing can collide
-    }
+    // No Plugins/ root yet — nothing can collide.
+    const children = await listDirOrAbsent(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
+    if (!children) return null;
     const slug = pluginManifestName(name);
     // Only what actually publishes a manifest claims a slug: a DIRECTORY
     // that is not dot-prefixed (a parked delete — invisible to every
