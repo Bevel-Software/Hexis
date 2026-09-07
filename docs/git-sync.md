@@ -89,8 +89,11 @@ A `curl --fail` therefore fails exactly when Hexis is not in sync.
 name: Sync Hexis
 on:
   push:
-    # Branches only: a tag push has no branch to sync.
-    tags-ignore: ["**"]
+    # Every branch, and by the same token no tag: a push filter that names
+    # only branches ignores tag events. (A `tags-ignore` filter ALONE would
+    # do the opposite — consider tags only — and the workflow would never
+    # run for a branch push.)
+    branches: ["**"]
 jobs:
   sync:
     runs-on: ubuntu-latest
