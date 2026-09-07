@@ -228,18 +228,23 @@ describe('KbPluginSource — one walk, both shapes', () => {
   it('the manifest name is the identity and the folder only the label — unless the name is no identifier', async () => {
     await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', displayName: 'Go To Market' }));
     await write('Plugins/Numeric/plugin.json', '{"name":42}');
+    // A name nested deeper than any stack would serialise: the warning must
+    // describe it, never try to print it.
+    await write('Plugins/Nested/plugin.json', `{"name":${'['.repeat(20000)}${']'.repeat(20000)}}`);
     await write('Plugins/Ops/plugin.json', JSON.stringify({ name: 'Not An Identifier' }));
     await write('Plugins/Plain/plugin.json', '{}');
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
       ['go-to-market', 'Go To Market', 'Plugins/GTM'],
+      ['nested', 'Nested', 'Plugins/Nested'],
       ['numeric', 'Numeric', 'Plugins/Numeric'],
       ['ops', 'Ops', 'Plugins/Ops'],
       ['plain', 'Plain', 'Plugins/Plain'],
     ]);
     // Every PRESENT name that is no identifier is said out loud — whatever its type.
     expect(warnings).toEqual([
-      'Plugins/Numeric/plugin.json names 42, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "numeric"',
+      'Plugins/Nested/plugin.json names a value of type array, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "nested"',
+      'Plugins/Numeric/plugin.json names a value of type number, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "numeric"',
       'Plugins/Ops/plugin.json names "Not An Identifier", which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "ops"',
     ]);
   });

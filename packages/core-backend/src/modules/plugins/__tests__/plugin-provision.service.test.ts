@@ -231,6 +231,26 @@ describe('PluginProvisionService.deletePlugin', () => {
     }
   });
 
+  it('a bundle-shaped plugin locks on the identity its bundle declares — the one a creation would take', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/Ext'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/Ext/plugin.bundle.json'), '{"name":"ext-id"}');
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/Ext/access.md'), '---\n---\n');
+    let refuse: (err: Error) => void = () => {};
+    h.commits.runPendingCommit.mockImplementationOnce(
+      () => new Promise<undefined>((_resolve, reject) => { refuse = reject; }),
+    );
+    const deleting = h.svc.deletePlugin(USER, 'Ext');
+    await new Promise((r) => setTimeout(r, 20));
+    // Spelled differently, same identity: must wait for the delete, then see the twin.
+    const creating = h.svc.createPlugin(USER, 'Ext Id');
+    await new Promise((r) => setTimeout(r, 20));
+    refuse(new Error('push refused'));
+    await expect(deleting).rejects.toThrow('push refused');
+    await expect(creating).rejects.toMatchObject({ status: 409 });
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/Ext/plugin.bundle.json'))).resolves.toBeDefined();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/Ext Id'))).rejects.toThrow();
+  });
+
   it('a manifest that is there but cannot be read stops the delete — never a guessed identity lock', async () => {
     await h.svc.createPlugin(USER, 'GTM');
     const real = fs.readFile;
@@ -239,7 +259,8 @@ describe('PluginProvisionService.deletePlugin', () => {
         ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
         : (real as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
     try {
-      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toThrow('EACCES');
+      // Discovery reports the hole; the delete refuses the way a creation would.
+      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toMatchObject({ status: 503 });
     } finally {
       spy.mockRestore();
     }
@@ -354,8 +375,9 @@ describe('PluginProvisionService.deletePlugin', () => {
       return (real as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts);
     }) as never);
     try {
-      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toThrow('EACCES');
-      await expect(h.svc.createPlugin(USER, 'Ops')).rejects.toThrow('EACCES');
+      // Discovery cannot list the root: a hole, refused as such — never "unknown plugin" (404).
+      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toMatchObject({ status: 503 });
+      await expect(h.svc.createPlugin(USER, 'Ops')).rejects.toMatchObject({ status: 503 });
     } finally {
       spy.mockRestore();
     }

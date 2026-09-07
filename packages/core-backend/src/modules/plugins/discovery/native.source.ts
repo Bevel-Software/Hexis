@@ -56,7 +56,13 @@ export async function readNativePlugin(
   // Any PRESENT name that is not an identifier is worth a word — a number or
   // an object as much as a capitalised string. Only an absent name is silent.
   if (manifest && manifest.name !== undefined && !isPluginIdentifier(manifest.name)) {
-    const spelled = typeof manifest.name === 'string' ? `"${manifest.name}"` : JSON.stringify(manifest.name);
+    // A diagnostic must never be the thing that fails: a non-string name is
+    // described by its type, not serialised (a value nested deep enough
+    // would blow the stack on the way to a warning).
+    const spelled =
+      typeof manifest.name === 'string'
+        ? `"${manifest.name}"`
+        : `a value of type ${Array.isArray(manifest.name) ? 'array' : typeof manifest.name}`;
     warnings.push(
       `${folder}/${PLUGIN_MANIFEST_FILE} names ${spelled}, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "${name}"`,
     );

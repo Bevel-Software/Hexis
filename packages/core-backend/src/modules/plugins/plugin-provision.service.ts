@@ -35,7 +35,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isAbsence } from '../../shared/fs-errors.js';
-import type { PluginSource } from './discovery/plugin-source.js';
+import type { Discovery, PluginSource } from './discovery/plugin-source.js';
 import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 import {
@@ -47,7 +47,6 @@ import {
   PERSONAL_PLUGIN_PREFIX,
   isPersonalPluginDir,
   personalPluginFolderName,
-  pluginIdentityOf,
   validateFilename,
   type AuthUser,
 } from '@bevel-software/platform-shared';
@@ -75,26 +74,26 @@ export interface ProvisionCommitDriver {
  * "the folder could not be read" must never collapse into one answer — the
  * first is a 404 to a caller, the second an outage an operator must see.
  */
-async function listDirOrAbsent(dir: string): Promise<Array<{ name: string; isDirectory(): boolean }> | null> {
+async function listDirOrIncomplete(
+  dir: string,
+  repoRel: string,
+): Promise<Array<{ name: string; isDirectory(): boolean }> | null> {
   try {
     return await fs.readdir(dir, { withFileTypes: true });
   } catch (err) {
     if (isAbsence(err)) return null;
-    throw err;
+    // The same refusal a hole in discovery gets: this listing is one more
+    // read the operation needed and could not have.
+    throw incompleteDiscovery([repoRel]);
   }
 }
 
-/** A manifest's parsed object, or null for absent, unparsable or not-an-object text. */
-function parseManifestOrNull(text: string | null): Record<string, unknown> | null {
-  if (text === null) return null;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
+/** The refusal for a discovery with a hole in it: a name cannot be checked, an identity cannot be known. */
+function incompleteDiscovery(unreadable: string[]): PluginProvisionError {
+  return new PluginProvisionError(
+    `Some of the knowledge base could not be read (${unreadable.join(', ')}), so the plugin cannot be checked against every other. Try again, or ask an admin.`,
+    503,
+  );
 }
 
 export interface ProvisionedPlugin {
@@ -268,18 +267,16 @@ export class PluginProvisionService {
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     const pluginsDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR);
     const folderDir = path.join(pluginsDir, ...segments);
-    // Locked on the plugin's IDENTITY — the manifest name, the same key a
-    // creation of that name takes — not on a slug of the folder path, which
-    // for a nested plugin is a different string and would let a creation of
-    // the same identity run inside the delete's window.
-    // Only ABSENCE of the manifest falls back to the folder's slug; a manifest
-    // that is there but cannot be read is an identity nobody could see, and a
-    // delete must not proceed under a guessed lock.
-    const manifestText = await fs.readFile(path.join(folderDir, PLUGIN_MANIFEST_FILE), 'utf-8').catch((err: unknown) => {
-      if (isAbsence(err)) return null;
-      throw err;
-    });
-    const identity = pluginIdentityOf(parseManifestOrNull(manifestText), segments[segments.length - 1]!);
+    // Locked on the plugin's IDENTITY — the same key a creation of that name
+    // takes — not on a slug of the folder path, which for a nested plugin is a
+    // different string and would let a creation of the same identity run
+    // inside the delete's window. The identity is DISCOVERY's answer, in
+    // either file shape (a bundle's name as much as a manifest's), so delete
+    // and create can never key on two spellings of one plugin; a hole in
+    // discovery refuses, as it does for creation. A folder discovery does not
+    // list (no manifest at all) locks on its own slug — nothing else can
+    // claim that identity either.
+    const identity = await this.discoveredIdentity(`${PLUGINS_DIR}/${name}`, segments[segments.length - 1]!);
     return this.creations.run(`plugin:${identity}`, async () => {
       // Exact spelling of EVERY component — the catalog hands the route the
       // on-disk spelling, so a mismatch means the plugin is gone (or was
@@ -340,10 +337,12 @@ export class PluginProvisionService {
    */
   private async exactFolderExists(root: string, segments: string[]): Promise<boolean> {
     let dir = root;
+    let rel = PLUGINS_DIR;
     for (const segment of segments) {
-      const entries = await listDirOrAbsent(dir);
+      const entries = await listDirOrIncomplete(dir, rel);
       if (!entries?.some((e) => e.isDirectory() && e.name === segment)) return false;
       dir = path.join(dir, segment);
+      rel = `${rel}/${segment}`;
     }
     return true;
   }
@@ -353,10 +352,29 @@ export class PluginProvisionService {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     // No Plugins/ root yet — nothing can collide.
-    const children = await listDirOrAbsent(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
+    const children = await listDirOrIncomplete(path.join(wsDir, this.kbDirName, PLUGINS_DIR), PLUGINS_DIR);
     if (!children) return null;
     const lower = name.toLowerCase();
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
+  }
+
+  /** The identity discovery gives the plugin at `folder`, or the folder's own slug when it lists none there. */
+  private async discoveredIdentity(folder: string, leaf: string): Promise<string> {
+    const { plugins, unreadable } = await this.discovered();
+    const found = plugins.find((p) => p.folder === folder);
+    if (found) return found.name;
+    // Not listed and nothing unreadable: no manifest, no bundle — the folder
+    // is its own identity. Not listed while something was unreadable: the
+    // plugin may be behind the hole, and its identity unknown.
+    if (unreadable.length > 0) throw incompleteDiscovery(unreadable);
+    return pluginManifestName(leaf);
+  }
+
+  /** One discovery over the knowledge base checkout. */
+  private async discovered(): Promise<Discovery> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    return this.source.discover(path.join(wsDir, this.kbDirName));
   }
 
   /**
@@ -373,15 +391,8 @@ export class PluginProvisionService {
    * prove a name free.
    */
   private async manifestNameTwin(name: string): Promise<string | null> {
-    const wsId = await this.readyWorkspaceId();
-    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    const { plugins, unreadable } = await this.source.discover(path.join(wsDir, this.kbDirName));
-    if (unreadable.length > 0) {
-      throw new PluginProvisionError(
-        `Some of the knowledge base could not be read (${unreadable.join(', ')}), so the name cannot be checked against every plugin. Try again, or ask an admin.`,
-        503,
-      );
-    }
+    const { plugins, unreadable } = await this.discovered();
+    if (unreadable.length > 0) throw incompleteDiscovery(unreadable);
     const slug = pluginManifestName(name);
     return plugins.find((p) => pluginManifestName(p.name) === slug)?.folder ?? null;
   }

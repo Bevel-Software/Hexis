@@ -1,5 +1,5 @@
 import { useId, useState } from 'react';
-import { PERSONAL_PLUGIN_PREFIX } from '@bevel-software/platform-shared';
+import { PERSONAL_PLUGIN_PREFIX, pluginManifestName } from '@bevel-software/platform-shared';
 import { Banner, Button, Dialog, TextField } from '../../../shared/components';
 import { renamePlugin, type PluginSummary } from '../services/plugins.api';
 import { useLibraryToast } from '../state/toast.context';
@@ -35,7 +35,10 @@ export function RenamePluginDialog({
 
   const trimmedName = name.trim();
   const identifierChanges = trimmedName !== plugin.name;
-  // The same two rules the server applies — and, like the server, only to a
+  // The same three rules the server applies — the identifier shape, the
+  // reserved prefix, and that the name is its own slug (the marketplace keys
+  // on a 64-character slug; a longer name would be one thing here and
+  // another everywhere it is published) — and, like the server, only to a
   // NEW identifier: the current one is whatever the manifest says, and a
   // name that predates a rule must not block a display-name change.
   const nameError = !identifierChanges || !trimmedName
@@ -44,7 +47,9 @@ export function RenamePluginDialog({
       ? 'Lowercase letters, digits and single hyphens, like sales-team.'
       : trimmedName.startsWith(PERSONAL_PLUGIN_PREFIX)
         ? `"${PERSONAL_PLUGIN_PREFIX}" is reserved for personal folders. Pick another identifier.`
-        : null;
+        : pluginManifestName(trimmedName) !== trimmedName
+          ? 'Too long: an identifier is at most 64 characters.'
+          : null;
   const changed = identifierChanges || displayName.trim() !== (plugin.displayName ?? plugin.name);
   const canSubmit = trimmedName.length > 0 && nameError === null && changed && !busy;
 

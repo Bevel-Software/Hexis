@@ -334,6 +334,18 @@ describe('PluginPage', () => {
     expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
   });
 
+  it('refuses an identifier longer than the slug the marketplace keys on, before asking the server', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: `${'a'.repeat(60)}-${'b'.repeat(10)}` } });
+    expect(within(dialog).getByText(/at most 64 characters/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
+    expect(pluginsMock.renamePlugin).not.toHaveBeenCalled();
+  });
+
   it('lets a plugin whose identifier already wears the reserved prefix change its display name', async () => {
     pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'personal-legacy', displayName: 'Legacy', canWrite: true })]);
     pluginsMock.renamePlugin.mockResolvedValue({ name: 'personal-legacy', displayName: 'Legacy Team', rewritten: [] });
