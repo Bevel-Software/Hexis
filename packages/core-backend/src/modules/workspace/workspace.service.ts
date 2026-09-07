@@ -7,7 +7,11 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import {
+  RemoteBranchGoneError,
+  WorkflowDomainError,
+  isMissingRemoteBranchFailure,
+} from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import {
   cloneCredentialArgs,
@@ -696,9 +700,18 @@ export class WorkspaceService implements IWorkspaceService {
       }
     } catch (err) {
       const redacted = redactError(err);
-      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+      // A branch origin does not have is a fact about the branch, not a
+      // failure of ours: the host deleted it (and the sync retired the
+      // clone), or the link was to a branch that never existed. Typed, so the
+      // routes answer 410 with the branch named and the browser can say "this
+      // branch no longer exists" instead of "something went wrong".
+      if (isMissingRemoteBranchFailure(redacted)) {
+        console.log(`[workspace] branch "${branch}" does not exist on origin — nothing to clone`);
+        throw new RemoteBranchGoneError(branch);
+      }
+      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
       throw new Error(`Failed to clone process map: ${redacted}`);
     }
   }

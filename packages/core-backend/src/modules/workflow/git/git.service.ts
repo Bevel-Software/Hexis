@@ -34,6 +34,7 @@ import {
   ProtectedBranchError,
   PullRebaseConflictError,
   RemoteBranchGoneError,
+  isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -1603,7 +1604,7 @@ export class GitService implements IGitService {
       return await this.refreshRemoteBranchRef(cwd, branch);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (/couldn't find remote ref/i.test(msg)) throw new RemoteBranchGoneError(branch);
+      if (isMissingRemoteBranchFailure(msg)) throw new RemoteBranchGoneError(branch);
       throw err;
     }
   }
