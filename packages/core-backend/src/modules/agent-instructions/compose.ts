@@ -154,30 +154,45 @@ const LIST_ITEM_OR_QUOTE = /^([-*+]|\d{1,9}[.)])(\s|$)|^>/;
  * code rather than a paragraph, so it and everything inside it (blank lines
  * and rules included) are skipped, and a fence that never closes runs to the
  * end of the text, as in CommonMark. Inside a block, ATX heading lines and
- * thematic breaks are dropped, and a setext heading (paragraph text with a
- * `===` or `---` underline directly beneath it) is dropped together with its
- * underline, so `Title\n===\nText` and `## Title\nText` both yield `Text`.
- * A rule beneath a list item or a blockquote, or beneath the lines that
- * continue one, is not an underline (it cannot lazily continue either), so
- * `- Item\n---` keeps the item and drops the rule. Empty when the text has
- * no such paragraph (absent, empty, code-only or heading-only preamble).
+ * rules (a thematic break, or a bare `===` or `---` line) are never content,
+ * and a setext heading (paragraph text with a `===` or `---` underline
+ * directly beneath it) is dropped together with its underline, so
+ * `Title\n===\nText` and `## Title\nText` both yield `Text`. A rule beneath
+ * a list item or a blockquote, or beneath the lines that continue one, is
+ * not an underline (it cannot lazily continue either), so `- Item\n---`
+ * keeps the item and drops the rule. Empty when the text has no such
+ * paragraph (absent, empty, code-only or heading-only preamble).
  */
 function firstNonHeadingParagraph(text: string): string {
   for (const block of paragraphBlocks(text)) {
-    let underline = -1;
+    const kinds = block.map(lineKind);
     // A list item or blockquote owns every line beneath it until the block
     // ends (a lazy continuation is trimmed to look like paragraph text), so
     // once one opens, no rule further down the block is an underline.
     let container = false;
-    block.forEach((l, i) => {
-      if (LIST_ITEM_OR_QUOTE.test(l)) container = true;
-      else if (i > 0 && !container && SETEXT_UNDERLINE.test(l) && isParagraphText(block[i - 1])) underline = i;
+    let underline = -1;
+    kinds.forEach((kind, i) => {
+      if (kind === 'container') container = true;
+      else if (kind === 'rule' && i > 0 && !container && kinds[i - 1] === 'text' && SETEXT_UNDERLINE.test(block[i]))
+        underline = i;
     });
-    const lines = underline >= 0 ? block.slice(underline + 1) : block;
-    const content = lines.filter((l) => !ATX_HEADING.test(l) && !THEMATIC_BREAK.test(l));
+    const content = block.filter((_, i) => i > underline && (kinds[i] === 'text' || kinds[i] === 'container'));
     if (content.length > 0) return content.join(' ').replace(/\s+/g, ' ');
   }
   return '';
+}
+
+/**
+ * What a line is on its own, in CommonMark's order of precedence: a rule is
+ * tested before a list item because `- - -` and `* * *` are breaks, not
+ * items. Whether a rule underlines the text above it depends on its
+ * neighbours and is decided by the caller.
+ */
+function lineKind(line: string): 'heading' | 'rule' | 'container' | 'text' {
+  if (ATX_HEADING.test(line)) return 'heading';
+  if (THEMATIC_BREAK.test(line) || SETEXT_UNDERLINE.test(line)) return 'rule';
+  if (LIST_ITEM_OR_QUOTE.test(line)) return 'container';
+  return 'text';
 }
 
 /** The text's blocks outside fenced code, each a list of trimmed non-blank lines. */
@@ -208,11 +223,6 @@ function paragraphBlocks(text: string): string[][] {
   }
   flush();
   return blocks;
-}
-
-/** Whether a setext underline beneath this line would head it: only paragraph text can carry one. */
-function isParagraphText(line: string): boolean {
-  return !ATX_HEADING.test(line) && !SETEXT_UNDERLINE.test(line) && !THEMATIC_BREAK.test(line);
 }
 
 /**

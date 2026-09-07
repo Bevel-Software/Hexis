@@ -155,6 +155,13 @@ describe('composeAgentInstructions: the tool prefix', () => {
     expect(composeAgentInstructions('> quote\ncontinued\n---\n\nWhat we know.').toolPrefix).toBe(
       `${TOOL_PREFIX_LINE} > quote continued`,
     );
+    // A bare `===` beneath a container is literal text to CommonMark, but a line of rule characters is never content worth sending.
+    expect(composeAgentInstructions('- Item\nPara\n===\n\nWhat we know.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} - Item Para`);
+  });
+
+  it('a spaced thematic break is a break, not a list item, so the setext heading beneath it is still dropped', () => {
+    expect(composeAgentInstructions('* * *\nTitle\n===\n\nWhat we know.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} What we know.`);
+    expect(composeAgentInstructions('- - -\nTitle\n---\n\nWhat we know.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} What we know.`);
   });
 
   it('a fenced code block is not a paragraph: a rule inside it is code, and the prose after it is the prefix', () => {
