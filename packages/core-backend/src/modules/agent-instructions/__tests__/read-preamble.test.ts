@@ -74,8 +74,8 @@ describe('readAgentPreamble', () => {
     await expect(readAgentPreamble(workspace(), KB)).rejects.toMatchObject({ code: 'ENOTDIR' });
   });
 
-  // Root reads a mode-000 file, so the open would not fail for it.
-  it.skipIf(process.getuid?.() === 0)('an open that fails for any reason but absence throws too', async () => {
+  // Root reads a mode-000 file, and Windows has no mode bits to deny with, so neither can make the open fail.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('an open that fails for any reason but absence throws too', async () => {
     const file = path.join(wsDir, KB, 'mcp-description.md');
     await fs.writeFile(file, 'Acme.', 'utf8');
     await fs.chmod(file, 0o000); // the lstat still passes; the open is what fails

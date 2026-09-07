@@ -157,17 +157,22 @@ const LIST_ITEM_OR_QUOTE = /^([-*+]|\d{1,9}[.)])(\s|$)|^>/;
  * thematic breaks are dropped, and a setext heading (paragraph text with a
  * `===` or `---` underline directly beneath it) is dropped together with its
  * underline, so `Title\n===\nText` and `## Title\nText` both yield `Text`.
- * A rule beneath a list item or a blockquote is not an underline (it cannot
- * lazily continue either), so `- Item\n---` keeps the item and drops the
- * rule. Empty when the text has no such paragraph (absent, empty, code-only
- * or heading-only preamble).
+ * A rule beneath a list item or a blockquote, or beneath the lines that
+ * continue one, is not an underline (it cannot lazily continue either), so
+ * `- Item\n---` keeps the item and drops the rule. Empty when the text has
+ * no such paragraph (absent, empty, code-only or heading-only preamble).
  */
 function firstNonHeadingParagraph(text: string): string {
   for (const block of paragraphBlocks(text)) {
-    const underline = block.reduce(
-      (last, l, i) => (i > 0 && SETEXT_UNDERLINE.test(l) && isParagraphText(block[i - 1]) ? i : last),
-      -1,
-    );
+    let underline = -1;
+    // A list item or blockquote owns every line beneath it until the block
+    // ends (a lazy continuation is trimmed to look like paragraph text), so
+    // once one opens, no rule further down the block is an underline.
+    let container = false;
+    block.forEach((l, i) => {
+      if (LIST_ITEM_OR_QUOTE.test(l)) container = true;
+      else if (i > 0 && !container && SETEXT_UNDERLINE.test(l) && isParagraphText(block[i - 1])) underline = i;
+    });
     const lines = underline >= 0 ? block.slice(underline + 1) : block;
     const content = lines.filter((l) => !ATX_HEADING.test(l) && !THEMATIC_BREAK.test(l));
     if (content.length > 0) return content.join(' ').replace(/\s+/g, ' ');
@@ -187,8 +192,8 @@ function paragraphBlocks(text: string): string[][] {
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (fence !== null) {
-      // The closer: the same character as the opener, at least as many of it, nothing else.
-      if (line.startsWith(fence) && /^[`~]+$/.test(line)) fence = null;
+      // The closer: the opener's character only, at least as many of it, nothing else.
+      if (line.startsWith(fence) && /^(`+|~+)$/.test(line)) fence = null;
       continue;
     }
     const opener = CODE_FENCE.exec(line);
@@ -207,9 +212,7 @@ function paragraphBlocks(text: string): string[][] {
 
 /** Whether a setext underline beneath this line would head it: only paragraph text can carry one. */
 function isParagraphText(line: string): boolean {
-  return (
-    !ATX_HEADING.test(line) && !SETEXT_UNDERLINE.test(line) && !THEMATIC_BREAK.test(line) && !LIST_ITEM_OR_QUOTE.test(line)
-  );
+  return !ATX_HEADING.test(line) && !SETEXT_UNDERLINE.test(line) && !THEMATIC_BREAK.test(line);
 }
 
 /**

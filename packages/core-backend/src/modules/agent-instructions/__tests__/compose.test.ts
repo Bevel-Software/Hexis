@@ -148,6 +148,13 @@ describe('composeAgentInstructions: the tool prefix', () => {
     expect(composeAgentInstructions('> Permits\n---\n\nWhat we know about permits.').toolPrefix).toBe(
       `${TOOL_PREFIX_LINE} > Permits`,
     );
+    // The lines that continue an item or a quote belong to it, so a rule beneath them is a break too.
+    expect(composeAgentInstructions('- Item one\n  continuation\n---\n\nWhat we know.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} - Item one continuation`,
+    );
+    expect(composeAgentInstructions('> quote\ncontinued\n---\n\nWhat we know.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} > quote continued`,
+    );
   });
 
   it('a fenced code block is not a paragraph: a rule inside it is code, and the prose after it is the prefix', () => {
@@ -160,6 +167,17 @@ describe('composeAgentInstructions: the tool prefix', () => {
     );
     // A fence that never closes runs to the end of the file, as in CommonMark.
     expect(composeAgentInstructions('```\nnever closed\n\nstill code').toolPrefix).toBe(TOOL_PREFIX_LINE);
+  });
+
+  it("a fence closes only on a line of the opener's character, at least as long", () => {
+    // Mixed characters do not close it, so what follows stays code.
+    expect(composeAgentInstructions('```\ncode\n```~\nmore code\n```\n\nProse.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} Prose.`,
+    );
+    // A shorter run does not close it; a longer one does.
+    expect(composeAgentInstructions('````\ncode\n```\nstill code\n`````\n\nProse.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} Prose.`,
+    );
   });
 
   it('CRLF input still yields the first paragraph', () => {
