@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ImgHTMLAttributes } from 'react';
 import { ImageOff } from 'lucide-react';
 import { isExternalHref } from '../../../../shared/markdown/hrefs';
 
@@ -23,26 +23,57 @@ export type KbImageResolver = (src: string) => KbImageSource | null;
 const NO_SOURCE_NOTE =
   'This image has no usable source. Inline data: images are not supported; save the file under ./assets/ and link it.';
 
+const PLACEHOLDER_CLASS =
+  'inline-flex max-w-full items-center gap-1.5 rounded-sm border border-dashed border-line-strong bg-sunken px-2 py-1 align-middle text-xs text-ink-muted';
+
 /**
  * What an image leaves behind when there is nothing to show. A `role="img"`
  * whose accessible name is the note, so a screen reader hears what a sighted
  * reader sees; the alt text stays, so the author's description is not lost
  * with the picture. A span, not a div: an image sits inside a paragraph, and
  * a block there is invalid markup.
+ *
+ * With `onRetry` it is a button. The one failure nothing else clears is a
+ * load error on a URL that does not change (a network blip, a 403 that lifts,
+ * a file fixed on disk with no event), and the reader is the one who knows it
+ * is worth another try; retrying on our own would loop error → image → error.
  */
-function ImagePlaceholder({ alt, note }: { alt?: string; note: string }) {
-  return (
-    <span
-      role="img"
-      aria-label={alt ? `${alt}. ${note}` : note}
-      title={note}
-      className="inline-flex max-w-full items-center gap-1.5 rounded-sm border border-dashed border-line-strong bg-sunken px-2 py-1 align-middle text-xs text-ink-muted"
-    >
+function ImagePlaceholder({
+  alt,
+  note,
+  onRetry,
+}: {
+  alt?: string;
+  note: string;
+  onRetry?: () => void;
+}) {
+  const label = alt ? `${alt}. ${note}` : note;
+  const body = (
+    <>
       <ImageOff size={14} aria-hidden="true" className="shrink-0" />
       <span className="min-w-0 break-words">
         {alt ? <span className="text-ink">{alt} </span> : null}
         {note}
+        {onRetry ? <span className="ml-1.5 text-accent">Retry</span> : null}
       </span>
+    </>
+  );
+  if (onRetry) {
+    return (
+      <button
+        type="button"
+        onClick={onRetry}
+        aria-label={`${label}. Retry`}
+        title="Try loading the image again"
+        className={`${PLACEHOLDER_CLASS} cursor-pointer hover:text-ink`}
+      >
+        {body}
+      </button>
+    );
+  }
+  return (
+    <span role="img" aria-label={label} title={note} className={PLACEHOLDER_CLASS}>
+      {body}
     </span>
   );
 }
@@ -56,7 +87,8 @@ function ImagePlaceholder({ alt, note }: { alt?: string; note: string }) {
  *   '' (stripped: was data:)   any            placeholder: no usable source
  *   ./assets/x.png             none           <img src as-is>  (the embed, as before)
  *   ./assets/x.png             {src, path}    <img src=raw-file URL>; on error the
- *                                             placeholder "Couldn't load image: <path>"
+ *                                             placeholder "Couldn't load image: <path>",
+ *                                             with Retry
  *   ./assets/x.png             {src: null}    placeholder with the resolver's note
  *   ./assets/x.png             null           placeholder "Couldn't load image: <src>"
  *
@@ -65,34 +97,28 @@ function ImagePlaceholder({ alt, note }: { alt?: string; note: string }) {
  * carries no HTTP status, so a failure says "couldn't load", never "not found".
  *
  * The failure state is keyed by the resolved src: an author who fixes the
- * link, or a teammate who uploads the missing file (which bumps the version
- * in the URL), sees the image without a reload. Every `<img>` carries
- * `loading="lazy"` (thirty screenshots on a Loop export must not all fetch at
- * once) and `referrerPolicy="no-referrer"` (an external image host learns
- * nothing about which page of the knowledge base cited it).
+ * link, or a teammate who uploads the missing file (which bumps the revision
+ * in the URL), sees the image without a reload; the same URL is tried again
+ * on request. Every attribute the sanitizer let through reaches the element
+ * (`id`, `align`, `aria-*`; `srcset` and `class` never survive it), and every
+ * `<img>` carries `loading="lazy"` (thirty screenshots on a Loop export must
+ * not all fetch at once) and `referrerPolicy="no-referrer"` (an external image
+ * host learns nothing about which page of the knowledge base cited it).
  */
 export function KbImage({
   src,
   alt,
   title,
-  width,
-  height,
   resolve,
-}: {
-  src?: string;
-  alt?: string;
-  title?: string;
-  width?: number | string;
-  height?: number | string;
-  resolve?: KbImageResolver;
-}) {
+  ...rest
+}: ImgHTMLAttributes<HTMLImageElement> & { resolve?: KbImageResolver }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   if (!src) return <ImagePlaceholder alt={alt} note={NO_SOURCE_NOTE} />;
+  // Ours come after the author's, so they hold on every image.
   const shared = {
+    ...rest,
     alt,
     title,
-    width,
-    height,
     loading: 'lazy' as const,
     referrerPolicy: 'no-referrer' as const,
   };
@@ -103,7 +129,13 @@ export function KbImage({
     return <ImagePlaceholder alt={alt} note={`${resolved.note}: ${resolved.path}`} />;
   }
   if (failedSrc === resolved.src) {
-    return <ImagePlaceholder alt={alt} note={`Couldn't load image: ${resolved.path}`} />;
+    return (
+      <ImagePlaceholder
+        alt={alt}
+        note={`Couldn't load image: ${resolved.path}`}
+        onRetry={() => setFailedSrc(null)}
+      />
+    );
   }
   return <img src={resolved.src} {...shared} onError={() => setFailedSrc(resolved.src)} />;
 }

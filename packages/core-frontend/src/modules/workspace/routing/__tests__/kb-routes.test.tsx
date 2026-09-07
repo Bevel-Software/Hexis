@@ -187,8 +187,16 @@ describe('resolveKbHref', () => {
     });
   });
 
-  it('keeps a name with a colon in it inside the workspace', () => {
-    expect(resolveKbHref('Notes: today.md', opts)).toMatchObject({
+  // Any scheme is external, not only the web ones: an app's own (`sms:`,
+  // `geo:`, `x-devonthink-item:`) names no workspace file either. A bare
+  // colon-name would read as a scheme too, but both sanitizers drop an href
+  // with a scheme they do not know before the pipeline sees it; a path with a
+  // segment before the colon is still a path.
+  it('classifies any scheme as external, and keeps a colon inside a path segment', () => {
+    for (const href of ['sms:555', 'geo:0,0', 'about:config', 'x-devonthink-item://abc']) {
+      expect(resolveKbHref(href, opts)).toEqual({ kind: 'external' });
+    }
+    expect(resolveKbHref('./Notes: today.md', opts)).toMatchObject({
       kind: 'workspace',
       path: 'knowledge-base/Knowledge/Sub/Notes: today.md',
     });

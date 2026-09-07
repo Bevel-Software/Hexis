@@ -190,9 +190,24 @@ describe('KbMarkdownView images', () => {
       />,
     );
     fireEvent.error(screen.getByRole('img', { name: 'Shot' }));
-    const placeholder = screen.getByRole('img', { name: /Couldn't load image: KB\/assets\/shot.png/ });
+    const placeholder = screen.getByRole('button', { name: /Couldn't load image: KB\/assets\/shot.png/ });
     // The alt text survives the picture.
     expect(placeholder.getAttribute('aria-label')).toMatch(/^Shot\./);
+  });
+
+  // A URL that never changes (a blip, a 403 that lifts, a file fixed on disk
+  // with no event) is the one failure nothing else clears.
+  it('tries the same source again on request after a failed load', () => {
+    render(
+      <KbMarkdownView
+        source={'![Shot](./assets/shot.png)\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'Shot' }));
+    fireEvent.click(screen.getByRole('button', { name: /Retry$/ }));
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute('src', RAW_URL);
   });
 
   it('recovers when the source changes after a failure, without a reload', () => {
@@ -202,7 +217,7 @@ describe('KbMarkdownView images', () => {
     );
     const { rerender } = render(view('missing.png'));
     fireEvent.error(screen.getByRole('img', { name: 'Shot' }));
-    expect(screen.getByRole('img', { name: /Couldn't load image/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Couldn't load image/ })).toBeInTheDocument();
     rerender(view('fixed.png'));
     expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute('src', '/raw/fixed.png');
   });
@@ -245,6 +260,19 @@ describe('KbMarkdownView images', () => {
     );
     expect(resolveImage).toHaveBeenCalledWith('./assets/shot.png');
     expect(screen.getByRole('img', { name: 'Inline' })).toHaveAttribute('src', RAW_URL);
+  });
+
+  it('forwards the attributes the sanitizer let through on an inline image', () => {
+    render(
+      <KbMarkdownView
+        source={'<img src="./assets/shot.png" alt="Inline" align="right">\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    const img = screen.getByRole('img', { name: 'Inline' });
+    expect(img).toHaveAttribute('align', 'right');
+    expect(img).toHaveAttribute('src', RAW_URL);
   });
 
   it('keeps alt and title, and leaks no hast node onto the element', () => {

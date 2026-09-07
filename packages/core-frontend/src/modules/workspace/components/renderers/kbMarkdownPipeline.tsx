@@ -228,25 +228,13 @@ export function useKbMarkdownComponents({
         return <a href={href} {...props}>{children}</a>;
       },
       // Every image, whether from `![alt](src)` or an inline `<img>` that
-      // rehype-raw parsed, goes through `KbImage` and the injected resolver.
-      // Nothing is spread onto the element, so the hast `node` never leaks.
-      img({ src, alt, title, width, height }: {
-        src?: string;
-        alt?: string;
-        title?: string;
-        width?: number | string;
-        height?: number | string;
-      }) {
-        return (
-          <KbImage
-            src={src}
-            alt={alt}
-            title={title}
-            width={width}
-            height={height}
-            resolve={resolveImage}
-          />
-        );
+      // rehype-raw parsed, goes through `KbImage` and the injected resolver,
+      // with every attribute the sanitizer let through. Only the hast `node`
+      // is dropped, so it never lands on the element as `node="[object Object]"`.
+      img(props: React.ImgHTMLAttributes<HTMLImageElement> & { node?: unknown }) {
+        const attributes = { ...props };
+        delete attributes.node;
+        return <KbImage {...attributes} resolve={resolveImage} />;
       },
       pre({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) {
         // Render a mermaid code block as a diagram.

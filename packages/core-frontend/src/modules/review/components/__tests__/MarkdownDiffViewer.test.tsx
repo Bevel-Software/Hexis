@@ -206,13 +206,16 @@ describe('MarkdownDiffViewer', () => {
     });
 
     it('passes an external image through on either side, resolver or not', () => {
-      render(
-        <MarkdownDiffViewer
-          payload={payload('![Old](https://cdn.example.com/old.png)\n', '![New](https://cdn.example.com/new.png)\n')}
-        />,
+      const external = payload(
+        '![Old](https://cdn.example.com/old.png)\n',
+        '![New](https://cdn.example.com/new.png)\n',
       );
-      expect(screen.getByRole('img', { name: 'Old' })).toHaveAttribute('src', 'https://cdn.example.com/old.png');
-      expect(screen.getByRole('img', { name: 'New' })).toHaveAttribute('src', 'https://cdn.example.com/new.png');
+      for (const resolver of [undefined, resolveImage]) {
+        const { unmount } = render(<MarkdownDiffViewer payload={external} resolveImage={resolver} />);
+        expect(screen.getByRole('img', { name: 'Old' })).toHaveAttribute('src', 'https://cdn.example.com/old.png');
+        expect(screen.getByRole('img', { name: 'New' })).toHaveAttribute('src', 'https://cdn.example.com/new.png');
+        unmount();
+      }
     });
   });
 });
