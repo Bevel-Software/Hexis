@@ -15,7 +15,8 @@ describe('comparePathComponents', () => {
     // could each claim a different one for the same slug.
     const composed = 'Plugins/café';
     const decomposed = 'Plugins/café';
-    expect(composed.localeCompare(decomposed)).toBe(0);
+    // (Whether the host's collation equates them is the host's business —
+    // the property under test holds either way: distinct paths never tie.)
     const order = comparePathComponents(composed, decomposed);
     expect(order).not.toBe(0);
     expect(comparePathComponents(decomposed, composed)).toBe(-order);

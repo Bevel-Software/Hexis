@@ -251,6 +251,15 @@ describe('PluginProvisionService.deletePlugin', () => {
     await expect(fs.stat(path.join(h.dir, KB, 'Plugins/Ext Id'))).rejects.toThrow();
   });
 
+  it('validates the folder path AS GIVEN — a padded spelling is refused, never trimmed into a real folder', async () => {
+    await h.svc.createPlugin(USER, 'GTM');
+    for (const padded of [' GTM', 'GTM ', 'teams/ Deep']) {
+      await expect(h.svc.deletePlugin(USER, padded)).rejects.toMatchObject({ status: 422 });
+    }
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM/plugin.json'))).resolves.toBeDefined();
+    expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1); // the create above only
+  });
+
   it('a hole ANYWHERE in discovery stops a delete — even of a plugin whose own folder was read fine', async () => {
     await h.svc.createPlugin(USER, 'GTM');
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/Other'), { recursive: true });

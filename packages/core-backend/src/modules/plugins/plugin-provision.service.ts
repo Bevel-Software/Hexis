@@ -248,7 +248,11 @@ export class PluginProvisionService {
     // could climb out of the root, and no backslash — `/` is the one
     // separator the repository speaks, and a `\` would read as a second one
     // on Windows and as a name character everywhere else.
-    const name = rawFolder.trim();
+    // Validated AS GIVEN, never trimmed first: a folder spelled with a
+    // leading or trailing space names no folder the catalog handed out, and
+    // trimming it would delete a different one. (`validateFilename` refuses
+    // the whitespace.)
+    const name = rawFolder;
     const segments = name.split('/');
     // Every segment must be a name the filesystem carries (the ONE rule
     // creation applies, `validateFilename`: no control characters, no `\`,

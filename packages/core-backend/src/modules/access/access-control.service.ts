@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
 import { isAbsence } from '../../shared/fs-errors.js';
+import { isSkippedEntry } from '../../shared/fs-walk.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -1556,11 +1557,10 @@ export class AccessControlService implements IAccessControl {
       return;
     }
     for (const entry of entries) {
-      // Skip VCS metadata + vendored deps. Hidden dirs (`.git`, `.vscode`,
-      // etc.) and `node_modules` can't host KB rules and are often huge —
-      // walking them would slow every cache miss without benefit.
-      if (entry.name.startsWith('.')) continue;
-      if (entry.name === 'node_modules') continue;
+      // Skip VCS metadata + vendored deps — the ONE rule every walk shares
+      // (`isSkippedEntry`), so a writer walking for grants never sees a
+      // folder this model would not have read.
+      if (isSkippedEntry(entry.name)) continue;
       const abs = path.join(absDir, entry.name);
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
