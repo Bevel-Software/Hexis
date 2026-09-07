@@ -57,12 +57,13 @@ export const MARKETPLACE_NAME = 'hexis';
 export const BUNDLE_PLUGIN = 'hexis-all';
 
 /**
- * The label on a connection key minted when a person connects their
+ * The KIND stored on a connection key minted when a person connects their
  * claude.ai account (Cowork, claude.ai) to this deployment — the backend's
- * `CLAUDE_LINK_KEY_LABEL`, spelled once more here so the key list can show
- * those links as what they are.
+ * `CLAUDE_LINK_KEY_KIND`, spelled once more here so the key list can tell
+ * those links from keys people created by hand. The kind, never the label:
+ * a label is free text anyone can type.
  */
-export const CLAUDE_LINK_LABEL = 'Claude (claude.ai and Cowork)';
+export const CLAUDE_LINK_KIND = 'claude-link';
 
 /**
  * The three one-liners the settings page shows, with the key in the URL —

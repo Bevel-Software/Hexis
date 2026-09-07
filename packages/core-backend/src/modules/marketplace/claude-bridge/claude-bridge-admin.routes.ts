@@ -8,7 +8,7 @@ import {
 export interface ClaudeBridgeAdminRoutesDeps {
   credentials: ClaudeBridgeCredentialsService;
   isAdmin(email: string | undefined): Promise<boolean>;
-  /** The hostname Claude registers — the deployment's public host. */
+  /** The deployment's public address; only its host is shown. */
   publicUrl: string;
   /** The marketplace URL people paste — the same one Claude Code clones. */
   marketplaceUrl: string;
@@ -18,7 +18,8 @@ export interface ClaudeBridgeAdminRoutesDeps {
  * What an Owner needs to register this deployment in Claude's admin settings
  * as a GitHub Enterprise Server, in the fields that form has — and the one
  * verb on it, rotate. Admins only: the client secret is what makes claude.ai
- * trust the token exchange.
+ * trust the token exchange. Never cached: after a rotation or a sign-out no
+ * copy of the old secrets may linger in a browser or a proxy.
  *
  *   GET  /api/admin/claude-bridge          the credentials and the two URLs
  *   POST /api/admin/claude-bridge/rotate   new credentials, all of them
@@ -36,9 +37,8 @@ export function createClaudeBridgeAdminRoutes(deps: ClaudeBridgeAdminRoutesDeps)
 
   const describe = async () => {
     const creds = await deps.credentials.ensure();
-    const host = new URL(deps.publicUrl).host;
     return {
-      host,
+      host: new URL(deps.publicUrl).host,
       appId: creds.appId,
       clientId: creds.clientId,
       clientSecret: creds.clientSecret,
@@ -50,31 +50,29 @@ export function createClaudeBridgeAdminRoutes(deps: ClaudeBridgeAdminRoutesDeps)
     };
   };
 
-  router.get('/admin/claude-bridge', requireAdmin, async (_req, res) => {
+  const send = async (res: express.Response, body: () => Promise<unknown>) => {
     try {
-      res.json(await describe());
+      const payload = await body();
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(payload);
     } catch (err) {
-      answer(res, err);
+      if (err instanceof ClaudeBridgeUnavailableError) {
+        res.status(409).json({ error: err.message });
+        return;
+      }
+      console.error('[claude-bridge admin]', err);
+      res.status(500).json({ error: 'Internal error' });
     }
-  });
+  };
 
-  router.post('/admin/claude-bridge/rotate', requireAdmin, async (_req, res) => {
-    try {
+  router.get('/admin/claude-bridge', requireAdmin, (_req, res) => send(res, describe));
+
+  router.post('/admin/claude-bridge/rotate', requireAdmin, (_req, res) =>
+    send(res, async () => {
       await deps.credentials.rotate();
-      res.json(await describe());
-    } catch (err) {
-      answer(res, err);
-    }
-  });
+      return describe();
+    }),
+  );
 
   return router;
-}
-
-function answer(res: express.Response, err: unknown): void {
-  if (err instanceof ClaudeBridgeUnavailableError) {
-    res.status(409).json({ error: err.message });
-    return;
-  }
-  console.error('[claude-bridge admin]', err);
-  res.status(500).json({ error: 'Internal error' });
 }

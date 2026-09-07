@@ -18,7 +18,11 @@ export interface ClaudeBridgeRoutesDeps {
    */
   owner: string;
   repoName: string;
-  /** The deployment's public origin, for the URLs GitHub-shaped bodies carry. */
+  /**
+   * The deployment's public address. Only its ORIGIN is ever emitted: a
+   * configured URL may carry userinfo or a path, and neither belongs in a
+   * body handed to a third party.
+   */
   publicUrl: string;
 }
 
@@ -39,11 +43,13 @@ export interface ClaudeBridgeRoutesDeps {
  * revoked link fails here the same way it fails on the git remote.
  *
  * Errors are GitHub-shaped too (`{ message }`, and the OAuth error body on
- * the token endpoint): the caller is a GitHub client and reads them as one.
+ * the token endpoint, in whichever encoding the client negotiated): the
+ * caller is a GitHub client and reads them as one.
  */
 export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.Router {
   const router = express.Router();
-  const { bridge, keys, repo, owner, repoName, publicUrl } = deps;
+  const { bridge, keys, repo, owner, repoName } = deps;
+  const origin = new URL(deps.publicUrl).origin;
   const fullName = `${owner}/${repoName}`;
 
   router.get('/login/oauth/authorize', async (req, res) => {
@@ -55,25 +61,18 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
   });
 
   // GitHub's token endpoint takes JSON or a form and answers in the shape
-  // `Accept` asks for; claude.ai sends JSON and asks for JSON.
+  // `Accept` asks for — success and failure alike; claude.ai sends JSON and
+  // asks for JSON.
   router.post(
     '/login/oauth/access_token',
     express.json({ limit: '16kb' }),
     express.urlencoded({ extended: false, limit: '16kb' }),
     async (req, res) => {
       try {
-        const tokens = await bridge.exchangeCode((req.body ?? {}) as Record<string, unknown>);
-        if (wantsForm(req)) {
-          res.type('application/x-www-form-urlencoded').send(new URLSearchParams(tokens).toString());
-          return;
-        }
-        res.json(tokens);
+        negotiated(req, res, 200, await bridge.exchangeCode((req.body ?? {}) as Record<string, unknown>));
       } catch (err) {
         if (err instanceof ClaudeBridgeRequestError) {
-          // GitHub answers a bad exchange with 200 + an error body; a 4xx
-          // with the same body is what every OAuth client handles, and what
-          // the facade answered.
-          res.status(err.status).json({ error: err.code, error_description: err.message });
+          negotiated(req, res, err.status, { error: err.code, error_description: err.message });
           return;
         }
         answerError(res, err);
@@ -114,7 +113,7 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
 
   api.get('/repos/:owner/:repo', (req, res) => {
     if (!isOurs(req)) return void notFound(res);
-    res.json(repositoryBody(fullName, owner, repoName, publicUrl));
+    res.json(repositoryBody(fullName, owner, repoName, origin));
   });
 
   api.get('/repos/:owner/:repo/commits', async (req, res) => {
@@ -122,7 +121,7 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
     try {
       const { sha } = await repo.headFor({ id: req.userId!, email: req.userEmail! });
       const commit = await repo.describeCommit(sha);
-      res.json([commitBody(commit, fullName, publicUrl)]);
+      res.json([commitBody(commit, fullName, origin)]);
     } catch (err) {
       answerError(res, err);
     }
@@ -154,8 +153,14 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
       };
       archive.on('error', (err: Error) => fail(err.message));
       archive.on('close', (code) => {
-        if (code !== 0) fail(`git archive exited ${code}: ${Buffer.concat(stderr).toString().trim()}`);
+        if (code !== 0 && code !== null) fail(`git archive exited ${code}: ${Buffer.concat(stderr).toString().trim()}`);
       });
+      // A client that goes away mid-download must not leave git running.
+      const stop = () => {
+        if (archive.exitCode === null && !archive.killed) archive.kill();
+      };
+      req.on('aborted', stop);
+      res.on('close', stop);
       archive.stdout!.pipe(res);
     } catch (err) {
       answerError(res, err);
@@ -181,9 +186,21 @@ function unauthorized(res: express.Response): void {
   res.status(401).json({ message: 'Bad credentials' });
 }
 
-function wantsForm(req: express.Request): boolean {
+/** The token endpoint's reply, in the encoding the client asked for. */
+function negotiated(
+  req: express.Request,
+  res: express.Response,
+  status: number,
+  payload: Record<string, string>,
+): void {
   const accept = req.headers.accept ?? '';
-  return accept.includes('application/x-www-form-urlencoded') && !accept.includes('json');
+  const wantsForm = accept.includes('application/x-www-form-urlencoded') && !accept.includes('json');
+  res.status(status);
+  if (wantsForm) {
+    res.type('application/x-www-form-urlencoded').send(new URLSearchParams(payload).toString());
+    return;
+  }
+  res.json(payload);
 }
 
 function answerError(res: express.Response, err: unknown): void {
@@ -196,8 +213,8 @@ function answerError(res: express.Response, err: unknown): void {
 }
 
 /** A repository as GitHub describes one — the fields a marketplace sync reads. */
-function repositoryBody(fullName: string, owner: string, name: string, publicUrl: string) {
-  const html = `${publicUrl.replace(/\/$/, '')}/${fullName}`;
+function repositoryBody(fullName: string, owner: string, name: string, origin: string) {
+  const html = `${origin}/${fullName}`;
   return {
     id: 1,
     node_id: 'R_hexis_marketplace',
@@ -208,7 +225,7 @@ function repositoryBody(fullName: string, owner: string, name: string, publicUrl
     html_url: html,
     description: 'The skills you may read, compiled as native plugins.',
     fork: false,
-    url: `${publicUrl.replace(/\/$/, '')}/api/v3/repos/${fullName}`,
+    url: `${origin}/api/v3/repos/${fullName}`,
     clone_url: `${html}.git`,
     default_branch: 'main',
     visibility: 'private',
@@ -221,9 +238,9 @@ function repositoryBody(fullName: string, owner: string, name: string, publicUrl
 function commitBody(
   commit: { sha: string; message: string; authorName: string; authorEmail: string; date: string; tree: string },
   fullName: string,
-  publicUrl: string,
+  origin: string,
 ) {
-  const base = `${publicUrl.replace(/\/$/, '')}/api/v3/repos/${fullName}`;
+  const base = `${origin}/api/v3/repos/${fullName}`;
   const who = { name: commit.authorName, email: commit.authorEmail, date: commit.date };
   return {
     sha: commit.sha,
@@ -236,7 +253,7 @@ function commitBody(
       comment_count: 0,
     },
     url: `${base}/commits/${commit.sha}`,
-    html_url: `${publicUrl.replace(/\/$/, '')}/${fullName}/commit/${commit.sha}`,
+    html_url: `${origin}/${fullName}/commit/${commit.sha}`,
     author: null,
     committer: null,
     parents: [],

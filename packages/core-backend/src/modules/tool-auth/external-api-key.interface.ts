@@ -22,6 +22,12 @@ declare global {
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
+  /**
+   * What the key was minted AS — `key` for one a person created by hand,
+   * another kind for one a flow minted on their behalf (a Claude link).
+   * Stored with the row; the label is the person's to edit and proves nothing.
+   */
+  kind: string;
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
@@ -37,14 +43,17 @@ export interface MintedExternalApiKey {
   summary: ExternalApiKeySummary;
 }
 
+/** The kind of a key a person creates by hand. */
+export const DEFAULT_KEY_KIND = 'key';
+
 /**
- * How a key is minted. `prefix` picks one of the plaintext prefixes the
- * service recognises — the tenant's own by default, or another it was built
- * with (a Claude link's `gho_`); a prefix the service does not know is
- * refused, since `looksLikeExternalApiKey` would never route it back.
+ * How a key is minted. `kind` names one of the kinds the service was built
+ * with, each of which carries its own plaintext prefix (the tenant's for the
+ * default kind, `gho_` for a Claude link); an unknown kind is refused, since
+ * nothing would route its bearer back.
  */
 export interface MintOptions {
-  prefix?: string;
+  kind?: string;
 }
 
 /**

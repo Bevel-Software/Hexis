@@ -1,5 +1,5 @@
 {
-  "id": "11326848-d13d-4297-9f71-8ff8104ccbe2",
+  "id": "6904313c-b0c2-41b1-a8e4-6d7dda9e706f",
   "prevId": "16b22a96-7e97-4951-afd7-6bd2dcfd8ec7",
   "version": "7",
   "dialect": "postgresql",
@@ -236,6 +236,92 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.claude_marketplace_codes": {
+      "name": "claude_marketplace_codes",
+      "schema": "",
+      "columns": {
+        "code_hash": {
+          "name": "code_hash",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "redirect_uri": {
+          "name": "redirect_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "consumed_at": {
+          "name": "consumed_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "claude_marketplace_codes_by_user": {
+          "name": "claude_marketplace_codes_by_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "claude_marketplace_codes_user_id_users_id_fk": {
+          "name": "claude_marketplace_codes_user_id_users_id_fk",
+          "tableFrom": "claude_marketplace_codes",
+          "tableTo": "users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.deployment_settings": {
       "name": "deployment_settings",
       "schema": "",
@@ -323,6 +409,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'key'"
         },
         "created_at": {
           "name": "created_at",

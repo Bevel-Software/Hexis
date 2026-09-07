@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
-import { CLAUDE_LINK_LABEL, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
+import { CLAUDE_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
@@ -284,22 +284,39 @@ describe('the Marketplaces tab', () => {
     for (const v of commands) expect(v).toContain(new URL(PUBLIC_URL).host);
   });
 
-  it('lists Claude connections from the key list, and keeps active ones out of the autonomous list', async () => {
+  it('tells Claude connections from keys by their stored kind — never by the label', async () => {
     listMock.mockResolvedValue([
-      { id: 'c1', label: CLAUDE_LINK_LABEL, createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
-      { id: 'k1', label: 'CI', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      { id: 'c1', kind: CLAUDE_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      // A hand-made key wearing the link's usual label is still a key.
+      { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
     ]);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
-    await screen.findByText(CLAUDE_LINK_LABEL);
-    expect(cowork).toHaveTextContent(CLAUDE_LINK_LABEL);
-    expect(cowork).not.toHaveTextContent('CI');
+    await screen.findByText('My Cowork link');
+    expect(cowork).toHaveTextContent('My Cowork link');
+    expect(cowork).not.toHaveTextContent('Claude (claude.ai and Cowork)');
 
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
-    await screen.findByText('CI');
-    expect(screen.queryByText(CLAUDE_LINK_LABEL)).toBeNull();
+    await screen.findByText('Claude (claude.ai and Cowork)');
+    expect(screen.queryByText('My Cowork link')).toBeNull();
+  });
+
+  it('says where the keys went when only Claude connections exist, and shows a load error on both tabs', async () => {
+    listMock.mockResolvedValue([
+      { id: 'c1', kind: CLAUDE_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+    ]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText(/Your Claude connections are on the Marketplaces tab/);
+
+    listMock.mockRejectedValue(new Error('keys are down'));
+    mount(PUBLIC_URL);
+    await user.click(screen.getAllByRole('tab', { name: 'Marketplaces' }).at(-1)!);
+    await screen.findByText('keys are down');
+    expect(screen.queryByText(/None yet/)).toBeNull();
   });
 });
 

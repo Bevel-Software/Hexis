@@ -11,8 +11,10 @@ import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace
 import {
   ClaudeBridgeCredentialsService,
   ClaudeMarketplaceBridge,
+  MemoryClaudeBridgeCodeStore,
   MemoryClaudeBridgeCredentialsStore,
   CLAUDE_CLIENT_NAME,
+  CLAUDE_LINK_KEY_KIND,
   CLAUDE_LINK_KEY_LABEL,
   CLAUDE_LINK_KEY_PREFIX,
   createClaudeBridgeAdminRoutes,
@@ -27,12 +29,13 @@ import type { VirtualTree } from '../../plugins/compile/compile-marketplace.js';
  * that recorded the contract: the authorize redirect, the consent finish,
  * the code exchange with our client id and secret, then — with the token
  * that came back — repository, head commit, zipball. Two people, two trees,
- * and a token that reads only its own.
+ * a token that reads only its own — and two REPLICAS over one store, since
+ * the replica that issued a code is not the one asked to exchange it.
  */
 
 const CALLBACK = 'https://claude.ai/connect/github/callback';
 const FRONTEND = 'http://app.test';
-const PUBLIC = 'https://kb.acme.com';
+const PUBLIC = 'https://ops:hunter2@kb.acme.com/some/path';
 const STATE_SECRET = 'state-secret';
 
 const users: Record<string, AuthUser> = {
@@ -51,37 +54,98 @@ function tree(files: Record<string, string>, sourceCommit: string): VirtualTree 
 
 /** Connection keys, in memory: what the service does minus the database. */
 function makeKeys() {
-  const byToken = new Map<string, { tokenId: string; user: AuthUser; label: string }>();
-  const prefixes = ['bevel_', CLAUDE_LINK_KEY_PREFIX];
+  const byToken = new Map<string, { tokenId: string; user: AuthUser; label: string; kind: string }>();
+  const kinds: Record<string, string> = { key: 'bevel_', [CLAUDE_LINK_KEY_KIND]: CLAUDE_LINK_KEY_PREFIX };
   return {
     byToken,
-    looksLikeExternalApiKey: (t: string) => prefixes.some((p) => t.startsWith(p)),
+    looksLikeExternalApiKey: (t: string) => Object.values(kinds).some((p) => t.startsWith(p)),
     verifyAndLoadToken: async (t: string) => {
       const hit = byToken.get(t);
       return hit ? { tokenId: hit.tokenId, user: hit.user } : null;
     },
-    mint: async (userId: string, label: string, options: { prefix?: string } = {}) => {
-      const prefix = options.prefix ?? 'bevel_';
-      if (!prefixes.includes(prefix)) throw new Error(`Unknown key prefix "${prefix}"`);
+    mint: async (userId: string, label: string, options: { kind?: string } = {}) => {
+      const kind = options.kind ?? 'key';
+      const prefix = kinds[kind];
+      if (!prefix) throw new Error(`Unknown key kind "${kind}"`);
       const user = Object.values(users).find((u) => u.id === userId)!;
       const plaintext = prefix + randomBytes(16).toString('base64url');
-      byToken.set(plaintext, { tokenId: `tok-${byToken.size + 1}`, user, label });
+      byToken.set(plaintext, { tokenId: `tok-${byToken.size + 1}`, user, label, kind });
       return {
         plaintext,
-        summary: { id: `tok-${byToken.size}`, label, createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+        summary: { id: `tok-${byToken.size}`, label, kind, createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
       };
     },
   };
 }
 
+/** One replica: its own bridge over the SHARED stores, its own HTTP listener. */
+async function replica(shared: {
+  credentials: MemoryClaudeBridgeCredentialsStore;
+  codes: MemoryClaudeBridgeCodeStore;
+  keys: ReturnType<typeof makeKeys>;
+  repo: MarketplaceRepoService;
+  admins: Set<string>;
+}) {
+  const credentials = new ClaudeBridgeCredentialsService(shared.credentials);
+  const bridge = new ClaudeMarketplaceBridge({
+    credentials,
+    codes: shared.codes,
+    keys: shared.keys,
+    stateSecret: STATE_SECRET,
+    publicFrontendUrl: FRONTEND,
+  });
+  const app = express();
+  app.use(
+    createClaudeBridgeRoutes({ bridge, keys: shared.keys, repo: shared.repo, owner: 'git', repoName: 'marketplace', publicUrl: PUBLIC }),
+  );
+  // The consent routes as the SPA reaches them: behind a session. The
+  // session here is a header naming the person.
+  const session: express.RequestHandler = (req, _res, next) => {
+    const who = req.header('x-test-user');
+    if (who && users[who]) {
+      req.userId = users[who].id;
+      req.userEmail = users[who].email;
+    }
+    next();
+  };
+  const provider = {
+    clientsStore: { getClient: async () => undefined },
+    issueAuthCode: async () => {
+      throw new Error('the SDK code path must not be reached for a Claude link');
+    },
+  } as unknown as BevelOAuthProvider;
+  app.use(
+    '/api',
+    session,
+    express.json(),
+    createOAuthConsentRoutes({
+      provider,
+      stateSecret: STATE_SECRET,
+      bridge: {
+        isBridgeRequest: (st) => bridge.isBridgeRequest(st),
+        clientName: CLAUDE_CLIENT_NAME,
+        completeConsent: (userId, st) => bridge.completeConsent(userId, st),
+      },
+    }),
+    createClaudeBridgeAdminRoutes({
+      credentials,
+      isAdmin: async (email) => shared.admins.has(email ?? ''),
+      publicUrl: PUBLIC,
+      marketplaceUrl: 'https://kb.acme.com/git/marketplace.git',
+    }),
+  );
+  const server = await new Promise<http.Server>((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const { port } = server.address() as { port: number };
+  return { credentials, base: `http://127.0.0.1:${port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
 describe('the Claude marketplace bridge', () => {
   let root: string;
-  let server: http.Server;
-  let base: string;
-  let keys: ReturnType<typeof makeKeys>;
-  let credentials: ClaudeBridgeCredentialsService;
-  let repo: MarketplaceRepoService;
-  const admins = new Set(['alice@x.io']);
+  let shared: Parameters<typeof replica>[0];
+  let a: Awaited<ReturnType<typeof replica>>;
+  let b: Awaited<ReturnType<typeof replica>>;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-bridge-'));
@@ -93,80 +157,35 @@ describe('the Claude marketplace bridge', () => {
       sourceCommit: async () => 'aaa111',
       compileFor: async ({ userEmail }) => tree(trees[userEmail] ?? {}, 'aaa111'),
     };
-    repo = new MarketplaceRepoService(path.join(root, 'marketplace.git'), compiler);
-    keys = makeKeys();
-    credentials = new ClaudeBridgeCredentialsService(new MemoryClaudeBridgeCredentialsStore());
-    const bridge = new ClaudeMarketplaceBridge({
-      credentials,
-      keys,
-      stateSecret: STATE_SECRET,
-      publicFrontendUrl: FRONTEND,
-    });
-
-    const app = express();
-    app.use(
-      createClaudeBridgeRoutes({ bridge, keys, repo, owner: 'git', repoName: 'marketplace', publicUrl: PUBLIC }),
-    );
-    // The consent routes as the SPA reaches them: behind a session. The
-    // session here is a header naming the person.
-    const session: express.RequestHandler = (req, _res, next) => {
-      const who = req.header('x-test-user');
-      if (who && users[who]) {
-        req.userId = users[who].id;
-        req.userEmail = users[who].email;
-      }
-      next();
+    shared = {
+      credentials: new MemoryClaudeBridgeCredentialsStore(),
+      codes: new MemoryClaudeBridgeCodeStore(),
+      keys: makeKeys(),
+      repo: new MarketplaceRepoService(path.join(root, 'marketplace.git'), compiler),
+      admins: new Set(['alice@x.io']),
     };
-    const provider = {
-      clientsStore: { getClient: async () => undefined },
-      issueAuthCode: async () => {
-        throw new Error('the SDK code path must not be reached for a Claude link');
-      },
-    } as unknown as BevelOAuthProvider;
-    app.use(
-      '/api',
-      session,
-      express.json(),
-      createOAuthConsentRoutes({
-        provider,
-        stateSecret: STATE_SECRET,
-        bridge: {
-          isBridgeRequest: (st) => bridge.isBridgeRequest(st),
-          clientName: CLAUDE_CLIENT_NAME,
-          completeConsent: (userId, st) => bridge.completeConsent(userId, st),
-        },
-      }),
-      createClaudeBridgeAdminRoutes({
-        credentials,
-        isAdmin: async (email) => admins.has(email ?? ''),
-        publicUrl: PUBLIC,
-        marketplaceUrl: `${PUBLIC}/git/marketplace.git`,
-      }),
-    );
-    server = await new Promise<http.Server>((resolve) => {
-      const s = app.listen(0, '127.0.0.1', () => resolve(s));
-    });
-    const { port } = server.address() as { port: number };
-    base = `http://127.0.0.1:${port}`;
+    a = await replica(shared);
+    b = await replica(shared);
   });
   afterEach(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await a.close();
+    await b.close();
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  /** The whole connect flow for one person, as the browser and Anthropic's backend run it. */
-  async function connect(who: string): Promise<string> {
-    const creds = await credentials.ensure();
+  /** The browser's half: authorize on one replica, approve, and come back with a code. */
+  async function approve(base: string, who: string, state = 'claude-state'): Promise<string> {
+    const creds = await a.credentials.ensure();
     const authorize = await fetch(
-      `${base}/login/oauth/authorize?client_id=${encodeURIComponent(creds.clientId)}&redirect_uri=${encodeURIComponent(CALLBACK)}&state=claude-state`,
+      `${base}/login/oauth/authorize?client_id=${encodeURIComponent(creds.clientId)}&redirect_uri=${encodeURIComponent(CALLBACK)}&state=${state}`,
       { redirect: 'manual' },
     );
     expect(authorize.status).toBe(302);
     const location = new URL(authorize.headers.get('location')!);
     expect(location.origin + location.pathname).toBe(`${FRONTEND}/connect`);
-    const state = location.searchParams.get('oauth')!;
+    const signed = location.searchParams.get('oauth')!;
 
-    const request = await fetch(`${base}/api/mcp/oauth/request?state=${encodeURIComponent(state)}`, {
+    const request = await fetch(`${base}/api/mcp/oauth/request?state=${encodeURIComponent(signed)}`, {
       headers: { 'x-test-user': who },
     });
     expect(await request.json()).toEqual({ clientName: 'Claude', scope: null, resource: null });
@@ -174,19 +193,29 @@ describe('the Claude marketplace bridge', () => {
     const complete = await fetch(`${base}/api/mcp/oauth/complete`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-user': who },
-      body: JSON.stringify({ state }),
+      body: JSON.stringify({ state: signed }),
     });
     expect(complete.status).toBe(200);
     const redirectTo = new URL(((await complete.json()) as { redirectTo: string }).redirectTo);
     expect(redirectTo.origin + redirectTo.pathname).toBe(CALLBACK);
-    expect(redirectTo.searchParams.get('state')).toBe('claude-state');
-    const code = redirectTo.searchParams.get('code')!;
+    expect(redirectTo.searchParams.get('state')).toBe(state);
+    return redirectTo.searchParams.get('code')!;
+  }
 
-    const token = await fetch(`${base}/login/oauth/access_token`, {
+  /** Anthropic's half: the exchange, on whichever replica the load balancer picked. */
+  async function exchange(base: string, body: Record<string, string>, accept = 'application/vnd.github+json') {
+    return fetch(`${base}/login/oauth/access_token`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/vnd.github+json' },
-      body: JSON.stringify({ client_id: creds.clientId, client_secret: creds.clientSecret, code }),
+      headers: { 'content-type': 'application/json', accept },
+      body: JSON.stringify(body),
     });
+  }
+
+  async function connect(who: string): Promise<string> {
+    const creds = await a.credentials.ensure();
+    const code = await approve(a.base, who);
+    // The exchange lands on the OTHER replica.
+    const token = await exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code });
     expect(token.status).toBe(200);
     const body = (await token.json()) as { access_token: string; token_type: string; scope: string };
     expect(body.token_type).toBe('bearer');
@@ -194,33 +223,38 @@ describe('the Claude marketplace bridge', () => {
     return body.access_token;
   }
 
-  const api = (token: string, p: string) =>
+  const api = (base: string, token: string, p: string) =>
     fetch(`${base}/api/v3${p}`, {
       headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
     });
 
-  it('connects a person and mints them a Claude-shaped connection key', async () => {
+  it('connects a person across replicas and mints them a Claude-link key', async () => {
     const token = await connect('alice');
-    const minted = keys.byToken.get(token)!;
+    const minted = shared.keys.byToken.get(token)!;
     expect(minted.user.id).toBe('user-alice');
+    expect(minted.kind).toBe(CLAUDE_LINK_KEY_KIND);
     expect(minted.label).toBe(CLAUDE_LINK_KEY_LABEL);
   });
 
-  it('serves the repository, the head commit and the zipball of that person’s own tree', async () => {
+  it('serves the repository, the head commit and the zipball of that person’s own tree — from the origin, never the configured userinfo', async () => {
     const token = await connect('alice');
 
-    const repoRes = await api(token, '/repos/git/marketplace');
+    const repoRes = await api(b.base, token, '/repos/git/marketplace');
     expect(repoRes.status).toBe(200);
-    const repoBody = (await repoRes.json()) as { full_name: string; private: boolean; default_branch: string };
+    const repoBody = (await repoRes.json()) as { full_name: string; private: boolean; default_branch: string; clone_url: string; url: string };
     expect(repoBody).toMatchObject({ full_name: 'git/marketplace', private: true, default_branch: 'main' });
+    expect(repoBody.clone_url).toBe('https://kb.acme.com/git/marketplace.git');
+    expect(JSON.stringify(repoBody)).not.toContain('hunter2');
+    expect(JSON.stringify(repoBody)).not.toContain('/some/path');
 
-    const commits = await api(token, '/repos/git/marketplace/commits?per_page=1');
+    const commits = await api(a.base, token, '/repos/git/marketplace/commits?per_page=1');
     expect(commits.status).toBe(200);
-    const [head] = (await commits.json()) as { sha: string; commit: { message: string } }[];
+    const [head] = (await commits.json()) as { sha: string; commit: { message: string }; url: string }[];
     expect(head.sha).toMatch(/^[0-9a-f]{40}$/);
     expect(head.commit.message).toContain('aaa111');
+    expect(head.url).toContain('https://kb.acme.com/api/v3/');
 
-    const zip = await api(token, `/repos/git/marketplace/zipball/${head.sha}`);
+    const zip = await api(b.base, token, `/repos/git/marketplace/zipball/${head.sha}`);
     expect(zip.status).toBe(200);
     expect(zip.headers.get('content-type')).toBe('application/zip');
     const bytes = Buffer.from(await zip.arrayBuffer());
@@ -231,109 +265,153 @@ describe('the Claude marketplace bridge', () => {
     expect(names).toContain(`${prefix}plugins/gtm/skills/deploy/SKILL.md`);
   });
 
-  it('keeps every person to their own tree: a foreign sha is not found', async () => {
+  it('keeps every person to their own tree: a foreign sha and an unknown sha are not found', async () => {
     const alice = await connect('alice');
     const bob = await connect('bob');
-    const aliceHead = ((await (await api(alice, '/repos/git/marketplace/commits?per_page=1')).json()) as { sha: string }[])[0].sha;
-    const bobHead = ((await (await api(bob, '/repos/git/marketplace/commits?per_page=1')).json()) as { sha: string }[])[0].sha;
+    const aliceHead = ((await (await api(a.base, alice, '/repos/git/marketplace/commits?per_page=1')).json()) as { sha: string }[])[0].sha;
+    const bobHead = ((await (await api(a.base, bob, '/repos/git/marketplace/commits?per_page=1')).json()) as { sha: string }[])[0].sha;
     expect(aliceHead).not.toBe(bobHead);
-    expect((await api(bob, `/repos/git/marketplace/zipball/${aliceHead}`)).status).toBe(404);
-    const bobZip = Buffer.from(await (await api(bob, `/repos/git/marketplace/zipball/${bobHead}`)).arrayBuffer()).toString('latin1');
+    expect((await api(a.base, bob, `/repos/git/marketplace/zipball/${aliceHead}`)).status).toBe(404);
+    expect((await api(a.base, bob, `/repos/git/marketplace/zipball/${'0'.repeat(40)}`)).status).toBe(404);
+    const bobZip = Buffer.from(await (await api(a.base, bob, `/repos/git/marketplace/zipball/${bobHead}`)).arrayBuffer()).toString('latin1');
     expect(bobZip).not.toContain('plugins/gtm');
   });
 
-  it('refuses what it should: bad secret, replayed code, wrong redirect, no token, other repos', async () => {
-    const creds = await credentials.ensure();
-    // A redirect anywhere but claude.ai never gets a code.
+  it('spends a code exactly once across replicas, and only after every other check passed', async () => {
+    const creds = await a.credentials.ensure();
+    const code = await approve(a.base, 'alice');
+    const good = { client_id: creds.clientId, client_secret: creds.clientSecret, code };
+
+    // Wrong about something else: the code survives to be retried.
+    const badRedirect = await exchange(b.base, { ...good, redirect_uri: 'https://claude.ai/elsewhere' });
+    expect(badRedirect.status).toBe(400);
+    expect(((await badRedirect.json()) as { error: string }).error).toBe('redirect_uri_mismatch');
+    const badSecret = await exchange(b.base, { ...good, client_secret: 'not-it' });
+    expect(badSecret.status).toBe(401);
+
+    // Then the first correct exchange wins, on either replica, and the code is spent for both.
+    expect((await exchange(b.base, good)).status).toBe(200);
+    const replayHere = await exchange(a.base, good);
+    expect(replayHere.status).toBe(400);
+    expect(((await replayHere.json()) as { error: string }).error).toBe('bad_verification_code');
+    expect((await exchange(b.base, good)).status).toBe(400);
+  });
+
+  it('keeps at most one live code per person: mashing Finish never grows the store', async () => {
+    for (let i = 0; i < 5; i++) await approve(a.base, 'alice', `s${i}`);
+    await approve(b.base, 'bob');
+    expect(shared.codes.size).toBe(2);
+    // Only the newest of alice's codes is live.
+    const creds = await a.credentials.ensure();
+    const latest = await approve(a.base, 'alice', 'last');
+    expect(shared.codes.size).toBe(2);
+    expect((await exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code: latest })).status).toBe(200);
+  });
+
+  it('answers the token endpoint in the encoding the client negotiated, failures included', async () => {
+    const creds = await a.credentials.ensure();
+    const form = 'application/x-www-form-urlencoded';
+    const failed = await exchange(a.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code: 'nope' }, form);
+    expect(failed.status).toBe(400);
+    expect(failed.headers.get('content-type')).toContain(form);
+    expect(new URLSearchParams(await failed.text()).get('error')).toBe('bad_verification_code');
+    const code = await approve(a.base, 'alice');
+    const ok = await exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code }, form);
+    expect(ok.headers.get('content-type')).toContain(form);
+    expect(new URLSearchParams(await ok.text()).get('token_type')).toBe('bearer');
+  });
+
+  it('refuses what it should: wrong redirect host, unknown client, no token, other repos', async () => {
+    const creds = await a.credentials.ensure();
     const elsewhere = await fetch(
-      `${base}/login/oauth/authorize?client_id=${creds.clientId}&redirect_uri=${encodeURIComponent('https://evil.example/cb')}`,
+      `${a.base}/login/oauth/authorize?client_id=${creds.clientId}&redirect_uri=${encodeURIComponent('https://evil.example/cb')}`,
       { redirect: 'manual' },
     );
     expect(elsewhere.status).toBe(400);
-    // The wrong client id is unknown.
     const wrongClient = await fetch(
-      `${base}/login/oauth/authorize?client_id=Iv1.nope&redirect_uri=${encodeURIComponent(CALLBACK)}`,
+      `${a.base}/login/oauth/authorize?client_id=Iv1.nope&redirect_uri=${encodeURIComponent(CALLBACK)}`,
       { redirect: 'manual' },
     );
     expect(wrongClient.status).toBe(400);
 
     const token = await connect('alice');
-    // A code is consumed by its exchange; the same code again is refused.
-    const state = new URL((await fetch(
-      `${base}/login/oauth/authorize?client_id=${creds.clientId}&redirect_uri=${encodeURIComponent(CALLBACK)}`,
-      { redirect: 'manual' },
-    )).headers.get('location')!).searchParams.get('oauth')!;
-    const complete = await fetch(`${base}/api/mcp/oauth/complete`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-test-user': 'alice' },
-      body: JSON.stringify({ state }),
-    });
-    const code = new URL(((await complete.json()) as { redirectTo: string }).redirectTo).searchParams.get('code')!;
-    const badSecret = await fetch(`${base}/login/oauth/access_token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ client_id: creds.clientId, client_secret: 'not-it', code }),
-    });
-    expect(badSecret.status).toBe(401);
-    expect(((await badSecret.json()) as { error: string }).error).toBe('incorrect_client_credentials');
-    const first = await fetch(`${base}/login/oauth/access_token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ client_id: creds.clientId, client_secret: creds.clientSecret, code }),
-    });
-    expect(first.status).toBe(200);
-    const replay = await fetch(`${base}/login/oauth/access_token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ client_id: creds.clientId, client_secret: creds.clientSecret, code }),
-    });
-    expect(replay.status).toBe(400);
-    expect(((await replay.json()) as { error: string }).error).toBe('bad_verification_code');
-
-    // The REST surface: no token, a revoked-looking token, another repository.
-    const noToken = await fetch(`${base}/api/v3/repos/git/marketplace`);
+    const noToken = await fetch(`${a.base}/api/v3/repos/git/marketplace`);
     expect(noToken.status).toBe(401);
     expect(noToken.headers.get('www-authenticate')).toContain('Bearer');
-    expect((await api('gho_unknown', '/repos/git/marketplace')).status).toBe(401);
-    expect((await api(token, '/repos/someone/else')).status).toBe(404);
-    expect((await api(token, '/user')).status).toBe(404);
-    expect((await api(token, '/repos/git/marketplace/zipball/main..HEAD')).status).toBe(404);
+    expect((await api(a.base, 'gho_unknown', '/repos/git/marketplace')).status).toBe(401);
+    expect((await api(a.base, token, '/repos/someone/else')).status).toBe(404);
+    expect((await api(a.base, token, '/user')).status).toBe(404);
+    expect((await api(a.base, token, '/repos/git/marketplace/zipball/main..HEAD')).status).toBe(404);
   });
 
-  it('a consent finish that is not a Claude link still goes to the SDK', async () => {
-    // A state without `gh` is an MCP client's; the bridge must not claim it.
+  it('a consent finish that is not a Claude link still goes to the SDK, and a Claude link without a bridge is a client error', async () => {
     const { signAuthRequest } = await import('../../mcp/oauth/oauth-state.js');
-    const state = signAuthRequest(STATE_SECRET, { c: 'mcp-client', r: 'http://localhost/cb', cc: 'challenge' });
-    const complete = await fetch(`${base}/api/mcp/oauth/complete`, {
+    const mcpState = signAuthRequest(STATE_SECRET, { c: 'mcp-client', r: 'http://localhost/cb', cc: 'challenge' });
+    const complete = await fetch(`${a.base}/api/mcp/oauth/complete`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-user': 'alice' },
-      body: JSON.stringify({ state }),
+      body: JSON.stringify({ state: mcpState }),
     });
     expect(complete.status).toBe(500); // the stub SDK path throws — proving it was the one asked
+
+    // A deployment whose consent routes were built without the bridge.
+    const bare = express();
+    bare.use('/api', (req, _res, next) => { req.userId = 'user-alice'; next(); }, express.json(), createOAuthConsentRoutes({
+      provider: { clientsStore: { getClient: async () => undefined } } as unknown as BevelOAuthProvider,
+      stateSecret: STATE_SECRET,
+    }));
+    const server = await new Promise<http.Server>((resolve) => { const s = bare.listen(0, '127.0.0.1', () => resolve(s)); });
+    const { port } = server.address() as { port: number };
+    const ghState = signAuthRequest(STATE_SECRET, { c: 'Iv1.x', r: CALLBACK, gh: true });
+    try {
+      const request = await fetch(`http://127.0.0.1:${port}/api/mcp/oauth/request?state=${encodeURIComponent(ghState)}`);
+      expect(request.status).toBe(400);
+      const finish = await fetch(`http://127.0.0.1:${port}/api/mcp/oauth/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state: ghState }),
+      });
+      expect(finish.status).toBe(400);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 
-  it('hands an admin the registration fields, and rotating replaces every one of them', async () => {
-    const forbidden = await fetch(`${base}/api/admin/claude-bridge`, { headers: { 'x-test-user': 'bob' } });
+  it('hands an admin the registration fields uncached, and a rotation on one replica is what the other checks', async () => {
+    const forbidden = await fetch(`${a.base}/api/admin/claude-bridge`, { headers: { 'x-test-user': 'bob' } });
     expect(forbidden.status).toBe(403);
-    const shown = await fetch(`${base}/api/admin/claude-bridge`, { headers: { 'x-test-user': 'alice' } });
+    const shown = await fetch(`${a.base}/api/admin/claude-bridge`, { headers: { 'x-test-user': 'alice' } });
     expect(shown.status).toBe(200);
+    expect(shown.headers.get('cache-control')).toBe('no-store');
     const before = (await shown.json()) as Record<string, string>;
     expect(before.host).toBe('kb.acme.com');
-    expect(before.marketplaceUrl).toBe(`${PUBLIC}/git/marketplace.git`);
+    expect(before.marketplaceUrl).toBe('https://kb.acme.com/git/marketplace.git');
     expect(before.clientId).toMatch(/^Iv1\.[0-9a-f]{16}$/);
     expect(before.privateKeyPem).toContain('BEGIN RSA PRIVATE KEY');
     expect(before.appId).toMatch(/^\d{6}$/);
 
-    const rotated = await fetch(`${base}/api/admin/claude-bridge/rotate`, { method: 'POST', headers: { 'x-test-user': 'alice' } });
+    // Rotate on replica B…
+    const rotated = await fetch(`${b.base}/api/admin/claude-bridge/rotate`, { method: 'POST', headers: { 'x-test-user': 'alice' } });
+    expect(rotated.headers.get('cache-control')).toBe('no-store');
     const after = (await rotated.json()) as Record<string, string>;
     for (const field of ['appId', 'clientId', 'clientSecret', 'webhookSecret', 'privateKeyPem']) {
       expect(after[field]).not.toBe(before[field]);
     }
-    // The old client id no longer authorizes.
+    // …and replica A, which served the old set a moment ago, now refuses it and accepts the new.
     const stale = await fetch(
-      `${base}/login/oauth/authorize?client_id=${before.clientId}&redirect_uri=${encodeURIComponent(CALLBACK)}`,
+      `${a.base}/login/oauth/authorize?client_id=${before.clientId}&redirect_uri=${encodeURIComponent(CALLBACK)}`,
       { redirect: 'manual' },
     );
     expect(stale.status).toBe(400);
+    const fresh = await fetch(
+      `${a.base}/login/oauth/authorize?client_id=${after.clientId}&redirect_uri=${encodeURIComponent(CALLBACK)}`,
+      { redirect: 'manual' },
+    );
+    expect(fresh.status).toBe(302);
+  });
+
+  it('initialises once even when two replicas race for the first credentials', async () => {
+    const [x, y] = await Promise.all([a.credentials.ensure(), b.credentials.ensure()]);
+    expect(x.clientId).toBe(y.clientId);
   });
 });

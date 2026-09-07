@@ -28,10 +28,23 @@ export interface ClaudeBridgeCredentials {
   rotatedAt: Date | null;
 }
 
-/** Where the one credentials row lives — the database in production, memory in tests. */
+/**
+ * Where the one credentials row lives — the database in production, memory
+ * in tests. THE row, not a copy of it: every replica reads the store on
+ * every use, so a rotation on one replica is what every other replica
+ * checks the very next exchange. The reads are rare (a connect, an admin
+ * page), and a cache would be a second source of truth with no invalidation.
+ */
 export interface ClaudeBridgeCredentialsStore {
   load(): Promise<ClaudeBridgeCredentials | null>;
-  save(creds: ClaudeBridgeCredentials): Promise<void>;
+  /**
+   * Store `creds` only if no row exists yet, and return whichever row
+   * exists afterwards — so two replicas initialising at once agree on one
+   * set, and the loser's generated values are simply dropped.
+   */
+  createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials>;
+  /** Replace the row whole. */
+  replace(creds: ClaudeBridgeCredentials): Promise<void>;
 }
 
 const ROW_ID = 'default';
@@ -67,9 +80,27 @@ export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsSt
     };
   }
 
-  async save(creds: ClaudeBridgeCredentials): Promise<void> {
+  async createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+    await this.db
+      .insert(claudeMarketplaceBridge)
+      .values({ id: ROW_ID, ...this.seal(creds) })
+      .onConflictDoNothing({ target: claudeMarketplaceBridge.id });
+    const stored = await this.load();
+    if (!stored) throw new Error('claude bridge credentials vanished between insert and read');
+    return stored;
+  }
+
+  async replace(creds: ClaudeBridgeCredentials): Promise<void> {
+    const sealed = this.seal(creds);
+    await this.db
+      .insert(claudeMarketplaceBridge)
+      .values({ id: ROW_ID, ...sealed })
+      .onConflictDoUpdate({ target: claudeMarketplaceBridge.id, set: sealed });
+  }
+
+  private seal(creds: ClaudeBridgeCredentials) {
     const crypto = this.requireCrypto();
-    const sealed = {
+    return {
       appId: creds.appId,
       clientId: creds.clientId,
       clientSecret: crypto.encrypt(creds.clientSecret),
@@ -79,10 +110,6 @@ export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsSt
       createdAt: creds.createdAt,
       rotatedAt: creds.rotatedAt,
     };
-    await this.db
-      .insert(claudeMarketplaceBridge)
-      .values({ id: ROW_ID, ...sealed })
-      .onConflictDoUpdate({ target: claudeMarketplaceBridge.id, set: sealed });
   }
 
   private requireCrypto(): TokenCrypto {
@@ -103,42 +130,30 @@ export class ClaudeBridgeUnavailableError extends Error {
 }
 
 /**
- * Generates the credentials once and hands them out afterwards. Cached after
- * the first load: the token exchange checks the client secret on every
- * connect, and the row never changes except through {@link rotate}.
+ * Generates the credentials on first use and reads them from the store on
+ * every use after that. No in-process copy: the store is the one place the
+ * truth lives, whichever replica asks.
  */
 export class ClaudeBridgeCredentialsService {
-  private cached: ClaudeBridgeCredentials | null = null;
-  private inflight: Promise<ClaudeBridgeCredentials> | null = null;
-
   constructor(private readonly store: ClaudeBridgeCredentialsStore) {}
 
   /** The credentials, generated on first use. */
   async ensure(): Promise<ClaudeBridgeCredentials> {
-    if (this.cached) return this.cached;
-    this.inflight ??= (async () => {
-      const existing = await this.store.load();
-      if (existing) return (this.cached = existing);
-      const fresh = generateCredentials(null);
-      await this.store.save(fresh);
-      return (this.cached = fresh);
-    })().finally(() => {
-      this.inflight = null;
-    });
-    return this.inflight;
+    const existing = await this.store.load();
+    if (existing) return existing;
+    return this.store.createIfAbsent(generateCredentials(null));
   }
 
   /**
-   * New credentials, all of them. Every existing registration on the Claude
-   * side stops matching at once — the client secret it holds is gone — which
-   * is the point of rotating: the Owner re-enters the new set, and connected
-   * users' tokens (connection keys) are untouched, since those are ours.
+   * New credentials, all of them. Every registration on the Claude side stops
+   * matching at once — the client secret it holds is gone — which is the
+   * point of rotating: the Owner re-enters the new set, and connected users'
+   * tokens (connection keys) are untouched, since those are ours.
    */
   async rotate(): Promise<ClaudeBridgeCredentials> {
     const current = await this.ensure();
     const fresh = generateCredentials(current.createdAt);
-    await this.store.save(fresh);
-    this.cached = fresh;
+    await this.store.replace(fresh);
     return fresh;
   }
 }
@@ -163,13 +178,17 @@ function generateCredentials(createdAt: Date | null): ClaudeBridgeCredentials {
   };
 }
 
-/** For tests and single-process hosts: the row kept in memory. */
+/** For tests: the row kept in memory, with the same first-writer-wins rule. */
 export class MemoryClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsStore {
   private row: ClaudeBridgeCredentials | null = null;
   async load(): Promise<ClaudeBridgeCredentials | null> {
     return this.row;
   }
-  async save(creds: ClaudeBridgeCredentials): Promise<void> {
+  async createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+    this.row ??= creds;
+    return this.row;
+  }
+  async replace(creds: ClaudeBridgeCredentials): Promise<void> {
     this.row = creds;
   }
 }

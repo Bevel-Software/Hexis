@@ -182,11 +182,23 @@ export class MarketplaceRepoService {
     if (!looksLikeObjectId(sha)) return false;
     const head = await this.headOf(namespace);
     if (!head) return false;
+    // Two questions with two answers each, and only "no" is ever silent:
+    // a commit git does not have is simply not contained; a commit it has
+    // is an ancestor (exit 0) or not (exit 1); anything else — a corrupt
+    // store, a lock, a bad ref — is a failure the caller must hear about,
+    // not a 404 wearing its clothes.
+    try {
+      await this.git(['-C', this.repoDir, 'rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+    } catch (err) {
+      if (exitCodeOf(err) === 1) return false;
+      throw err;
+    }
     try {
       await this.git(['-C', this.repoDir, 'merge-base', '--is-ancestor', sha, head]);
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      if (exitCodeOf(err) === 1) return false;
+      throw err;
     }
   }
 
@@ -305,6 +317,12 @@ export class MarketplaceRepoService {
   private git(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
     return execFileAsync('git', args, { cwd: opts.cwd, env: opts.env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
   }
+}
+
+/** The exit code an execFile failure carries, or null when the process never ran. */
+function exitCodeOf(err: unknown): number | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'number' ? code : null;
 }
 
 function looksLikeObjectId(sha: string): boolean {

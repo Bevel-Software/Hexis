@@ -1,15 +1,19 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { MintedExternalApiKey } from '../../tool-auth/external-api-key.interface.js';
 import { signAuthRequest, type McpAuthRequestState } from '../../mcp/oauth/oauth-state.js';
 import type { ClaudeBridgeCredentialsService } from './claude-bridge-credentials.service.js';
+import type { ClaudeBridgeCodeStore } from './claude-bridge-codes.store.js';
 
 /**
- * The plaintext prefix of a connection key minted for a Claude link. `gho_`
- * is what a GitHub OAuth token looks like, and the shape claude.ai has been
- * seen to accept from a GitHub Enterprise host; the key is otherwise an
- * ordinary connection key — hashed at rest, revocable from the person's
- * external-agent page, accepted by every surface a connection key is.
+ * The KIND stored on a connection key minted for a Claude link, and the
+ * plaintext prefix that kind is minted with. `gho_` is what a GitHub OAuth
+ * token looks like, and the shape claude.ai has been seen to accept from a
+ * GitHub Enterprise host; the key is otherwise an ordinary connection key —
+ * hashed at rest, revocable from the person's external-agent page, accepted
+ * by every surface a connection key is. The kind, not the label, is what
+ * tells such a key apart: a label is the person's to edit.
  */
+export const CLAUDE_LINK_KEY_KIND = 'claude-link';
 export const CLAUDE_LINK_KEY_PREFIX = 'gho_';
 
 /** The label those keys carry, so the person recognises them in their list. */
@@ -25,11 +29,12 @@ const CODE_TTL_MS = 10 * 60_000;
 const CODE_BYTES = 10;
 
 export interface ClaudeBridgeKeyMinter {
-  mint(userId: string, label: string, options?: { prefix?: string }): Promise<MintedExternalApiKey>;
+  mint(userId: string, label: string, options?: { kind?: string }): Promise<MintedExternalApiKey>;
 }
 
 export interface ClaudeMarketplaceBridgeDeps {
   credentials: ClaudeBridgeCredentialsService;
+  codes: ClaudeBridgeCodeStore;
   keys: ClaudeBridgeKeyMinter;
   /** HMAC secret for the signed authorize state — the same one the MCP flow uses. */
   stateSecret: string;
@@ -48,13 +53,6 @@ export class ClaudeBridgeRequestError extends Error {
   }
 }
 
-interface PendingCode {
-  userId: string;
-  clientId: string;
-  redirectUri: string;
-  expiresAt: number;
-}
-
 /**
  * The "connect your GitHub Enterprise account" flow, as claude.ai drives it
  * against a GitHub Enterprise host — with hexis standing where GitHub would.
@@ -65,18 +63,17 @@ interface PendingCode {
  *      flow uses, and send the browser to the SPA's `/connect` page — where a
  *      hexis session (or a sign-in) attaches a person to the request.
  *   2. Finish on that page comes back through the consent routes with the
- *      state; {@link completeConsent} mints a one-time code bound to that
+ *      state; {@link completeConsent} stores a one-time code bound to that
  *      person and returns the callback URL carrying it.
  *   3. Anthropic's backend posts the code with our client id and secret to
  *      `/login/oauth/access_token`; {@link exchangeCode} turns it into a
  *      connection key for that person — the token every later fetch carries.
  *
- * Codes live in memory for ten minutes: they are consumed within seconds of
- * Finish, and a restart in between simply asks the person to connect again.
+ * Nothing here is remembered in the process: credentials and codes are read
+ * from their stores on every step, so the replica that issued a code and the
+ * replica that exchanges it need not be the same one.
  */
 export class ClaudeMarketplaceBridge {
-  private readonly codes = new Map<string, PendingCode>();
-
   constructor(private readonly deps: ClaudeMarketplaceBridgeDeps) {}
 
   /** Where to send the browser for an authorize request, or a 4xx to answer with. */
@@ -109,20 +106,21 @@ export class ClaudeMarketplaceBridge {
 
   /**
    * The person approved on `/connect`: a one-time code for them, and the
-   * claude.ai callback to send the browser to.
+   * claude.ai callback to send the browser to. Supersedes any live code the
+   * same person already had for this client.
    */
   async completeConsent(userId: string, st: McpAuthRequestState): Promise<{ redirectTo: string }> {
     const creds = await this.deps.credentials.ensure();
     if (!safeEqual(st.c, creds.clientId) || !isAllowedRedirect(st.r)) {
       throw new ClaudeBridgeRequestError(400, 'invalid_request', 'The authorization request is not a Claude link.');
     }
-    this.sweep();
     const code = randomBytes(CODE_BYTES).toString('hex');
-    this.codes.set(code, {
+    await this.deps.codes.put({
+      codeHash: hashCode(code),
       userId,
       clientId: st.c,
       redirectUri: st.r,
-      expiresAt: Date.now() + CODE_TTL_MS,
+      expiresAt: new Date(Date.now() + CODE_TTL_MS),
     });
     const url = new URL(st.r);
     url.searchParams.set('code', code);
@@ -131,9 +129,11 @@ export class ClaudeMarketplaceBridge {
   }
 
   /**
-   * The token exchange. Client id and secret must be ours, the code must be
-   * live and unused; the answer is a connection key for the person who
-   * approved, in the response shape GitHub's token endpoint has.
+   * The token exchange. Client id and secret must be ours and the code live;
+   * every check runs BEFORE the code is spent, so a request that is wrong
+   * about something else (its redirect, say) can be corrected and retried.
+   * Spending is one conditional update in the store — the first exchange
+   * wins, on whichever replica, and only the winner mints.
    */
   async exchangeCode(body: Record<string, unknown>): Promise<{
     access_token: string;
@@ -147,29 +147,25 @@ export class ClaudeMarketplaceBridge {
     if (!clientId || !clientSecret || !safeEqual(clientId, creds.clientId) || !safeEqual(clientSecret, creds.clientSecret)) {
       throw new ClaudeBridgeRequestError(401, 'incorrect_client_credentials', 'The client_id and/or client_secret passed are incorrect.');
     }
-    this.sweep();
-    const pending = code ? this.codes.get(code) : undefined;
+    const pending = code ? await this.deps.codes.peek(hashCode(code)) : null;
     if (!pending || pending.clientId !== clientId) {
       throw new ClaudeBridgeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
     }
-    // One use: consumed before minting, so a replayed exchange cannot mint twice.
-    this.codes.delete(code);
     const redirectUri = str(body.redirect_uri);
     if (redirectUri && redirectUri !== pending.redirectUri) {
       throw new ClaudeBridgeRequestError(400, 'redirect_uri_mismatch', 'The redirect_uri does not match the authorization.');
     }
-    const minted = await this.deps.keys.mint(pending.userId, CLAUDE_LINK_KEY_LABEL, {
-      prefix: CLAUDE_LINK_KEY_PREFIX,
-    });
+    const spent = await this.deps.codes.consume(pending.codeHash);
+    if (!spent) {
+      throw new ClaudeBridgeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
+    }
+    const minted = await this.deps.keys.mint(spent.userId, CLAUDE_LINK_KEY_LABEL, { kind: CLAUDE_LINK_KEY_KIND });
     return { access_token: minted.plaintext, token_type: 'bearer', scope: '' };
   }
+}
 
-  private sweep(): void {
-    const now = Date.now();
-    for (const [code, pending] of this.codes) {
-      if (pending.expiresAt <= now) this.codes.delete(code);
-    }
-  }
+function hashCode(code: string): string {
+  return createHash('sha256').update(code).digest('hex');
 }
 
 function isAllowedRedirect(uri: string): boolean {

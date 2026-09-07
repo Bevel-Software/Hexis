@@ -183,6 +183,12 @@ export const externalApiKeys = pgTable('api_tokens', {
   userId: uuid('user_id').notNull().references(() => users.id),
   tokenHash: text('token_hash').notNull().unique(),
   label: text('label').notNull(),
+  /**
+   * What the key was minted as: `key` by hand, or a flow's own kind (a
+   * Claude link). The one fact that tells such keys apart — the label is
+   * free text the person may edit or imitate.
+   */
+  kind: text('kind').default('key').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastUsedAt: timestamp('last_used_at'),
   revokedAt: timestamp('revoked_at'),
@@ -513,3 +519,23 @@ export const claudeMarketplaceBridge = pgTable('claude_marketplace_bridge', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   rotatedAt: timestamp('rotated_at'),
 });
+
+/**
+ * One-time codes the Claude connect flow issues on the consent page and
+ * Anthropic's backend exchanges seconds later — in the database so the
+ * replica that issued a code and the replica asked to exchange it agree.
+ * ONE live row per person and client (the newest supersedes), spent by a
+ * conditional update, swept on the next issue. See
+ * `marketplace/claude-bridge/claude-bridge-codes.store.ts`.
+ */
+export const claudeMarketplaceCodes = pgTable('claude_marketplace_codes', {
+  codeHash: text('code_hash').primaryKey(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull(),
+  redirectUri: text('redirect_uri').notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  consumedAt: timestamp('consumed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (t) => ({
+  byUser: index('claude_marketplace_codes_by_user').on(t.userId),
+}));

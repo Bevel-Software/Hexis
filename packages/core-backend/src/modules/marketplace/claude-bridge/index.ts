@@ -7,8 +7,15 @@ export {
   type ClaudeBridgeCredentialsStore,
 } from './claude-bridge-credentials.service.js';
 export {
+  DbClaudeBridgeCodeStore,
+  MemoryClaudeBridgeCodeStore,
+  type ClaudeBridgeCodeStore,
+  type PendingClaudeCode,
+} from './claude-bridge-codes.store.js';
+export {
   ClaudeMarketplaceBridge,
   ClaudeBridgeRequestError,
+  CLAUDE_LINK_KEY_KIND,
   CLAUDE_LINK_KEY_PREFIX,
   CLAUDE_LINK_KEY_LABEL,
   CLAUDE_CLIENT_NAME,

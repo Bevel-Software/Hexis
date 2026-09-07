@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Banner, Button } from '../../../shared/components';
 import { Dialog } from '../../../shared/components/Dialog';
 import { CopyBlock } from '../../../shared/mcp';
@@ -20,9 +20,14 @@ import {
  *
  * The fields are exactly the ones the "Add manually" form asks for, in its
  * order, so the card reads as a copy source, not a form of its own. Rotate
- * replaces every one of them: the registration on the Claude side stops
- * matching until an Owner re-enters the new set, while people's existing
+ * replaces the generated ones: the registration on the Claude side stops
+ * matching until an Owner re-enters them, while people's existing
  * connections — connection keys, ours — keep working.
+ *
+ * What is on screen is always the LATEST answer the server gave: a load
+ * that was in flight when a rotation returned is discarded, never applied
+ * over the new set — an admin copying pre-rotation values into Claude would
+ * register a secret that no longer exists.
  */
 export function ClaudeConnectionCard() {
   const [creds, setCreds] = useState<ClaudeBridgeCredentials | null>(null);
@@ -30,30 +35,50 @@ export function ClaudeConnectionCard() {
   const [loaded, setLoaded] = useState(false);
   const [confirmRotate, setConfirmRotate] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [rotateError, setRotateError] = useState<string | null>(null);
+  // Every request takes a number; only the newest one's answer is applied.
+  const latest = useRef(0);
 
   const refresh = useCallback(() => {
+    const seq = ++latest.current;
     fetchClaudeBridge()
       .then((c) => {
+        if (seq !== latest.current) return;
         setCreds(c);
         setError(null);
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setLoaded(true));
+      .catch((err: unknown) => {
+        if (seq !== latest.current) return;
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (seq === latest.current) setLoaded(true);
+      });
   }, []);
 
   useEffect(refresh, [refresh]);
 
   const rotate = async () => {
+    const seq = ++latest.current;
     setRotating(true);
+    setRotateError(null);
     try {
-      setCreds(await rotateClaudeBridge());
+      const next = await rotateClaudeBridge();
+      if (seq !== latest.current) return;
+      setCreds(next);
       setError(null);
       setConfirmRotate(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Inside the dialog, where the person is looking — not behind its scrim.
+      if (seq === latest.current) setRotateError(err instanceof Error ? err.message : String(err));
     } finally {
       setRotating(false);
     }
+  };
+
+  const closeRotate = () => {
+    setConfirmRotate(false);
+    setRotateError(null);
   };
 
   return (
@@ -112,25 +137,32 @@ export function ClaudeConnectionCard() {
 
       <Dialog
         open={confirmRotate}
-        onClose={() => setConfirmRotate(false)}
+        onClose={closeRotate}
         title="Rotate the Claude connection credentials?"
         size="sm"
         busy={rotating}
         footer={
           <>
-            <Button variant="outline" size="sm" onClick={() => setConfirmRotate(false)} disabled={rotating}>
+            <Button variant="outline" size="sm" onClick={closeRotate} disabled={rotating}>
               Cancel
             </Button>
             <Button variant="danger" size="sm" onClick={() => void rotate()} disabled={rotating}>
-              {rotating ? 'Rotating…' : 'Rotate'}
+              {rotating ? 'Rotating…' : rotateError ? 'Try again' : 'Rotate'}
             </Button>
           </>
         }
       >
         <p className="text-sm text-ink">
-          Every field changes. The registration in Claude's admin settings stops working until an
-          Owner enters the new values there. People who already connected keep their connection.
+          The App ID, Client ID, client secret, webhook secret and private key change; the
+          hostname and the marketplace URL stay the same. The registration in Claude's admin
+          settings stops working until an Owner enters the new values there. People who already
+          connected keep their connection.
         </p>
+        {rotateError && (
+          <Banner tone="danger" role="alert" className="mt-3">
+            {rotateError}
+          </Banner>
+        )}
       </Dialog>
     </section>
   );

@@ -17,7 +17,7 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
-import { CLAUDE_LINK_LABEL, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { CLAUDE_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { useAdmin } from '../../admin/state/admin.context';
 import {
   type ExternalApiKeySummary,
@@ -168,8 +168,14 @@ export function ExternalAgentAccessPage() {
   // top, never-used ones last among the active), with disconnected keys sunk
   // to the bottom. Non-destructive — nothing is hidden or deleted, just ordered
   // so a long list of stale/test keys doesn't bury the ones in use.
-  const claudeLinks = keys.filter((k) => k.label === CLAUDE_LINK_LABEL && k.revokedAt === null);
-  const sortedKeys = keys.filter((k) => k.label !== CLAUDE_LINK_LABEL || k.revokedAt !== null).sort((a, b) => {
+  // ONE list from the server, two views of it: live Claude links belong to
+  // the Marketplaces tab (they were minted by a connection, not created
+  // here), everything else — hand-made keys, and Claude links once
+  // disconnected, so they can be deleted — to the autonomous tab. Told
+  // apart by the stored kind, never the label.
+  const isClaudeLink = (k: ExternalApiKeySummary) => k.kind === CLAUDE_LINK_KIND;
+  const claudeLinks = keys.filter((k) => isClaudeLink(k) && k.revokedAt === null);
+  const sortedKeys = keys.filter((k) => !isClaudeLink(k) || k.revokedAt !== null).sort((a, b) => {
     const aRevoked = a.revokedAt !== null;
     const bRevoked = b.revokedAt !== null;
     if (aRevoked !== bRevoked) return aRevoked ? 1 : -1;
@@ -359,7 +365,14 @@ export function ExternalAgentAccessPage() {
                 <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-ink">Your Claude connections</div>
-                  {claudeLinks.length === 0 ? (
+                  {loadError && (
+                    <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                      {loadError}
+                    </div>
+                  )}
+                  {loading ? (
+                    <div className="text-meta text-ink-muted">Loading…</div>
+                  ) : loadError ? null : claudeLinks.length === 0 ? (
                     <div className="text-meta text-ink-muted">
                       None yet. One appears here after you connect from Cowork or claude.ai.
                     </div>
@@ -481,8 +494,11 @@ export function ExternalAgentAccessPage() {
               )}
               {loading ? (
                 <div className="text-xs text-ink-muted">Loading…</div>
-              ) : keys.length === 0 ? (
-                <div className="text-xs text-ink-muted">No external API keys yet.</div>
+              ) : sortedKeys.length === 0 ? (
+                <div className="text-xs text-ink-muted">
+                  No external API keys yet.
+                  {claudeLinks.length > 0 && ' Your Claude connections are on the Marketplaces tab.'}
+                </div>
               ) : (
                 <ul className="divide-y divide-line border border-line rounded">
                   {sortedKeys.map((k) => {

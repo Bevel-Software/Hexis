@@ -27,6 +27,9 @@ export interface OAuthConsentRoutesDeps {
  * landing from the redirect chain authenticates via the HttpOnly bevel_token
  * cookie fallback, so THIS is where a Bevel user attaches to the flow.
  */
+/** A Claude-link state reaching a deployment whose routes were built without the bridge. */
+const NO_BRIDGE = 'Connecting a Claude account is not enabled on this deployment.';
+
 export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.Router {
   const router = express.Router();
 
@@ -36,7 +39,8 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const raw = typeof req.query.state === 'string' ? req.query.state : '';
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
-    if (deps.bridge?.isBridgeRequest(st)) {
+    if (st.gh) {
+      if (!deps.bridge) return void res.status(400).json({ error: NO_BRIDGE });
       res.json({ clientName: deps.bridge.clientName, scope: null, resource: null });
       return;
     }
@@ -56,8 +60,9 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const raw = typeof (req.body ?? {}).state === 'string' ? req.body.state : '';
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
+    if (st.gh && !deps.bridge) return void res.status(400).json({ error: NO_BRIDGE });
     try {
-      const { redirectTo } = deps.bridge?.isBridgeRequest(st)
+      const { redirectTo } = st.gh && deps.bridge
         ? await deps.bridge.completeConsent(userId, st)
         : await deps.provider.issueAuthCode(userId, st);
       res.json({ redirectTo });

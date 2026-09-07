@@ -64,7 +64,9 @@ import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
   ClaudeBridgeCredentialsService,
   ClaudeMarketplaceBridge,
+  DbClaudeBridgeCodeStore,
   DbClaudeBridgeCredentialsStore,
+  CLAUDE_LINK_KEY_KIND,
   CLAUDE_LINK_KEY_PREFIX,
 } from '../modules/marketplace/claude-bridge/index.js';
 import {
@@ -689,12 +691,12 @@ export async function createCoreServices(
   // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
   // over loopback and re-exposes every tool, dispatching calls back through the
   // REST tool surface (so agent logic + metering live there, once).
-  // Connection keys also come in the shape a Claude link needs (`gho_…`):
+  // Connection keys also come as Claude links (`gho_…`, kind `claude-link`):
   // the same key, minted by the marketplace bridge below when a person
-  // connects their claude.ai account.
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, [
-    CLAUDE_LINK_KEY_PREFIX,
-  ]);
+  // connects their claude.ai account, told apart by its stored kind.
+  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
+    [CLAUDE_LINK_KEY_KIND]: CLAUDE_LINK_KEY_PREFIX,
+  });
 
   // The bridge that lets claude.ai and Cowork add the per-user marketplace
   // as if this deployment were a GitHub Enterprise Server: generated app
@@ -706,6 +708,7 @@ export async function createCoreServices(
   );
   const claudeBridge = new ClaudeMarketplaceBridge({
     credentials: claudeBridgeCredentials,
+    codes: new DbClaudeBridgeCodeStore(db),
     keys: externalApiKeyService,
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
