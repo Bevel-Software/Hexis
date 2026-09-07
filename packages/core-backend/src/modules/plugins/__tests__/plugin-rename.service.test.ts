@@ -111,6 +111,29 @@ describe('PluginRenameService', () => {
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 
+  it('refuses to claim a name against a listing with a hole in it — an unreadable folder may hold that very plugin', async () => {
+    // Discovery as the walker reports it when a folder exists but could not
+    // be read: the plugins it did see, plus the hole.
+    const real = new KbPluginSource();
+    const holed = {
+      dialect: 'kb',
+      discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
+    };
+    const svcOverHole = new PluginRenameService(
+      { getWorkspacePath: async (id: string) => path.join(root, id) } as unknown as WorkspaceService,
+      { commitChanges: async () => { throw new Error('must not commit'); } },
+      access,
+      holed,
+      KB_DIR,
+    );
+    await expect(svcOverHole.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({
+      status: 503,
+      payload: { kind: 'incomplete-discovery', unreadable: ['Plugins/Hidden'] },
+    });
+    expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
+    expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
+  });
+
   it('renames the identifier: the manifest and every grant that spells the old one, in ONE commit', async () => {
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
 

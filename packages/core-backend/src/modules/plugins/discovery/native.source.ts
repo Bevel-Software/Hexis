@@ -9,6 +9,7 @@ import {
   pluginDisplayNameOf,
   pluginIdentityOf,
 } from '@bevel-software/platform-shared';
+import { isAbsence } from '../../../shared/fs-errors.js';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
 /**
@@ -22,10 +23,11 @@ export async function readNativePlugin(
   folder: string,
   relFolder: string,
   warnings: string[],
+  unreadable: string[],
 ): Promise<DiscoveredPlugin> {
   const folderName = path.posix.basename(relFolder);
-  const manifestText = await readText(path.join(dir, PLUGIN_MANIFEST_FILE));
-  const mcpJsonText = await readText(path.join(dir, PLUGIN_MCP_FILE));
+  const manifestText = await readText(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings, unreadable);
+  const mcpJsonText = await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings, unreadable);
   const manifest = parseObject(manifestText);
   if (manifestText !== null && manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
@@ -68,10 +70,20 @@ export async function readNativePlugin(
   };
 }
 
-async function readText(abs: string): Promise<string | null> {
+/**
+ * A file's text, or null when there is no such file. A file that is there
+ * but cannot be read is ALSO null to the caller — the plugin still stands,
+ * on its folder's name — but it is said and counted: a manifest nobody could
+ * read is an identity nobody could see.
+ */
+async function readText(abs: string, folder: string, warnings: string[], unreadable: string[]): Promise<string | null> {
   try {
     return await fs.readFile(abs, 'utf-8');
-  } catch {
+  } catch (err) {
+    if (!isAbsence(err)) {
+      warnings.push(`${folder}/${path.basename(abs)} could not be read — ${err instanceof Error ? err.message : String(err)}`);
+      unreadable.push(`${folder}/${path.basename(abs)}`);
+    }
     return null;
   }
 }

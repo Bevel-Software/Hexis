@@ -260,10 +260,9 @@ export class PluginProvisionService {
       // there: a sibling somebody named that way, or the residue of a run
       // that crashed mid-delete (which stays, invisible, for a person to
       // clear; a delete must never destroy anything but the plugin it names).
-      const parkedDir = path.join(
-        path.dirname(folderDir),
-        `.${segments[segments.length - 1]}.deleting-${randomUUID()}`,
-      );
+      // FIXED LENGTH: the plugin's own name is not part of it, so a name near
+      // the filesystem's component limit parks as well as a short one.
+      const parkedDir = path.join(path.dirname(folderDir), `.deleting-${randomUUID()}`);
       await fs.rename(folderDir, parkedDir);
       try {
         // Inline and `systemAuthorized`, for `provision`'s reasons in

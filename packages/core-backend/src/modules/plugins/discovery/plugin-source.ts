@@ -61,6 +61,15 @@ export interface Discovery {
   plugins: DiscoveredPlugin[];
   /** What was skipped and why — unparsable files, unknown profiles. */
   warnings: string[];
+  /**
+   * Folders and files that exist but could NOT be read (permissions, I/O),
+   * repo-relative. Every plugin at or beneath them is missing from
+   * `plugins` — not absent, unseen. A reader that only shows what it can
+   * carries on (the catalog does); a WRITER that keys a change on the set
+   * of plugins (a rename claiming a name) must refuse while this is not
+   * empty, or it may take an identity it could not see.
+   */
+  unreadable: string[];
 }
 
 export interface PluginSource {

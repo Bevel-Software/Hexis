@@ -87,7 +87,18 @@ export class PluginRenameService {
   ): Promise<RenameResult> {
     const wsId = linksWorkspaceId();
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
-    const { plugins } = await this.source.discover(kbRoot);
+    const { plugins, unreadable } = await this.source.discover(kbRoot);
+    // A rename claims a name against EVERY plugin there is. A listing with a
+    // hole in it — a folder or manifest that exists but could not be read —
+    // is not that set: the name could belong to what was not seen, and two
+    // plugins would answer to it once it is. Fail closed; nothing is written.
+    if (unreadable.length > 0) {
+      throw new PluginRenameError(
+        `Some of the knowledge base could not be read (${unreadable.join(', ')}), so the rename cannot be checked against every plugin. Try again, or ask an admin.`,
+        503,
+        { kind: 'incomplete-discovery', unreadable },
+      );
+    }
     const plugin = plugins.find((p) => p.name === current.trim() && !p.personal && p.exists);
     // Fail closed, like every plugin surface: unknown and not-yours answer alike.
     if (!plugin || !(await this.accessControl.canWrite(wsId, user.email, `${plugin.folder}/access.md`))) {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -244,9 +244,39 @@ describe('KbPluginSource — one walk, both shapes', () => {
     ]);
   });
 
+  it('counts what exists but could not be read — a folder, a manifest — so a writer can tell a hole from an absence', async () => {
+    await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
+    await write('Plugins/Hidden/plugin.json', '{"name":"hidden-identity"}');
+    await write('Plugins/teams/Deep/plugin.json', '{"name":"deep"}');
+    const realReaddir = fs.readdir;
+    const realReadFile = fs.readFile;
+    const eacces = () => Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }));
+    const spies = [
+      vi.spyOn(fs, 'readdir').mockImplementation(((dir: string, opts: unknown) =>
+        String(dir).endsWith('teams') ? eacces() : (realReaddir as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts)) as never),
+      vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+        String(file).includes('Hidden') && String(file).endsWith('plugin.json')
+          ? eacces()
+          : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never),
+    ];
+    try {
+      const { plugins, warnings, unreadable } = await new KbPluginSource().discover(kb);
+      // The container could not be listed: nothing beneath it was seen. The
+      // manifest could not be read: the plugin stands on its folder's name —
+      // an identity nobody could see. Both are counted, not folded into absence.
+      expect(unreadable).toEqual(['Plugins/Hidden/plugin.json', 'Plugins/teams']);
+      expect(plugins.map((p) => p.name)).toEqual(['gtm', 'hidden']);
+      expect(warnings.some((w) => w.startsWith('Plugins/Hidden/plugin.json could not be read'))).toBe(true);
+      expect(warnings.some((w) => w.startsWith('Plugins/teams: could not be read'))).toBe(true);
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
+  });
+
   it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
-    const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    const { plugins, warnings, unreadable } = await new KbPluginSource().discover(kb);
     expect(plugins).toEqual([]);
     expect(warnings).toEqual([]);
+    expect(unreadable).toEqual([]);
   });
 });

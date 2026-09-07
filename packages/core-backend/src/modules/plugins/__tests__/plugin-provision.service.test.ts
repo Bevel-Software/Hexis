@@ -225,6 +225,15 @@ describe('PluginProvisionService.deletePlugin', () => {
     );
   });
 
+  it('deletes a plugin whose name sits at the filesystem component limit — the park adds nothing to the name', async () => {
+    // 240 characters: valid to create (≤ 255 bytes), and long enough that a
+    // park spelled `.<name>.deleting-<uuid>` would not be a legal component.
+    const long = 'a'.repeat(240);
+    await h.svc.createPlugin(USER, long);
+    await h.svc.deletePlugin(USER, long);
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toEqual([]);
+  });
+
   it('refuses an unknown name — and a casing mismatch, which is the same thing — with 404', async () => {
     await h.svc.createPlugin(USER, 'GTM');
     for (const name of ['Nope', 'gtm']) {

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, pluginManifestName } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin, Discovery, PluginSource } from './plugin-source.js';
+import { isAbsence } from '../../../shared/fs-errors.js';
 import { comparePathComponents } from '../../../shared/path-order.js';
 import { readNativePlugin } from './native.source.js';
 import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bundle.source.js';
@@ -33,6 +34,7 @@ export class KbPluginSource implements PluginSource {
 
   async discover(kbRoot: string): Promise<Discovery> {
     const warnings: string[] = [];
+    const unreadable: string[] = [];
     const plugins: DiscoveredPlugin[] = [];
     const root = path.join(kbRoot, PLUGINS_DIR);
     const registry = await loadRegistry(kbRoot, warnings);
@@ -57,12 +59,12 @@ export class KbPluginSource implements PluginSource {
     const visit = async (dir: string, relFolder: string): Promise<number> => {
       const folder = relFolder ? `${PLUGINS_DIR}/${relFolder}` : PLUGINS_DIR;
       const isRoot = relFolder === '';
-      if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings))) {
-        claim(await readNativePlugin(dir, folder, relFolder, warnings));
+      if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings, unreadable))) {
+        claim(await readNativePlugin(dir, folder, relFolder, warnings, unreadable));
         return 1;
       }
-      if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE), folder, warnings))) {
-        const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings);
+      if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE), folder, warnings, unreadable))) {
+        const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings, unreadable);
         if (bundle) claim(bundle);
         return 1; // unreadable: reported, and still not descended into
       }
@@ -72,8 +74,12 @@ export class KbPluginSource implements PluginSource {
       } catch (err) {
         // Absence is a knowledge base without that folder — ordinary. Any
         // other failure hides every plugin beneath, and must say so rather
-        // than let the catalog shrink in silence.
-        if (!isAbsence(err)) warnings.push(`${folder}: could not be read — ${describe(err)}`);
+        // than let the catalog shrink in silence — and be COUNTED, so a
+        // writer can tell an incomplete listing from a complete one.
+        if (!isAbsence(err)) {
+          warnings.push(`${folder}: could not be read — ${describe(err)}`);
+          unreadable.push(folder);
+        }
         return 0;
       }
       let beneath = 0;
@@ -86,23 +92,21 @@ export class KbPluginSource implements PluginSource {
     };
 
     await visit(root, '');
-    return { plugins, warnings };
+    return { plugins, warnings, unreadable };
   }
 }
 
-/** Whether `abs` is a file; a probe that fails for any reason but absence is reported. */
-async function isFile(abs: string, folder: string, warnings: string[]): Promise<boolean> {
+/** Whether `abs` is a file; a probe that fails for any reason but absence is reported and counted. */
+async function isFile(abs: string, folder: string, warnings: string[], unreadable: string[]): Promise<boolean> {
   try {
     return (await fs.stat(abs)).isFile();
   } catch (err) {
-    if (!isAbsence(err)) warnings.push(`${folder}: ${path.basename(abs)} could not be read — ${describe(err)}`);
+    if (!isAbsence(err)) {
+      warnings.push(`${folder}: ${path.basename(abs)} could not be read — ${describe(err)}`);
+      unreadable.push(`${folder}/${path.basename(abs)}`);
+    }
     return false;
   }
-}
-
-function isAbsence(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 function describe(err: unknown): string {
