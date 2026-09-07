@@ -33,6 +33,8 @@
  * change requests; only the UI dresses them up.
  */
 
+export type { PluginMembership } from '../skills/skills.contract.js';
+
 /** Access-rule principals as the resolver hands them back. */
 export interface ResolvedPrincipals {
   roles: string[];

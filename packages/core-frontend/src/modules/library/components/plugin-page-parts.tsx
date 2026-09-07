@@ -156,6 +156,7 @@ export function CardGrid({
             owned={item.owned}
             status={item.status}
             version={item.version}
+            lifecycle={item.lifecycle}
             pending={
               item.pending && {
                 authorName: item.pending.authorName,

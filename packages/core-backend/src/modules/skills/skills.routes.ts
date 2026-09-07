@@ -1,6 +1,21 @@
 import express from 'express';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
-import type { IPendingSkillService, ISkillService } from './skills.contract.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import type { IPendingSkillService, ISkillService, PluginMembership } from './skills.contract.js';
+
+/** The slice of the plugin link index this surface reads — see `PluginLinkIndex`. */
+export interface SkillMembershipSource {
+  membership(): Promise<{
+    bySkill: Map<string, PluginMembership[]>;
+    byPlugin: Map<string, { folder: string }>;
+  }>;
+}
+
+/** The one access verdict this surface needs: may the caller read a path on the default branch? */
+export interface SkillMembershipGate {
+  canReadBatch(workspaceId: string, userEmail: string, paths: string[]): Promise<Map<string, boolean>>;
+}
 
 /**
  * Browser-facing (JWT) skill routes for the `/`-command menu, mounted behind
@@ -8,14 +23,27 @@ import type { IPendingSkillService, ISkillService } from './skills.contract.js';
  * so discovery, default-branch pinning, and per-user `canRead` filtering live
  * ONCE — the frontend never re-implements skill discovery or bypasses access.
  *
- *   GET /api/skills            → { skills: SkillSummary[] }   (filtered to this user)
+ *   GET /api/skills            → { skills: SkillSummary[] }   (filtered to this user,
+ *                                                              each with its `plugins`)
  *   GET /api/skills/pending    → { skills: PendingSkill[] }   (proposed, not released)
  *   GET /api/skills/:name      → GetSkillResult               (body + files)
  *   GET /api/skills/:name?file=… → GetSkillResult             (a bundled file's content)
+ *
+ * `plugins` is decorated HERE, not in the catalog: the catalog is what agents
+ * load by name and it stays plugin-unaware; the browser is the surface that
+ * groups skills by plugin. Optional dependency, so a host without the link
+ * index gets undecorated summaries rather than a 500.
  */
 export function createSkillsRoutes(
   skillService: ISkillService,
   pendingSkills?: IPendingSkillService,
+  links?: SkillMembershipSource,
+  /**
+   * With `links`: the memberships a caller sees name only plugins they may
+   * DISCOVER (read the plugin's access.md — the plugin index's own listing
+   * verdict), so this surface never reveals a plugin `/api/plugins` omits.
+   */
+  gate?: SkillMembershipGate,
 ): express.Router {
   const router = express.Router();
 
@@ -25,7 +53,35 @@ export function createSkillsRoutes(
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
-    res.json({ skills: await skillService.listSkills(email) });
+    const skills = await skillService.listSkills(email);
+    if (!links) {
+      res.json({ skills });
+      return;
+    }
+    let bySkill: Map<string, PluginMembership[]>;
+    // Fail closed: memberships without a gate to judge them by name nothing.
+    let discoverable: (plugin: string) => boolean = () => false;
+    try {
+      const membership = await links.membership();
+      bySkill = membership.bySkill;
+      if (gate) {
+        const folders = [...membership.byPlugin.entries()];
+        const verdicts = folders.length
+          ? await gate.canReadBatch(
+              workspaceIdForBranch(DEFAULT_BRANCH),
+              email,
+              folders.map(([, p]) => `${p.folder}/access.md`),
+            )
+          : new Map<string, boolean>();
+        const visible = new Set(folders.filter(([, p]) => verdicts.get(`${p.folder}/access.md`) === true).map(([name]) => name));
+        discoverable = (plugin) => visible.has(plugin);
+      }
+    } catch {
+      bySkill = new Map(); // membership is a decoration; the shelf must not fall with it
+    }
+    res.json({
+      skills: skills.map((s) => ({ ...s, plugins: (bySkill.get(s.path) ?? []).filter((m) => discoverable(m.name)) })),
+    });
   });
 
   /**

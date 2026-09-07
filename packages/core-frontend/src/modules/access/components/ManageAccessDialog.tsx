@@ -24,6 +24,11 @@ import {
   grantAccess,
   revokeAccess,
   suggestPrincipals,
+  PLUGIN_PRINCIPAL_VERBS,
+  parsePluginPrincipalToken,
+  pluginPrincipalLabel,
+  pluginPrincipalToken,
+  type ResolvedPrincipal,
   asInheritedError,
   type AccessEligible,
   type AccessResponse,
@@ -83,7 +88,7 @@ interface PrincipalRow {
    * (grant audience). Decides the badge ("Role" vs "Group") and which
    * principal kind mutations round-trip with.
    */
-  kind: 'user' | 'role' | 'group';
+  kind: 'user' | 'role' | 'group' | 'plugin';
   isYou: boolean;
   /** The principal to send on grant / revoke. */
   principal: Principal;
@@ -164,7 +169,10 @@ function principalKey(p: Principal): string {
     ? `r:${p.role.toLowerCase()}`
     : p.kind === 'group'
       ? `g:${p.group.toLowerCase()}`
-      : `u:${p.email.toLowerCase()}`;
+      : p.kind === 'plugin'
+        // The server keys plugin principals by their full token (`p:plugin/gtm/read`).
+        ? `p:${pluginPrincipalToken(p.plugin, p.verb).toLowerCase()}`
+        : `u:${p.email.toLowerCase()}`;
 }
 
 /**
@@ -527,25 +535,35 @@ export function ManageAccessDialog({
     // Kinded collective list for one eligible set. Older servers omit
     // `principals` (version skew) — fall back to the name-only `roles`,
     // treating everything as a role (the pre-groups display).
-    const collectivesOf = (list: AccessEligible): { name: string; kind: 'role' | 'group' }[] =>
+    const collectivesOf = (list: AccessEligible): ResolvedPrincipal[] =>
       list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
-    const touchCollective = (c: { name: string; kind: 'role' | 'group' }): PrincipalRow => {
-      // Rows are keyed by KIND + name (`g:`/`r:`) — the backend treats a bare
-      // `Product` (group) and `role/Product` (role) as DIFFERENT principals,
-      // so a group and a role sharing a name are two rows, each mutating its
-      // own grant. Collapsing them to one row silently pointed every edit at
-      // the group and hid the role's grant entirely.
+    const touchCollective = (c: ResolvedPrincipal): PrincipalRow => {
+      // Rows are keyed by KIND + name (`g:`/`r:`/`p:`) — the backend treats a
+      // bare `Product` (group) and `role/Product` (role) as DIFFERENT
+      // principals, so a group and a role sharing a name are two rows, each
+      // mutating its own grant. Collapsing them to one row silently pointed
+      // every edit at the group and hid the role's grant entirely. A plugin
+      // principal's name is its full `plugin/<Name>/<verb>` token.
       const key =
-        c.kind === 'group' ? `g:${c.name.toLowerCase()}` : `r:${c.name.toLowerCase()}`;
+        c.kind === 'group'
+          ? `g:${c.name.toLowerCase()}`
+          : c.kind === 'plugin'
+            ? `p:${c.name.toLowerCase()}`
+            : `r:${c.name.toLowerCase()}`;
       let row = rows.get(key);
       if (!row) {
+        const plugin = c.kind === 'plugin' ? parsePluginPrincipalToken(c.name) : null;
         row = {
           key,
-          label: c.name,
+          label: plugin ? pluginPrincipalLabel(plugin.plugin, plugin.verb) : c.name,
           kind: c.kind,
           isYou: false,
           principal:
-            c.kind === 'group' ? { kind: 'group', group: c.name } : { kind: 'role', role: c.name },
+            c.kind === 'group'
+              ? { kind: 'group', group: c.name }
+              : plugin
+                ? { kind: 'plugin', plugin: plugin.plugin, verb: plugin.verb }
+                : { kind: 'role', role: c.name },
           verbs: { owner: false, write: false, read: false, download: false },
           manage: 'direct',
           ancestors: [],
@@ -687,7 +705,13 @@ export function ManageAccessDialog({
   }, [query, suggest]);
 
   const principalLabel = (p: Principal): string =>
-    p.kind === 'role' ? p.role : p.kind === 'group' ? p.group : p.displayName || p.email;
+    p.kind === 'role'
+      ? p.role
+      : p.kind === 'group'
+        ? p.group
+        : p.kind === 'plugin'
+          ? pluginPrincipalLabel(p.plugin, p.verb)
+          : p.displayName || p.email;
 
   const addChip = useCallback((p: Principal) => {
     setPickedChips((chips) =>
@@ -1036,7 +1060,7 @@ export function ManageAccessDialog({
               // The same chip vocabulary as the suggest menu's trailing tags:
               // a role is a capability, a group is an audience — badge which.
               <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-                {p.kind === 'group' ? 'Group' : 'Role'}
+                {p.kind === 'group' ? 'Group' : p.kind === 'plugin' ? 'Plugin' : 'Role'}
               </Badge>
             )}
           </div>
@@ -1202,7 +1226,7 @@ export function ManageAccessDialog({
                     `roles` or `groups` (version skew) must degrade to an empty
                     section, never a crash. Groups lead — they are the audience
                     concept grants are meant for; roles remain grantable below. */}
-                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
+                {query.trim() && suggest && ((suggest.groups?.length ?? 0) > 0 || (suggest.roles?.length ?? 0) > 0 || (suggest.pluginPrincipals?.length ?? 0) > 0 || (suggest.people?.length ?? 0) > 0) && (
                   <AnchoredMenu width="anchor" align="left" className="max-h-56 overflow-auto">
                     {(suggest.groups ?? []).map((g) => (
                       <MenuItem
@@ -1232,6 +1256,24 @@ export function ManageAccessDialog({
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
                     ))}
+                    {/* A plugin is three grantees — its readers, its writers, its
+                        owners — each following the plugin's own roster live. */}
+                    {(suggest.pluginPrincipals ?? []).flatMap((name) =>
+                      PLUGIN_PRINCIPAL_VERBS.map((verb) => (
+                        <MenuItem
+                          key={`pl:${name}/${verb}`}
+                          onClick={() => addChip({ kind: 'plugin', plugin: name, verb })}
+                          trailing={
+                            <span className="text-label uppercase text-ink-faint">plugin</span>
+                          }
+                        >
+                          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
+                            {initials(name)}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{pluginPrincipalLabel(name, verb)}</span>
+                        </MenuItem>
+                      )),
+                    )}
                     {(suggest.people ?? []).map((p) => {
                       const tone = avatarTone(p.name || p.email);
                       return (

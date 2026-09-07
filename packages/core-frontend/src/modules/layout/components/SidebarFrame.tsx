@@ -57,7 +57,7 @@ export function SidebarFrame({
   header,
 }: {
   children: ReactNode;
-  /** Names the region and its resize handle, e.g. `Library plugins`. */
+  /** Names the region and its resize handle, e.g. `Library navigation`. */
   label: string;
   /**
    * Pinned above `children`, outside whatever list the surface is holding.

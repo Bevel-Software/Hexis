@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
+import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
@@ -56,6 +57,8 @@ beforeEach(() => {
 
 function mount(mcpUrl: string) {
   configureMcpUrl(mcpUrl);
+  // The marketplace remote is served from the same deployment address.
+  configureMarketplaceGitUrl(`${new URL(mcpUrl).origin}/git/marketplace.git`);
   return render(
     <MemoryRouter>
       <ExternalAgentAccessPage />
@@ -137,7 +140,12 @@ describe('the interactive tab: local first, hosted second, each with its own add
   it('keeps each family on its own address', () => {
     mount(PUBLIC_URL);
     for (const value of snippets()) {
-      if (value.includes('hexis')) {
+      if (value.includes('marketplace.git')) {
+        // The marketplace remote is the deployment's own address (with the
+        // key in the userinfo, so the HOST is what survives), never the browser's.
+        expect(value).toContain(new URL(PUBLIC_URL).host);
+        expect(value).not.toContain(window.location.host);
+      } else if (value.includes('hexis')) {
         expect(value).toContain(window.location.origin);
         expect(value).not.toContain(PUBLIC_URL);
       } else {
@@ -221,6 +229,43 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
+   * The modal holds the SAME three drawers as the interactive tab, in the
+   * same order, and every one of them arrives closed: the key is what the
+   * dialog hands over, and the configs wait until the reader picks a side.
+   */
+  it('folds the configs into the tab\'s three drawers, all closed', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await revealAKey(user);
+    const dialog = screen.getByRole('alertdialog');
+    const summaries = [
+      'Desktop agents — the local server (recommended)',
+      'Web agents and pipelines — the hosted endpoint',
+      'Skills as native plugins — the marketplace',
+    ].map((text) => within(dialog).getByText(text));
+    for (const summary of summaries) {
+      expect(summary.tagName).toBe('SUMMARY');
+      expect((summary.closest('details') as HTMLDetailsElement).open).toBe(false);
+    }
+    expect(summaries[0].compareDocumentPosition(summaries[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(summaries[1].compareDocumentPosition(summaries[2]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The key itself is not behind a drawer.
+    expect(within(dialog).getByRole('button', { name: 'Copy external API key' }).closest('details')).toBeNull();
+  });
+
+  /**
+   * The placeholder on the keyless tab is a placeholder, not a percent-encoded
+   * one: `%3Cexternal-api-key%3E` looked like a secret to paste.
+   */
+  it('shows the marketplace placeholder verbatim on the keyless tab', () => {
+    mount(PUBLIC_URL);
+    const marketplace = snippets().filter((v) => v.includes('marketplace.git'));
+    expect(marketplace.length).toBeGreaterThan(0);
+    for (const v of marketplace) expect(v).not.toContain('%3C');
+    expect(marketplace.some((v) => v.includes('key:<external-api-key>@'))).toBe(true);
+  });
+
+  /**
    * The consolidation's real risk: snippets that must carry a secret
    * and snippets that must not. Losing the token during the move would look
    * like working code and fail at connect time.
@@ -231,9 +276,9 @@ describe('the key-bearing snippets quote the deployment too', () => {
     expect(snippets().some((v) => v.includes(KEY))).toBe(false);
     await revealAKey(user);
     expect(snippets().filter((v) => v.includes(KEY))).toHaveLength(
-      // the reveal textarea itself, the three keyed hosted snippets, and the
-      // two local-server (hexis-mcp) snippets
-      6,
+      // the reveal textarea itself, the three keyed hosted snippets, the two
+      // local-server (hexis-mcp) snippets, and the three marketplace commands
+      9,
     );
   });
 });

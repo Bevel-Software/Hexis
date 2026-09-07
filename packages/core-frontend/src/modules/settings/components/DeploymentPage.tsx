@@ -82,7 +82,12 @@ export function DeploymentPage() {
 
       {loaded && status?.settings && (
         <div className="mt-6">
-          <SetupScreen settings={status.settings} onSaved={refresh} variant="settings" />
+          <SetupScreen
+            settings={status.settings}
+            sync={status.sync}
+            onSaved={refresh}
+            variant="settings"
+          />
         </div>
       )}
     </PageShell>
