@@ -31,6 +31,7 @@ vi.mock('../../pr/services/pr-cancel.api', () => ({
 
 import { ChangeRequestDialog } from '../components/ChangeRequestDialog';
 import { AuthContext } from '../../auth/state/auth.context';
+import { readFileOnBranch } from '../services/change-requests.api';
 
 const CR: PullRequestSummary = {
   number: 12,
@@ -273,5 +274,33 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     await screen.findByText(/Waiting on approval/);
     expect(screen.queryByRole('button', { name: 'Accept file' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Revert file' })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The bytes of an image in a change request live on the request's branch, and
+ * a screenshot the request adds is not in the checked-out tree at all. The
+ * dialog passes no resolver, so the viewer names each image instead of
+ * showing another revision's copy (`?ref=` in TODOS.md is the way to show it).
+ */
+describe('ChangeRequestDialog: images in a markdown diff', () => {
+  it("names a workspace image the request adds instead of showing the checked-out tree's copy", async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ path: 'Docs/a.md', isApproved: true })]),
+    );
+    vi.mocked(readFileOnBranch).mockImplementation(async (branch: string) =>
+      branch === CR.branch ? 'text\n\n![Shot](./assets/shot.png)\n' : 'text\n',
+    );
+    try {
+      const { container } = render(
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+      );
+      expect(
+        await screen.findByRole('img', { name: /Image not shown: \.\/assets\/shot.png/ }),
+      ).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+    } finally {
+      vi.mocked(readFileOnBranch).mockImplementation(async () => 'branch copy');
+    }
   });
 });

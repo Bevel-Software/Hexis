@@ -20,11 +20,13 @@ import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { useGit } from '../../../git/state/git.context';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import { kbFileUrl, resolveRelativePath, useNodeIdNav } from '../../../workspace/routing/kb-routes';
+import { kbFileUrl, resolveKbHref, useNodeIdNav } from '../../../workspace/routing/kb-routes';
+import { useImageVersions } from '../../../workspace/hooks/useImageVersions';
+import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
-import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
+import { getOrCreateWorkspace, writeFile, rawFileUrl } from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
@@ -264,6 +266,13 @@ export function SkillPage({
   const [busyCr, setBusyCr] = useState<number | null>(null);
 
   /**
+   * The file on screen as a workspace path, `<kbDirName>/<skill>/<file>`: the
+   * base every relative link and image in it resolves against, and the path
+   * the history panel reads. Null until the workspace and the skill have both
+   * resolved.
+   */
+  const fileWorkspacePath = kbDirName && skillPath ? `${kbDirName}/${fileRepoPath}` : null;
+  /**
    * The workspace-relative path `FileHistoryPanel` reads the git log for — the
    * same string the Knowledge viewer hands it, so a skill file's history is
    * the file's history, not a second implementation of it. Null until the
@@ -271,7 +280,7 @@ export function SkillPage({
    * asks immediately, so handing it a half-built one would ask about
    * `undefined/SKILL.md`.
    */
-  const historyPath = kbDirName && skillPath ? `${kbDirName}/${fileRepoPath}` : null;
+  const historyPath = fileWorkspacePath;
   /**
    * Whether `⋯` has anything behind it. Git not ready means there is no log to
    * show, and an overflow that opens onto an empty panel is worse than no
@@ -409,9 +418,43 @@ export function SkillPage({
   // reads it. Only the propose flow stacks on the caller's own branch copy.
   const editorBase = !canEditDirectly && ownCr ? ownBranchBase : rawOnMain;
 
-  const openInEditor = useCallback(
-    (wsRelative: string) => navigate(kbFileUrl(DEFAULT_BRANCH, wsRelative)),
-    [navigate],
+  /**
+   * Follow a link out of the rendered file. The same grammar as the Knowledge
+   * view (`resolveKbHref`): the destination is decoded, so a link to
+   * `Some File.md` opens `Some File.md` and not `Some%20File.md`; an absolute
+   * app URL keeps its own branch; anything else opens on the default branch,
+   * where skills live.
+   */
+  const openLinkInEditor = useCallback(
+    (href: string) => {
+      if (!fileWorkspacePath) return;
+      const target = resolveKbHref(href, { basePath: fileWorkspacePath, kbDirName });
+      if (target?.kind !== 'workspace') return;
+      navigate(kbFileUrl(target.branch ?? DEFAULT_BRANCH, target.path) + target.hash);
+    },
+    [fileWorkspacePath, kbDirName, navigate],
+  );
+
+  /**
+   * Images in the file, served from the DEFAULT branch's workspace: that is
+   * the tree this pane renders (`rawOnMain`), and where `headingLink` and the
+   * link handler above point. The checked-out branch may be somebody's draft
+   * with another copy of the picture, or none. The version keeps an open page
+   * current when a teammate replaces a screenshot under the same name.
+   */
+  const skillWorkspaceId = encodeURIComponent(DEFAULT_BRANCH);
+  const imageVersion = useImageVersions(skillWorkspaceId);
+  const resolveImage = useCallback<KbImageResolver>(
+    (src) => {
+      if (!fileWorkspacePath) return null;
+      const target = resolveKbHref(src, { basePath: fileWorkspacePath, kbDirName });
+      if (target?.kind !== 'workspace') return null;
+      return {
+        src: rawFileUrl(skillWorkspaceId, target.path, { version: imageVersion(target.path) }),
+        path: target.path,
+      };
+    },
+    [fileWorkspacePath, kbDirName, skillWorkspaceId, imageVersion],
   );
 
   /**
@@ -731,12 +774,12 @@ export function SkillPage({
           file={active}
           raw={raw}
           suggestion={null}
-          onOpenLink={(href) => {
-            if (!kbDirName) return;
-            openInEditor(resolveRelativePath(`${kbDirName}/${skillPath}/${active}`, href));
-          }}
+          onOpenLink={openLinkInEditor}
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
+          // No workspace yet means no base to resolve against: images render
+          // as plain tags, exactly as before the resolver existed.
+          resolveImage={fileWorkspacePath ? resolveImage : undefined}
           /*
            * ONE action, decided by the ACL. An `Edit` used to sit beside
            * `Propose changes` for EVERYONE and jump to the Knowledge editor —

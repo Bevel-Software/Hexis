@@ -553,6 +553,11 @@ export function ChangeRequestDialog({
                 // destinations) applies here as it does in the document view.
                 // Navigating away from a modal mid-review would also lose the
                 // review context, so inert is the better default regardless.
+                //
+                // Images are named, not fetched, for the same reason: the
+                // bytes on the checked-out tree are not the request's, and a
+                // screenshot the request adds is not there at all (`?ref=` in
+                // TODOS.md).
                 <MarkdownDiffViewer payload={mdPayload} />
               ) : (
               <MarkedFile
