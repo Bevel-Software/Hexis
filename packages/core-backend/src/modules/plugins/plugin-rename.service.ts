@@ -76,6 +76,10 @@ export class PluginRenameService {
     private readonly onChanged?: () => void,
   ) {}
 
+  private noteChanged(wsId: string): void {
+    noteChangedFor(this.accessControl, this.events, this.onChanged, wsId);
+  }
+
   async rename(
     user: AuthUser,
     current: string,
@@ -177,23 +181,41 @@ export class PluginRenameService {
       // One failure is NOT a failed commit: the commit landed locally and only
       // the push did not (the typed hand-off the workflow throws). Restoring
       // the old bytes then would stack an uncommitted inverse of a real
-      // commit; the recovery flow owns that state, so it is left alone.
-      if (!(err instanceof PushNeedsAgentResolutionError)) {
+      // commit; the recovery flow owns that state, so it is left alone — and
+      // since the tree DID change, every cache keyed on the old identity is
+      // dropped before the error goes up, exactly as on success.
+      if (err instanceof PushNeedsAgentResolutionError) {
+        this.noteChanged(wsId);
+      } else {
         for (const w of writes) {
           if (w.before !== null) await this.workspaceService.writeFile(wsId, w.rel, w.before).catch(() => undefined);
         }
       }
       throw err;
     }
-    this.accessControl.invalidate(wsId);
-    this.events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: linksWorkspaceIdBranch() });
-    this.onChanged?.();
+    this.noteChanged(wsId);
     return {
       name: nextName,
       displayName: pluginDisplayNameOf(manifest, folderName),
       rewritten: writes.slice(1).map((w) => w.rel.slice(this.kbDirName.length + 1)),
     };
   }
+}
+
+/**
+ * The tree changed: drop the resolver's model and the plugin caches, and
+ * tell every session. The ONE place this happens, for the landed commit and
+ * for the committed-but-unpushed one alike.
+ */
+function noteChangedFor(
+  accessControl: IAccessControl,
+  events: PluginRenameService['events'],
+  onChanged: (() => void) | undefined,
+  wsId: string,
+): void {
+  accessControl.invalidate(wsId);
+  events?.emit({ kind: 'fs-tree-changed', workspaceId: wsId, branch: linksWorkspaceIdBranch() });
+  onChanged?.();
 }
 
 /**

@@ -600,12 +600,15 @@ export function ManageAccessDialog({
     for (const u of data.owners.users) touchUser(u).verbs.owner = true;
     for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
     for (const u of data.eligible.users) touchUser(u).verbs.write = true;
-    // Read membership is per-principal only for a restricted node. When
-    // `restricted` is false, read is `everyone` and the reader lists are empty.
-    if (data.readers.restricted) {
-      for (const c of collectivesOf(data.readers)) touchCollective(c).verbs.read = true;
-      for (const u of data.readers.users) touchUser(u).verbs.read = true;
+    // Read grants are rows whether or not the node is public: on a public
+    // node they are what MAKES it public (a plugin principal anyone holds),
+    // and the row is where that grant is removed. The built-in `everyone`
+    // itself is not a row — the "Anyone can read" band is its place.
+    for (const c of collectivesOf(data.readers)) {
+      if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) continue;
+      touchCollective(c).verbs.read = true;
     }
+    for (const u of data.readers.users) touchUser(u).verbs.read = true;
     for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 

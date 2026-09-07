@@ -238,9 +238,12 @@ describe('PluginRenameService', () => {
     failNextCommit = new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'Plugins/GTM/plugin.json', 'rejected', 'n/a');
     await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
     // Restoring the old bytes here would stack an uncommitted inverse on a
-    // real commit; the working tree stays as the commit left it.
+    // real commit; the working tree stays as the commit left it — and since
+    // it changed, the caches keyed on the old identity are dropped as on success.
     expect((await manifest()).name).toBe('go-to-market');
     expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/go-to-market/read');
+    expect(invalidated).toBe(1);
+    expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
   });
 
   it('will not rename a plugin read from an external format — that repository owns its name', async () => {

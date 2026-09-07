@@ -223,7 +223,15 @@ describe('plugin principals', () => {
         'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/Open/read\n',
       });
       const skill = 'Skills/Common/tips/SKILL.md';
-      expect((await svc.eligibleReaders(workspaceId, skill)).restricted).toBe(false);
+      const readers = await svc.eligibleReaders(workspaceId, skill);
+      expect(readers.restricted).toBe(false);
+      // Public — and the lists still name the grant that makes it so, so the
+      // share dialog has a row to remove it by.
+      expect(readers.principals).toEqual([
+        { name: 'Admin', kind: 'role' }, // the root's write, folded into read
+        { name: 'everyone', kind: 'role' },
+        { name: 'plugin/open/read', kind: 'plugin' },
+      ]);
       // A revoke of `everyone` here would strip no line — so no source claims one.
       expect(await svc.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'everyone' })).toEqual({});
       // The plugin grant IS the line, and the one whose removal ends public read.

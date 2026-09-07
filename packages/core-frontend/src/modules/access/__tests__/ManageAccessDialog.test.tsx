@@ -163,12 +163,30 @@ describe('ManageAccessDialog: removing public read', () => {
     expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
   });
 
-  it('offers no Remove — and says why — when public read comes only through a plugin', async () => {
-    api.fetchFileAccess.mockResolvedValue({ ...PUBLIC_VIEW, sources: { 'r:everyone': {} } } as AccessResponse);
+  it('offers no Remove on the band when public read comes through a plugin — the plugin grant is the row to remove', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      // Public through `plugin/open/read`; the resolver lists both the derived
+      // `everyone` and the plugin principal, and only the plugin has a line.
+      readers: {
+        restricted: false,
+        principals: [
+          { name: 'everyone', kind: 'role' },
+          { name: 'plugin/open/read', kind: 'plugin' },
+        ],
+        roles: ['everyone', 'plugin/open/read'],
+        users: [],
+      },
+      sources: { 'r:everyone': {}, 'p:plugin/open/read': { read: [{ kind: 'direct' }] } },
+    } as AccessResponse);
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
     await screen.findByText('Anyone can read');
     expect(screen.getByText(/through a plugin anyone can read/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+    // The plugin principal IS a row here, with its read grant to act on…
+    expect(screen.getByText('open · readers')).toBeInTheDocument();
+    // …while the built-in everyone is not a second row beside its band.
+    expect(screen.queryByText('everyone')).toBeNull();
     expect(api.revokeAccess).not.toHaveBeenCalled();
   });
 });

@@ -256,6 +256,21 @@ describe('PluginProvisionService.deletePlugin', () => {
     await expect(h.svc.deletePlugin(USER, 'teams/Nope')).rejects.toMatchObject({ status: 404 });
   });
 
+  it('removes nothing but the plugin it names — a sibling that happens to look like a park survives', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/access.md'), '---\n---\n');
+    // Whatever this is — a person's folder, the residue of a crashed run — it is not ours to delete.
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/.Deep.deleting'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/.Deep.deleting/keep.md'), 'mine');
+
+    await h.svc.deletePlugin(USER, 'teams/Deep');
+
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/teams/Deep'))).rejects.toThrow();
+    expect(await fs.readFile(path.join(h.dir, KB, 'Plugins/teams/.Deep.deleting/keep.md'), 'utf-8')).toBe('mine');
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins/teams'))).toEqual(['.Deep.deleting']);
+  });
+
   it('deletes only the exact spelling, at every depth — a stale casing must not park a replacement at the same place', async () => {
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
     await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');

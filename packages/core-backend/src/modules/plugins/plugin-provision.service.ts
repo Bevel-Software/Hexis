@@ -31,6 +31,7 @@
  *     personal skill.
  */
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -237,10 +238,15 @@ export class PluginProvisionService {
       }
 
       // Dot-prefixed ⇒ invisible to the plugin scanner and the collision
-      // check for the whole window the commit is in flight.
-      const parkedDir = path.join(path.dirname(folderDir), `.${segments[segments.length - 1]}.deleting`);
-
-      await fs.rm(parkedDir, { recursive: true, force: true }); // a stale park from a crashed run
+      // check for the whole window the commit is in flight. UNIQUE, so the
+      // park never lands on — and never removes — a path that was already
+      // there: a sibling somebody named that way, or the residue of a run
+      // that crashed mid-delete (which stays, invisible, for a person to
+      // clear; a delete must never destroy anything but the plugin it names).
+      const parkedDir = path.join(
+        path.dirname(folderDir),
+        `.${segments[segments.length - 1]}.deleting-${randomUUID()}`,
+      );
       await fs.rename(folderDir, parkedDir);
       try {
         // Inline and `systemAuthorized`, for `provision`'s reasons in

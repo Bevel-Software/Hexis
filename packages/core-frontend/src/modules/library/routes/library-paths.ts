@@ -208,7 +208,11 @@ function decodeSegment(raw: string): string {
  */
 export function libraryHomeForItemPath(
   repoRelativePath: string,
-  /** The plugin's IDENTITY, resolved by the caller through the catalog; undefined falls back to the folder. */
+  /**
+   * The plugin's IDENTITY, resolved by the caller through the catalog. Both
+   * `undefined` (not resolved) and `null` (resolved to no plugin) fall back
+   * to the folder — a personal shelf is decided by the folder before either.
+   */
   pluginName?: string | null,
   /** The label for that identity; identity by default. */
   labelOf: (name: string) => string = (n) => n,

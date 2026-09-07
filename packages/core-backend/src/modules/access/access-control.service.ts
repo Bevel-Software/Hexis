@@ -1103,14 +1103,15 @@ export class AccessControlService implements IAccessControl {
   }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    // When `read: everyone` applies cleanly, the node is readable by all users
-    // and the role/user lists are meaningless. Otherwise return the explicit
-    // reader set; it may be empty for a default-denied path with no grants.
-    if (canEveryoneReadResolved(model, relativePath, own)) {
-      return { restricted: false, principals: [], roles: [], users: [] };
-    }
+    // `restricted` is the verdict — whether `read: everyone` applies cleanly —
+    // and the lists are the GRANTS that exist regardless: on a public node
+    // they name what makes it public (`everyone`, and a public plugin
+    // principal whose grant is the one to remove), so the share dialog can
+    // show that grant as a row. Consumers that only want to know whether the
+    // node is public read the flag; the lists may be empty for a
+    // default-denied path with no grants.
     const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    return { restricted: true, principals, roles, users };
+    return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users };
   }
 
   async eligibleDownloaders(

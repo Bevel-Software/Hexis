@@ -72,7 +72,8 @@ export function ToolPage({
 
   // Same rule as the skill page: back goes to the page the tool LIVES on —
   // its plugin, or the personal page — never to a root the reader may not
-  // have come from. Falls back to the root while the tool is still loading.
+  // have come from. While the tool is still loading the path is empty, so
+  // the home is the root; a resolved identity of null falls back to the folder.
   const data = useLibrary();
   const toolPath = page.tool?.path ?? '';
   const home = libraryHomeForItemPath(
