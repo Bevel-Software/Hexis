@@ -6,7 +6,7 @@ import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
-import { ownersTextOf } from '../utils/plugin-summary';
+import { ownersTextOf, pluginLabel } from '../utils/plugin-summary';
 import type { PluginSummary } from '../services/plugins.api';
 import { EmptyStateAction } from './plugin-page-parts';
 import { PluginIndexRow } from './PluginIndexRow';
@@ -36,6 +36,8 @@ interface IndexEntry {
   skillCount: number;
   toolCount: number;
   attention: number;
+  /** Some of the attention locks members out of a skill — orange, not amber. */
+  urgent: boolean;
   /** The caller can see inside: folder read, manage rights, or item grants. */
   member: boolean;
 }
@@ -63,6 +65,7 @@ export function PluginsIndexPage() {
         const derivedSkills = countKind(items, name, 'skill');
         const derivedTools = countKind(items, name, 'integration');
         const hasItems = derivedSkills + derivedTools > 0;
+        const attention = attentionOf(items, name, pluginSummaries);
         return {
           name,
           summary,
@@ -71,7 +74,8 @@ export function PluginsIndexPage() {
           // "4 skills" here as on the plugin page.
           skillCount: summary ? summary.skillCount : derivedSkills,
           toolCount: summary ? summary.toolCount : derivedTools,
-          attention: attentionOf(items, name),
+          attention: attention.total,
+          urgent: attention.brokenLinks > 0,
           member: summary ? summary.canRead || summary.canWrite || hasItems : hasItems,
         };
       });
@@ -147,7 +151,7 @@ export function PluginsIndexPage() {
             {mine.map((entry) => (
               <PluginIndexRow
                 key={entry.name}
-                label={entry.name}
+                label={pluginLabel(entry.name, pluginSummaries)}
                 badge={
                   entry.summary?.canWrite ? (
                     <Badge tone="outline" size="xs" className="shrink-0 uppercase">
@@ -158,7 +162,7 @@ export function PluginsIndexPage() {
                 {...describe(entry)}
                 trailing={
                   entry.attention > 0 ? (
-                    <Badge tone="wait" size="xs">
+                    <Badge tone={entry.urgent ? 'urgent' : 'wait'} size="xs">
                       {entry.attention}
                     </Badge>
                   ) : undefined
@@ -175,7 +179,7 @@ export function PluginsIndexPage() {
                 {locked.map((entry) => (
                   <PluginIndexRow
                     key={entry.name}
-                    label={entry.name}
+                    label={pluginLabel(entry.name, pluginSummaries)}
                     {...describe(entry)}
                     /* The row has to SAY it is locked, not just look it — the
                        glyph is decorative (`aria-hidden`) and the word beside
@@ -244,7 +248,8 @@ function countsText(skills: number, tools: number): string {
 }
 
 function countKind(items: LibraryItem[], plugin: string | null, kind: LibraryItem['kind']): number {
-  return items.filter((i) => i.plugin === plugin && i.kind === kind).length;
+  // The `null` bucket is "yours alone": shared skills have no folder plugin but are not yours.
+  return items.filter((i) => i.plugin === plugin && i.kind === kind && (plugin !== null || !i.shared)).length;
 }
 
 /** Section label with an optional count cap beside it, not inside it — the

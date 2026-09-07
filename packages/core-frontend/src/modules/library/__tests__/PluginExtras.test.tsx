@@ -91,6 +91,21 @@ describe('ClientExtensionsSection', () => {
     expect(screen.getByRole('button', { name: 'hooks/on-save.js' })).toBeInTheDocument();
   });
 
+  it('finds the namespace dirs of a plugin nested below the root — the folder is a path, walked a segment at a time', async () => {
+    const nested: FileTreeEntry = dir('root', [
+      dir('knowledge-base', [
+        dir('Plugins', [dir('teams', [dir('deep', [dir('com.example.client', [dir('hooks', [file('on-open.js')])])])])]),
+      ]),
+    ]);
+    renderSection({ workspaceId: encodeURIComponent(DEFAULT_BRANCH), fileTree: nested }, 'teams/deep');
+    expect(await screen.findByText('com.example.client/')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'hooks/on-open.js' }));
+    expect(navigateMock).toHaveBeenCalledWith(
+      expect.stringContaining('/knowledge-base/Plugins/teams/deep/com.example.client/hooks/on-open.js'),
+      expect.anything(),
+    );
+  });
+
   /**
    * `rawFile` steps past the app gate into the Knowledge editor — right for
    * opaque client data, wrong for a `.tool`, which has a first-class tool

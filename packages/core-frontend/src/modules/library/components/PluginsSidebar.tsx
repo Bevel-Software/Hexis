@@ -27,13 +27,24 @@ export interface PluginsSidebarProps {
   filter: LibraryFilter | null;
   /** A row was clicked — the layout navigates; the sidebar owns no state. */
   onSelect(filter: LibraryFilter): void;
-  /** Readable plugins, with their item count and how many integrations need setup. */
-  plugins: { plugin: string; count: number; attention: number }[];
+  /** Readable plugins, with their item count and how many integrations need setup. `label` is what the row shows; `plugin` is the identity it navigates by. */
+  plugins: {
+    plugin: string;
+    label?: string;
+    count: number;
+    attention: number;
+    /**
+     * Some of the attention is a linked skill the plugin's members cannot
+     * read. That outranks a tool the reader has not set up for themselves —
+     * it blocks other people — so the count turns orange, not amber.
+     */
+    urgent?: boolean;
+  }[];
   /**
    * Plugins the caller cannot read, alphabetical. Rendered after a gap, with a
-   * lock instead of a count.
+   * lock instead of a count. A bare string is a plugin whose label is its name.
    */
-  lockedPlugins: string[];
+  lockedPlugins: (string | { name: string; label: string })[];
   ownedCount: number;
   /**
    * How many of the caller's OWN items are waiting on them. Drives the amber
@@ -87,6 +98,16 @@ export interface PluginsSidebarProps {
    * appears — which is the honest default for a view with no actions wired.
    */
   onContextMenu?(target: SidebarContextTarget): void;
+  /**
+   * The Skills folder — a file tree of the shared `Skills/` root — rendered
+   * right under the All plugins home row, before the Library lenses: the two
+   * places the Library hangs off. A SLOT rather than a component this
+   * nav names: the tree reads the workspace and navigates on its own, and the
+   * sidebar stays what it is, a pure view of names and counts. Omitted, the
+   * nav has no Skills section, which keeps a host rendering the shipped nav
+   * source-compatible.
+   */
+  skillsTree?: ReactNode;
 }
 
 /**
@@ -123,6 +144,7 @@ export function PluginsSidebar({
   pluginsIndexActive,
   onOpenPluginsIndex,
   onContextMenu,
+  skillsTree,
 }: PluginsSidebarProps) {
   const rowClass = (selected: boolean) =>
     cn(
@@ -162,10 +184,12 @@ export function PluginsSidebar({
     label: string,
     target: LibraryFilter,
     count: number,
-    tone: 'count' | 'pending' = 'count',
+    tone: 'count' | 'pending' | 'urgent' = 'count',
   ) => (
     <button
-      key={label}
+      // Keyed by what the row IS (its target), never by what it says: two
+      // plugins may share a label, and React must still tell their rows apart.
+      key={target.kind === 'group' ? `group:${target.plugin}` : target.kind}
       type="button"
       aria-current={isCurrent(target)}
       className={rowClass(isCurrent(target))}
@@ -178,7 +202,11 @@ export function PluginsSidebar({
         <span
           className={cn(
             'h-4.5 shrink-0 basis-5.5 rounded-md text-center text-meta leading-[18px] tabular-nums',
-            tone === 'pending' ? 'bg-wait-soft font-bold text-wait' : 'text-ink-faint',
+            tone === 'urgent'
+              ? 'bg-urgent-soft font-bold text-urgent'
+              : tone === 'pending'
+                ? 'bg-wait-soft font-bold text-wait'
+                : 'text-ink-faint',
           )}
         >
           {count}
@@ -198,13 +226,15 @@ export function PluginsSidebar({
    * (a non-member has nothing to fix). The accessible name carries the state in
    * words, so the glyph itself can stay decorative.
    */
-  const lockedRow = (name: string) => {
+  const lockedRow = (locked: string | { name: string; label: string }) => {
+    const name = typeof locked === 'string' ? locked : locked.name;
+    const label = typeof locked === 'string' ? locked : locked.label;
     const target: LibraryFilter = { kind: 'group', plugin: name };
     return (
       <button
         key={`locked:${name}`}
         type="button"
-        aria-label={`${name} (locked)`}
+        aria-label={`${label} (locked)`}
         aria-current={isCurrent(target)}
         className={rowClass(isCurrent(target))}
         onClick={() => onSelect(target)}
@@ -212,9 +242,9 @@ export function PluginsSidebar({
         // reason it gets the same click: a plugin you are not in is still a
         // place, and `Manage access` is exactly the item an admin locked out of
         // one needs. Which verbs are actually true is the layout's call.
-        onContextMenu={(e) => openMenu(e, target, name, e.currentTarget)}
+        onContextMenu={(e) => openMenu(e, target, label, e.currentTarget)}
       >
-        <span className="truncate">{name}</span>
+        <span className="truncate">{label}</span>
         <span className="flex h-4.5 shrink-0 basis-5.5 items-center justify-center text-ink-faint">
           <LockGlyph className="size-3" />
         </span>
@@ -225,7 +255,7 @@ export function PluginsSidebar({
   return (
     <>
         <nav
-          aria-label="Library plugins"
+          aria-label="Library navigation"
           className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto"
           // The nav's empty space is a target too — Knowledge's tree gives its
           // ROOT row a menu holding the create verbs, and this is where the
@@ -253,6 +283,10 @@ export function PluginsSidebar({
           >
             <span className="truncate">All plugins</span>
           </button>
+          {/* The shared Skills root, a folder right under the home row: the
+              two places the Library hangs off — every plugin, every skill —
+              before any lens slices the catalog. The tree is its own row. */}
+          {skillsTree}
 
           {/* Lenses — the whole catalog, sliced — which is exactly what the
               plugin rows below are not. Naming the section is what keeps that
@@ -277,14 +311,16 @@ export function PluginsSidebar({
           {/* Your own space leads the plugins, as in the prototype (line 2487):
               it is the one you are always in. */}
           {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
-          {plugins.map(({ plugin, count, attention }) =>
+          {plugins.map(({ plugin, label, count, attention, urgent }) =>
             // Amber wins the count slot: a plugin that needs setup is telling you
-            // something, and how many items it holds is not the news.
+            // something, and how many items it holds is not the news. Orange
+            // wins over amber: members locked out of a skill outrank a tool
+            // the reader has not set up for themselves.
             row(
-              plugin,
+              label ?? plugin,
               { kind: 'group', plugin },
               attention > 0 ? attention : count,
-              attention > 0 ? 'pending' : 'count',
+              attention > 0 ? (urgent ? 'urgent' : 'pending') : 'count',
             ),
           )}
           {/* The heading's `+` is hover-revealed, and a person with no plugins
@@ -337,52 +373,73 @@ export function PluginsSidebar({
 }
 
 /**
- * The `INCLUDED IN YOUR MCP` heading, and the one way to make a new plugin —
- * the prototype's `.lbladd` (line 78).
+ * A nav section's name, with an optional row of actions at its right edge.
+ * The first one has no top padding — the sidebar's own `pt-6` already placed
+ * it — so every label is the same component with its spacing decided by where
+ * it sits, not by which one it is.
  *
- * The heading says what this list IS rather than what its rows are called:
- * these folders are the set mounted into the caller's MCP — the agent's
- * working context — not merely a directory of plugins. (The locked rows that
- * trail the list sit below a gap for exactly that reason: they are in the
- * workspace but not in your MCP, and the break is what keeps the heading
- * honest about them.)
- *
- * `All plugins` is NOT a row here. It heads the whole nav instead: it is the
- * Library's home rather than one more entry in the set mounted into your MCP,
- * and inside this list it used to collect the clicks meant for the plugins
- * under it.
- *
- * The `+` is always in the DOM and always reachable by keyboard; only its
- * opacity follows hover, so the nav stays quiet without the control being
- * conditional. `focus-visible:opacity-100` is what keeps that honest for
+ * The actions are always in the DOM and always reachable by keyboard; only
+ * their opacity follows hover, so the nav stays quiet without the controls
+ * being conditional. `focus-within:opacity-100` is what keeps that honest for
  * anyone who never hovers anything.
+ *
+ * Exported for the Skills tree, whose heading is this label with the tree's
+ * own create buttons in the slot — one heading style over every list of
+ * places in this nav.
  */
-/**
- * A nav section's name. The first one has no top padding — the sidebar's own
- * `pt-6` already placed it — so the two labels are the same component with
- * their spacing decided by where they sit, not by which one they are.
- */
-function SectionLabel({ children, spaced = false }: { children: ReactNode; spaced?: boolean }) {
+export function SectionLabel({
+  children,
+  spaced = false,
+  actions,
+}: {
+  children: ReactNode;
+  spaced?: boolean;
+  actions?: ReactNode;
+}) {
   return (
-    <div className={cn('px-2.5 pb-1.5 text-label uppercase text-ink-faint', spaced && 'pt-5')}>
-      {children}
+    <div className={cn('group/label flex items-center gap-1 px-2.5 pb-1.5', spaced && 'pt-5')}>
+      <span className="text-label uppercase text-ink-faint">{children}</span>
+      {actions && (
+        <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/label:opacity-100">
+          {actions}
+        </span>
+      )}
     </div>
   );
 }
 
+/**
+ * The `PLUGINS` heading, and the one way to make a new plugin — the
+ * prototype's `.lbladd` (line 78).
+ *
+ * It used to read "Included in your MCP", from when a plugin was the only
+ * way a skill reached an agent. Skills have a root of their own now, listed
+ * as a tree above this section, so the heading says what these rows ARE:
+ * plugins — the bundles the caller is in. (The locked rows that trail the
+ * list sit below a gap for the same reason: they are in the workspace but
+ * not the caller's, and the break is what keeps the heading honest.)
+ *
+ * `All plugins` is NOT a row here. It heads the whole nav instead: it is the
+ * Library's home rather than one more entry in the caller's set, and inside
+ * this list it used to collect the clicks meant for the plugins under it.
+ */
 function PluginsLabel({ onCreate }: { onCreate(): void }) {
   return (
-    <div className="group/label flex items-center gap-1 px-2.5 pb-1.5 pt-5">
-      <span className="text-label uppercase text-ink-faint">Included in your MCP</span>
-      <button
-        type="button"
-        onClick={onCreate}
-        title="New plugin"
-        aria-label="New plugin"
-        className="ml-auto flex size-4.5 items-center justify-center rounded-xs text-ui leading-none text-ink-faint opacity-0 transition-opacity hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover/label:opacity-100"
-      >
-        +
-      </button>
-    </div>
+    <SectionLabel
+      spaced
+      actions={
+        <button
+          type="button"
+          onClick={onCreate}
+          title="New plugin"
+          aria-label="New plugin"
+          className="flex size-4.5 items-center justify-center rounded-xs text-ui leading-none text-ink-faint hover:bg-hover hover:text-ink"
+        >
+          +
+        </button>
+      }
+    >
+      Plugins
+    </SectionLabel>
   );
 }

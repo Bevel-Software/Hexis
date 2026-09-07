@@ -85,12 +85,12 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
         </Link>
         <span aria-hidden="true">›</span>
         <span aria-current="page" className="truncate text-ink-muted">
-          {plugin.name}
+          {plugin.displayName || plugin.name}
         </span>
       </nav>
 
       <div className="mt-1.5 flex items-center gap-2.5">
-        <h1 className="text-display font-semibold">{plugin.name}</h1>
+        <h1 className="text-display font-semibold">{plugin.displayName || plugin.name}</h1>
         <Badge tone="outline" size="sm">
           <LockGlyph className="size-3 shrink-0" />
           Locked

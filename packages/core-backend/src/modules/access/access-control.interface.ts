@@ -67,7 +67,7 @@ export type GrantPrincipal =
  * returns it, and payload consumers fall back to `roles` (all treated as
  * roles) when absent.
  */
-export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' };
+export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' | 'plugin' };
 
 /**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
@@ -199,11 +199,13 @@ export interface IAccessControl {
   /**
    * Answers the file viewer's "who can see this?" affordance. `restricted` is
    * false only when `read: everyone` applies without an effective user-level
-   * denial — the node is readable by all signed-in users, and the role/user
-   * lists are empty because their content would be meaningless. When
-   * `restricted` is true the lists name the principals (roles + direct users)
-   * that may read, with owners folded in (an `owner:` grant confers read). The
-   * lists may be empty for a default-denied path with no grants.
+   * denial — the node is readable by all signed-in users. The lists name the
+   * principals (roles + direct users) granted read whether or not the node
+   * is public, with owners folded in (an `owner:` grant confers read); on a
+   * public node they include what makes it public. `publicVia` names the
+   * PUBLIC plugin principals granted read here — principals every signed-in
+   * user holds — so a caller can tell public-through-a-plugin from a literal
+   * `everyone` grant. The lists may be empty for a default-denied path.
    */
   eligibleReaders(
     workspaceId: string,
@@ -213,6 +215,7 @@ export interface IAccessControl {
     principals?: ResolvedPrincipal[];
     roles: string[];
     users: { name: string; email: string }[];
+    publicVia?: string[];
   }>;
 
   /**
@@ -323,9 +326,17 @@ export interface IAccessControl {
    * (named). The login-only `users` table is unioned in by the caller — this
    * method covers the KB-canonical people the users table misses.
    */
-  kbPrincipals(
-    workspaceId: string,
-  ): Promise<{ roles: string[]; groups: string[]; people: { name: string; email: string }[] }>;
+  kbPrincipals(workspaceId: string): Promise<{
+    roles: string[];
+    groups: string[];
+    /**
+     * Plugins whose `plugin/<Name>/<verb>` principals exist (personal folders
+     * excluded): the display name and the repo-relative folder, so a caller
+     * can apply the discoverability verdict (`canRead` on `<folder>/access.md`).
+     */
+    plugins: { name: string; folder: string }[];
+    people: { name: string; email: string }[];
+  }>;
 
   /**
    * Reverse-lookup an email by its SHA-256 hash (per `hashEmail` semantics)

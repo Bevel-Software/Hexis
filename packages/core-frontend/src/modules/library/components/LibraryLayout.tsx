@@ -12,8 +12,8 @@ import {
   pathForPluginsIndex,
   pathForLibraryFilter,
 } from '../routes/library-paths';
-import { pluginCounts, type LibraryFilter } from '../utils/status';
-import { primaryFolderOf } from '../utils/plugin-summary';
+import { isUngrouped, pluginCounts, pluginsOfItem, type LibraryFilter } from '../utils/status';
+import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
@@ -22,6 +22,7 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
 import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
+import { SkillsTree } from './SkillsTree';
 import { PluginsSidebarMenu } from './PluginsSidebarMenu';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { DeletePluginDialog } from './DeletePluginDialog';
@@ -96,8 +97,8 @@ export function LibraryLayout() {
    * The member rows: every plugin the caller can READ (or manages), whether or
    * not anything is in it yet. Counts come from the catalog, membership does
    * not — a freshly created plugin has no skills or tools, and deriving the
-   * rows from the items alone made it vanish from the very nav that says
-   * "Included in your MCP". Being in a plugin is what puts it in your MCP;
+   * rows from the items alone made it vanish from the very nav that lists
+   * the caller's plugins. Being in a plugin is what puts it in your MCP;
    * having content is not. The catalog still contributes names the summaries
    * miss (a per-file grant can surface one skill from an otherwise unreadable
    * folder), so the two witnesses are merged rather than either winning.
@@ -110,11 +111,16 @@ export function LibraryLayout() {
     }
     return [...names]
       .sort((a, b) => a.localeCompare(b))
-      .map((plugin) => ({
-        plugin,
-        count: counts.get(plugin) ?? 0,
-        attention: attentionOf(items, plugin),
-      }));
+      .map((plugin) => {
+        const attention = attentionOf(items, plugin, pluginSummaries);
+        return {
+          plugin,
+          label: pluginLabel(plugin, pluginSummaries),
+          count: counts.get(plugin) ?? 0,
+          attention: attention.total,
+          urgent: attention.brokenLinks > 0,
+        };
+      });
   }, [items, pluginSummaries]);
   /**
    * Plugins the caller cannot get into, alphabetical.
@@ -127,13 +133,16 @@ export function LibraryLayout() {
    * which is what keeps the row and the page it opens in agreement.
    */
   const lockedPlugins = useMemo(() => {
-    const visible = new Set(items.map((i) => i.plugin).filter((g): g is string => g !== null));
+    // Membership by folder AND by link: a shared skill linked into a plugin
+    // the caller cannot open still sits in the gallery under that plugin, so
+    // the plugin is visible, not locked — or it would be listed twice.
+    const visible = new Set(items.flatMap((i) => pluginsOfItem(i)));
     return pluginSummaries
       // A manager (canWrite via admin-rescue) is not locked out — their plugin
       // belongs with the ones they run, not below the gap.
       .filter((g) => !g.canRead && !g.canWrite && !visible.has(g.name))
-      .map((g) => g.name)
-      .sort((a, b) => a.localeCompare(b));
+      .map((g) => ({ name: g.name, label: g.displayName || g.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
   }, [pluginSummaries, items]);
 
   const ownedCount = useMemo(() => items.filter((i) => i.owned).length, [items]);
@@ -146,7 +155,7 @@ export function LibraryLayout() {
     () => items.filter((i) => i.owned && i.status.state !== 'ok').length,
     [items],
   );
-  const ungroupedCount = useMemo(() => items.filter((i) => i.plugin === null).length, [items]);
+  const ungroupedCount = useMemo(() => items.filter(isUngrouped).length, [items]);
   const attentionCount = useMemo(
     () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,
     [items],
@@ -207,7 +216,7 @@ export function LibraryLayout() {
           place — a person who skipped the welcome page and stayed in
           Knowledge still sees it. It renders nothing once onboarding is
           done. */}
-      <SidebarFrame label="Library plugins" header={<ConnectAgentPill />}>
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
         <PluginsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}
@@ -229,6 +238,7 @@ export function LibraryLayout() {
           pluginsIndexActive={isPluginsIndexPath(location.pathname)}
           onOpenPluginsIndex={() => navigate(pathForPluginsIndex())}
           onContextMenu={openContextMenu}
+          skillsTree={<SkillsTree />}
         />
       </SidebarFrame>
 

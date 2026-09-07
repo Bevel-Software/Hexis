@@ -53,6 +53,7 @@ mid-task can suggest the fix, and a person decides whether it lands.
 - [Deploy with Docker](#deploy-it-in-5-minutes-docker)
 - [Local development](#local-development-run-from-source)
 - [Configuration reference](docs/configuration.md)
+- [Skills in Cowork and claude.ai](docs/claude-cowork.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Repository layout](#repository-layout)
 - [FAQ](#faq)

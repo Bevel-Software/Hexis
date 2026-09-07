@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { PluginsSidebar, type PluginsSidebarProps } from '../components/PluginsSidebar';
 import type { LibraryFilter } from '../utils/status';
 
@@ -46,6 +46,41 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
 const row = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('PluginsSidebar', () => {
+  it('shows a plugin by its label and navigates by its identity — locked rows too', () => {
+    const { onSelect } = renderSidebar({
+      plugins: [{ plugin: 'gtm', label: 'Go To Market', count: 3, attention: 0 }],
+      lockedPlugins: [{ name: 'finance', label: 'Finance' }],
+    });
+    fireEvent.click(row(/^Go To Market/));
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'group', plugin: 'gtm' });
+    expect(screen.queryByRole('button', { name: /^gtm/ })).toBeNull();
+
+    fireEvent.click(row('Finance (locked)'));
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'group', plugin: 'finance' });
+    expect(screen.queryByRole('button', { name: /^finance/ })).toBeNull();
+  });
+
+  it('two plugins wearing one label are still two rows, each navigating to its own identity', () => {
+    // React tells on a list keyed by something two children share; the rows
+    // are keyed by what they ARE, so it has nothing to say.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { onSelect } = renderSidebar({
+        plugins: [
+          { plugin: 'sales-eu', label: 'Sales', count: 1, attention: 0 },
+          { plugin: 'sales-us', label: 'Sales', count: 2, attention: 0 },
+        ],
+      });
+      const rows = screen.getAllByRole('button', { name: /^Sales/ });
+      expect(rows).toHaveLength(2);
+      fireEvent.click(rows[1]);
+      expect(onSelect).toHaveBeenLastCalledWith({ kind: 'group', plugin: 'sales-us' });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('leads with All plugins. The Library opens there, so the nav starts there', () => {
     const { onOpenPluginsIndex } = renderSidebar();
     const rows = screen.getAllByRole('button');
@@ -67,9 +102,20 @@ describe('PluginsSidebar', () => {
     expect(row(/^All plugins/)).toHaveAttribute('aria-current', 'false');
   });
 
-  it('heads the plugin rows with what the list is: the set in your MCP', () => {
+  it('heads the plugin rows with what they are: plugins', () => {
     renderSidebar();
-    expect(screen.getByText('Included in your MCP')).toBeInTheDocument();
+    expect(screen.getByText('Plugins')).toBeInTheDocument();
+    expect(screen.queryByText('Included in your MCP')).not.toBeInTheDocument();
+  });
+
+  it('renders the Skills tree it is handed right under All plugins, before the lenses', () => {
+    renderSidebar({ skillsTree: <div data-testid="skills-tree">tree</div> });
+    const tree = screen.getByTestId('skills-tree');
+    const home = screen.getByRole('button', { name: 'All plugins' });
+    const library = screen.getByText('Library');
+    // Document order: All plugins → the tree → the Library heading.
+    expect(home.compareDocumentPosition(tree) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tree.compareDocumentPosition(library) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("leads the plugins with the caller's own space", () => {
@@ -122,9 +168,24 @@ describe('PluginsSidebar', () => {
     renderSidebar();
     // GTM: 3 items but 2 integrations need setup — amber wins the slot.
     expect(row(/^GTM/)).toHaveAccessibleName('GTM 2');
+    expect(within(row(/^GTM/)).getByText('2')).toHaveClass('text-wait');
     expect(row(/^Engineering/)).toHaveAccessibleName('Engineering 4');
     // Never a grey 0: an empty plugin shows no count at all.
     expect(row(/^Product/)).toHaveAccessibleName('Product');
+  });
+
+  it('turns the count orange when members are locked out of a linked skill', () => {
+    renderSidebar({
+      plugins: [
+        { plugin: 'GTM', count: 3, attention: 2, urgent: true },
+        { plugin: 'Ops', count: 3, attention: 1, urgent: false },
+      ],
+    });
+    // Blocking other people outranks a tool the reader has not set up.
+    const gtm = within(row(/^GTM/)).getByText('2');
+    expect(gtm).toHaveClass('text-urgent');
+    expect(gtm).not.toHaveClass('text-wait');
+    expect(within(row(/^Ops/)).getByText('1')).toHaveClass('text-wait');
   });
 
   it('emits the right LibraryFilter per row', () => {

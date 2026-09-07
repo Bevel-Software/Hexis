@@ -132,6 +132,13 @@ export interface GitSyncFailedEvent {
   branch: string;
   /** Sanitised git error — safe to display, tokens already redacted. */
   reason: string;
+  /**
+   * Present when the failure is a REMOTE-SYNC CONFLICT (`POST /api/sync`
+   * found Hexis-side commits that contradict what landed on the host): the
+   * repo-relative files a person has to reconcile. Unlike a failing push,
+   * this is the author's to act on, so the banner offers to open them.
+   */
+  conflictedPaths?: string[];
 }
 
 /**

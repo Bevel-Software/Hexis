@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -66,7 +66,7 @@ const CATALOG: LibraryData = {
 
 const KB = 'knowledge-base';
 
-function wrap(children: ReactNode) {
+function wrap(children: ReactNode, fileTree: FileTreeEntry | null = null) {
   const adminValue = {
     isAdmin: false,
     unreadCount: 0,
@@ -80,6 +80,8 @@ function wrap(children: ReactNode) {
   const workspaceValue = {
     workspaceId: 'ws',
     kbDirName: KB,
+    fileTree,
+    pendingUploads: new Map(),
   } as unknown as WorkspaceContextValue;
   return (
     <AdminContext.Provider value={adminValue}>
@@ -92,10 +94,17 @@ function wrap(children: ReactNode) {
 
 function LocationProbe() {
   const location = useLocation();
-  return <div aria-label="pathname">{location.pathname}</div>;
+  const rawFile = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
+  return (
+    <>
+      <div aria-label="pathname">{location.pathname}</div>
+      <div aria-label="hash">{location.hash}</div>
+      <div aria-label="raw-file">{String(rawFile)}</div>
+    </>
+  );
 }
 
-function renderAt(url: string) {
+function renderAt(url: string, fileTree: FileTreeEntry | null = null) {
   // The same two mounts the shell's CoreSurfaces gives this surface.
   return render(
     <MemoryRouter initialEntries={[url]}>
@@ -104,6 +113,7 @@ function renderAt(url: string) {
           <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
           <Route path="/workspace/*" element={<LibraryRoutes />} />
         </Routes>,
+        fileTree,
       )}
       <LocationProbe />
     </MemoryRouter>,
@@ -474,6 +484,107 @@ describe('WorkspaceItemRoute', () => {
     expect(await screen.findByLabelText('skill-page')).toHaveTextContent(
       'create-sales-deck::notes.md',
     );
+  });
+
+  /**
+   * The shared-skills root: skills and the scope folders that own them, no
+   * plugin around them. The same evidence rules as under `Plugins/`, with
+   * the two plugin destinations replaced — a scope has no page, and a file
+   * filed directly in a scope opens as the plain file it is.
+   */
+  describe('a skill under the shared Skills/ root', () => {
+    const SHARED: LibraryData = {
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        { name: 'discovery-call', description: '', path: 'Skills/Sales/discovery-call' },
+      ],
+    };
+
+    beforeEach(() => {
+      dataMock.useLibraryData.mockReturnValue(SHARED);
+    });
+
+    it("renders a shared skill file on that file's tab, inside the library nav", async () => {
+      renderAt(itemUrl('Skills/Sales/discovery-call/checklist.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('discovery-call::checklist.md');
+      expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+    });
+
+    it('opens a bare shared skill folder on SKILL.md', async () => {
+      renderAt(itemUrl('Skills/Sales/discovery-call'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('discovery-call::SKILL.md');
+    });
+
+    it('resolves a just-created shared skill from its SKILL.md alone', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Skills/Sales/brand-new/SKILL.md'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('brand-new::SKILL.md');
+    });
+
+    it('sends a SCOPE folder home — the sidebar tree is where scopes are browsed', async () => {
+      renderAt(itemUrl('Skills/Sales'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent(/^\/skills-and-tools$/),
+      );
+    });
+
+    it("opens a scope's own file as a plain file, in the pane workspace", async () => {
+      renderAt(itemUrl('Skills/Sales/access.md'));
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      // Same URL — the raw view is router state, never a different address.
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales/access.md'));
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+    });
+
+    it("carries a scope file's #fragment into the raw view — a heading deep link still lands", async () => {
+      renderAt(`${itemUrl('Skills/Sales/README.md')}#goal`);
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      expect(screen.getByLabelText('hash')).toHaveTextContent('#goal');
+    });
+
+    it("opens a scope's loose file as a plain file when the TREE shows no SKILL.md there — before the catalog answers", async () => {
+      // A scope with nothing the caller may read beneath it: the catalog has
+      // no evidence, but the workspace tree has the folder and no SKILL.md in
+      // it, and a folder without one is no skill.
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      const d = (rel: string, children: FileTreeEntry[]): FileTreeEntry => ({
+        name: rel.split('/').pop() ?? rel,
+        relativePath: rel,
+        type: 'directory',
+        children,
+      });
+      const tree = d('.', [
+        d(KB, [d(`${KB}/Skills`, [d(`${KB}/Skills/Sales`, [{ name: 'notes.md', relativePath: `${KB}/Skills/Sales/notes.md`, type: 'file' }])])]),
+      ]);
+      renderAt(itemUrl('Skills/Sales/notes.md'), tree);
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+    });
+
+    it("does not read a SKILL.md URL into a folder the tree shows has none as a skill", async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      const d = (rel: string, children: FileTreeEntry[]): FileTreeEntry => ({
+        name: rel.split('/').pop() ?? rel,
+        relativePath: rel,
+        type: 'directory',
+        children,
+      });
+      const tree = d('.', [
+        d(KB, [d(`${KB}/Skills`, [d(`${KB}/Skills/Sales`, [{ name: 'notes.md', relativePath: `${KB}/Skills/Sales/notes.md`, type: 'file' }])])]),
+      ]);
+      renderAt(itemUrl('Skills/Sales/SKILL.md'), tree);
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+    });
+
+    it('waits for the catalog rather than guessing a scope is a skill', async () => {
+      dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
+      renderAt(itemUrl('Skills/Sales'));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument());
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales'));
+    });
   });
 
   it('a non-default branch never renders an item page', async () => {

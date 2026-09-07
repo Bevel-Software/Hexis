@@ -2,6 +2,7 @@ import {
   EMAIL_REGEX,
   GROUP_REF_PREFIX,
   RESERVED_ROLE_NAMES,
+  PLUGIN_TOKEN_PREFIX,
   ROLE_TOKEN_PREFIX,
   canonicalEmail,
   canonicalRoleName,
@@ -67,6 +68,9 @@ export function unsafeNameReason(displayName: string): string | null {
   if (trimmed.startsWith('-')) return "starts with '-'";
   if (canonicalRoleName(trimmed).startsWith(ROLE_TOKEN_PREFIX)) {
     return `starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix (the explicit role token in access entries)`;
+  }
+  if (canonicalRoleName(trimmed).startsWith(PLUGIN_TOKEN_PREFIX)) {
+    return `starts with the reserved '${PLUGIN_TOKEN_PREFIX}' prefix (the plugin-principal token in access entries)`;
   }
   return null;
 }

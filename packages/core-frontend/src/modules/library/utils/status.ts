@@ -12,15 +12,20 @@ import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vau
  */
 
 /**
- * Three states, and no fourth.
+ * Four states, and no fifth.
  *
  * There used to be an `off` — "not set up yet", drawn in grey. Grey reads as
  * *disabled*, or as *not your problem*: an unconfigured integration looked like
  * furniture next to the amber ones, when in fact it is the state that most
  * needs somebody. Anything that needs a person is amber; anything that was
  * working and stopped is red. Nothing that needs a person is grey.
+ *
+ * `urgent` sits between the two: it needs a person, like amber, but it is
+ * blocking OTHER people right now — a plugin's members locked out of a skill
+ * it ships — where amber blocks only the reader's own use. Orange, the same
+ * colour the sidebar count turns for it, so the card and the count agree.
  */
-export type GemState = 'ok' | 'warn' | 'err';
+export type GemState = 'ok' | 'warn' | 'urgent' | 'err';
 
 export interface AttentionStatus {
   state: GemState;
@@ -55,7 +60,7 @@ const SIGNED_IN: AttentionStatus = { state: 'ok', text: 'Signed in' };
 const KEY_SAVED: AttentionStatus = { state: 'ok', text: 'Key saved' };
 
 /** Severity order for aggregation: broken sign-in beats anything merely unset. */
-const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
+const RANK: Record<GemState, number> = { ok: 0, warn: 1, urgent: 2, err: 3 };
 
 /**
  * What ONE variable is: in place, or `Needs <the thing>`.
@@ -241,6 +246,67 @@ export interface LibraryFilterable {
   owned: boolean;
   /** Folder plugin from the item's KB path, or null when it sits in none. */
   plugin: string | null;
+  /**
+   * Lives under the shared `Skills/` root rather than in a plugin folder.
+   * Such an item has no folder plugin, but it is not "yours alone" either —
+   * it is owned by a scope and shared into plugins by link — so the
+   * ungrouped view leaves it out and only the catalog-wide view lists it.
+   */
+  shared?: boolean;
+  /**
+   * Every plugin the item belongs to, inline or by link. `plugin` above is the
+   * FOLDER plugin only (routing, "yours alone"); this is what the plugin
+   * page and the sidebar counts go by.
+   */
+  plugins?: { name: string }[];
+}
+
+/** "Yours alone": in no plugin folder AND not a shared skill. */
+export function isUngrouped(item: Pick<LibraryFilterable, 'plugin' | 'shared'>): boolean {
+  return item.plugin === null && !item.shared;
+}
+
+/** Whether an item belongs to `plugin` — by folder, or by a link from the plugin's manifest. */
+export function isInPlugin(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>, plugin: string): boolean {
+  return item.plugin === plugin || (item.plugins?.some((m) => m.name === plugin) ?? false);
+}
+
+/**
+ * The item as the plugin page should show it: a LINK whose grant is missing
+ * gets the note in the tools' grammar — "Needs setup", and "share with plugin
+ * members" for someone who can edit the skill's rules — because until the
+ * grant is back, the plugin's members cannot read it. In ORANGE (`urgent`),
+ * not amber: it locks other people out, and the sidebar count for the plugin
+ * is the same colour. Healthy links are untouched.
+ */
+export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus }>(
+  item: T,
+  plugin: string,
+): T {
+  const membership = (item.plugins as { name: string; linked?: boolean; granted?: boolean }[] | undefined)?.find(
+    (m) => m.name === plugin,
+  );
+  if (!membership?.linked || membership.granted !== false) return item;
+  // One amber note at a time, and the card's own comes first: a skill whose
+  // tools need setup, or one under review, already says what to do — the
+  // broken link is reported once that is settled, not in its place.
+  if (item.status.state !== 'ok') return item;
+  return {
+    ...item,
+    status: {
+      state: 'urgent',
+      text: item.owned ? 'Needs setup: share with plugin members' : 'Needs setup',
+      hint: `The skill's access rules no longer name ${plugin}'s members. Repair the link from the skill page.`,
+    },
+  };
+}
+
+/** The distinct plugin names an item belongs to. */
+export function pluginsOfItem(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>): string[] {
+  const names = new Set<string>();
+  if (item.plugin !== null) names.add(item.plugin);
+  for (const m of item.plugins ?? []) names.add(m.name);
+  return [...names];
 }
 
 /** Sidebar selection narrows; the query matches name/description within it. */
@@ -260,9 +326,9 @@ export function filterLibraryItems<T extends LibraryFilterable>(
       case 'owned':
         return item.owned;
       case 'group':
-        return item.plugin === filter.plugin;
+        return isInPlugin(item, filter.plugin);
       case 'ungrouped':
-        return item.plugin === null;
+        return isUngrouped(item);
     }
   });
 }
@@ -279,8 +345,9 @@ export function pluginCounts<T extends LibraryFilterable>(
 ): { plugin: string; count: number }[] {
   const counts = new Map<string, number>();
   for (const item of items) {
-    if (item.plugin === null) continue;
-    counts.set(item.plugin, (counts.get(item.plugin) ?? 0) + 1);
+    // A linked skill counts for every plugin that links it, like the plugin
+    // index's own totals.
+    for (const name of pluginsOfItem(item)) counts.set(name, (counts.get(name) ?? 0) + 1);
   }
   return [...counts.entries()]
     .map(([plugin, count]) => ({ plugin, count }))

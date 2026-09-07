@@ -1,6 +1,7 @@
 import {
   DEFAULT_BRANCH,
   PLUGINS_DIR,
+  SKILLS_DIR,
   type ChangeRequest,
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
@@ -118,6 +119,8 @@ export class PendingSkillsService implements IPendingSkillService {
         name: isSafeSkillName(declared) ? declared : folderName,
         description: fm.description,
         version: fm.version,
+        owner: fm.owner,
+        lifecycle: fm.lifecycle,
         path: folder,
         changeRequestNumber: cr.number,
         branch: cr.branch,
@@ -156,11 +159,10 @@ export class PendingSkillsService implements IPendingSkillService {
  */
 function isSkillDoc(repoRelPath: string): boolean {
   const segments = repoRelPath.split('/');
-  return (
-    segments.length >= 4 &&
-    segments[0] === PLUGINS_DIR &&
-    segments[segments.length - 1] === SKILL_DOC
-  );
+  if (segments[segments.length - 1] !== SKILL_DOC) return false;
+  // Under `Skills/` a skill may sit directly below the root: `Skills/<skill>/SKILL.md`.
+  if (segments[0] === SKILLS_DIR) return segments.length >= 3;
+  return segments.length >= 4 && segments[0] === PLUGINS_DIR;
 }
 
 /** The skill folder holding a SKILL.md. */

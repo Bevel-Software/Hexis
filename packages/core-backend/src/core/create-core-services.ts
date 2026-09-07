@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
@@ -5,7 +6,7 @@ import {
   configureBranchModel,
   validateBranchModel,
   PROTECTED_BRANCHES,
-  PLUGINS_DIR,
+  configureKbLayout,
 } from '@bevel-software/platform-shared';
 import { CoreConfig } from '../core-config.js';
 import { getDb, type Database } from '../modules/database/connection.js';
@@ -15,10 +16,20 @@ import { WorkspaceService } from '../modules/workspace/workspace.service.js';
 import { RoutineWritePolicyService } from '../modules/workspace/routine-write-policy.js';
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
+import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
+import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
+
+/** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
+function mcpEndpointUrl(publicBackendUrl: string): string {
+  const url = new URL('/api/mcp', publicBackendUrl);
+  url.username = '';
+  url.password = '';
+  return url.toString();
+}
 
 /** `a.com, b.com` → `['a.com','b.com']`, tolerating a leading `@` or `.`. */
 function parseDomainList(raw: string): string[] {
@@ -40,7 +51,26 @@ import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
-import { PluginIndexService, PluginProvisionService, JoinRequestsService } from '../modules/plugins/index.js';
+import {
+  PluginIndexService,
+  PluginProvisionService,
+  JoinRequestsService,
+  PluginLinkIndex,
+  PluginLinksService,
+  PluginRenameService,
+  MarketplaceCompilerService,
+  KbPluginSource,
+} from '../modules/plugins/index.js';
+import { MarketplaceRepoService } from '../modules/marketplace/index.js';
+import {
+  GitHubFacadeCredentialsService,
+  GitHubFacade,
+  DbGitHubFacadeCodeStore,
+  DbGitHubFacadeCredentialsStore,
+  CLAUDE_CONSUMER,
+  GITHUB_LINK_KEY_KIND,
+  GITHUB_LINK_KEY_PREFIX,
+} from '../modules/marketplace/github-facade/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -94,6 +124,7 @@ import { TokenCrypto } from '../shared/token-crypto.js';
 import { UpdateCheckService } from '../modules/update-check/update-check.service.js';
 import { resolveAppVersion } from '../version.js';
 import { noopRecoveryAgent, type CorePorts } from './core-ports.js';
+import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.js';
 
 /**
  * Everything the CORE composition builds: the core services `createCoreServer`
@@ -128,6 +159,18 @@ export interface CoreServices {
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
+  /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
+  pluginLinkIndex: PluginLinkIndex;
+  /** Link / unlink / repair shared skills into plugins. */
+  pluginLinksService: PluginLinksService;
+  pluginRenameService: PluginRenameService;
+  /** Source layout → distribution layout, for one audience. */
+  marketplaceCompiler: MarketplaceCompilerService;
+  /** The bare repository the per-user marketplace git endpoint serves from. */
+  marketplaceRepo: MarketplaceRepoService;
+  /** The GitHub Enterprise facade products such as claude.ai add the marketplace through. */
+  githubFacade: GitHubFacade;
+  githubFacadeCredentials: GitHubFacadeCredentialsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -137,6 +180,8 @@ export interface CoreServices {
   reviewWorkflowService: ReviewWorkflowService;
   fileLockService: FileLockService;
   workflowService: WorkflowService;
+  /** Remote sync (`POST /api/sync`): a git host or pipeline makes the clones catch up. */
+  kbSyncService: KbSyncService;
   eventBus: WorkflowEventBus;
   fileChangeNotifier: FileChangeNotifier;
   pendingCommitsService: PendingCommitsService;
@@ -242,6 +287,11 @@ export async function createCoreServices(
     protectedBranches: settings.resolve('protectedBranches'),
   };
   if (!validateBranchModel(branchModel)) configureBranchModel(branchModel);
+  // The KB layout — the three renameable roots — applied the same way and at
+  // the same moment, before any service captures a root name. Unlike the
+  // branch model it always resolves (every root has a default), so an invalid
+  // value is a real misconfiguration and stops the boot.
+  configureKbLayout(settings.resolveKbLayout());
   // A token supplied through the setup screen has to reach the credential
   // helper, which reads `$GITHUB_TOKEN` at call time.
   settings.syncGitTokenEnv();
@@ -269,6 +319,7 @@ export async function createCoreServices(
   // whatever the distribution appends.
   const kbStartupSteps = [
     new GroupsToPluginsStep(),
+    new PluginManifestsStep(),
     new TemplateFilesStep(extraDirs),
     new RolesYamlStep([config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
@@ -324,17 +375,27 @@ export async function createCoreServices(
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
-  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName);
+  // Where plugins come from: one walk of the plugins root that reads every
+  // plugin folder in whichever file shape it carries (see
+  // modules/plugins/discovery). Nothing to configure, nothing to document.
+  const pluginSource = new KbPluginSource();
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, Date.now, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
+  // The link index resolves manifests against the released catalog, and the
+  // plugin index counts through it (inline + linked), so it comes first.
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, Date.now, pluginSource);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
     toolManualService,
     kbDirName,
+    Date.now,
+    pluginLinkIndex,
+    pluginSource,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
@@ -450,6 +511,62 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
+  // Links land as ordinary default-branch commits and change what the plugin
+  // index counts, so a link drops that cache too.
+  const pluginLinksService = new PluginLinksService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    skillService,
+    pluginLinkIndex,
+    kbDirName,
+    eventBus,
+    () => pluginIndexService.invalidate(),
+  );
+  // A rename rewrites grants across the knowledge base in one batch commit,
+  // then drops every cache that keyed on the old identity.
+  const pluginRenameService = new PluginRenameService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    pluginSource,
+    kbDirName,
+    eventBus,
+    () => {
+      pluginIndexService.invalidate();
+      pluginLinkIndex.invalidate();
+    },
+  );
+  // Source → distribution. The marketplace's identity is fixed for now; the
+  // per-user git endpoint and any mirror both compile through this.
+  const marketplaceCompiler = new MarketplaceCompilerService(
+    workspaceService,
+    accessControl,
+    skillService,
+    pluginLinkIndex,
+    kbDirName,
+    {
+      name: 'hexis',
+      owner: 'Hexis',
+      description: 'Skills and plugins from this knowledge base',
+      // The knowledge base as a tool, shipped in the skills plugin so an
+      // agent installing from the marketplace can read what its skills refer
+      // to. The same address `/api/config` and the OAuth metadata publish,
+      // userinfo stripped; the client's OAuth flow supplies the identity.
+      knowledgeBaseMcp: { name: 'hexis', url: mcpEndpointUrl(config.publicBackendUrl) },
+    },
+    pluginSource,
+  );
+  // Sibling of the workspaces root, like the spill store: one bare repo, one
+  // git namespace per caller (see marketplace-repo.service.ts).
+  const marketplaceRepo = new MarketplaceRepoService(
+    path.resolve(config.workspacesRoot, '..', 'marketplace.git'),
+    marketplaceCompiler,
+  );
+
+  // Remote sync. Drives the workflow module's per-branch pull-and-announce
+  // over every clone the workspace service knows about; owns no git of its own.
+  const kbSyncService = new KbSyncService(workflowService, workspaceService);
   // Server-scoped MCP editing — the tool page's edit form. One server's truth
   // spans a plugin's mcp.json AND plugin.json extensions block, and this is
   // the ONE writer that rewrites both entries and commits them together (see
@@ -486,43 +603,16 @@ export async function createCoreServices(
     workflowService,
   );
 
-  // Subscriber A — catalog freshness: a committed change drops the affected
-  // caches immediately instead of waiting out their TTLs. The tool/skill
-  // catalogs are global but read the DEFAULT branch only, so only
-  // default-branch changes under their folders matter. (The kb-graph id-index
-  // invalidation that used to live in this subscriber is registered by the
-  // enterprise overlay, next to the kb-graph service it belongs to — the
-  // caches are independent, so the split preserves behavior.)
-  fileChangeNotifier.onFilesChanged(({ branch, paths }) => {
-    if (branch !== DEFAULT_BRANCH) return;
-    // Skills, tools and the plugin index all live under `Plugins/`, so one
-    // touch check drives all three caches. An access grant lands as a
-    // default-branch change to `Plugins/<plugin>/access.md`, so this is also
-    // what makes a newly-granted plugin unlock within one round-trip instead
-    // of one TTL.
-    const touched = paths.some((p) => p.startsWith(`${kbDirName}/${PLUGINS_DIR}/`));
-    if (touched) {
-      toolManualService.invalidate();
-      skillService.invalidate();
-      pluginIndexService.invalidate();
-    }
-
-  });
-
-  // Subscriber B — WRITE-time freshness for the same three caches. The
-  // workspace routes emit `fs-tree-changed` the moment bytes hit a working
-  // tree; Subscriber A above fires only when the ASYNC commit lands. Between
-  // the two, "create a skill, reload the catalog" raced the commit pipeline
-  // and lost — the new skill's card stayed invisible until a refresh outlived
-  // the TTL. The catalogs scan the working tree anyway, so invalidating at
-  // write time makes the very next read see the file. No path filter: this
-  // event carries none, and a spurious drop only costs one re-scan.
-  eventBus.onEmit((event) => {
-    if (event.kind !== 'fs-tree-changed') return;
-    if (!('branch' in event) || event.branch !== DEFAULT_BRANCH) return;
-    toolManualService.invalidate();
-    skillService.invalidate();
-    pluginIndexService.invalidate();
+  // Catalog freshness: the skill / tool-manual / plugin-index caches all scan
+  // the DEFAULT branch's working tree, and all three go stale on the same
+  // events (a commit, a working-tree write, a merge). Wired in one place so a
+  // new way of reaching the default branch cannot refresh two of them and
+  // leave the third serving last minute's answer.
+  registerCatalogCacheInvalidation({
+    eventBus,
+    fileChangeNotifier,
+    kbDirName,
+    catalogs: [toolManualService, skillService, pluginIndexService, pluginLinkIndex],
   });
 
   // Admin = `Admin` role in roles.yaml, resolved through the access model on the
@@ -609,7 +699,30 @@ export async function createCoreServices(
   // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
   // over loopback and re-exposes every tool, dispatching calls back through the
   // REST tool surface (so agent logic + metering live there, once).
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix);
+  // Connection keys also come as GitHub-shaped links (`gho_…`, kind
+  // `github-link`): the same key, minted by the marketplace facade below when
+  // a person connects an account on claude.ai, told apart by its stored kind.
+  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
+    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_PREFIX,
+  });
+
+  // The facade that lets products which sync marketplaces only from a GitHub
+  // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
+  // generated app credentials an Owner registers once, and the connect flow
+  // that turns a hexis session into a connection key the product holds.
+  // Reuses the MCP flow's signed state and /connect page — see
+  // modules/marketplace/github-facade.
+  const githubFacadeCredentials = new GitHubFacadeCredentialsService(
+    new DbGitHubFacadeCredentialsStore(db, config.secretsEncKey ? new TokenCrypto(config.secretsEncKey) : null),
+  );
+  const githubFacade = new GitHubFacade({
+    credentials: githubFacadeCredentials,
+    codes: new DbGitHubFacadeCodeStore(db),
+    keys: externalApiKeyService,
+    consumers: [CLAUDE_CONSUMER],
+    stateSecret: config.jwtSecret,
+    publicFrontendUrl: config.publicFrontendUrl,
+  });
   const mcpSessionStore = new McpSessionStore();
   const mcpService = new McpService(
     mcpSessionStore,
@@ -826,6 +939,13 @@ export async function createCoreServices(
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
+    pluginLinkIndex,
+    pluginLinksService,
+    pluginRenameService,
+    marketplaceCompiler,
+    marketplaceRepo,
+    githubFacade,
+    githubFacadeCredentials,
     authService,
     authMiddleware,
     accountErasureService,
@@ -835,6 +955,7 @@ export async function createCoreServices(
     reviewWorkflowService,
     fileLockService,
     workflowService,
+    kbSyncService,
     eventBus,
     fileChangeNotifier,
     pendingCommitsService,

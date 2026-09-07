@@ -50,12 +50,12 @@ export function NewPluginDialog({ existing, onClose, onCreated }: NewPluginDialo
     if (!canCreate) return;
     setBusy(true);
     try {
-      // Navigate with the SERVER's folder name, not the typed one — the
-      // endpoint owns the canonical spelling of what it created.
-      const { folder } = await createPlugin(trimmed);
+      // Navigate with the SERVER's identity, not the typed name — the
+      // endpoint owns the identifier of what it created.
+      const { name } = await createPlugin(trimmed);
       onCreated();
       onClose();
-      navigate(pathForPlugin(folder));
+      navigate(pathForPlugin(name));
     } catch (err) {
       // The server's refusal names the problem (name taken, reserved
       // prefix…) — worth more than a generic apology.

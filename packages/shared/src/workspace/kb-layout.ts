@@ -1,4 +1,5 @@
 import { branchSegment } from '../git/branchAuthor.js';
+import { validateFilename } from './filename.js';
 
 /**
  * Top-level layout of the KB repo (inside the `KB_DIR_NAME` clone).
@@ -8,7 +9,8 @@ import { branchSegment } from '../git/branchAuthor.js';
  *
  *   <kbDirName>/
  *   ├── KnowledgeBase/   ← all team ontologies live here (the knowledge graph)
- *   ├── Plugins/         ← one folder per plugin; each holds BOTH skills and tools
+ *   ├── Skills/          ← shared skills, organised by ownership; plugins LINK to them
+ *   ├── Plugins/         ← one folder per plugin: manifest, MCP servers, tools, links
  *   ├── Data/            ← agent-produced records; parsed like KnowledgeBase/
  *   ├── Agents/          ← .agent files — agent role configurations (not the graph)
  *   ├── Pipelines/       ← .pipeline files — execution-layer processes (not the graph)
@@ -24,23 +26,47 @@ import { branchSegment } from '../git/branchAuthor.js';
  *
  * These names are the single source of truth for both sides of the app:
  *  - Backend: the graph parser discovers ontologies under the
- *    {@link ONTOLOGY_ROOTS} (`KnowledgeBase/` and `Data/`); `Plugins/`,
+ *    {@link ontologyRoots} (`KnowledgeBase/` and `Data/`); `Plugins/`,
  *    `Agents/`, `Pipelines/` (and anything else at the root) are ignored by
  *    parsing, validation, and the diagram.
  *  - Frontend: the file tree renders these root folders as distinct
  *    top-level sections.
  *
  * Don't hard-code these strings elsewhere — import them from here.
+ *
+ * CONFIGURABLE, WITH DEFAULTS. The three roots a deployment may rename
+ * (`KnowledgeBase/`, `Skills/`, `Plugins/`) are `let` bindings applied by
+ * {@link configureKbLayout} — the backend from its deployment settings, the
+ * browser from `GET /api/config` — the same live-binding pattern as the branch
+ * model in `git/protected.ts`. Unlike the branch model they carry defaults, so
+ * nothing has to wait for configuration; but the same rule applies: read them
+ * inside a function body, never capture one at module scope.
  */
 
 /** Folder under the repo root that contains all team ontologies. */
-export const KNOWLEDGE_BASE_DIR = 'KnowledgeBase';
+export let KNOWLEDGE_BASE_DIR = 'KnowledgeBase';
+
+/**
+ * Folder under the repo root that holds SHARED skills, organised by ownership:
+ *
+ *   Skills/<scope>/…/<skill>/SKILL.md     a skill, at any depth
+ *   Skills/<scope>/access.md              who owns / may read the scope
+ *
+ * A skill's readability comes from ITS OWN path walk — the scope folders'
+ * `access.md` files — never from the plugins that link it. Plugins point at
+ * skills here by path (see `HEXIS_LINKED_SKILLS_KEY`), so one definition can
+ * ship in several plugins, and a skill in no plugin at all is a normal state.
+ * Inline skills under `Plugins/<Plugin>/skills/` remain supported (personal
+ * folders, legacy layouts); the catalog is the union of both trees.
+ */
+export let SKILLS_DIR = 'Skills';
 
 /**
  * Folder under the repo root that holds the plugins.
  *
- *   Plugins/<Plugin>/plugin.json                  the Agent Plugins manifest
- *   Plugins/<Plugin>/skills/<skill>/SKILL.md      a skill
+ *   Plugins/<Plugin>/plugin.json                  the Agent Plugins manifest; its
+ *                                                 hexis extension lists LINKED skills
+ *   Plugins/<Plugin>/skills/<skill>/SKILL.md      an inline skill
  *   Plugins/<Plugin>/mcp.json                     MCP servers
  *   Plugins/<Plugin>/software.bevel.hexis/tools/  http + inline `.tool` manuals
  *   Plugins/<Plugin>/access.md                    who can read/write the plugin
@@ -59,10 +85,11 @@ export const KNOWLEDGE_BASE_DIR = 'KnowledgeBase';
  *    `inline` types the spec has no slot for. `mcp`-type manuals are emitted as
  *    real `mcp.json` entries instead, so the portable half stays portable.
  *
- * Skills and tools live TOGETHER in one plugin because they share a single
- * access boundary: a tool a plugin cannot read is a skill that plugin cannot
- * run, so splitting them across two roots meant maintaining the same permission
- * twice and letting them drift.
+ * A plugin's own `access.md` governs what the plugin FOLDER holds: the
+ * manifest, the MCP servers, the tools, and any inline skills. Shared skills
+ * under `Skills/` are governed by their own scope and are made visible to a
+ * plugin's members by granting the plugin's principal (`plugin/<Name>/read`)
+ * on the skill — ownership decides, the plugin is a view.
  *
  * A plugin is not a registry of unique names — it is a folder. The same
  * integration may exist in several plugins as separate files (`Everyone/…/
@@ -74,7 +101,106 @@ export const KNOWLEDGE_BASE_DIR = 'KnowledgeBase';
  * display casing. The lowercase slug the spec does constrain lives in the
  * manifest's `name` field.
  */
-export const PLUGINS_DIR = 'Plugins';
+export let PLUGINS_DIR = 'Plugins';
+
+/** The three renameable roots, as a deployment declares them and `/api/config` serves them. */
+export interface KbLayout {
+  knowledgeBaseDir: string;
+  skillsDir: string;
+  pluginsDir: string;
+}
+
+/** The layout a deployment gets when it names nothing. */
+export const DEFAULT_KB_LAYOUT: Readonly<KbLayout> = Object.freeze({
+  knowledgeBaseDir: 'KnowledgeBase',
+  skillsDir: 'Skills',
+  pluginsDir: 'Plugins',
+});
+
+/**
+ * What is wrong with one root name, or null. A root is joined onto the repo
+ * root and onto `<dir>/.gitkeep`, so a separator or `..` would write outside
+ * the repository; a dot-prefixed name would be skipped by every scanner that
+ * treats dot-entries as bookkeeping; `.git` in any case would corrupt the clone.
+ */
+export function validateKbRootName(name: string): string | null {
+  const v = name.trim();
+  if (!v) return 'A folder name is required.';
+  if (v.includes('/') || v.includes('\\')) return 'Use a single folder name — no slashes.';
+  // The ONE rule for what a path segment may be called — the same one every
+  // file and folder made through the platform passes (reserved Windows
+  // names, trailing dots, forbidden characters, length) — plus what a ROOT
+  // must not be: dot-prefixed, which every scanner skips as bookkeeping.
+  const asName = validateFilename(v);
+  if (asName) return asName;
+  if (v.startsWith('.')) return 'The name can\'t start with a dot.';
+  return null;
+}
+
+/**
+ * What is wrong with a layout, or null — the same rule {@link configureKbLayout}
+ * enforces, without applying anything. Separate so the setup screen can judge a
+ * proposed layout before it is saved. The three names must differ, compared
+ * case-insensitively: the workspaces live on case-insensitive filesystems too,
+ * where `Skills` and `skills` are one folder.
+ */
+export function validateKbLayout(layout: KbLayout): string | null {
+  for (const [label, value] of [
+    ['knowledge base', layout.knowledgeBaseDir],
+    ['skills', layout.skillsDir],
+    ['plugins', layout.pluginsDir],
+  ] as const) {
+    const problem = validateKbRootName(value ?? '');
+    if (problem) return `The ${label} folder: ${problem}`;
+  }
+  const names = [layout.knowledgeBaseDir, layout.skillsDir, layout.pluginsDir].map((n) =>
+    n.trim().toLowerCase(),
+  );
+  if (new Set(names).size !== names.length) {
+    return 'The knowledge base, skills and plugins folders must have three different names.';
+  }
+  // The fixed reserved roots are taken too: naming the skills folder `Data`
+  // would give one directory two reserved roles.
+  const fixed = [DATA_DIR, AGENTS_DIR, PIPELINES_DIR].map((n) => n.toLowerCase());
+  const clash = names.find((n) => fixed.includes(n));
+  if (clash) return `"${clash}" is a reserved folder name (${[DATA_DIR, AGENTS_DIR, PIPELINES_DIR].join(', ')}).`;
+  return null;
+}
+
+/**
+ * Apply the layout. Called once during boot on each side; throws on an invalid
+ * one so a bad deployment setting fails beside the rest of the wiring rather
+ * than scattering a half-renamed tree. Applying the defaults is a no-op.
+ */
+export function configureKbLayout(layout: KbLayout): void {
+  const problem = validateKbLayout(layout);
+  if (problem) throw new Error(problem);
+  KNOWLEDGE_BASE_DIR = layout.knowledgeBaseDir.trim();
+  SKILLS_DIR = layout.skillsDir.trim();
+  PLUGINS_DIR = layout.pluginsDir.trim();
+}
+
+/** The layout currently in effect. */
+export function currentKbLayout(): KbLayout {
+  return { knowledgeBaseDir: KNOWLEDGE_BASE_DIR, skillsDir: SKILLS_DIR, pluginsDir: PLUGINS_DIR };
+}
+
+/**
+ * Render the layout placeholders a managed template carries —
+ * `{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}` — with the
+ * names in effect. The packaged `AGENTS.md` and `.bevelignore` are written
+ * this way so a deployment that renamed its roots hands the agent a guide
+ * that names the folders it will actually find. Text without placeholders
+ * passes through unchanged.
+ */
+export function renderKbLayoutPlaceholders(text: string, layout: KbLayout = currentKbLayout()): string {
+  // Replacer FUNCTIONS: a string replacement would interpret `$&`, `$$` and
+  // friends inside a folder name, and `$` is a legal character in one.
+  return text
+    .replaceAll('{{knowledgeBaseDir}}', () => layout.knowledgeBaseDir)
+    .replaceAll('{{skillsDir}}', () => layout.skillsDir)
+    .replaceAll('{{pluginsDir}}', () => layout.pluginsDir);
+}
 
 /**
  * The pre-rename name of {@link PLUGINS_DIR}. Referenced ONLY by the migration
@@ -103,6 +229,99 @@ export const HEXIS_EXTENSION_NS = 'software.bevel.hexis';
 
 /** UTCP manuals whose `http`/`inline` types the spec cannot express. */
 export const HEXIS_TOOLS_DIR = `${HEXIS_EXTENSION_NS}/tools`;
+
+/**
+ * The manifest key under which a plugin LINKS shared skills:
+ *
+ *   plugin.json → extensions["software.bevel.hexis"].skills: [
+ *     "Skills/Engineering/deploy",   ← one skill folder
+ *     "Skills/Sales"                 ← a folder of skills: every skill beneath
+ *   ]
+ *
+ * Entries are repo-root-relative folder paths. A plugin's effective skill set
+ * is its inline `skills/` folder PLUS everything these roots resolve to. The
+ * spec reserves `extensions` for exactly this kind of client-specific data, so
+ * a conformant client that ignores it still gets a valid manifest; the
+ * compiled distribution copies the linked skills in for it.
+ *
+ * Linking is a reference, not a grant: a member of the plugin can read a
+ * linked skill only because the skill's own access rules name the plugin's
+ * principal (`plugin/<Name>/read`). The link service writes both together.
+ */
+export const HEXIS_LINKED_SKILLS_KEY = 'skills';
+
+/**
+ * Normalise a linked-skill root, or null when it cannot be one: a
+ * repo-root-relative POSIX folder path with no `..`, no leading slash, no
+ * backslashes and no empty segments. Trailing slashes are dropped.
+ */
+export function normalizeSkillRoot(raw: string): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.includes('\\') || trimmed.startsWith('/')) return null;
+  const segments = trimmed.split('/');
+  // Only TRAILING slashes are forgiven; an empty segment anywhere else
+  // (`Skills//deploy`) is a malformed path, not a spelling of a valid one.
+  while (segments.length > 0 && segments[segments.length - 1] === '') segments.pop();
+  if (segments.length === 0) return null;
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) return null;
+  return segments.join('/');
+}
+
+/**
+ * The linked-skill roots a parsed manifest declares — invalid entries are
+ * dropped, duplicates collapsed, order kept. A manifest with no extension
+ * block links nothing.
+ */
+export function linkedSkillRoots(manifest: unknown): string[] {
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return [];
+  const ext = (manifest as Record<string, unknown>).extensions;
+  if (typeof ext !== 'object' || ext === null) return [];
+  const ns = (ext as Record<string, unknown>)[HEXIS_EXTENSION_NS];
+  if (typeof ns !== 'object' || ns === null) return [];
+  const raw = (ns as Record<string, unknown>)[HEXIS_LINKED_SKILLS_KEY];
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    const root = normalizeSkillRoot(typeof entry === 'string' ? entry : '');
+    if (root !== null && !out.includes(root)) out.push(root);
+  }
+  return out;
+}
+
+/**
+ * The manifest with its linked-skill roots REPLACED by `roots`, every other
+ * byte of the object preserved (the MCP extension block beside it, the
+ * portable fields above it). An empty list removes the key rather than
+ * leaving `skills: []` behind.
+ */
+export function withLinkedSkillRoots(
+  manifest: Record<string, unknown>,
+  roots: readonly string[],
+): Record<string, unknown> {
+  const extensions =
+    typeof manifest.extensions === 'object' && manifest.extensions !== null && !Array.isArray(manifest.extensions)
+      ? { ...(manifest.extensions as Record<string, unknown>) }
+      : {};
+  const current = extensions[HEXIS_EXTENSION_NS];
+  const ns: Record<string, unknown> =
+    typeof current === 'object' && current !== null && !Array.isArray(current)
+      ? { ...(current as Record<string, unknown>) }
+      : {};
+  if (roots.length > 0) ns[HEXIS_LINKED_SKILLS_KEY] = [...roots];
+  else delete ns[HEXIS_LINKED_SKILLS_KEY];
+  if (Object.keys(ns).length > 0) extensions[HEXIS_EXTENSION_NS] = ns;
+  else delete extensions[HEXIS_EXTENSION_NS];
+  const out: Record<string, unknown> = { ...manifest };
+  if (Object.keys(extensions).length > 0) out.extensions = extensions;
+  else delete out.extensions;
+  return out;
+}
+
+/** Whether `skillPath` (a skill folder) falls under `root` (a skill folder or a folder of skills). */
+export function skillUnderRoot(skillPath: string, root: string): boolean {
+  return skillPath === root || skillPath.startsWith(`${root}/`);
+}
 
 /**
  * The manifest `name` for a plugin folder: lowercased, anything outside
@@ -135,23 +354,53 @@ export const PLUGIN_MANIFEST_SCHEMA = `https://agent-plugins.org/schemas/${AGENT
 export const PLUGIN_MCP_SCHEMA = `https://agent-plugins.org/schemas/${AGENT_PLUGINS_SCHEMA_VERSION}/mcp.schema.json`;
 
 /**
- * A minimal, valid `plugin.json` for a plugin folder.
- *
- * Deliberately only the two required fields. `version`, `license` and the rest
- * are optional metadata about a DISTRIBUTED package, and inventing values for a
- * folder someone just made in the app would be asserting things nobody said —
- * a plugin here is a place a team keeps skills, not something published.
- *
- * The display name is the folder, which is why nothing here carries one: the
- * manifest's `name` is constrained to a lowercase slug, and the field set is
- * closed, so there is no conformant home for "Sales" other than an extension.
+ * The Agent Plugins `name`: a kebab-case identifier — lowercase letters and
+ * digits in hyphen-separated runs, nothing else. It is the plugin's IDENTITY:
+ * what the marketplace publishes it as, what the access principals are
+ * spelled from (`plugin/<name>/<verb>`), what the catalog and the URLs key
+ * on. `pluginManifestName` folds any spelling into one of these.
+ */
+export const PLUGIN_IDENTIFIER_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function isPluginIdentifier(name: unknown): name is string {
+  return typeof name === 'string' && PLUGIN_IDENTIFIER_RE.test(name);
+}
+
+/**
+ * The identity of a plugin folder: the manifest's `name` when it IS an
+ * identifier, else the folder name folded into one. A manifest naming
+ * something that cannot be an identifier is not silently reinterpreted; the
+ * folder stands in, and discovery says so.
+ */
+export function pluginIdentityOf(manifest: Record<string, unknown> | null, folderName: string): string {
+  const declared = manifest?.name;
+  return isPluginIdentifier(declared) ? declared : pluginManifestName(folderName);
+}
+
+/**
+ * What a person sees the plugin called: the manifest's `displayName` (the
+ * vendor field Claude Code shows in its picker; any casing, spaces allowed),
+ * else the folder name — which is what every plugin made before this field
+ * existed was called, so nothing renames itself on upgrade.
+ */
+export function pluginDisplayNameOf(manifest: Record<string, unknown> | null, folderName: string): string {
+  const declared = manifest?.displayName;
+  return typeof declared === 'string' && declared.trim() ? declared.trim() : folderName;
+}
+
+/**
+ * A minimal, valid `plugin.json` for a plugin folder: the identifier the
+ * folder name folds into, and — when the folder is spelled differently — the
+ * folder's spelling as `displayName`, so a client's picker shows "Sales
+ * Team" for `sales-team`. Nothing else: `version`, `license` and the rest
+ * are metadata about a DISTRIBUTED package, and inventing values for a
+ * folder someone just made in the app would be asserting things nobody said.
  */
 export function renderPluginManifest(folderName: string): string {
-  return `${JSON.stringify(
-    { $schema: PLUGIN_MANIFEST_SCHEMA, name: pluginManifestName(folderName) },
-    null,
-    2,
-  )}\n`;
+  const name = pluginManifestName(folderName);
+  const manifest: Record<string, unknown> = { $schema: PLUGIN_MANIFEST_SCHEMA, name };
+  if (folderName !== name) manifest.displayName = folderName;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
 /**
@@ -182,6 +431,18 @@ export function personalPluginFolderName(userId: string): string {
 /** Whether a `Plugins/` child is somebody's personal folder. */
 export function isPersonalPluginFolder(folderName: string): boolean {
   return folderName.startsWith(PERSONAL_PLUGIN_PREFIX);
+}
+
+/**
+ * THE structural rule for a personal shelf: a repo-relative folder that is a
+ * DIRECT child of the plugins root and carries the personal prefix. A deeper
+ * folder so named is just a name, and a plugin whose manifest name happens
+ * to start with the prefix is a plugin — discovery, the principal picker and
+ * the item pages all ask this one question of the FOLDER.
+ */
+export function isPersonalPluginDir(repoRelDir: string): boolean {
+  const segments = repoRelDir.split('/').filter(Boolean);
+  return segments.length === 2 && segments[0] === PLUGINS_DIR && isPersonalPluginFolder(segments[1]!);
 }
 
 /**
@@ -222,8 +483,20 @@ export const PIPELINES_DIR = 'Pipelines';
 /**
  * The roots whose subfolders are discovered as ontologies by the graph parser
  * (each subfolder with both `NodeTypes/` and `Knowledge/` is an ontology).
+ * A function, not a constant: `KNOWLEDGE_BASE_DIR` is configurable, and a
+ * module-scope array would snapshot the default before configuration.
  */
-export const ONTOLOGY_ROOTS: readonly string[] = [KNOWLEDGE_BASE_DIR, DATA_DIR];
+export function ontologyRoots(): readonly string[] {
+  return [KNOWLEDGE_BASE_DIR, DATA_DIR];
+}
+
+/**
+ * Every reserved root name, as currently configured — the set the file tree
+ * renders as its own sections rather than folding into Knowledge.
+ */
+export function reservedRootDirNames(): ReadonlySet<string> {
+  return new Set([KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR, DATA_DIR, AGENTS_DIR, PIPELINES_DIR]);
+}
 
 /** The `Knowledge/` marker subfolder of an ontology (holds the graph nodes). */
 export const KNOWLEDGE_DIR = 'Knowledge';

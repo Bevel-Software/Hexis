@@ -3,7 +3,6 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
-  pluginOfPath,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
@@ -33,9 +32,14 @@ import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
-import { ownersTextOf } from '../../utils/plugin-summary';
+import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
+import { SharedViaPlugins } from './SharedViaPlugins';
+import { AccessRequestsBanner } from '../AccessRequestsBanner';
+import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
+import { listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
+import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
@@ -136,17 +140,37 @@ export function SkillPage({
   const skillPath = skill?.path ?? '';
   const prefix = `${skillPath}/`;
 
+  /** Every plugin holding this skill, from the catalog's decoration. */
+  const memberships = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugins ?? [],
+    [data.items, name],
+  );
+  /**
+   * Write-access requests on this skill, for its editors. The endpoint answers
+   * `[]` to everyone else, so the fetch is unconditional and the banner hides
+   * itself; `owned` only spares a pointless call.
+   */
+  const skillRequestsApi = useMemo<JoinRequestsApi>(
+    () => ({ list: listSkillAccessRequests, reconcile: reconcileSkillAccessRequest }),
+    [],
+  );
+  const accessRequests = useJoinRequests(name, skillPath || null, skillRequestsApi);
+  const [manageOpen, setManageOpen] = useState(false);
+
   /**
    * Who has to say yes. A skill has no owner of its own — it inherits its plugin
    * folder's `access.md` — so the people who review a change to it are the
    * plugin's owners. Naming the wrong reviewer is worse than naming none, hence
    * the neutral fallback when the plugin index hasn't resolved.
    */
+  const itemPlugin = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugin ?? null,
+    [data.items, name],
+  );
   const ownerName = useMemo(() => {
-    const plugin = skill ? pluginOfPath(skill.path) : null;
-    const summary = plugin ? data.pluginSummaries.find((g) => g.name === plugin) : undefined;
+    const summary = itemPlugin ? data.pluginSummaries.find((g) => g.name === itemPlugin) : undefined;
     return summary ? ownersTextOf(summary) : 'the owner';
-  }, [skill, data.pluginSummaries]);
+  }, [itemPlugin, data.pluginSummaries]);
 
   const files = useMemo(
     () => ['SKILL.md', ...(skill?.files ?? []).map((f) => f.slice(prefix.length))],
@@ -467,7 +491,7 @@ export function SkillPage({
   // The page the skill lives on, not the Library root: "back" from a skill
   // you opened off its plugin page must land on that plugin page. Derived from
   // the path, so a deep link gets the same honest destination as a click.
-  const home = libraryHomeForItemPath(skillPath);
+  const home = libraryHomeForItemPath(skillPath, itemPlugin, (n) => pluginLabel(n, data.pluginSummaries));
   const backLink = (
     <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
       {`‹ ${home.label}`}
@@ -590,7 +614,47 @@ export function SkillPage({
             those rules are decided. Same call the tool page made. */}
       </header>
 
+      {/* Not before the folder is known: Accept grants ON the folder and
+          Manage access opens it, and both are no-ops against ''. */}
+      {owned && skillPath && (
+        <AccessRequestsBanner
+          plugin={name}
+          folders={[skillPath]}
+          requests={accessRequests.requests}
+          onManage={() => setManageOpen(true)}
+          onAccept={(r, p) => void accessRequests.accept(r, p)}
+          onDecline={(r) => void accessRequests.decline(r)}
+        />
+      )}
+      {manageOpen && kbDirName && skillPath && (
+        <ManageAccessDialog
+          // The Library speaks the DEFAULT branch: a skill's rules are edited
+          // where the catalog reads them, whatever branch the ambient
+          // workspace happens to be on.
+          workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+          entry={{ name, relativePath: `${kbDirName}/${skillPath}`, type: 'directory' }}
+          onClose={() => {
+            setManageOpen(false);
+            accessRequests.reload();
+            data.reload();
+          }}
+        />
+      )}
+
       <IntegrationsSection needed={needed} onConnect={() => navigate('/connect')} />
+
+      {skill && (
+        <SharedViaPlugins
+          skillName={name}
+          skillPath={skillPath}
+          memberships={memberships}
+          owned={owned}
+          onChanged={() => {
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
+      )}
 
       <SkillFileTabs
         files={files}

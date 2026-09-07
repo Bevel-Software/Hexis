@@ -136,7 +136,7 @@ beforeEach(() => {
   resetOnboardingForTests();
   setSidebarCollapsed(false, true);
   serviceMocks.createPlugin.mockReset();
-  serviceMocks.createPlugin.mockResolvedValue({ folder: 'Design' });
+  serviceMocks.createPlugin.mockResolvedValue({ folder: 'Design', name: 'design' });
   serviceMocks.createEmptySkill.mockReset();
   serviceMocks.createEmptySkill.mockResolvedValue({
     repoRelativePath: 'Plugins/personal-u1/weekly-report/SKILL.md',
@@ -249,8 +249,9 @@ describe('creator welcome actions', () => {
     // indexes -> navigate), so it is the settled state to wait for; asserting
     // it immediately races the refresh microtasks and flakes under CI load.
     await waitFor(() =>
+      // The new plugin's page is addressed by its identity, not its folder.
       expect(screen.getByLabelText('pathname')).toHaveTextContent(
-        '/skills-and-tools/plugins/Design',
+        '/skills-and-tools/plugins/design',
       ),
     );
     expect(data.reload).toHaveBeenCalledOnce();

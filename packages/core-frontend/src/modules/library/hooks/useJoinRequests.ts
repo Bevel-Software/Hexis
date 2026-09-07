@@ -40,16 +40,41 @@ export interface JoinRequestsState {
   reload(): void;
 }
 
-export function useJoinRequests(plugin: string, folder: string | null): JoinRequestsState {
-  const [requests, setRequests] = useState<JoinRequest[]>([]);
+/**
+ * Where the requests come from. The default is a plugin's join requests; a
+ * skill page passes the skill's write-access endpoints instead — same
+ * proposals, same accept-by-grant, a different folder.
+ */
+export interface JoinRequestsApi {
+  list(name: string): Promise<JoinRequest[]>;
+  reconcile(name: string, number: number): Promise<boolean>;
+}
+
+// Lazy wrappers, not the functions themselves: the plugin API is resolved at
+// call time, so a surface that never lists requests never needs those exports.
+const PLUGIN_JOIN_API: JoinRequestsApi = {
+  list: (name) => listJoinRequests(name),
+  reconcile: (name, number) => reconcileJoinRequest(name, number),
+};
+
+export function useJoinRequests(
+  plugin: string,
+  folder: string | null,
+  api: JoinRequestsApi = PLUGIN_JOIN_API,
+): JoinRequestsState {
+  // Keyed by the plugin they came from: a page that moves from skill A to
+  // skill B without unmounting must not show A's requests until B's arrive —
+  // a banner that lets an editor grant A's proposal against B's folder.
+  const [loaded, setLoaded] = useState<{ plugin: string; rows: JoinRequest[] } | null>(null);
+  const requests = loaded?.plugin === plugin ? loaded.rows : [];
   const [revision, setRevision] = useState(0);
   const toast = useLibraryToast();
 
   useEffect(() => {
     let cancelled = false;
-    listJoinRequests(plugin)
+    api.list(plugin)
       .then((rows) => {
-        if (!cancelled) setRequests(rows);
+        if (!cancelled) setLoaded({ plugin, rows });
       })
       .catch(() => {
         // Silent: a manager surface that fails must not put an error banner in
@@ -58,7 +83,7 @@ export function useJoinRequests(plugin: string, folder: string | null): JoinRequ
     return () => {
       cancelled = true;
     };
-  }, [plugin, revision]);
+  }, [plugin, revision, api]);
 
   const reload = useCallback(() => setRevision((r) => r + 1), []);
 
@@ -79,23 +104,28 @@ export function useJoinRequests(plugin: string, folder: string | null): JoinRequ
       }
       // Drop the accepted proposal locally so the row goes immediately; the
       // refetch below is what makes it true.
-      setRequests((rows) =>
-        rows.map((r) =>
-          r.number === request.number
-            ? {
-                ...r,
-                proposals: r.proposals.filter(
-                  (p) => !(p.id === proposal.id && p.verb === proposal.verb),
-                ),
-              }
-            : r,
-        ),
+      setLoaded((cur) =>
+        cur && cur.plugin === plugin
+          ? {
+              ...cur,
+              rows: cur.rows.map((r) =>
+                r.number === request.number
+                  ? {
+                      ...r,
+                      proposals: r.proposals.filter(
+                        (p) => !(p.id === proposal.id && p.verb === proposal.verb),
+                      ),
+                    }
+                  : r,
+              ),
+            }
+          : cur,
       );
       toast(`${proposal.label} now has ${proposal.verb} access.`);
-      await reconcileJoinRequest(plugin, request.number).catch(() => false);
+      await api.reconcile(plugin, request.number).catch(() => false);
       setRevision((r) => r + 1);
     },
-    [folder, plugin, toast],
+    [folder, plugin, toast, api],
   );
 
   const decline = useCallback(
