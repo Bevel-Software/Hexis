@@ -98,10 +98,10 @@ describe('membership by link', () => {
     const items = [shared, inline, personal, unsetTool] as unknown as LibraryItem[];
     // Ops: one tool to set up, one linked skill its members cannot read.
     expect(brokenLinksOf(items, 'Ops')).toBe(1);
-    expect(attentionOf(items, 'Ops')).toBe(2);
+    expect(attentionOf(items, 'Ops')).toEqual({ total: 2, brokenLinks: 1 });
     // GTM's link is granted: nothing to report.
     expect(brokenLinksOf(items, 'GTM')).toBe(0);
-    expect(attentionOf(items, 'GTM')).toBe(0);
+    expect(attentionOf(items, 'GTM')).toEqual({ total: 0, brokenLinks: 0 });
     // An inline skill is never a broken link, whatever `granted` says.
     const oddInline = { ...inline, plugins: [{ name: 'GTM', linked: false, granted: false }] };
     expect(brokenLinksOf([oddInline] as unknown as LibraryItem[], 'GTM')).toBe(0);
@@ -112,7 +112,7 @@ describe('membership by link', () => {
     // skill a missing grant is about — so the summary's count decides.
     const items = [shared, inline] as unknown as LibraryItem[];
     expect(brokenLinksOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toBe(2);
-    expect(attentionOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toBe(2);
+    expect(attentionOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toEqual({ total: 2, brokenLinks: 2 });
     // An older server sends no count: the catalog is the fallback.
     expect(brokenLinksOf(items, 'Ops', [{ name: 'Ops' }])).toBe(1);
     expect(brokenLinksOf(items, 'Ops', [])).toBe(1);

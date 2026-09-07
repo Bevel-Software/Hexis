@@ -4,7 +4,7 @@ import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { attentionOf, brokenLinksOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
+import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import {
   isPluginsIndexPath,
@@ -111,13 +111,16 @@ export function LibraryLayout() {
     }
     return [...names]
       .sort((a, b) => a.localeCompare(b))
-      .map((plugin) => ({
-        plugin,
-        label: pluginLabel(plugin, pluginSummaries),
-        count: counts.get(plugin) ?? 0,
-        attention: attentionOf(items, plugin, pluginSummaries),
-        urgent: brokenLinksOf(items, plugin, pluginSummaries) > 0,
-      }));
+      .map((plugin) => {
+        const attention = attentionOf(items, plugin, pluginSummaries);
+        return {
+          plugin,
+          label: pluginLabel(plugin, pluginSummaries),
+          count: counts.get(plugin) ?? 0,
+          attention: attention.total,
+          urgent: attention.brokenLinks > 0,
+        };
+      });
   }, [items, pluginSummaries]);
   /**
    * Plugins the caller cannot get into, alphabetical.

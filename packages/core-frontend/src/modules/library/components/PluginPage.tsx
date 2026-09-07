@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
-import { attentionOf, brokenLinksOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
@@ -141,11 +141,10 @@ export function PluginPage() {
   const skillItems = pluginItems.filter((i) => i.kind === 'skill');
   const releasedSkillItems = skillItems.filter((i) => !i.pending);
   const toolItems = pluginItems.filter((i) => i.kind === 'integration');
-  const attention = attentionOf(data.items, plugin, data.pluginSummaries);
   // Two kinds of attention, two banners: a link without its grant locks the
   // plugin's members out of a skill NOW, so it outranks an integration the
   // reader has not connected for themselves.
-  const brokenLinks = brokenLinksOf(data.items, plugin, data.pluginSummaries);
+  const { total: attention, brokenLinks } = attentionOf(data.items, plugin, data.pluginSummaries);
   const integrationsNeedingSetup = attention - brokenLinks;
   // What the Skills band actually renders. The filter is a VIEW over the band,
   // not a different query — flipping it back must show exactly what was there.

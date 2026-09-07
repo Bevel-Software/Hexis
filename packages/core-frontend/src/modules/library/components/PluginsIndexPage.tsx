@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { attentionOf, brokenLinksOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
+import { attentionOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
 import { ownersTextOf, pluginLabel } from '../utils/plugin-summary';
@@ -65,6 +65,7 @@ export function PluginsIndexPage() {
         const derivedSkills = countKind(items, name, 'skill');
         const derivedTools = countKind(items, name, 'integration');
         const hasItems = derivedSkills + derivedTools > 0;
+        const attention = attentionOf(items, name, pluginSummaries);
         return {
           name,
           summary,
@@ -73,8 +74,8 @@ export function PluginsIndexPage() {
           // "4 skills" here as on the plugin page.
           skillCount: summary ? summary.skillCount : derivedSkills,
           toolCount: summary ? summary.toolCount : derivedTools,
-          attention: attentionOf(items, name, pluginSummaries),
-          urgent: brokenLinksOf(items, name, pluginSummaries) > 0,
+          attention: attention.total,
+          urgent: attention.brokenLinks > 0,
           member: summary ? summary.canRead || summary.canWrite || hasItems : hasItems,
         };
       });

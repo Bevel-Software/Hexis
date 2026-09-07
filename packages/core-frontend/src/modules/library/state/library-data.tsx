@@ -274,16 +274,26 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  * double every broken connection. Pending change requests are a review
  * concern, not a setup one, and belong to a different surface.
  */
+export interface PluginAttention {
+  /** Everything that needs a person: integrations to set up plus broken links. */
+  total: number;
+  /** The broken-link part alone — what turns the count orange. */
+  brokenLinks: number;
+}
+
 export function attentionOf(
   items: LibraryItem[],
   plugin: string,
   summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
-): number {
-  return (
-    items.filter(
-      (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
-    ).length + brokenLinksOf(items, plugin, summaries)
-  );
+): PluginAttention {
+  // One pass for the links, returned beside the total: every caller wants
+  // both, and computing the part again for the tone would filter the whole
+  // catalog a second time per plugin.
+  const brokenLinks = brokenLinksOf(items, plugin, summaries);
+  const integrations = items.filter(
+    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
+  ).length;
+  return { total: integrations + brokenLinks, brokenLinks };
 }
 
 /**
