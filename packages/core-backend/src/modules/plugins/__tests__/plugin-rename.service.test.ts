@@ -17,8 +17,11 @@ const walkMock = vi.hoisted(() => ({ holeInTheWalk: false }));
 vi.mock('../../../shared/fs-walk.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../shared/fs-walk.js')>();
   return {
+    ...actual,
     walkFiles: (root: string, match: (b: string) => boolean, opts?: { strict?: boolean }) => {
-      if (walkMock.holeInTheWalk && opts?.strict) throw new Error('EACCES: a folder could not be listed');
+      if (walkMock.holeInTheWalk && opts?.strict) {
+        throw new actual.WalkError('KnowledgeBase/Notes', Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      }
       return actual.walkFiles(root, match, opts);
     },
   };
@@ -294,7 +297,11 @@ describe('PluginRenameService', () => {
 
   it('a folder it cannot list stops the rename before a byte is written', async () => {
     walkMock.holeInTheWalk = true;
-    await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toThrow('could not be listed');
+    // The same refusal as a discovery hole — a 503 naming the folder, never a raw errno.
+    await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({
+      status: 503,
+      payload: { kind: 'incomplete-discovery', unreadable: ['KnowledgeBase/Notes'] },
+    });
     expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
     expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
     expect(commits).toEqual([]);

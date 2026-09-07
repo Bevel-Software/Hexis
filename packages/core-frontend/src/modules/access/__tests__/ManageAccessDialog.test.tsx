@@ -216,6 +216,32 @@ describe('ManageAccessDialog: removing public read', () => {
     expect(screen.getByText(/also through open · readers/)).toBeInTheDocument();
     expect(screen.getByText(/keeps it public until that plugin's read grant is removed/)).toBeInTheDocument();
   });
+
+  it('does not promise a direct grant when the literal everyone line lives in a parent', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      readers: {
+        restricted: false,
+        principals: [
+          { name: 'everyone', kind: 'role' },
+          { name: 'plugin/open/read', kind: 'plugin' },
+        ],
+        roles: ['everyone', 'plugin/open/read'],
+        users: [],
+        publicVia: ['plugin/open/read'],
+      },
+      sources: {
+        'r:everyone': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }] },
+        'p:plugin/open/read': { read: [{ kind: 'direct' }] },
+      },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Anyone can read');
+    // Nothing direct to remove here: the plain Remove leads into the remove-from-parent flow.
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove direct grant' })).toBeNull();
+    expect(screen.getByText(/also through open · readers/)).toBeInTheDocument();
+  });
 });
 
 /**

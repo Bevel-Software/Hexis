@@ -11,8 +11,9 @@ import fs from 'node:fs/promises';
  * A directory that cannot be listed is SKIPPED by default — right for a
  * catalog, which shows what it can. A caller that must see EVERYTHING or
  * nothing (a rename rewriting every grant that names a principal) passes
- * `strict`, and the walk throws instead: a list with a hole in it is not
- * a list of every file.
+ * `strict`, and the walk throws a {@link WalkError} naming the directory
+ * instead: a list with a hole in it is not a list of every file, and the
+ * caller can say WHICH hole rather than pass a raw errno up.
  */
 export async function walkFiles(
   root: string,
@@ -25,7 +26,7 @@ export async function walkFiles(
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch (err) {
-      if (opts.strict) throw err;
+      if (opts.strict) throw new WalkError(rel, err);
       return;
     }
     for (const entry of entries) {
@@ -38,4 +39,15 @@ export async function walkFiles(
   await walk(root, '');
   out.sort();
   return out;
+}
+
+/** A strict walk's refusal: the directory (relative to the root, `''` for the root itself) it could not list. */
+export class WalkError extends Error {
+  constructor(
+    readonly relDir: string,
+    readonly cause: unknown,
+  ) {
+    super(`${relDir || '.'} could not be listed — ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'WalkError';
+  }
 }

@@ -225,6 +225,43 @@ describe('PluginProvisionService.deletePlugin', () => {
     );
   });
 
+  it('refuses a folder path the filesystem cannot carry with 422 — control characters, a reserved name, a dot-prefix', async () => {
+    for (const bad of ['teams/De ep', 'a\tb', 'teams/NUL', '.deleting-x', 'teams/.hidden']) {
+      await expect(h.svc.deletePlugin(USER, bad)).rejects.toMatchObject({ status: 422 });
+    }
+  });
+
+  it('a nested plugin holds its identity against a creation at the root — taken is discovery\'s answer', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/access.md'), '---\n---\n');
+    await expect(h.svc.createPlugin(USER, 'Deep')).rejects.toMatchObject({ status: 409 });
+    await expect(h.svc.createPlugin(USER, 'Deep')).rejects.toThrow('Plugins/teams/Deep');
+  });
+
+  it('a delete and a creation of one IDENTITY never overlap — even when the identity is not the folder path', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/access.md'), '---\n---\n');
+    // The delete's commit hangs, then is REFUSED — the folder comes back.
+    let refuse: (err: Error) => void = () => {};
+    h.commits.runPendingCommit.mockImplementationOnce(
+      () => new Promise<undefined>((_resolve, reject) => { refuse = reject; }),
+    );
+    const deleting = h.svc.deletePlugin(USER, 'teams/Deep');
+    await new Promise((r) => setTimeout(r, 20));
+    // A creation of the same identity, started while the folder is parked
+    // and invisible: it must wait for the delete, not slip in beside it.
+    const creating = h.svc.createPlugin(USER, 'Deep');
+    await new Promise((r) => setTimeout(r, 20));
+    refuse(new Error('push refused'));
+    await expect(deleting).rejects.toThrow('push refused');
+    // The delete rolled back, so `deep` is still taken — and the creation sees it.
+    await expect(creating).rejects.toMatchObject({ status: 409 });
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'))).resolves.toBeDefined();
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/Deep'))).rejects.toThrow();
+  });
+
   it('deletes a plugin whose name sits at the filesystem component limit — the park adds nothing to the name', async () => {
     // 240 characters: valid to create (≤ 255 bytes), and long enough that a
     // park spelled `.<name>.deleting-<uuid>` would not be a legal component.

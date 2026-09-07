@@ -59,15 +59,24 @@ export class KbPluginSource implements PluginSource {
     const visit = async (dir: string, relFolder: string): Promise<number> => {
       const folder = relFolder ? `${PLUGINS_DIR}/${relFolder}` : PLUGINS_DIR;
       const isRoot = relFolder === '';
-      if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings, unreadable))) {
-        const native = await readNativePlugin(dir, folder, relFolder, warnings, unreadable);
-        if (native) claim(native);
-        return 1; // a manifest that could not be read: a hole, and still not descended into
-      }
-      if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE), folder, warnings, unreadable))) {
-        const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings, unreadable);
-        if (bundle) claim(bundle);
-        return 1; // unreadable: reported, and still not descended into
+      if (!isRoot) {
+        // An identity file that cannot even be PROBED is a hole exactly like
+        // one that cannot be read: the folder may be a plugin, so it is
+        // neither listed nor descended into.
+        const manifestProbe = await probeFile(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings, unreadable);
+        if (manifestProbe === 'unreadable') return 1;
+        if (manifestProbe === 'file') {
+          const native = await readNativePlugin(dir, folder, relFolder, warnings, unreadable);
+          if (native) claim(native);
+          return 1; // a manifest that could not be read: a hole, and still not descended into
+        }
+        const bundleProbe = await probeFile(path.join(dir, BUNDLE_FILE), folder, warnings, unreadable);
+        if (bundleProbe === 'unreadable') return 1;
+        if (bundleProbe === 'file') {
+          const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings, unreadable);
+          if (bundle) claim(bundle);
+          return 1; // unreadable: reported, and still not descended into
+        }
       }
       let entries: import('node:fs').Dirent[];
       try {
@@ -97,16 +106,24 @@ export class KbPluginSource implements PluginSource {
   }
 }
 
-/** Whether `abs` is a file; a probe that fails for any reason but absence is reported and counted. */
-async function isFile(abs: string, folder: string, warnings: string[], unreadable: string[]): Promise<boolean> {
+/**
+ * What `abs` is: a file, absent, or something that could not even be probed —
+ * which is reported and counted as a hole, and which the caller must treat as
+ * "maybe a plugin" rather than "no plugin here".
+ */
+async function probeFile(
+  abs: string,
+  folder: string,
+  warnings: string[],
+  unreadable: string[],
+): Promise<'file' | 'absent' | 'unreadable'> {
   try {
-    return (await fs.stat(abs)).isFile();
+    return (await fs.stat(abs)).isFile() ? 'file' : 'absent';
   } catch (err) {
-    if (!isAbsence(err)) {
-      warnings.push(`${folder}: ${path.basename(abs)} could not be read — ${describe(err)}`);
-      unreadable.push(`${folder}/${path.basename(abs)}`);
-    }
-    return false;
+    if (isAbsence(err)) return 'absent';
+    warnings.push(`${folder}: ${path.basename(abs)} could not be read — ${describe(err)}`);
+    unreadable.push(`${folder}/${path.basename(abs)}`);
+    return 'unreadable';
   }
 }
 

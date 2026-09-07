@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { walkFiles } from '../../shared/fs-walk.js';
+import { WalkError, walkFiles } from '../../shared/fs-walk.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import {
   PLUGIN_TOKEN_PREFIX,
@@ -169,7 +169,14 @@ export class PluginRenameService {
       // a folder that cannot be listed: the grant it may hold would keep the
       // old spelling. Every such file is collected, then refused together.
       const unopened: string[] = [];
-      for (const rel of await walkFiles(kbRoot, hasAccessFrontmatterExtension, { strict: true })) {
+      let listed: string[];
+      try {
+        listed = await walkFiles(kbRoot, hasAccessFrontmatterExtension, { strict: true });
+      } catch (err) {
+        if (err instanceof WalkError) this.assertComplete([err.relDir || '.']);
+        throw err;
+      }
+      for (const rel of listed) {
         const abs = path.join(kbRoot, rel);
         let before: string;
         try {

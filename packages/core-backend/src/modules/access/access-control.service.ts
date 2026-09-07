@@ -4,6 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
+import { isAbsence } from '../../shared/fs-errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -162,12 +163,6 @@ function roleKnown(roles: RolesIndex, canonicalRole: string): boolean {
  */
 export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: string };
 
-/** True for the errno codes that mean "the file genuinely is not there". */
-function isAbsenceError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException | null)?.code;
-  return code === 'ENOENT' || code === 'ENOTDIR';
-}
-
 /**
  * Load the ACTIVE group source through `read` (working tree or at-ref — the
  * caller supplies the reader, so both model loaders share one mode rule):
@@ -205,7 +200,7 @@ export async function loadActiveGroups(
     // subprocess. roles.yaml and access.md already fail the build closed on
     // the same error; groups cannot be the one input that does not.
     if (err instanceof AccessUnreadableError) throw err;
-    if (isAbsenceError(err)) {
+    if (isAbsence(err)) {
       syncedText = null;
     } else {
       // A non-absence read error on the SYNCED source must NOT fall back to
@@ -224,7 +219,7 @@ export async function loadActiveGroups(
       text = await read(GROUPS_YAML);
     } catch (err) {
       if (err instanceof AccessUnreadableError) throw err; // see above
-      if (isAbsenceError(err)) text = null;
+      if (isAbsence(err)) text = null;
       else return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
     }
   }

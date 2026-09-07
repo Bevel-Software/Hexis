@@ -34,6 +34,9 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isAbsence } from '../../shared/fs-errors.js';
+import type { PluginSource } from './discovery/plugin-source.js';
+import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 import {
   DEFAULT_BRANCH,
@@ -44,6 +47,8 @@ import {
   PERSONAL_PLUGIN_PREFIX,
   isPersonalPluginDir,
   personalPluginFolderName,
+  pluginIdentityOf,
+  validateFilename,
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -74,9 +79,21 @@ async function listDirOrAbsent(dir: string): Promise<Array<{ name: string; isDir
   try {
     return await fs.readdir(dir, { withFileTypes: true });
   } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    if (isAbsence(err)) return null;
     throw err;
+  }
+}
+
+/** A manifest's parsed object, or null for absent, unparsable or not-an-object text. */
+function parseManifestOrNull(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
 }
 
@@ -117,6 +134,8 @@ export class PluginProvisionService {
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
     private readonly events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void },
+    /** Which names are TAKEN is discovery's answer — the same one every catalog gets. */
+    private readonly source: PluginSource = new KbPluginSource(),
   ) {}
 
   /**
@@ -232,7 +251,12 @@ export class PluginProvisionService {
     // on Windows and as a name character everywhere else.
     const name = rawFolder.trim();
     const segments = name.split('/');
-    if (!name || segments.some((s) => !s || s === '.' || s === '..' || s.includes('\\'))) {
+    // Every segment must be a name the filesystem carries (the ONE rule
+    // creation applies, `validateFilename`: no control characters, no `\`,
+    // no `.`/`..`, no reserved names) and none may be dot-prefixed (a parked
+    // delete, invisible to every scanner) — refused here as a 422, never
+    // discovered by the fs layer as a 500.
+    if (!name || segments.some((s) => validateFilename(s) !== null || s.startsWith('.'))) {
       throw new PluginProvisionError('A plugin needs a name.', 422);
     }
     if (isPersonalPluginDir(`${PLUGINS_DIR}/${name}`)) {
@@ -240,11 +264,19 @@ export class PluginProvisionService {
       // nobody deletes somebody's private shelf through the plugin door.
       throw new PluginProvisionError('Unknown plugin', 404);
     }
-    return this.creations.run(`plugin:${pluginManifestName(name)}`, async () => {
-      const wsId = await this.readyWorkspaceId();
-      const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-      const pluginsDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR);
-      const folderDir = path.join(pluginsDir, ...segments);
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const pluginsDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR);
+    const folderDir = path.join(pluginsDir, ...segments);
+    // Locked on the plugin's IDENTITY — the manifest name, the same key a
+    // creation of that name takes — not on a slug of the folder path, which
+    // for a nested plugin is a different string and would let a creation of
+    // the same identity run inside the delete's window.
+    const identity = pluginIdentityOf(
+      parseManifestOrNull(await fs.readFile(path.join(folderDir, PLUGIN_MANIFEST_FILE), 'utf-8').catch(() => null)),
+      segments[segments.length - 1]!,
+    );
+    return this.creations.run(`plugin:${identity}`, async () => {
       // Exact spelling of EVERY component — the catalog hands the route the
       // on-disk spelling, so a mismatch means the plugin is gone (or was
       // never there). Checked against directory listings, never `stat`: on a
@@ -323,26 +355,31 @@ export class PluginProvisionService {
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
   }
 
-  /** An existing PLUGIN FOLDER whose derived manifest name equals `name`'s, or null. */
+  /**
+   * An existing plugin — at ANY depth, in either file shape — whose identity
+   * folds to the same slug as `name`'s, as its repo-relative folder; or null.
+   * Discovery's answer, so creation and every catalog agree on what is taken:
+   * a nested plugin claims its identity as fully as a top-level one, and a
+   * parked delete (dot-prefixed, invisible to the walk) claims nothing.
+   * Personal folders count — they publish a plugin.json like any plugin
+   * (though the reservation above means a named plugin never reaches this
+   * check with a personal slug). A loose file at the root is not a plugin.
+   *
+   * Refuses on a HOLE: a listing that could not see part of the tree cannot
+   * prove a name free.
+   */
   private async manifestNameTwin(name: string): Promise<string | null> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
-    // No Plugins/ root yet — nothing can collide.
-    const children = await listDirOrAbsent(path.join(wsDir, this.kbDirName, PLUGINS_DIR));
-    if (!children) return null;
+    const { plugins, unreadable } = await this.source.discover(path.join(wsDir, this.kbDirName));
+    if (unreadable.length > 0) {
+      throw new PluginProvisionError(
+        `Some of the knowledge base could not be read (${unreadable.join(', ')}), so the name cannot be checked against every plugin. Try again, or ask an admin.`,
+        503,
+      );
+    }
     const slug = pluginManifestName(name);
-    // Only what actually publishes a manifest claims a slug: a DIRECTORY
-    // that is not dot-prefixed (a parked delete — invisible to every
-    // scanner). Personal folders count — they publish a plugin.json like
-    // any plugin (though the reservation above means a named plugin can
-    // never reach this check with a personal slug). A loose file at the
-    // root (`Plugins/slack.tool`) is not a plugin and must not 409 a
-    // legitimate "Slack Tool".
-    return (
-      children.find(
-        (c) => c.isDirectory() && !c.name.startsWith('.') && pluginManifestName(c.name) === slug,
-      )?.name ?? null
-    );
+    return plugins.find((p) => pluginManifestName(p.name) === slug)?.folder ?? null;
   }
 
   private async provision(user: AuthUser, folder: string, accessMd: string): Promise<void> {

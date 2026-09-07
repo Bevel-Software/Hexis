@@ -848,6 +848,10 @@ export function ManageAccessDialog({
   // own rows can remove. The band says both, so removing one never reads as
   // removing public access when the other remains.
   const publicReadSources = lookupSources(data?.sources, 'r:everyone')?.read ?? [];
+  // A literal line HERE can be removed in place; one in a parent goes through
+  // the remove-from-parent flow — the button must not promise a direct grant
+  // it would not be removing.
+  const publicReadIsDirect = publicReadSources.some((s) => s.kind === 'direct');
   const publicViaLabels = (data?.readers.publicVia ?? []).map((token) => {
     const parsed = parsePluginPrincipalToken(token);
     return parsed ? pluginPrincipalLabel(parsed.plugin, parsed.verb) : token;
@@ -1437,7 +1441,7 @@ export function ManageAccessDialog({
                     {publicReadSources.length > 0 && publicViaLabels.length === 0
                       ? `Public: every signed-in user can read this ${targetKind}`
                       : publicReadSources.length > 0
-                        ? `Public: every signed-in user can read this ${targetKind} — also through ${publicViaLabels.join(', ')}. Removing the direct grant keeps it public until that plugin's read grant is removed too.`
+                        ? `Public: every signed-in user can read this ${targetKind} — also through ${publicViaLabels.join(', ')}. Removing the everyone grant keeps it public until that plugin's read grant is removed too.`
                         : `Public through a plugin anyone can read${publicViaLabels.length > 0 ? ` (${publicViaLabels.join(', ')})` : ''}. Remove that plugin's read grant to restrict this ${targetKind}.`}
                   </div>
                 </div>
@@ -1449,7 +1453,7 @@ export function ManageAccessDialog({
                     disabled={busy}
                     onClick={removePublicRead}
                   >
-                    {publicViaLabels.length > 0 ? 'Remove direct grant' : 'Remove'}
+                    {publicViaLabels.length > 0 && publicReadIsDirect ? 'Remove direct grant' : 'Remove'}
                   </Button>
                 )}
               </div>

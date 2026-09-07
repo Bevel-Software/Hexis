@@ -278,6 +278,25 @@ describe('KbPluginSource — one walk, both shapes', () => {
     }
   });
 
+  it('an identity file that cannot even be probed is a hole: the folder is neither listed nor descended into', async () => {
+    await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
+    await write('Plugins/Hidden/plugin.json', '{"name":"hidden"}');
+    // Beneath the unprobeable folder: must stay unseen, not surface as a plugin of its own.
+    await write('Plugins/Hidden/Sub/plugin.json', '{"name":"sub"}');
+    const realStat = fs.stat;
+    const spy = vi.spyOn(fs, 'stat').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith(path.join('Hidden', 'plugin.json'))
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (realStat as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      const { plugins, unreadable } = await new KbPluginSource().discover(kb);
+      expect(unreadable).toEqual(['Plugins/Hidden/plugin.json']);
+      expect(plugins.map((p) => p.name)).toEqual(['gtm']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
     const { plugins, warnings, unreadable } = await new KbPluginSource().discover(kb);
     expect(plugins).toEqual([]);
