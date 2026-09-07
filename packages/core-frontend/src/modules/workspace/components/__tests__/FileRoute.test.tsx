@@ -249,6 +249,22 @@ describe('FileRoute', () => {
     expect(screen.queryByText(/File not found/i)).not.toBeInTheDocument();
   });
 
+  it('renders the branch-gone screen when hydrate answers 410 — the branch was deleted on the host', async () => {
+    const hydrateTabs = vi.fn(async () => {
+      throw new WorkspaceApiError(410);
+    });
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => {
+      expect(screen.getByText(/This branch no longer exists/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText('alice/draft')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Go to/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load this file/i)).not.toBeInTheDocument();
+  });
   it('renders file-load-failed when hydrate throws a non-404 error', async () => {
     const hydrateTabs = vi.fn(async () => {
       throw new WorkspaceApiError(500);
