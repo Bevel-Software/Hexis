@@ -1,3 +1,5 @@
+import type { KbWalkListener } from '../../../shared/kb-walk.js';
+
 /**
  * Plugin DISCOVERY as an interface — the one seam between "what a plugin is
  * on disk" and everything that consumes plugins (the plugin index, the link
@@ -75,9 +77,23 @@ export interface Discovery {
   unreadable: string[];
 }
 
+/** What one walk yields when discovery shares it: the plugins, and every hole the walk met anywhere. */
+export interface PluginSourceWalk {
+  discovery: Discovery;
+  /** Every folder the walk could not list, repo-relative — under the plugins root or anywhere else. */
+  holes: string[];
+}
+
 export interface PluginSource {
   /** A short name for logs and the settings screen. */
   readonly dialect: string;
   /** Enumerate the plugins in a KB checkout. Never throws: a broken tree yields warnings. */
   discover(kbRoot: string): Promise<Discovery>;
+  /**
+   * Discover while driving other listeners from the SAME walk — a writer
+   * that needs plugins and grant files alike reads the tree once, and sees
+   * one set of holes. Optional: a source that cannot share its walk is
+   * discovered on its own and the caller walks separately.
+   */
+  walkWith?(kbRoot: string, listeners: readonly KbWalkListener[]): Promise<PluginSourceWalk>;
 }

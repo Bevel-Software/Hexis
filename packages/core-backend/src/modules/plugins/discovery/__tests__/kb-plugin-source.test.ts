@@ -283,16 +283,17 @@ describe('KbPluginSource — one walk, both shapes', () => {
     }
   });
 
-  it('an identity file that cannot even be probed is a hole: the folder is neither listed nor descended into', async () => {
+  it('a folder whose identity file could not be read is a hole that CLAIMS its subtree: nothing beneath surfaces as a plugin', async () => {
     await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
     await write('Plugins/Hidden/plugin.json', '{"name":"hidden"}');
-    // Beneath the unprobeable folder: must stay unseen, not surface as a plugin of its own.
+    // Beneath the hole: the walk still visits it (other listeners may need
+    // it), but to discovery it is inside a plugin folder — not a plugin.
     await write('Plugins/Hidden/Sub/plugin.json', '{"name":"sub"}');
-    const realStat = fs.stat;
-    const spy = vi.spyOn(fs, 'stat').mockImplementation(((file: string, opts: unknown) =>
+    const realReadFile = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
       String(file).endsWith(path.join('Hidden', 'plugin.json'))
         ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
-        : (realStat as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+        : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
     try {
       const { plugins, unreadable } = await new KbPluginSource().discover(kb);
       expect(unreadable).toEqual(['Plugins/Hidden/plugin.json']);

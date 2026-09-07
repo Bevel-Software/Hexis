@@ -11,18 +11,21 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { PluginRenameError, PluginRenameService, renamePluginPrincipalInText } from '../plugin-rename.service.js';
 
-// The walk the rename rewrites through, with a switch that makes it refuse
-// exactly when asked to be strict — the way a folder it cannot list would.
+// The one walk of the checkout, with a switch that makes it report a hole —
+// the way a folder it cannot list would — to every listener on it.
 const walkMock = vi.hoisted(() => ({ holeInTheWalk: false }));
-vi.mock('../../../shared/fs-walk.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../shared/fs-walk.js')>();
+vi.mock('../../../shared/kb-walk.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../shared/kb-walk.js')>();
   return {
     ...actual,
-    walkFiles: (root: string, match: (b: string) => boolean, opts?: { strict?: boolean }) => {
-      if (walkMock.holeInTheWalk && opts?.strict) {
-        throw new actual.WalkError('KnowledgeBase/Notes', Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+    walkKb: async (root: string, listeners: readonly import('../../../shared/kb-walk.js').KbWalkListener[]) => {
+      const result = await actual.walkKb(root, listeners);
+      if (walkMock.holeInTheWalk) {
+        const err = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        for (const l of listeners) await l.onHole?.('KnowledgeBase/Notes', err);
+        result.holes.push('KnowledgeBase/Notes');
       }
-      return actual.walkFiles(root, match, opts);
+      return result;
     },
   };
 });
@@ -135,6 +138,15 @@ describe('PluginRenameService', () => {
     });
     expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
     expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
+  });
+
+  it('a display-name change claims nothing, so a hole elsewhere does not stop it', async () => {
+    walkMock.holeInTheWalk = true;
+    await svc.rename(manager, 'gtm', { displayName: 'Go To Market' });
+    expect((await manifest()).displayName).toBe('Go To Market');
+    expect(commits).toHaveLength(1);
+    // The same hole still refuses an identifier change.
+    await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({ status: 503 });
   });
 
   it('tells a NON-manager nothing about the tree — a holed discovery is still just "unknown plugin" to them', async () => {

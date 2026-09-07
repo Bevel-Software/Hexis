@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
 import { isAbsence } from '../../shared/fs-errors.js';
-import { isSkippedEntry } from '../../shared/fs-walk.js';
+import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -283,6 +283,54 @@ interface AccessScope {
  * `hasPermissionResolved`). `collapseScopes` flattens this into the
  * closest-wins-per-principal view the display helpers use.
  */
+/**
+ * The rules listener on the one walk of the checkout: every `access.md` at
+ * any depth (the access tree is structure-agnostic — the root's included),
+ * plus every plugin manifest under the plugins root, for principal
+ * synthesis. A reader: a folder the walk could not list is simply not in
+ * the model (a writer that needs completeness asks the walk for its holes).
+ *
+ * Per-file failures (malformed YAML, bad role refs, unknown verbs) are
+ * logged and the offending file is dropped from the model — they do NOT
+ * throw. A typo in one nested access.md must not 500 the entire editor;
+ * admins can still write `access.md` / `roles.yaml` because
+ * `hasPermissionResolved` admin-rescues those paths, so the bad config
+ * remains fixable from inside the app.
+ */
+function accessFileListener(
+  repoDir: string,
+  out: Map<string, AccessFile>,
+  pluginDirs: Map<string, string>,
+): KbWalkListener {
+  return {
+    async onFile(dir, name) {
+      const rel = dir ? `${dir}/${name}` : name;
+      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${PLUGINS_DIR}/`)) {
+        const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
+        pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
+        return;
+      }
+      if (name !== 'access.md') return;
+      const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
+      const parsed = parseAccessFile(text, rel);
+      if (!parsed.ok) {
+        // Treat as if the file didn't exist for resolution purposes.
+        // Admin-rescue on access.md paths still lets an admin fix it.
+        for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
+        return;
+      }
+      for (const w of parsed.warnings) console.warn(`[access] ${w}`);
+      if (out.has(parsed.file.dir)) {
+        console.warn(
+          `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
+        );
+        return;
+      }
+      out.set(parsed.file.dir, parsed.file);
+    },
+  };
+}
+
 /** A manifest's parsed object, or null for absent, unparsable or not-an-object text. */
 function parseManifestText(text: string | null): Record<string, unknown> | null {
   if (text === null) return null;
@@ -1506,7 +1554,7 @@ export class AccessControlService implements IAccessControl {
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
     const pluginDirs = new Map<string, string>();
-    await this.collectAccessFiles(repoDir, '', accessFiles, pluginDirs);
+    await walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
     // folder's own access.md — a plugin being a folder with a manifest, at
@@ -1541,56 +1589,6 @@ export class AccessControlService implements IAccessControl {
     };
     this.cache.set(workspaceId, { model, loadedAt: Date.now() });
     return model;
-  }
-
-  private async collectAccessFiles(
-    absDir: string,
-    relDir: string,
-    out: Map<string, AccessFile>,
-    /** Folders under the plugins root carrying a manifest → the plugin's identity, for principal synthesis. */
-    pluginDirs?: Map<string, string>,
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      // Skip VCS metadata + vendored deps — the ONE rule every walk shares
-      // (`isSkippedEntry`), so a writer walking for grants never sees a
-      // folder this model would not have read.
-      if (isSkippedEntry(entry.name)) continue;
-      const abs = path.join(absDir, entry.name);
-      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await this.collectAccessFiles(abs, rel, out, pluginDirs);
-      } else if (
-        pluginDirs &&
-        entry.isFile() &&
-        entry.name === PLUGIN_MANIFEST_FILE &&
-        relDir.startsWith(`${PLUGINS_DIR}/`)
-      ) {
-        pluginDirs.set(relDir, pluginIdentityOf(parseManifestText(await fs.readFile(abs, 'utf-8').catch(() => null)), entry.name === PLUGIN_MANIFEST_FILE ? path.posix.basename(relDir) : relDir));
-      } else if (entry.isFile() && entry.name === 'access.md') {
-        const text = await fs.readFile(abs, 'utf-8');
-        const parsed = parseAccessFile(text, rel);
-        if (!parsed.ok) {
-          // Treat as if the file didn't exist for resolution purposes.
-          // Admin-rescue on access.md paths still lets an admin fix it.
-          for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
-          continue;
-        }
-        for (const w of parsed.warnings) console.warn(`[access] ${w}`);
-        if (out.has(parsed.file.dir)) {
-          console.warn(
-            `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
-          );
-          continue;
-        }
-        out.set(parsed.file.dir, parsed.file);
-      }
-    }
   }
 
   private async repoDir(workspaceId: string): Promise<string> {

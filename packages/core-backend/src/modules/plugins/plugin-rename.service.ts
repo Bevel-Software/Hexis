@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { WalkError, walkFiles } from '../../shared/fs-walk.js';
+import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import {
   PLUGIN_TOKEN_PREFIX,
@@ -97,7 +97,22 @@ export class PluginRenameService {
   ): Promise<RenameResult> {
     const wsId = linksWorkspaceId();
     const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
-    const { plugins, unreadable } = await this.source.discover(kbRoot);
+    // ONE walk of the checkout for everything the rename needs to know:
+    // the plugins (discovery's listener) and every file that can carry a
+    // grant (this one's), seeing one set of holes. Listing is all that
+    // happens here — no file is read, nothing is decided — so it can run
+    // before authorization without telling anyone anything.
+    const grantFiles: string[] = [];
+    const grantListener: KbWalkListener = {
+      onFile(dir, name) {
+        if (hasAccessFrontmatterExtension(name)) grantFiles.push(dir ? `${dir}/${name}` : name);
+      },
+    };
+    const { discovery, holes } = this.source.walkWith
+      ? await this.source.walkWith(kbRoot, [grantListener])
+      : { discovery: await this.source.discover(kbRoot), holes: (await walkKb(kbRoot, [grantListener])).holes };
+    const { plugins } = discovery;
+    const unreadable = [...new Set([...discovery.unreadable, ...holes])];
     // Three phases: READ everything, DECIDE, then WRITE. Nothing about the
     // tree — not even that part of it could not be read — reaches a caller
     // before they are known to manage the plugin they name.
@@ -113,18 +128,19 @@ export class PluginRenameService {
         { kind: 'read-only' },
       );
     }
-    // A rename claims a name against EVERY plugin there is. A listing with a
-    // hole in it — a folder or manifest that exists but could not be read —
-    // is not that set: the name could belong to what was not seen, and two
-    // plugins would answer to it once it is. Fail closed; nothing is written.
-    this.assertComplete(unreadable);
-
     const nextName = patch.name === undefined ? plugin.name : String(patch.name).trim();
     // The rules govern a NEW identifier only. The current one is whatever the
     // manifest says — a hand-written name that predates a rule (a reserved
     // prefix, say) must not block a display-name change, and cannot be
     // "fixed" by a rename that keeps it.
     const identifierChanges = nextName !== plugin.name;
+    // A NEW identifier is claimed against EVERY plugin there is and rewritten
+    // into every grant there is. A listing with a hole in it — a folder or
+    // manifest that exists but could not be read — is neither set: the name
+    // could belong to what was not seen, the grant could live there. Fail
+    // closed; nothing is written. A display-name change claims nothing and
+    // touches one manifest, so it needs no more than its own plugin read.
+    if (identifierChanges) this.assertComplete(unreadable);
     // An identifier must be its own slug: the marketplace and the collision
     // checks key on `pluginManifestName(name)`, so a name that does not
     // round-trip (longer than the slug's 64 characters, say) would be one
@@ -166,21 +182,14 @@ export class PluginRenameService {
       // Every access entry in the knowledge base that names the old
       // principal — in a folder's access.md or in the own frontmatter of any
       // file kind the resolver reads grants from (`.md`, `.tool`, whatever
-      // an overlay registered). STRICT walk: a folder that could not be
-      // listed would leave the old spelling live in it, and a principal
-      // renamed in some files and not others is two principals.
-      // A file the walk listed but that cannot be opened is the same hole as
-      // a folder that cannot be listed: the grant it may hold would keep the
-      // old spelling. Every such file is collected, then refused together.
+      // an overlay registered). The files came from the walk above, whose
+      // holes have already refused: a folder that could not be listed would
+      // leave the old spelling live in it, and a principal renamed in some
+      // files and not others is two principals. A file the walk listed but
+      // that cannot be opened is the same hole: every such file is
+      // collected, then refused together.
       const unopened: string[] = [];
-      let listed: string[];
-      try {
-        listed = await walkFiles(kbRoot, hasAccessFrontmatterExtension, { strict: true });
-      } catch (err) {
-        if (err instanceof WalkError) this.assertComplete([err.relDir || '.']);
-        throw err;
-      }
-      for (const rel of listed) {
+      for (const rel of grantFiles) {
         const abs = path.join(kbRoot, rel);
         let before: string;
         try {

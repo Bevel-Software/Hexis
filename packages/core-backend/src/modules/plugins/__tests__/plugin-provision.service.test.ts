@@ -51,6 +51,20 @@ async function makeHarness() {
   return { svc, dir, commits, accessControl, events, writeFile };
 }
 
+/** Wait until a delete has parked `dir` (it is gone from its place) — the moment a racing creation may start. */
+async function untilParked(dir: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (await fs.stat(dir).then(() => false, () => true)) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`${dir} was never parked`);
+}
+
+/** Let every pending microtask and short timer run — enough for a queued lock waiter to be queued. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 5));
+}
+
 describe('PluginProvisionService.createPlugin', () => {
   let h: Awaited<ReturnType<typeof makeHarness>>;
   beforeEach(async () => {
@@ -240,10 +254,10 @@ describe('PluginProvisionService.deletePlugin', () => {
       () => new Promise<undefined>((_resolve, reject) => { refuse = reject; }),
     );
     const deleting = h.svc.deletePlugin(USER, 'Ext');
-    await new Promise((r) => setTimeout(r, 20));
+    await untilParked(path.join(h.dir, KB, 'Plugins/Ext'));
     // Spelled differently, same identity: must wait for the delete, then see the twin.
     const creating = h.svc.createPlugin(USER, 'Ext Id');
-    await new Promise((r) => setTimeout(r, 20));
+    await settle();
     refuse(new Error('push refused'));
     await expect(deleting).rejects.toThrow('push refused');
     await expect(creating).rejects.toMatchObject({ status: 409 });
@@ -312,11 +326,11 @@ describe('PluginProvisionService.deletePlugin', () => {
       () => new Promise<undefined>((_resolve, reject) => { refuse = reject; }),
     );
     const deleting = h.svc.deletePlugin(USER, 'teams/Deep');
-    await new Promise((r) => setTimeout(r, 20));
+    await untilParked(path.join(h.dir, KB, 'Plugins/teams/Deep'));
     // A creation of the same identity, started while the folder is parked
     // and invisible: it must wait for the delete, not slip in beside it.
     const creating = h.svc.createPlugin(USER, 'Deep');
-    await new Promise((r) => setTimeout(r, 20));
+    await settle();
     refuse(new Error('push refused'));
     await expect(deleting).rejects.toThrow('push refused');
     // The delete rolled back, so `deep` is still taken — and the creation sees it.
