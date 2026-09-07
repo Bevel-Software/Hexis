@@ -3,7 +3,6 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
-  pluginOfPath,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
@@ -33,7 +32,7 @@ import { useLibrary } from '../../state/library-data';
 import { useLibraryToast } from '../../state/toast.context';
 import { libraryHomeForItemPath, urlForSkillFile } from '../../routes/library-paths';
 import { changeAuthorName, formatWhen } from '../../../change-requests/utils/author';
-import { ownersTextOf } from '../../utils/plugin-summary';
+import { ownersTextOf, pluginLabel } from '../../utils/plugin-summary';
 import { neededToolsFor, toolStatus } from '../../utils/status';
 import { StatusDot } from '../StatusDot';
 import { SharedViaPlugins } from './SharedViaPlugins';
@@ -164,11 +163,14 @@ export function SkillPage({
    * plugin's owners. Naming the wrong reviewer is worse than naming none, hence
    * the neutral fallback when the plugin index hasn't resolved.
    */
+  const itemPlugin = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name)?.plugin ?? null,
+    [data.items, name],
+  );
   const ownerName = useMemo(() => {
-    const plugin = skill ? pluginOfPath(skill.path) : null;
-    const summary = plugin ? data.pluginSummaries.find((g) => g.name === plugin) : undefined;
+    const summary = itemPlugin ? data.pluginSummaries.find((g) => g.name === itemPlugin) : undefined;
     return summary ? ownersTextOf(summary) : 'the owner';
-  }, [skill, data.pluginSummaries]);
+  }, [itemPlugin, data.pluginSummaries]);
 
   const files = useMemo(
     () => ['SKILL.md', ...(skill?.files ?? []).map((f) => f.slice(prefix.length))],
@@ -489,7 +491,7 @@ export function SkillPage({
   // The page the skill lives on, not the Library root: "back" from a skill
   // you opened off its plugin page must land on that plugin page. Derived from
   // the path, so a deep link gets the same honest destination as a click.
-  const home = libraryHomeForItemPath(skillPath);
+  const home = libraryHomeForItemPath(skillPath, itemPlugin, (n) => pluginLabel(n, data.pluginSummaries));
   const backLink = (
     <Button variant="quiet" size="sm" onClick={() => navigate(home.path)}>
       {`‹ ${home.label}`}
@@ -612,7 +614,9 @@ export function SkillPage({
             those rules are decided. Same call the tool page made. */}
       </header>
 
-      {owned && (
+      {/* Not before the folder is known: Accept grants ON the folder and
+          Manage access opens it, and both are no-ops against ''. */}
+      {owned && skillPath && (
         <AccessRequestsBanner
           plugin={name}
           folders={[skillPath]}

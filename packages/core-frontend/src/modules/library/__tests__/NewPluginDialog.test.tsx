@@ -56,10 +56,11 @@ function renderDialog(existing: string[] = ['GTM', 'Finance']) {
 describe('NewPluginDialog', () => {
   beforeEach(() => {
     pluginsMock.createPlugin.mockReset();
-    // A folder name that DIFFERS from the input, so a dialog that navigates
-    // with the typed name instead of the server's answer fails here.
+    // A folder AND an identity that both DIFFER from the input, so a dialog
+    // that navigates with the typed name — or with the folder — fails here.
     pluginsMock.createPlugin.mockImplementation(async (name: string) => ({
       folder: `${name}-canonical`,
+      name: `${name.toLowerCase()}-id`,
     }));
   });
 
@@ -75,8 +76,8 @@ describe('NewPluginDialog', () => {
 
     // Trimmed — the endpoint owns everything after the name.
     await waitFor(() => expect(pluginsMock.createPlugin).toHaveBeenCalledWith('Design'));
-    // The route is built from the SERVER's folder, not the typed name.
-    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/plugins/Design-canonical'));
+    // The route is built from the SERVER's identity — not the typed name, not the folder.
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/plugins/design-id'));
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 

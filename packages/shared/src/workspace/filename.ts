@@ -23,9 +23,13 @@ const WINDOWS_RESERVED_NAMES = new Set([
 
 /** Characters Windows forbids in any filename component. `/` is the path
  *  separator on Unix, included for the same reason. `\` is also a path
- *  separator on Windows. Control chars (0x00–0x1F) are rejected separately. */
+ *  separator on Windows. Control characters are rejected with them: NUL and
+ *  0x01–0x1F because Windows refuses them, and DEL (0x7F) — which every
+ *  filesystem would write — as a matter of hygiene: a name carrying a
+ *  character nobody can see or type is not a name people can share, and the
+ *  knowledge-base root names are validated by this same rule. */
 // eslint-disable-next-line no-control-regex
-const FORBIDDEN_CHARS = /[<>:"/\\|?*\x00-\x1F]/;
+const FORBIDDEN_CHARS = /[<>:"/\\|?*\x00-\x1F\x7F]/;
 
 /** Per-component byte limit: NTFS = 255 UTF-16 units, ext4 = 255 bytes,
  *  APFS = 255 UTF-8 bytes. Use UTF-8 bytes — the strictest of the three. */
@@ -45,7 +49,7 @@ export function validateFilename(name: string): string | null {
   if (name === '.' || name === '..') return 'Name cannot be "." or ".."';
 
   if (FORBIDDEN_CHARS.test(name)) {
-    return 'Name cannot contain any of these characters: < > : " / \\ | ? *';
+    return 'Name cannot contain control characters or any of: < > : " / \\ | ? *';
   }
 
   // Windows trims trailing dots and spaces silently — a name ending in either

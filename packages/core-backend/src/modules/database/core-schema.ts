@@ -183,6 +183,12 @@ export const externalApiKeys = pgTable('api_tokens', {
   userId: uuid('user_id').notNull().references(() => users.id),
   tokenHash: text('token_hash').notNull().unique(),
   label: text('label').notNull(),
+  /**
+   * What the key was minted as: `key` by hand, or a flow's own kind (a
+   * Claude link). The one fact that tells such keys apart — the label is
+   * free text the person may edit or imitate.
+   */
+  kind: text('kind').default('key').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastUsedAt: timestamp('last_used_at'),
   revokedAt: timestamp('revoked_at'),
@@ -489,4 +495,52 @@ export const deploymentSettings = pgTable('deployment_settings', {
    */
   updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+/**
+ * What this deployment presents to claude.ai as a "GitHub Enterprise Server"
+ * so that Cowork and claude.ai can add the per-user marketplace: the app id,
+ * client id and secrets an Owner pastes into Claude's admin settings. ONE row,
+ * generated on first use, replaced whole on rotate. Secrets are sealed with
+ * the secrets key, as stored settings are — see
+ * `marketplace/github-facade/github-facade-credentials.service.ts`.
+ */
+export const githubFacadeIdentity = pgTable('github_facade_identity', {
+  id: text('id').primaryKey(),
+  appId: text('app_id').notNull(),
+  clientId: text('client_id').notNull(),
+  /** Sealed. */
+  clientSecret: text('client_secret').notNull(),
+  /** Sealed. */
+  webhookSecret: text('webhook_secret').notNull(),
+  /** Sealed — PKCS#1 PEM. */
+  privateKeyPem: text('private_key_pem').notNull(),
+  publicKeyPem: text('public_key_pem').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  rotatedAt: timestamp('rotated_at'),
+});
+
+/**
+ * One-time codes the Claude connect flow issues on the consent page and
+ * Anthropic's backend exchanges seconds later — in the database so the
+ * replica that issued a code and the replica asked to exchange it agree.
+ *
+ * Keyed by the PERSON: "one live code per person" is the table's own rule,
+ * not a cleanup's. Issuing upserts their row — the newest code overwrites
+ * the last in one statement — so the table holds at most one row per user,
+ * for as long as the user exists (the row goes with them), and nothing ever
+ * has to sweep it. The client id is data the exchange checks, not part of
+ * the key: the bridge has one client, and a rotated client id must not leave
+ * a dead row behind under the old one. The code's hash is the unique lookup
+ * an exchange uses, spent by a conditional update. See
+ * `marketplace/github-facade/github-facade-codes.store.ts`.
+ */
+export const githubFacadeCodes = pgTable('github_facade_codes', {
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull(),
+  codeHash: text('code_hash').notNull().unique(),
+  redirectUri: text('redirect_uri').notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  consumedAt: timestamp('consumed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
 });

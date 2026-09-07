@@ -9,6 +9,7 @@ import {
   renderPluginManifest,
 } from '@bevel-software/platform-shared';
 import { BUNDLE_FILE } from '../../../plugins/discovery/bundle-dialect/bundle.source.js';
+import { isAbsence } from '../../../../shared/fs-errors.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -126,7 +127,3 @@ async function isFile(abs: string): Promise<boolean> {
   );
 }
 
-function isAbsence(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === 'ENOENT' || code === 'ENOTDIR';
-}

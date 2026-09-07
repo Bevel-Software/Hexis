@@ -61,6 +61,16 @@ export const MARKETPLACE_NAME = 'hexis';
 export const BUNDLE_PLUGIN = 'hexis-all';
 
 /**
+ * The KIND stored on a connection key minted when a person connects an
+ * account on a product that treats this deployment as a GitHub Enterprise
+ * host (claude.ai, Cowork) — the backend's `GITHUB_LINK_KEY_KIND`, spelled
+ * once more here so the key list can tell those links from keys people
+ * created by hand. The kind, never the label: a label is free text anyone
+ * can type.
+ */
+export const GITHUB_LINK_KIND = 'github-link';
+
+/**
  * The three one-liners the settings page shows, with the key in the URL —
  * Claude Code's background refresh disables credential helpers, so the key
  * has nowhere else to live. `key` may be a placeholder.

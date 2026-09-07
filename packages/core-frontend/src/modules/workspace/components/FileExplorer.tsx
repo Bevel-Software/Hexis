@@ -592,6 +592,9 @@ export function FileTreeNode({
   const hasChildren = (entry.children?.length ?? 0) > 0;
   // Escape inside the context menu hands focus back to the row it came from.
   const rowRef = useRef<HTMLButtonElement>(null);
+  // The heading form of the row is a div, not a button; it is focusable so
+  // Escape in its menu has somewhere to hand focus back to.
+  const headingRef = useRef<HTMLDivElement>(null);
 
   // Auto-expand a directory whenever the open file lives inside it (so
   // deep-link URLs reveal the file's row in the tree) or while files
@@ -776,8 +779,11 @@ export function FileTreeNode({
           // that happens to be this folder's row: it takes drops, opens the
           // folder's menu, and shows the row's verbs on hover.
           <div
+            ref={headingRef}
+            tabIndex={0}
             className={cn(
               'group/label flex items-center gap-1 rounded-sm px-2.5 pb-1.5 pt-5',
+              'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
               dragOver && 'bg-hover ring-1 ring-accent/40',
             )}
             onDrop={handleDrop}
@@ -909,7 +915,7 @@ export function FileTreeNode({
             onRename={isHeading ? undefined : () => setRenaming(true)}
             deletable={!isHeading}
             onDownload={handleDownload}
-            returnFocusTo={rowRef}
+            returnFocusTo={isHeading ? headingRef : rowRef}
           />
         )}
       </div>

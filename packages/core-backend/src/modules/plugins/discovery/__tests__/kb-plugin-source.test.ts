@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,6 +54,8 @@ describe('KbPluginSource — bundles', () => {
       JSON.stringify({ name: 'close', version: '0.1.0', mcpProfile: 'empty', sourceSkillRoots: ['skills/departments/business/finance'] }),
     );
     await write('plugins/departments/engineering/shared/unnamed/plugin.bundle.json', JSON.stringify({ sourceSkillRoots: ['../escape', 'skills/x'] }));
+    // A bundle whose name is not its folder's, with no display name of its own.
+    await write('plugins/departments/business/finance/ledger-folder/plugin.bundle.json', JSON.stringify({ name: 'ledger' }));
     await write('plugins/broken/plugin.bundle.json', '{ not json');
   });
   afterEach(async () => {
@@ -64,7 +66,10 @@ describe('KbPluginSource — bundles', () => {
   it('finds bundles at any depth and reads them as plugins that link skill roots', async () => {
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
-    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'unnamed']);
+    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'unnamed']);
+    // The shared contract: a declared display name, else the FOLDER — never the identity.
+    expect(byName.get('example-plugin')!.displayName).toBe('Example Plugin');
+    expect(byName.get('ledger')!.displayName).toBe('ledger-folder');
 
     const example = byName.get('example-plugin')!;
     expect(example.folder).toBe('plugins/functional/cluster-a/example-plugin');
@@ -113,21 +118,30 @@ describe('KbPluginSource — bundles', () => {
           // A stray blank url beside a real command is still a stdio server.
           { id: 'launch', config: { type: 'stdio', command: 'run-it', url: '' } },
           { id: 'untyped-launch', config: { command: 'run-it', url: '' } },
+          // The client speaks no sse; shipping it would install a server nothing can use.
+          { id: 'events', config: { type: 'sse', url: 'https://events.example' } },
+          // A name that cannot be a server name (the secret namespace, the route slug).
+          { id: 'Bad Id', config: { command: 'x' } },
         ],
-        profiles: [{ id: 'global', servers: ['jira', 'no-url', 'blank-url', 'odd', 'launch', 'untyped-launch'] }],
+        profiles: [
+          { id: 'global', servers: ['jira', 'no-url', 'blank-url', 'odd', 'launch', 'untyped-launch', 'events', 'Bad Id'] },
+        ],
       }),
     );
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const example = plugins.find((p) => p.name === 'example-plugin')!;
     expect(example.mcpServers).toEqual({
       jira: { type: 'stdio', command: 'npx', args: ['-y', 'jira-mcp'] },
-      launch: { type: 'stdio', command: 'run-it' },
-      'untyped-launch': { type: 'stdio', command: 'run-it' },
+      launch: { type: 'stdio', command: 'run-it', args: [] },
+      'untyped-launch': { type: 'stdio', command: 'run-it', args: [] },
     });
     expect(warnings.some((w) => w.includes('"jira" is declared twice'))).toBe(true);
-    expect(warnings.some((w) => w.includes('"no-url" has transport "http" but no url'))).toBe(true);
+    // The reasons are the shared judgement's — the same words an mcp.json entry gets.
+    expect(warnings.some((w) => w.includes('"no-url" no url'))).toBe(true);
     expect(warnings.some((w) => w.includes('"blank-url" has neither a url nor a command'))).toBe(true);
-    expect(warnings.some((w) => w.includes('"odd" has an unknown transport'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"odd" unknown type "grpc"'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"events" the MCP client has no `sse` transport'))).toBe(true);
+    expect(warnings.some((w) => w.includes('"Bad Id" the name is the secret namespace'))).toBe(true);
   });
 
   it('cuts an extends cycle instead of hanging, and keeps what it collected', async () => {
@@ -188,13 +202,13 @@ describe('KbPluginSource — one walk, both shapes', () => {
     // Folders are visited in locale order (case-insensitive), depth first.
     // Position means nothing: only the two files make a plugin.
     expect(plugins.map((p) => [p.name, p.folder, p.linksAreManaged, p.exists])).toEqual([
-      ['Both', 'Plugins/Both', true, false],
+      ['both', 'Plugins/Both', true, false],
       ['example', 'Plugins/functional/cluster/example', false, true],
-      ['GTM', 'Plugins/GTM', true, true],
+      ['gtm', 'Plugins/GTM', true, true],
       ['deep', 'Plugins/teams/deep', true, false],
     ]);
-    expect(plugins.find((p) => p.name === 'GTM')?.linkedRoots).toEqual(['Skills/Eng']);
-    expect(plugins.find((p) => p.name === 'Both')?.linkedRoots).toEqual([]);
+    expect(plugins.find((p) => p.name === 'gtm')?.linkedRoots).toEqual(['Skills/Eng']);
+    expect(plugins.find((p) => p.name === 'both')?.linkedRoots).toEqual([]);
     expect(warnings).toEqual([]);
   });
 
@@ -206,14 +220,110 @@ describe('KbPluginSource — one walk, both shapes', () => {
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     expect(plugins.map((p) => p.folder)).toEqual(['Plugins/a/GTM']);
     expect(warnings).toEqual([
-      'Plugins/b/GTM: plugin name "GTM" is already used by Plugins/a/GTM — plugin skipped',
+      'Plugins/b/GTM: plugin name "gtm" is already used by Plugins/a/GTM — plugin skipped',
       'Plugins/c/gtm: plugin name "gtm" is already used by Plugins/a/GTM — plugin skipped',
     ]);
   });
 
-  it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
+  it('the manifest name is the identity and the folder only the label — unless the name is no identifier', async () => {
+    await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', displayName: 'Go To Market' }));
+    await write('Plugins/Numeric/plugin.json', '{"name":42}');
+    // A name nested deeper than any stack would serialise: the warning must
+    // describe it, never try to print it.
+    await write('Plugins/Nested/plugin.json', `{"name":${'['.repeat(20000)}${']'.repeat(20000)}}`);
+    await write('Plugins/Ops/plugin.json', JSON.stringify({ name: 'Not An Identifier' }));
+    await write('Plugins/Plain/plugin.json', '{}');
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
+    expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
+      ['go-to-market', 'Go To Market', 'Plugins/GTM'],
+      ['nested', 'Nested', 'Plugins/Nested'],
+      ['numeric', 'Numeric', 'Plugins/Numeric'],
+      ['ops', 'Ops', 'Plugins/Ops'],
+      ['plain', 'Plain', 'Plugins/Plain'],
+    ]);
+    // Every PRESENT name that is no identifier is said out loud — whatever its type.
+    expect(warnings).toEqual([
+      'Plugins/Nested/plugin.json names a value of type array, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "nested"',
+      'Plugins/Numeric/plugin.json names a value of type number, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "numeric"',
+      'Plugins/Ops/plugin.json names "Not An Identifier", which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "ops"',
+    ]);
+  });
+
+  it('counts what exists but could not be read — a folder, a manifest — so a writer can tell a hole from an absence', async () => {
+    await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
+    // An optional file that cannot be read carries no identity: a warning, never a hole.
+    await write('Plugins/GTM/mcp.json', '{"mcpServers":{}}');
+    await write('Plugins/Hidden/plugin.json', '{"name":"hidden-identity"}');
+    await write('Plugins/teams/Deep/plugin.json', '{"name":"deep"}');
+    const realReaddir = fs.readdir;
+    const realReadFile = fs.readFile;
+    const eacces = () => Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }));
+    const spies = [
+      vi.spyOn(fs, 'readdir').mockImplementation(((dir: string, opts: unknown) =>
+        String(dir).endsWith('teams') ? eacces() : (realReaddir as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts)) as never),
+      vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+        (String(file).includes('Hidden') && String(file).endsWith('plugin.json')) || String(file).endsWith('mcp.json')
+          ? eacces()
+          : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never),
+    ];
+    try {
+      const { plugins, warnings, unreadable } = await new KbPluginSource().discover(kb);
+      // The container could not be listed: nothing beneath it was seen. The
+      // manifest could not be read: an identity nobody could see, so the
+      // plugin is not listed under a guessed one. Both are holes, not absence.
+      expect(unreadable).toEqual(['Plugins/Hidden/plugin.json', 'Plugins/teams']);
+      expect(plugins.map((p) => p.name)).toEqual(['gtm']);
+      expect(warnings.some((w) => w.startsWith('Plugins/Hidden/plugin.json could not be read'))).toBe(true);
+      expect(warnings.some((w) => w.startsWith('Plugins/teams: could not be read'))).toBe(true);
+      // The unreadable mcp.json is said, and GTM stands without it.
+      expect(warnings.some((w) => w.startsWith('Plugins/GTM/mcp.json could not be read'))).toBe(true);
+      expect(plugins[0]!.mcpServers).toBeNull();
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
+  });
+
+  it('a folder whose identity file could not be read is a hole that CLAIMS its subtree: nothing beneath surfaces as a plugin', async () => {
+    await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
+    await write('Plugins/Hidden/plugin.json', '{"name":"hidden"}');
+    // Beneath the hole: the walk still visits it (other listeners may need
+    // it), but to discovery it is inside a plugin folder — not a plugin.
+    await write('Plugins/Hidden/Sub/plugin.json', '{"name":"sub"}');
+    const realReadFile = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith(path.join('Hidden', 'plugin.json'))
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      const { plugins, unreadable } = await new KbPluginSource().discover(kb);
+      expect(unreadable).toEqual(['Plugins/Hidden/plugin.json']);
+      expect(plugins.map((p) => p.name)).toEqual(['gtm']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a manifest that vanishes between the probe and the read is no plugin — never one under a guessed name', async () => {
+    await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
+    await write('Plugins/Gone/plugin.json', '{"name":"gone"}');
+    const realReadFile = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith(path.join('Gone', 'plugin.json'))
+        ? Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }))
+        : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      const { plugins, unreadable } = await new KbPluginSource().discover(kb);
+      expect(plugins.map((p) => p.name)).toEqual(['gtm']);
+      expect(unreadable).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
+    const { plugins, warnings, unreadable } = await new KbPluginSource().discover(kb);
     expect(plugins).toEqual([]);
     expect(warnings).toEqual([]);
+    expect(unreadable).toEqual([]);
   });
 });

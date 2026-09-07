@@ -6,10 +6,12 @@ import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
   decodePluginSegment,
+  pathForPlugin,
   pathForPluginsIndex,
   urlForLibraryItem,
 } from '../routes/library-paths';
-import { primaryFolderOf } from '../utils/plugin-summary';
+import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
+import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
@@ -116,6 +118,8 @@ export function PluginPage() {
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
   /** Whether the plugin's own delete confirmation is up. */
   const [deleteOpen, setDeleteOpen] = useState(false);
+  /** Whether the rename dialog is up. */
+  const [renameOpen, setRenameOpen] = useState(false);
 
   const summary = useMemo(
     () => data.pluginSummaries.find((g) => g.name === plugin) ?? null,
@@ -135,6 +139,7 @@ export function PluginPage() {
   );
 
   const skillItems = pluginItems.filter((i) => i.kind === 'skill');
+  const releasedSkillItems = skillItems.filter((i) => !i.pending);
   const toolItems = pluginItems.filter((i) => i.kind === 'integration');
   const attention = attentionOf(data.items, plugin);
   // What the Skills band actually renders. The filter is a VIEW over the band,
@@ -228,10 +233,16 @@ export function PluginPage() {
   }
 
   const primaryFolder = summary ? primaryFolderOf(summary) : null;
+  // What the page CALLS the plugin — its display name. `plugin` stays the
+  // identity: the URL, the grants, the API.
+  const label = pluginLabel(plugin, data.pluginSummaries);
+  // Where its files ARE, below the plugins root — what the manifest button
+  // and the extensions listing build paths from. The identity is not a path.
+  const folderBelowRoot = primaryFolder ? primaryFolder.slice(primaryFolder.indexOf('/') + 1) : plugin;
 
   return (
     <div className="pb-14">
-      <PluginBreadcrumb name={plugin} />
+      <PluginBreadcrumb name={label} />
 
       {/* The title row carries the page's one persistent action. `Share` IS
           the manage-access dialog — not a doorway to it. It stays un-gated:
@@ -242,9 +253,18 @@ export function PluginPage() {
           Share stays un-gated: for a non-writer the dialog renders read-only,
           which is exactly what "who is this shared with?" should answer. */}
       <div className="flex items-start justify-between gap-4">
-        <h1 className="mt-1.5 text-display font-semibold">{plugin}</h1>
+        <div className="min-w-0">
+          <h1 className="mt-1.5 text-display font-semibold">{label}</h1>
+          {/* Where it lives — the folder is no longer the name, so it is
+              said beneath it, the way a file path sits under a document title. */}
+          {primaryFolder && (
+            <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
+              {primaryFolder}
+            </p>
+          )}
+        </div>
         <div className="mt-1.5 flex items-center gap-1">
-          <ManifestButton kbDirName={kbDirName} folder={plugin} canWrite={summary?.canWrite === true} />
+          <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             // The dialog needs both to mount (`addOpen && summary &&
@@ -259,7 +279,11 @@ export function PluginPage() {
             // route enforces, so the item appears for exactly the people the
             // backend will let through.
             onDelete={summary?.isOwner ? () => setDeleteOpen(true) : undefined}
-            addLabel={`Add a skill or tool to ${plugin}`}
+            // The MANAGER's verb: the same gate as linking and the join banner —
+            // and, like linking, only for a plugin this platform writes (an
+            // external format is renamed in its own repository).
+            onRename={summary?.canWrite && summary.linksAreManaged !== false ? () => setRenameOpen(true) : undefined}
+            addLabel={`Add a skill or tool to ${label}`}
           />
         </div>
       </div>
@@ -296,11 +320,14 @@ export function PluginPage() {
       {/* Ownership decides readability, the plugin is a view: a linked skill
           the caller may not read is simply absent from their list, and the
           plugin's own total says how many. */}
-      {summary && summary.skillCount > skillItems.length && (
+      {/* Against the RELEASED skills the caller sees: a pending proposal is
+          a card here but not in the plugin's total, and counting it would
+          hide one hidden skill per proposal. */}
+      {summary && summary.skillCount > releasedSkillItems.length && (
         <p className="mb-2 text-detail text-ink-faint">
-          {summary.skillCount - skillItems.length === 1
+          {summary.skillCount - releasedSkillItems.length === 1
             ? '1 skill in this plugin is not shared with you.'
-            : `${summary.skillCount - skillItems.length} skills in this plugin are not shared with you.`}
+            : `${summary.skillCount - releasedSkillItems.length} skills in this plugin are not shared with you.`}
         </p>
       )}
       <PluginItemSections
@@ -311,6 +338,11 @@ export function PluginPage() {
         // them answer join requests. The backend's per-path gate enforces it
         // for real; this only decides who sees the affordance.
         onRemove={summary?.canWrite ? setRemoving : undefined}
+        // A LINK into a plugin whose links live in an external format cannot
+        // be removed here — the endpoint refuses it — so it is not offered.
+        canRemove={(item) =>
+          summary?.linksAreManaged !== false || !(item.plugins?.some((m) => m.name === plugin && m.linked) ?? false)
+        }
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'
@@ -390,6 +422,19 @@ export function PluginPage() {
         />
       )}
 
+      {renameOpen && summary && (
+        <RenamePluginDialog
+          plugin={summary}
+          onClose={() => setRenameOpen(false)}
+          onRenamed={(next) => {
+            data.reload();
+            data.reloadPlugins();
+            // The identity is the URL: a renamed plugin lives at a new address.
+            if (next.name !== plugin) navigate(pathForPlugin(next.name));
+          }}
+        />
+      )}
+
       {deleteOpen && summary && (
         <DeletePluginDialog
           name={plugin}
@@ -411,9 +456,12 @@ export function PluginPage() {
         <RemoveLibraryItemDialog
           item={removing}
           place={plugin}
+          // In this plugin by LINK: the manifest entry goes, the skill stays.
+          linked={removing.plugins?.some((m) => m.name === plugin && m.linked) ?? false}
           onClose={() => setRemoving(null)}
           onRemoved={() => {
-            toast(`Removed ${removing.name} from ${plugin}.`);
+            const wasLinked = removing.plugins?.some((m) => m.name === plugin && m.linked) ?? false;
+            toast(wasLinked ? `Unlinked ${removing.name} from ${plugin}.` : `Removed ${removing.name} from ${plugin}.`);
             // Catalog for the card, plugin index for the counts.
             data.reload();
             data.reloadPlugins();
@@ -421,7 +469,7 @@ export function PluginPage() {
         />
       )}
 
-      <ClientExtensionsSection kbDirName={kbDirName} folder={plugin} />
+      <ClientExtensionsSection kbDirName={kbDirName} folder={folderBelowRoot} />
       {manageDialog}
     </div>
   );

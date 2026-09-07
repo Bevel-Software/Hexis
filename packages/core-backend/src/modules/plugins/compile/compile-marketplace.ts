@@ -9,6 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { walkFiles } from '../../../shared/fs-walk.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
+import { judgeMcpServerEntry } from '../../tool-manuals/mcp-json-discovery.js';
 import type { SkillSummary } from '../../skills/skills.contract.js';
 import type { LinkMembership } from '../plugin-links.js';
 import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
@@ -158,14 +159,16 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
         `${name}: skill "${s.name}" at ${s.path} shares its name with ${other.path} — the second is left out`,
       ),
     );
-    const mcp = portableMcp(plugin.mcpServers);
+    const mcp = portableMcp(plugin.mcpServers, (name, reason) =>
+      warnings.push(`${plugin.folder}: mcp server "${name}" not shipped — ${reason}`),
+    );
     if (dedup.length === 0 && mcp === null) continue; // nothing this caller may see
-    // The slug is ALWAYS sanitised, even when the manifest declares a name: it
-    // becomes a path segment in the compiled tree, and a checked-in manifest
-    // is repository content, not trusted input. The same folding the
-    // provisioner applies (`[a-z0-9.-]`, no runs, no leading dots) leaves
-    // nothing that can be a separator or a parent reference.
-    const slug = pluginManifestName(typeof manifest?.name === 'string' && manifest.name ? manifest.name : name);
+    // The plugin's identity IS the marketplace slug. Folded once more here
+    // all the same: it becomes a path segment in the compiled tree, and a
+    // checked-in manifest is repository content, not trusted input — the
+    // folding (`[a-z0-9.-]`, no runs, no leading dots) leaves nothing that
+    // can be a separator or a parent reference.
+    const slug = pluginManifestName(name);
     if (RESERVED_SLUGS.has(slug)) {
       warnings.push(`${plugin.folder}: manifest name "${slug}" is reserved by the marketplace and cannot be a plugin — plugin skipped`);
       continue;
@@ -176,7 +179,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     }
     out.push({
       slug,
-      displayName: typeof manifest?.displayName === 'string' ? manifest.displayName : name,
+      displayName: plugin.displayName,
       description: typeof manifest?.description === 'string' ? manifest.description : undefined,
       version: typeof manifest?.version === 'string' ? manifest.version : undefined,
       skills: dedup,
@@ -359,28 +362,41 @@ function dedupeByName(
 }
 
 /**
- * The portable half of a plugin's `mcpServers`: transport, url, command,
- * args, env, cwd, and only those headers a client may send verbatim (no
- * `${VAR}` vault references). Null when there is no server to ship.
+ * The portable half of a plugin's `mcpServers`: every entry the ONE
+ * judgement accepts (a name a client can key on, a transport it speaks, the
+ * field that transport needs), normalised, minus what a client cannot use —
+ * `${VAR}` vault references in a url or a header. Null when there is no
+ * server to ship; each server left out is reported with the judgement's
+ * reason, so an omission is diagnosable.
  */
-function portableMcp(servers: Record<string, unknown> | null): Record<string, Record<string, unknown>> | null {
+function portableMcp(
+  servers: Record<string, unknown> | null,
+  leftOut: (name: string, reason: string) => void,
+): Record<string, Record<string, unknown>> | null {
   if (!servers) return null;
   const out: Record<string, Record<string, unknown>> = {};
   for (const [name, raw] of Object.entries(servers)) {
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
-    const server = raw as Record<string, unknown>;
-    const entry: Record<string, unknown> = {};
-    for (const key of ['type', 'url', 'command', 'args', 'env', 'cwd'] as const) {
-      if (server[key] !== undefined) entry[key] = server[key];
+    const verdict = judgeMcpServerEntry(name, raw);
+    if (!verdict.ok) {
+      leftOut(name, verdict.reason);
+      continue;
     }
-    if (typeof server.headers === 'object' && server.headers !== null) {
+    if (verdict.transport === 'stdio') {
+      out[name] = { ...verdict.entry };
+      continue;
+    }
+    const entry: Record<string, unknown> = { type: verdict.entry.type, url: verdict.entry.url };
+    if (containsVariableReference(verdict.entry.url)) {
+      leftOut(name, 'its url is expanded from the vault, which a client cannot do');
+      continue;
+    }
+    if (verdict.entry.headers) {
       const headers: Record<string, string> = {};
-      for (const [h, v] of Object.entries(server.headers as Record<string, unknown>)) {
-        if (typeof v === 'string' && !containsVariableReference(v)) headers[h] = v;
+      for (const [h, v] of Object.entries(verdict.entry.headers)) {
+        if (!containsVariableReference(v)) headers[h] = v;
       }
       if (Object.keys(headers).length > 0) entry.headers = headers;
     }
-    if (typeof entry.url === 'string' && containsVariableReference(entry.url)) continue; // ours to expand, not theirs
     out[name] = entry;
   }
   return Object.keys(out).length > 0 ? out : null;

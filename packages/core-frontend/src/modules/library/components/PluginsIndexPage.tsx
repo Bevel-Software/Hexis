@@ -6,7 +6,7 @@ import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
-import { ownersTextOf } from '../utils/plugin-summary';
+import { ownersTextOf, pluginLabel } from '../utils/plugin-summary';
 import type { PluginSummary } from '../services/plugins.api';
 import { EmptyStateAction } from './plugin-page-parts';
 import { PluginIndexRow } from './PluginIndexRow';
@@ -147,7 +147,7 @@ export function PluginsIndexPage() {
             {mine.map((entry) => (
               <PluginIndexRow
                 key={entry.name}
-                label={entry.name}
+                label={pluginLabel(entry.name, pluginSummaries)}
                 badge={
                   entry.summary?.canWrite ? (
                     <Badge tone="outline" size="xs" className="shrink-0 uppercase">
@@ -175,7 +175,7 @@ export function PluginsIndexPage() {
                 {locked.map((entry) => (
                   <PluginIndexRow
                     key={entry.name}
-                    label={entry.name}
+                    label={pluginLabel(entry.name, pluginSummaries)}
                     {...describe(entry)}
                     /* The row has to SAY it is locked, not just look it — the
                        glyph is decorative (`aria-hidden`) and the word beside

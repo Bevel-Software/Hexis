@@ -47,10 +47,14 @@ export interface ResolvedReaders extends ResolvedPrincipals {
 
 /** One plugin as `GET /api/plugins` reports it, resolved for ONE caller. */
 export interface PluginSummary {
-  /** Plugin folder name, e.g. `GTM`. */
+  /** The plugin's identity — its manifest name, e.g. `gtm`. */
   name: string;
+  /** What a person sees it called, e.g. `GTM`. */
+  displayName: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /** Whether this platform writes the plugin's links — see `PluginCatalogEntry`. */
+  linksAreManaged: boolean;
   /**
    * Per-caller: the caller can read the FOLDER (membership). Every returned
    * plugin has at least one of `canRead` / `canWrite` / discoverability; a
@@ -92,8 +96,17 @@ export interface PluginSummary {
  * appears at all) are resolved per request in the route.
  */
 export interface PluginCatalogEntry {
+  /** The plugin's identity — its manifest name. */
   name: string;
+  /** What a person sees it called — the manifest's `displayName`, else the folder name. */
+  displayName: string;
   folders: string[];
+  /**
+   * Whether this platform writes the plugin's links (a native `plugin.json`)
+   * — false for a plugin read from an external format, whose links are
+   * edited in that repository and which the link endpoints refuse.
+   */
+  linksAreManaged: boolean;
   skillCount: number;
   toolCount: number;
   owners: ResolvedPrincipals;

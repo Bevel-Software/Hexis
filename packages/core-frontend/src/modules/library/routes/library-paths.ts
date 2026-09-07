@@ -206,16 +206,29 @@ function decodeSegment(raw: string): string {
  * plugin page for a grouped item, the personal page for a personal one, and
  * the root only for the legacy shapes that live in neither.
  */
-export function libraryHomeForItemPath(repoRelativePath: string): {
+export function libraryHomeForItemPath(
+  repoRelativePath: string,
+  /**
+   * The plugin's IDENTITY, resolved by the caller through the catalog. Both
+   * `undefined` (not resolved) and `null` (resolved to no plugin) fall back
+   * to the folder — a personal shelf is decided by the folder before either.
+   */
+  pluginName?: string | null,
+  /** The label for that identity; identity by default. */
+  labelOf: (name: string) => string = (n) => n,
+): {
   label: string;
   path: string;
 } {
-  const plugin = pluginOfPath(repoRelativePath);
-  if (plugin !== null && !isPersonalPluginFolder(plugin)) {
-    return { label: plugin, path: pathForPlugin(plugin) };
-  }
-  if (plugin !== null) {
+  const folder = pluginOfPath(repoRelativePath);
+  // A personal shelf is decided by the FOLDER, whatever identity the caller
+  // resolved (a personal item's identity is null: a shelf is not a plugin).
+  if (folder !== null && isPersonalPluginFolder(folder)) {
     return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
+  }
+  const plugin = pluginName ?? folder;
+  if (plugin !== null) {
+    return { label: labelOf(plugin), path: pathForPlugin(plugin) };
   }
   return { label: 'All skills & tools', path: LIBRARY_ROOT };
 }

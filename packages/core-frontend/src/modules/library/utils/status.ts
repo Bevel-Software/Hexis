@@ -280,6 +280,10 @@ export function withLinkHealth<T extends LibraryFilterable & { status: Attention
     (m) => m.name === plugin,
   );
   if (!membership?.linked || membership.granted !== false) return item;
+  // One amber note at a time, and the card's own comes first: a skill whose
+  // tools need setup, or one under review, already says what to do — the
+  // broken link is reported once that is settled, not in its place.
+  if (item.status.state !== 'ok') return item;
   return {
     ...item,
     status: {

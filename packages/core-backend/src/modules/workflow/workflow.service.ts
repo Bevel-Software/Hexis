@@ -276,7 +276,10 @@ export class WorkflowService implements IWorkflowService {
    */
   private orphanSweepStarted = false;
 
-  async listBranches(workspaceId: string, opts?: { freshFetch?: boolean }): Promise<Branch[]> {
+  async listBranches(
+    workspaceId: string,
+    opts?: { freshFetch?: boolean; strictFetch?: boolean },
+  ): Promise<Branch[]> {
     const branches = await this.git.listBranches(workspaceId, opts);
     if (!this.orphanSweepStarted) {
       this.orphanSweepStarted = true;

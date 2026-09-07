@@ -78,17 +78,35 @@ export function createSkillAccessRequestRoutes(deps: {
         return;
       }
       const branch = joinBranchFor(user.email, folder);
-      const existing = (await workflow.listChangeRequestsAuthoredBy(user.email)).find(
+      // FRESH: a repeated click must find the request the previous one opened,
+      // and the cached listing can trail it — a miss here would send the
+      // retry into a duplicate refusal.
+      const existing = (await workflow.listChangeRequestsAuthoredBy(user.email, { fresh: true })).find(
         (cr) => cr.state === 'open' && cr.branch === branch,
       );
       if (existing) {
         res.json({ ok: true, number: existing.number });
         return;
       }
-      try {
-        await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);
-      } catch {
-        // exists (or raced) — proceed against it
+      // The branch may already exist (a request listed as closed, a retry
+      // after a failed open). Existence is PROBED, before and — if creation
+      // fails — after: the race shows up as "already exists" locally or as a
+      // rejected push when origin got there first, and a message is not a
+      // contract. A branch that is there is proceeded against; anything else
+      // is a real failure, and a proposal on a branch that was not made would
+      // be worse than the error. STRICT: the list proves absence, and a
+      // listing that could not fetch proves nothing — it throws instead of
+      // serving refs from before the branch was made (or deleted).
+      const branchExists = async () =>
+        (await workflow.listBranches(wsId(), { freshFetch: true, strictFetch: true })).some(
+          (b) => b.name === branch,
+        );
+      if (!(await branchExists())) {
+        try {
+          await workflow.createBranch(wsId(), branch, DEFAULT_BRANCH);
+        } catch (err) {
+          if (!(await branchExists())) throw err;
+        }
       }
       const ws = await workspaceService.getOrCreateForBranch(branch);
       const accessPath = `${kbDirName}/${rulesOf(folder)}`;

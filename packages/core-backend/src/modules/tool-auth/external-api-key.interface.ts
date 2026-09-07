@@ -22,6 +22,12 @@ declare global {
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
+  /**
+   * What the key was minted AS — `key` for one a person created by hand,
+   * another kind for one a flow minted on their behalf (a Claude link).
+   * Stored with the row; the label is the person's to edit and proves nothing.
+   */
+  kind: string;
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
@@ -35,6 +41,19 @@ export interface ExternalApiKeySummary {
 export interface MintedExternalApiKey {
   plaintext: string;
   summary: ExternalApiKeySummary;
+}
+
+/** The kind of a key a person creates by hand. */
+export const DEFAULT_KEY_KIND = 'key';
+
+/**
+ * How a key is minted. `kind` names one of the kinds the service was built
+ * with, each of which carries its own plaintext prefix (the tenant's for the
+ * default kind, `gho_` for a Claude link); an unknown kind is refused, since
+ * nothing would route its bearer back.
+ */
+export interface MintOptions {
+  kind?: string;
 }
 
 /**
@@ -59,7 +78,7 @@ export interface IExternalApiKeyService {
    * plaintext is **only** returned here — there is no read path that can
    * surface it again.
    */
-  mint(userId: string, label: string): Promise<MintedExternalApiKey>;
+  mint(userId: string, label: string, options?: MintOptions): Promise<MintedExternalApiKey>;
 
   /**
    * Resolve a plaintext token to the owning user. Returns null when the

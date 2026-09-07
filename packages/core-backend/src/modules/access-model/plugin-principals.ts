@@ -1,4 +1,4 @@
-import { pluginManifestName } from '@bevel-software/platform-shared';
+import { comparePathComponents } from '../../shared/path-order.js';
 import {
   EVERYONE_CANONICAL,
   PLUGIN_TOKEN_PREFIX,
@@ -53,28 +53,32 @@ export function synthesizePluginPrincipals(
   accessFiles: ReadonlyMap<string, AccessFile>,
   /**
    * The repo-relative folders that ARE plugins — the ones carrying a
-   * `plugin.json` — as the model loader saw them. A plugin is a folder with
-   * a manifest, at any depth; its access.md is its roster. Nothing else's is.
+   * `plugin.json` — each with its IDENTITY (the manifest's name, or the
+   * folder folded into one), as the model loader read them. A plugin is a
+   * folder with a manifest, at any depth; its access.md is its roster.
+   * Nothing else's is.
    */
-  pluginDirs: ReadonlySet<string>,
+  pluginDirs: ReadonlyMap<string, string>,
 ): void {
   const claimed = new Set<string>();
-  for (const dir of [...pluginDirs].sort()) {
-    const file = accessFiles.get(dir);
-    if (!file) continue; // a plugin without rules has no roster
-    const folder = dir.split('/').pop() ?? dir;
-    const slug = pluginManifestName(folder);
-    // Two plugins with one name: discovery keeps the first by path, so do we.
+  // The same path order discovery walks in, so "first by path" is the same
+  // plugin in both places — see `comparePathComponents`.
+  for (const [dir, slug] of [...pluginDirs].sort(([a], [b]) => comparePathComponents(a, b))) {
+    // Two plugins with one name: discovery keeps the first by path, so do we —
+    // and the claim is made BEFORE looking for a roster, or a first plugin
+    // without rules would leave its slug to a later twin's roster.
     if (claimed.has(slug)) continue;
     claimed.add(slug);
+    const file = accessFiles.get(dir);
+    if (!file) continue; // a plugin without rules has no roster
     for (const verb of PLUGIN_TOKEN_VERBS) {
       const { emails, everyone } = holdersOf(index, file, verb);
       const key = pluginPrincipalKey(slug, verb);
       index.byCanonical.set(key, {
-        displayName: `${PLUGIN_TOKEN_PREFIX}${folder}/${verb}`,
+        displayName: key,
         emails,
         kind: 'plugin',
-        pluginFolder: folder,
+        pluginName: slug,
         pluginDir: dir,
       });
       for (const email of emails) {

@@ -84,8 +84,9 @@ describe('PluginIndexService', () => {
     await pluginDir('Engineering');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Engineering', 'GTM']);
-    expect(catalog[1].folders).toEqual(['Plugins/GTM']);
+    // The manifest name is the identity; the folder is what people see.
+    expect(catalog.map((g) => g.name)).toEqual(['engineering', 'gtm']);
+    expect(catalog[1]).toMatchObject({ displayName: 'GTM', folders: ['Plugins/GTM'] });
   });
 
   test('a folder without an access.md is not a plugin', async () => {
@@ -102,7 +103,7 @@ describe('PluginIndexService', () => {
     await pluginDir('Real');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Real']);
+    expect(catalog.map((g) => g.name)).toEqual(['real']);
   });
 
   test('the retired Skills/ and Tools/ roots are NOT plugin roots', async () => {
@@ -111,7 +112,7 @@ describe('PluginIndexService', () => {
     await pluginDir('Engineering');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Engineering']);
+    expect(catalog.map((g) => g.name)).toEqual(['engineering']);
   });
 
   test('ignores loose files and dot-dirs under the plugin root', async () => {
@@ -122,7 +123,7 @@ describe('PluginIndexService', () => {
     await writeFile(join(kb(), 'Plugins', 'slack.tool'), '{}');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['GTM']);
+    expect(catalog.map((g) => g.name)).toEqual(['gtm']);
   });
 
   test('counts skills and tools from the global catalogs by pluginOfPath', async () => {
@@ -135,10 +136,10 @@ describe('PluginIndexService', () => {
       tools: tools('Plugins/GTM/heyreach.tool', 'Plugins/slack.tool'),
     }).catalog();
 
-    const gtm = catalog.find((g) => g.name === 'GTM')!;
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
     expect(gtm.skillCount).toBe(2);
     expect(gtm.toolCount).toBe(1);
-    const product = catalog.find((g) => g.name === 'Product')!;
+    const product = catalog.find((g) => g.name === 'product')!;
     expect(product.skillCount).toBe(1);
     expect(product.toolCount).toBe(0);
   });
@@ -199,7 +200,7 @@ describe('PluginIndexService', () => {
     await expect(service.catalog()).resolves.toEqual([]);
 
     fail = false;
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     warn.mockRestore();
   });
 
@@ -223,12 +224,12 @@ describe('PluginIndexService', () => {
     await pluginDir('GTM');
     const service = svc();
 
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     // A plugin added out of band is NOT seen while the cache holds…
     await pluginDir('Finance');
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     // …and IS seen once the file-change subscriber drops it.
     service.invalidate();
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['Finance', 'GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['finance', 'gtm']);
   });
 });

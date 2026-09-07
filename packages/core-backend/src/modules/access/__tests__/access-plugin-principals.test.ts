@@ -154,6 +154,128 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'sam@x.io', skill)).toBe(true);
     });
 
+    it('a public WRITE principal makes the path writable by everyone — and the eligible set says so', async () => {
+      // A gate that counts approvers must not see "a principal with no
+      // enumerable members" where the truth is "anyone signed in".
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - everyone\n'),
+        'Skills/Common/tips/access.md': '---\n---\nwrite:\n  - plugin/Open/write\n',
+      });
+      const writers = await svc.eligibleWriters(workspaceId, 'Skills/Common/tips/SKILL.md');
+      expect(writers.roles).toContain('everyone');
+      expect(await svc.canWrite(workspaceId, 'nobody@elsewhere.io', 'Skills/Common/tips/SKILL.md')).toBe(true);
+    });
+
+    it('two folders folding to one slug: the first by path claims it, roster or none — a twin never supplies the members', async () => {
+      // Discovery keeps the first folder by path and skips its twin; the
+      // principal follows the same rule, so the twin's roster never becomes
+      // the grant's membership through the back door.
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/a/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/b/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/b/GTM/access.md': pluginAccessMd('read:\n  - Zed <zed@x.io>\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
+      });
+      // Path order is the walk's order: a/GTM comes first, claims the slug
+      // and has no roster — so the principal is EMPTY. Neither the root-level
+      // GTM's Ali nor the later twin's Zed gets in through it.
+      expect(await svc.canRead(workspaceId, 'ali@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
+      expect(await svc.canRead(workspaceId, 'zed@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
+    });
+
+    it('a public READ principal makes the path unrestricted — one truth for the flag and the lists', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/Open/read\n',
+      });
+      const readers = await svc.eligibleReaders(workspaceId, 'Skills/Common/tips/SKILL.md');
+      expect(readers.restricted).toBe(false);
+    });
+
+    it('orders twins the way the walk does: component by component, never by the whole string', async () => {
+      // `a/b/GTM` is visited before `a-b/GTM` (the walk sorts each level:
+      // "a" < "a-b"); a whole-string compare would weigh "-" against "/" and
+      // could pick the other one — and with it the other roster.
+      const svc = await makeService({
+        'roles.yaml': ROLES_YAML,
+        'groups.yaml': GROUPS_YAML,
+        'access.md': '---\nwrite:\n  - Admin\n---\n',
+        'Plugins/a/b/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/a/b/GTM/access.md': pluginAccessMd('read:\n  - Ali <ali@x.io>\n'),
+        'Plugins/a-b/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/a-b/GTM/access.md': pluginAccessMd('read:\n  - Zed <zed@x.io>\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
+      });
+      expect(await svc.canRead(workspaceId, 'ali@x.io', 'Skills/Common/tips/SKILL.md')).toBe(true);
+      expect(await svc.canRead(workspaceId, 'zed@x.io', 'Skills/Common/tips/SKILL.md')).toBe(false);
+    });
+
+    it('a public principal is a verdict, not a line: nothing spells everyone, so nothing under that name is removable', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - plugin/Open/read\n',
+      });
+      const skill = 'Skills/Common/tips/SKILL.md';
+      const readers = await svc.eligibleReaders(workspaceId, skill);
+      expect(readers.restricted).toBe(false);
+      // Public — and the lists still name the grant that makes it so, so the
+      // share dialog has a row to remove it by.
+      expect(readers.principals).toEqual([
+        { name: 'Admin', kind: 'role' }, // the root's write, folded into read
+        { name: 'everyone', kind: 'role' },
+        { name: 'plugin/open/read', kind: 'plugin' },
+      ]);
+      // And WHY it is public: the resolver names the public plugin principal,
+      // which the lists alone cannot tell from an ordinary one.
+      expect(readers.publicVia).toEqual(['plugin/open/read']);
+      // A revoke of `everyone` here would strip no line — so no source claims one.
+      expect(await svc.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'everyone' })).toEqual({});
+      // The plugin grant IS the line, and the one whose removal ends public read.
+      expect(await svc.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'plugin/open/read' })).toEqual({
+        read: [{ kind: 'ancestor', path: 'Skills/Common/tips/access.md' }],
+      });
+      // A literal grant, by contrast, is a removable line.
+      const literal = await makeService({
+        ...BASE,
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - everyone\n',
+      });
+      expect(await literal.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'everyone' })).toEqual({
+        read: [{ kind: 'ancestor', path: 'Skills/Common/tips/access.md' }],
+      });
+    });
+
+    it('a DENIAL of a public principal denies everyone — it beats a literal everyone grant beside it and a farther one', async () => {
+      // Every NAMED person still reads (Admin is granted by name, and a grant
+      // wins among a caller's own keys), so re-checking named people finds
+      // nothing wrong; only the derived everyone verdict can say that the
+      // unnamed caller — who holds the public key and nothing else — is denied.
+      const svc = await makeService({
+        // The admin is the only named person in the whole knowledge base.
+        'roles.yaml': 'roles:\n  Admin:\n    - admin@x.io\n',
+        'groups.yaml': 'groups: {}\n',
+        'access.md': '---\nwrite:\n  - Admin\n---\n',
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
+        // Public at the scope above; the folder itself carves everyone back out
+        // through the public principal, next to a literal grant that must lose.
+        'Skills/Common/access.md': '---\n---\nread:\n  - everyone\n',
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - everyone\n  - Admin\n  - deny plugin/Open/read\n',
+      });
+      const skill = 'Skills/Common/tips/SKILL.md';
+      expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(true);
+      expect(await svc.canRead(workspaceId, 'nobody@elsewhere.io', skill)).toBe(false);
+      expect((await svc.eligibleReaders(workspaceId, skill)).restricted).toBe(true);
+      // The parent, where nothing denies, stays public.
+      expect((await svc.eligibleReaders(workspaceId, 'Skills/Common/SKILL.md')).restricted).toBe(false);
+    });
+
     it('a plugin readable by everyone yields a public principal', async () => {
       const svc = await makeService({
         ...BASE,
@@ -198,14 +320,15 @@ describe('plugin principals', () => {
   });
 
   describe('display', () => {
-    it('eligibleReaders reports the token as a plugin-kind principal with the folder\'s casing', async () => {
+    it('eligibleReaders reports the token as a plugin-kind principal spelled by the identity, whatever the grant wrote', async () => {
       const svc = await makeService({
         ...BASE,
-        'Skills/Eng/deploy/access.md': '---\n---\nread:\n  - plugin/gtm/read\n',
+        // The folder's casing — how grants were written before the manifest became the identity.
+        'Skills/Eng/deploy/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
       });
       const readers = await svc.eligibleReaders(workspaceId, 'Skills/Eng/deploy');
       expect(readers.restricted).toBe(true);
-      expect(readers.principals).toContainEqual({ name: 'plugin/GTM/read', kind: 'plugin' });
+      expect(readers.principals).toContainEqual({ name: 'plugin/gtm/read', kind: 'plugin' });
     });
 
     it('a plugin nested deeper than the root gets its principals too — a plugin is a folder with a manifest', async () => {
@@ -221,18 +344,24 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'mallory@x.io', 'Skills/S/x/SKILL.md')).toBe(false);
     });
 
-    it('kbPrincipals lists plugin folders once each, personal folders excluded', async () => {
+    it('kbPrincipals lists plugin folders once each, personal SHELVES excluded — by folder, never by name', async () => {
       const svc = await makeService({
         ...BASE,
         'Plugins/Ops/plugin.json': '{"name":"ops"}',
         'Plugins/Ops/access.md': pluginAccessMd('read:\n  - Admin\n'),
         'Plugins/personal-abc123/plugin.json': '{"name":"personal-abc123"}',
         'Plugins/personal-abc123/access.md': '---\n---\nread:\n  - Ali <ali@x.io>\n',
+        // A plugin whose hand-written manifest name wears the prefix is a
+        // plugin all the same: the shelf is a place, decided by the folder.
+        'Plugins/Odd/plugin.json': '{"name":"personal-odd"}',
+        'Plugins/Odd/access.md': pluginAccessMd('read:\n  - Admin\n'),
       });
       const { plugins } = await svc.kbPrincipals(workspaceId);
-      expect(plugins).toEqual([
-        { name: 'GTM', folder: 'Plugins/GTM' },
-        { name: 'Ops', folder: 'Plugins/Ops' },
+      // Named by identity — the manifest — with the folder beside it.
+      expect([...plugins].sort((a, b) => a.folder.localeCompare(b.folder))).toEqual([
+        { name: 'gtm', folder: 'Plugins/GTM' },
+        { name: 'personal-odd', folder: 'Plugins/Odd' },
+        { name: 'ops', folder: 'Plugins/Ops' },
       ]);
     });
   });

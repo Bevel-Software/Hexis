@@ -600,12 +600,22 @@ export function ManageAccessDialog({
     for (const u of data.owners.users) touchUser(u).verbs.owner = true;
     for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
     for (const u of data.eligible.users) touchUser(u).verbs.write = true;
-    // Read membership is per-principal only for a restricted node. When
-    // `restricted` is false, read is `everyone` and the reader lists are empty.
-    if (data.readers.restricted) {
-      for (const c of collectivesOf(data.readers)) touchCollective(c).verbs.read = true;
-      for (const u of data.readers.users) touchUser(u).verbs.read = true;
+    // Read grants are rows whether or not the node is public: on a public
+    // node they are what MAKES it public, and a row is the ONE place any
+    // grant is removed. The built-in `everyone` is a row like any principal
+    // — when a file spells it. A derived everyone (public only through a
+    // plugin principal) has no line of its own; the plugin's row is that grant.
+    for (const c of collectivesOf(data.readers)) {
+      if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) {
+        if (!lookupSources(data.sources, 'r:everyone')?.read?.length) continue;
+        const row = touchCollective(c);
+        row.label = 'Everyone';
+        row.verbs.read = true;
+        continue;
+      }
+      touchCollective(c).verbs.read = true;
     }
+    for (const u of data.readers.users) touchUser(u).verbs.read = true;
     for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 
@@ -803,41 +813,20 @@ export function ManageAccessDialog({
     }
   }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, effectiveNewVerbs, reload]);
 
-  // Revoke the public-read grant (`read: everyone`) at THIS path. Clears the
-  // "Anyone can read" state when it was granted here; an inherited public grant
-  // (from a parent folder) stays and is removed where it was set.
-  const removePublicRead = useCallback(async () => {
-    if (!workspaceId || repoRelative === null) return;
-    setBusy(true);
-    setMutateError(null);
-    try {
-      await revokeAccess(workspaceId, {
-        path: entry.relativePath,
-        kind: targetKind,
-        principal: { kind: 'role', role: 'everyone' },
-        verb: 'read',
-      });
-      reload();
-    } catch (err) {
-      // The public-read grant lives in a parent folder — route the 409 into the
-      // same "Remove from parent? / Restrict here?" confirmation the grantee rows
-      // use, instead of a raw error toast.
-      const inherited = asInheritedError(err);
-      if (inherited) {
-        setConfirmRemove({
-          principal: { kind: 'role', role: 'everyone' },
-          label: 'Everyone',
-          ancestors: ancestorsFromSources(inherited.sources),
-          verb: 'read',
-        });
-      } else {
-        setMutateError(err instanceof Error ? err.message : String(err));
-        reload();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }, [workspaceId, repoRelative, entry.relativePath, targetKind, reload]);
+  // WHY the node is public, said in the band and acted on in the rows: every
+  // literal `everyone` line (here, or in a parent) is the Everyone row's
+  // source; every public plugin principal granted read is that plugin's
+  // row. The band only describes — one mechanism removes, and it is the
+  // same one for every principal.
+  const publicReasons = [
+    ...(lookupSources(data?.sources, 'r:everyone')?.read ?? []).map((s) =>
+      s.kind === 'direct' ? 'granted here' : `inherited from ${folderLabel((s as { path: string }).path)}`,
+    ),
+    ...(data?.readers.publicVia ?? []).map((token) => {
+      const parsed = parsePluginPrincipalToken(token);
+      return `through ${parsed ? pluginPrincipalLabel(parsed.plugin, parsed.verb) : token}`;
+    }),
+  ];
 
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
@@ -1105,7 +1094,9 @@ export function ManageAccessDialog({
             </Button>
             {openRowKey === p.key && (
               <AnchoredMenu>
-                {TIER_ROLES.map((role) => {
+                {/* Everyone is public READ only (the grant route refuses the
+                    rest), so its row offers exactly the verb it can hold. */}
+                {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : TIER_ROLES).map((role) => {
                   const k = ROLE_TO_KEY[role];
                   const checked = p.verbs[k];
                   const disabled =
@@ -1124,21 +1115,22 @@ export function ManageAccessDialog({
                     </MenuItem>
                   );
                 })}
-                <div className="my-1 border-t border-line" />
-                {(() => {
-                  const checked = p.verbs.download;
-                  const disabled = busy || p.verbs.owner;
-                  return (
-                    <MenuItem
-                      disabled={disabled}
-                      active={checked}
-                      onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
-                      trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
-                    >
-                      Can download
-                    </MenuItem>
-                  );
-                })()}
+                {!isEveryoneRole(p.principal) && <div className="my-1 border-t border-line" />}
+                {!isEveryoneRole(p.principal) &&
+                  (() => {
+                    const checked = p.verbs.download;
+                    const disabled = busy || p.verbs.owner;
+                    return (
+                      <MenuItem
+                        disabled={disabled}
+                        active={checked}
+                        onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
+                        trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
+                      >
+                        Can download
+                      </MenuItem>
+                    );
+                  })()}
                 <div className="my-1 border-t border-line" />
                 <MenuItem
                   tone="danger"
@@ -1412,6 +1404,10 @@ export function ManageAccessDialog({
               )}
             </h3>
 
+            {/* A statement, not a control: it says the node is public and
+                why. Each reason is a grant with a row below — the Everyone
+                row for a literal line, the plugin's row for a public plugin
+                principal — and the row is where it is removed. */}
             {data && !data.readers.restricted && (
               <div className="flex items-center gap-3 py-1.5">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ok-soft text-ok">
@@ -1420,20 +1416,11 @@ export function ManageAccessDialog({
                 <div className="min-w-0 flex-1">
                   <div className="text-ui text-ink">Anyone can read</div>
                   <div className="text-detail text-ink-muted">
-                    Public: every signed-in user can read this {targetKind}
+                    {`Public: every signed-in user can read this ${targetKind}${
+                      publicReasons.length > 0 ? ` — ${publicReasons.join(', ')}` : ''
+                    }.`}
                   </div>
                 </div>
-                {canManage && (
-                  <Button
-                    variant="danger"
-                    size="tiny"
-                    className="shrink-0"
-                    disabled={busy}
-                    onClick={removePublicRead}
-                  >
-                    Remove
-                  </Button>
-                )}
               </div>
             )}
 

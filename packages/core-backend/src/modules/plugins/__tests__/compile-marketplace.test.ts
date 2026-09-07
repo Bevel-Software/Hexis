@@ -143,6 +143,60 @@ describe('compileMarketplace', () => {
     expect(tree.warnings).toEqual([]);
   });
 
+  it('ships only mcp servers a client could run, and names each one it leaves out', async () => {
+    // Written as text, not from an object literal: a literal `__proto__` key
+    // sets the prototype instead of an own property, and the point is a
+    // repository file that CARRIES that key.
+    await write(
+      'Plugins/GTM/mcp.json',
+      `{"mcpServers": {
+        "notion": { "type": "streamable-http", "url": "https://mcp.notion.com" },
+        "events": { "type": "sse", "url": "https://events.example" },
+        "Bad Name": { "type": "stdio", "command": "x" },
+        "empty": { "type": "stdio" },
+        "creds": { "type": "streamable-http", "url": "https://user:pw@mcp.example" },
+        "badenv": { "type": "stdio", "command": "x", "env": { "A": 1 } },
+        "badargs": { "type": "stdio", "command": "x", "args": [1, "b"] },
+        "badheaders": { "type": "streamable-http", "url": "https://x.example", "headers": { "A": 1 } },
+        "__proto__": { "type": "stdio", "command": "x" }
+      }}`,
+    );
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const mcp = json(tree, 'plugins/gtm/mcp.json');
+    expect(Object.keys(mcp.mcpServers)).toEqual(['notion']);
+    const left = (name: string) => tree.warnings.find((w) => w.includes(`"${name}" not shipped`)) ?? '';
+    expect(left('events')).toContain('sse');
+    expect(left('Bad Name')).toContain('name');
+    expect(left('empty')).toContain('no command');
+    expect(left('creds')).toContain('credentials');
+    expect(left('badenv')).toContain('env');
+    expect(left('badargs')).toContain('args');
+    expect(left('badheaders')).toContain('headers');
+    expect(left('__proto__')).toContain('name');
+  });
+
+  it('the manifest name is the identity: a folder called something else publishes, and is granted, under the name', async () => {
+    await write(
+      'Plugins/GTM/plugin.json',
+      JSON.stringify({ name: 'go-to-market', version: '2.1.0', extensions: { 'software.bevel.hexis': { skills: ['Skills/Eng/deploy'] } } }),
+    );
+    // The linked skill's grant spelled by the name reaches Sam…
+    await write('Skills/Eng/deploy/access.md', '---\n---\nread:\n  - plugin/go-to-market/read\n');
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(tree.plugins).toContain('go-to-market');
+    expect(tree.plugins).not.toContain('gtm');
+    expect([...tree.files.keys()]).toContain('plugins/go-to-market/skills/deploy/SKILL.md');
+    // …and a name that differs from the folder is nothing to warn about.
+    expect(tree.warnings).toEqual([]);
+  });
+
+  it('a grant spelled by the folder names no plugin once the manifest says otherwise', async () => {
+    await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', extensions: { 'software.bevel.hexis': { skills: ['Skills/Eng/deploy'] } } }));
+    // The fixture's grant on Skills/Eng/deploy still says plugin/GTM/read.
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect([...tree.files.keys()].some((p) => p.includes('deploy'))).toBe(false);
+  });
+
   it('for a stranger the plugin keeps only its MCP servers, and the public scope is all that ships', async () => {
     const tree = await compiler.compileFor({ userEmail: 'nobody@elsewhere.io' });
     const paths = [...tree.files.keys()].sort();
@@ -173,21 +227,27 @@ describe('compileMarketplace', () => {
     expect(tree.plugins).toEqual(['gtm', 'skills-and-knowledge', 'hexis-all']);
   });
 
-  it('a manifest name is repository content: it is folded to a safe slug, and a duplicate slug is skipped', async () => {
+  it('a manifest name that is no identifier is ignored, with a warning — the folder names the plugin', async () => {
     // A hostile or mistaken manifest name must never become a path segment
-    // that escapes the compiled tree.
+    // that escapes the compiled tree, nor an identity grants could spell.
     await write('Plugins/GTM/plugin.json', JSON.stringify({ name: '../../etc/passwd' }));
-    // A second plugin whose name folds to the same slug as the first.
-    await write('Plugins/Twin/plugin.json', JSON.stringify({ name: 'etc-passwd' }));
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const paths = [...tree.files.keys()];
+    expect(paths.every((p) => !p.includes('..') && !p.startsWith('/'))).toBe(true);
+    expect(paths).toContain('plugins/gtm/skills/outreach/SKILL.md');
+    expect(tree.warnings.some((w) => w.includes('Plugins/GTM') && w.includes('not a plugin identifier'))).toBe(true);
+  });
+
+  it('two folders claiming one identity: the first by path keeps it, the second is skipped and named', async () => {
+    await write('Plugins/Twin/plugin.json', JSON.stringify({ name: 'gtm' }));
     await write('Plugins/Twin/access.md', '---\nread:\n  - everyone\n---\nread:\n  - Sam <sam@x.io>\n');
     await write('Plugins/Twin/skills/twin-skill/SKILL.md', '---\ndescription: t\n---\n');
 
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
     const paths = [...tree.files.keys()];
-    expect(paths.every((p) => !p.includes('..') && !p.startsWith('/'))).toBe(true);
-    expect(paths).toContain('plugins/etc-passwd/skills/outreach/SKILL.md');
-    expect(paths).not.toContain('plugins/etc-passwd/skills/twin-skill/SKILL.md');
-    expect(tree.warnings.some((w) => w.includes('Plugins/Twin') && w.includes('already taken'))).toBe(true);
+    expect(paths).toContain('plugins/gtm/skills/outreach/SKILL.md');
+    expect(paths).not.toContain('plugins/gtm/skills/twin-skill/SKILL.md');
+    expect(tree.warnings.some((w) => w.includes('Plugins/Twin') && w.includes('already used'))).toBe(true);
   });
 
   it('a name clash inside one plugin keeps the first by path and says so', async () => {
