@@ -5,7 +5,7 @@ import { authFetch } from '../../../lib/api';
  * deployment as a GitHub Enterprise Server — the credentials hexis generated
  * for that purpose. Admins only; every field is shown so it can be copied.
  */
-export interface ClaudeBridgeCredentials {
+export interface GitHubFacadeCredentials {
   /** The hostname to register. */
   host: string;
   appId: string;
@@ -30,14 +30,14 @@ async function unwrap(res: Response, fallback: string): Promise<never> {
   throw new Error(serverError ?? fallback);
 }
 
-export async function fetchClaudeBridge(): Promise<ClaudeBridgeCredentials> {
-  const res = await authFetch('/api/admin/claude-bridge');
+export async function fetchGitHubFacade(): Promise<GitHubFacadeCredentials> {
+  const res = await authFetch('/api/admin/github-facade');
   if (!res.ok) await unwrap(res, "Couldn't load the Claude connection.");
-  return res.json() as Promise<ClaudeBridgeCredentials>;
+  return res.json() as Promise<GitHubFacadeCredentials>;
 }
 
-export async function rotateClaudeBridge(): Promise<ClaudeBridgeCredentials> {
-  const res = await authFetch('/api/admin/claude-bridge/rotate', { method: 'POST' });
+export async function rotateGitHubFacade(): Promise<GitHubFacadeCredentials> {
+  const res = await authFetch('/api/admin/github-facade/rotate', { method: 'POST' });
   if (!res.ok) await unwrap(res, "Couldn't rotate the Claude connection.");
-  return res.json() as Promise<ClaudeBridgeCredentials>;
+  return res.json() as Promise<GitHubFacadeCredentials>;
 }

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
-import { CLAUDE_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
+import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
@@ -286,7 +286,7 @@ describe('the Marketplaces tab', () => {
 
   it('tells Claude connections from keys by their stored kind — never by the label', async () => {
     listMock.mockResolvedValue([
-      { id: 'c1', kind: CLAUDE_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
       // A hand-made key wearing the link's usual label is still a key.
       { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
     ]);
@@ -305,7 +305,7 @@ describe('the Marketplaces tab', () => {
 
   it('says where the keys went when only Claude connections exist, and shows a load error on both tabs', async () => {
     listMock.mockResolvedValue([
-      { id: 'c1', kind: CLAUDE_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
     ]);
     const user = userEvent.setup();
     const first = mount(PUBLIC_URL);

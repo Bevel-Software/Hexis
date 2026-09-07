@@ -1,12 +1,12 @@
 import express from 'express';
 import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
-  ClaudeBridgeUnavailableError,
-  type ClaudeBridgeCredentialsService,
-} from './claude-bridge-credentials.service.js';
+  GitHubFacadeUnavailableError,
+  type GitHubFacadeCredentialsService,
+} from './github-facade-credentials.service.js';
 
-export interface ClaudeBridgeAdminRoutesDeps {
-  credentials: ClaudeBridgeCredentialsService;
+export interface GitHubFacadeAdminRoutesDeps {
+  credentials: GitHubFacadeCredentialsService;
   isAdmin(email: string | undefined): Promise<boolean>;
   /** The deployment's public address; only its host is shown. */
   publicUrl: string;
@@ -21,10 +21,10 @@ export interface ClaudeBridgeAdminRoutesDeps {
  * trust the token exchange. Never cached: after a rotation or a sign-out no
  * copy of the old secrets may linger in a browser or a proxy.
  *
- *   GET  /api/admin/claude-bridge          the credentials and the two URLs
- *   POST /api/admin/claude-bridge/rotate   new credentials, all of them
+ *   GET  /api/admin/github-facade          the credentials and the two URLs
+ *   POST /api/admin/github-facade/rotate   new credentials, all of them
  */
-export function createClaudeBridgeAdminRoutes(deps: ClaudeBridgeAdminRoutesDeps): express.Router {
+export function createGitHubFacadeAdminRoutes(deps: GitHubFacadeAdminRoutesDeps): express.Router {
   const router = express.Router();
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
@@ -56,18 +56,18 @@ export function createClaudeBridgeAdminRoutes(deps: ClaudeBridgeAdminRoutesDeps)
       res.setHeader('Cache-Control', 'no-store');
       res.json(payload);
     } catch (err) {
-      if (err instanceof ClaudeBridgeUnavailableError) {
+      if (err instanceof GitHubFacadeUnavailableError) {
         res.status(409).json({ error: err.message });
         return;
       }
-      console.error('[claude-bridge admin]', err);
+      console.error('[github-facade admin]', err);
       res.status(500).json({ error: 'Internal error' });
     }
   };
 
-  router.get('/admin/claude-bridge', requireAdmin, (_req, res) => send(res, describe));
+  router.get('/admin/github-facade', requireAdmin, (_req, res) => send(res, describe));
 
-  router.post('/admin/claude-bridge/rotate', requireAdmin, (_req, res) =>
+  router.post('/admin/github-facade/rotate', requireAdmin, (_req, res) =>
     send(res, async () => {
       await deps.credentials.rotate();
       return describe();

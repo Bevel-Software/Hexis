@@ -4,10 +4,10 @@ import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail au
 import '../../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
 import type { MarketplaceRepoService } from '../marketplace-repo.service.js';
 import type { MarketplaceKeyResolver } from '../git-http.routes.js';
-import { ClaudeBridgeRequestError, type ClaudeMarketplaceBridge } from './claude-bridge.service.js';
+import { GitHubFacadeRequestError, type GitHubFacade } from './github-facade.service.js';
 
-export interface ClaudeBridgeRoutesDeps {
-  bridge: ClaudeMarketplaceBridge;
+export interface GitHubFacadeRoutesDeps {
+  facade: GitHubFacade;
   keys: MarketplaceKeyResolver;
   repo: MarketplaceRepoService;
   /**
@@ -27,9 +27,9 @@ export interface ClaudeBridgeRoutesDeps {
 }
 
 /**
- * The GitHub-shaped surface claude.ai talks to when a person adds this
- * deployment's marketplace from their own settings — observed against a
- * facade, call for call, and nothing beyond it:
+ * The GitHub Enterprise surface a consumer (claude.ai, Cowork) talks to when
+ * a person adds this deployment's marketplace from their own settings —
+ * observed call for call against a lookalike host, and nothing beyond it:
  *
  *   GET  /login/oauth/authorize        the "connect your account" redirect
  *   POST /login/oauth/access_token     code → token (our client id + secret)
@@ -46,15 +46,15 @@ export interface ClaudeBridgeRoutesDeps {
  * the token endpoint, in whichever encoding the client negotiated): the
  * caller is a GitHub client and reads them as one.
  */
-export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.Router {
+export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.Router {
   const router = express.Router();
-  const { bridge, keys, repo, owner, repoName } = deps;
+  const { facade, keys, repo, owner, repoName } = deps;
   const origin = new URL(deps.publicUrl).origin;
   const fullName = `${owner}/${repoName}`;
 
   router.get('/login/oauth/authorize', async (req, res) => {
     try {
-      res.redirect(302, await bridge.authorizeRedirect(req.query as Record<string, unknown>));
+      res.redirect(302, await facade.authorizeRedirect(req.query as Record<string, unknown>));
     } catch (err) {
       answerError(res, err);
     }
@@ -69,9 +69,9 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
     express.urlencoded({ extended: false, limit: '16kb' }),
     async (req, res) => {
       try {
-        negotiated(req, res, 200, await bridge.exchangeCode((req.body ?? {}) as Record<string, unknown>));
+        negotiated(req, res, 200, await facade.exchangeCode((req.body ?? {}) as Record<string, unknown>));
       } catch (err) {
-        if (err instanceof ClaudeBridgeRequestError) {
+        if (err instanceof GitHubFacadeRequestError) {
           negotiated(req, res, err.status, { error: err.code, error_description: err.message });
           return;
         }
@@ -94,7 +94,7 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
     try {
       resolved = await keys.verifyAndLoadToken(token);
     } catch (err) {
-      console.error('[claude-bridge] key verification failed:', err);
+      console.error('[github-facade] key verification failed:', err);
       res.status(500).json({ message: 'Authentication backend unavailable' });
       return;
     }
@@ -144,7 +144,7 @@ export function createClaudeBridgeRoutes(deps: ClaudeBridgeRoutesDeps): express.
       const stderr: Buffer[] = [];
       archive.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
       const fail = (reason: string) => {
-        console.error(`[claude-bridge] zipball ${sha.slice(0, 7)} failed: ${reason}`);
+        console.error(`[github-facade] zipball ${sha.slice(0, 7)} failed: ${reason}`);
         // Headers are already out once the stream started; the only honest
         // answer then is a cut connection, which the client sees as a failed
         // download rather than a truncated archive it might unpack.
@@ -211,11 +211,11 @@ function negotiated(
 }
 
 function answerError(res: express.Response, err: unknown): void {
-  if (err instanceof ClaudeBridgeRequestError) {
+  if (err instanceof GitHubFacadeRequestError) {
     res.status(err.status).json({ message: err.message });
     return;
   }
-  console.error('[claude-bridge]', err);
+  console.error('[github-facade]', err);
   res.status(500).json({ message: 'Internal error' });
 }
 

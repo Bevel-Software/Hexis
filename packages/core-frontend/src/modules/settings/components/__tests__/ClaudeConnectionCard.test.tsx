@@ -4,9 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { ClaudeConnectionCard } from '../ClaudeConnectionCard';
 
 const { fetchMock, rotateMock } = vi.hoisted(() => ({ fetchMock: vi.fn(), rotateMock: vi.fn() }));
-vi.mock('../../services/claude-bridge.api', () => ({
-  fetchClaudeBridge: fetchMock,
-  rotateClaudeBridge: rotateMock,
+vi.mock('../../services/github-facade.api', () => ({
+  fetchGitHubFacade: fetchMock,
+  rotateGitHubFacade: rotateMock,
 }));
 
 const CREDS = {

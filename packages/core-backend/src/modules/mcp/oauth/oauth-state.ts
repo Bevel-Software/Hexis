@@ -20,14 +20,15 @@ export interface McpAuthRequestState {
   r: string;
   /**
    * PKCE code_challenge (S256 — the SDK authorize handler enforces it).
-   * Absent only on a Claude-link request (`gh`), whose client is a
+   * Absent only on a GitHub-facade request (`gh`), whose client is a
    * confidential one that proves itself with a secret at the token exchange.
    */
   cc?: string;
   /**
-   * A GitHub-shaped authorize request from claude.ai (the marketplace
-   * bridge), not an MCP client: the consent routes hand it to the bridge,
-   * which mints a code of its own instead of the SDK's.
+   * A GitHub-shaped authorize request from a product that treats this
+   * deployment as a GitHub Enterprise host (the marketplace facade), not an
+   * MCP client: the consent routes hand it to the facade, which mints a code
+   * of its own instead of the SDK's.
    */
   gh?: true;
   /** The client's own `state` parameter, echoed back on the code redirect. */

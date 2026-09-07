@@ -1,13 +1,13 @@
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
-import { claudeMarketplaceCodes } from '../../database/schema.js';
+import { githubFacadeCodes } from '../../database/schema.js';
 
 /**
  * A one-time code the consent page issued, waiting for Anthropic's backend
  * to exchange it. Looked up by the code's hash; the plaintext travels once,
  * in the redirect.
  */
-export interface PendingClaudeCode {
+export interface PendingFacadeCode {
   codeHash: string;
   userId: string;
   clientId: string;
@@ -30,19 +30,19 @@ export interface PendingClaudeCode {
  * every later attempt finds the code spent. Nothing in memory takes part in
  * either guarantee.
  */
-export interface ClaudeBridgeCodeStore {
+export interface GitHubFacadeCodeStore {
   /** Store a fresh code, replacing whatever the same person had. */
-  put(code: PendingClaudeCode): Promise<void>;
+  put(code: PendingFacadeCode): Promise<void>;
   /** The live (unspent, unexpired) code with this hash, without spending it. */
-  peek(codeHash: string): Promise<PendingClaudeCode | null>;
+  peek(codeHash: string): Promise<PendingFacadeCode | null>;
   /** Spend the code if it is live; null when it was not (unknown, spent, expired). */
-  consume(codeHash: string): Promise<PendingClaudeCode | null>;
+  consume(codeHash: string): Promise<PendingFacadeCode | null>;
 }
 
-export class DbClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
+export class DbGitHubFacadeCodeStore implements GitHubFacadeCodeStore {
   constructor(private readonly db: Database) {}
 
-  async put(code: PendingClaudeCode): Promise<void> {
+  async put(code: PendingFacadeCode): Promise<void> {
     const fresh = {
       clientId: code.clientId,
       codeHash: code.codeHash,
@@ -52,23 +52,23 @@ export class DbClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
       createdAt: new Date(),
     };
     await this.db
-      .insert(claudeMarketplaceCodes)
+      .insert(githubFacadeCodes)
       .values({ userId: code.userId, ...fresh })
-      .onConflictDoUpdate({ target: claudeMarketplaceCodes.userId, set: fresh });
+      .onConflictDoUpdate({ target: githubFacadeCodes.userId, set: fresh });
   }
 
-  async peek(codeHash: string): Promise<PendingClaudeCode | null> {
+  async peek(codeHash: string): Promise<PendingFacadeCode | null> {
     const [row] = await this.db
       .select()
-      .from(claudeMarketplaceCodes)
+      .from(githubFacadeCodes)
       .where(live(codeHash))
       .limit(1);
     return row ? toPending(row) : null;
   }
 
-  async consume(codeHash: string): Promise<PendingClaudeCode | null> {
+  async consume(codeHash: string): Promise<PendingFacadeCode | null> {
     const [row] = await this.db
-      .update(claudeMarketplaceCodes)
+      .update(githubFacadeCodes)
       .set({ consumedAt: new Date() })
       .where(live(codeHash))
       .returning();
@@ -79,13 +79,13 @@ export class DbClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
 /** The one definition of "live": this hash, unspent, unexpired. */
 function live(codeHash: string) {
   return and(
-    eq(claudeMarketplaceCodes.codeHash, codeHash),
-    isNull(claudeMarketplaceCodes.consumedAt),
-    gt(claudeMarketplaceCodes.expiresAt, new Date()),
+    eq(githubFacadeCodes.codeHash, codeHash),
+    isNull(githubFacadeCodes.consumedAt),
+    gt(githubFacadeCodes.expiresAt, new Date()),
   );
 }
 
-function toPending(row: typeof claudeMarketplaceCodes.$inferSelect): PendingClaudeCode {
+function toPending(row: typeof githubFacadeCodes.$inferSelect): PendingFacadeCode {
   return {
     codeHash: row.codeHash,
     userId: row.userId,
@@ -101,19 +101,19 @@ function toPending(row: typeof claudeMarketplaceCodes.$inferSelect): PendingClau
  * database's conditional update is atomic: two exchanges of one code cannot
  * both win here either.
  */
-export class MemoryClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
-  private readonly rows = new Map<string, PendingClaudeCode & { consumedAt: Date | null }>();
+export class MemoryGitHubFacadeCodeStore implements GitHubFacadeCodeStore {
+  private readonly rows = new Map<string, PendingFacadeCode & { consumedAt: Date | null }>();
 
-  async put(code: PendingClaudeCode): Promise<void> {
+  async put(code: PendingFacadeCode): Promise<void> {
     this.rows.set(code.userId, { ...code, consumedAt: null });
   }
 
-  async peek(codeHash: string): Promise<PendingClaudeCode | null> {
+  async peek(codeHash: string): Promise<PendingFacadeCode | null> {
     const row = this.findLive(codeHash);
     return row ? strip(row) : null;
   }
 
-  async consume(codeHash: string): Promise<PendingClaudeCode | null> {
+  async consume(codeHash: string): Promise<PendingFacadeCode | null> {
     const row = this.findLive(codeHash);
     if (!row) return null;
     row.consumedAt = new Date();
@@ -134,7 +134,7 @@ export class MemoryClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
   }
 }
 
-function strip(row: PendingClaudeCode & { consumedAt: Date | null }): PendingClaudeCode {
+function strip(row: PendingFacadeCode & { consumedAt: Date | null }): PendingFacadeCode {
   return {
     codeHash: row.codeHash,
     userId: row.userId,

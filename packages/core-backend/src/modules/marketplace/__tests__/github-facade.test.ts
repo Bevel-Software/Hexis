@@ -9,17 +9,16 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 
 import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace-repo.service.js';
 import {
-  ClaudeBridgeCredentialsService,
-  ClaudeMarketplaceBridge,
-  MemoryClaudeBridgeCodeStore,
-  MemoryClaudeBridgeCredentialsStore,
-  CLAUDE_CLIENT_NAME,
-  CLAUDE_LINK_KEY_KIND,
-  CLAUDE_LINK_KEY_LABEL,
-  CLAUDE_LINK_KEY_PREFIX,
-  createClaudeBridgeAdminRoutes,
-  createClaudeBridgeRoutes,
-} from '../claude-bridge/index.js';
+  GitHubFacadeCredentialsService,
+  GitHubFacade,
+  MemoryGitHubFacadeCodeStore,
+  MemoryGitHubFacadeCredentialsStore,
+  CLAUDE_CONSUMER,
+  GITHUB_LINK_KEY_KIND,
+  GITHUB_LINK_KEY_PREFIX,
+  createGitHubFacadeAdminRoutes,
+  createGitHubFacadeRoutes,
+} from '../github-facade/index.js';
 import { createOAuthConsentRoutes } from '../../mcp/oauth/oauth-consent.routes.js';
 import type { BevelOAuthProvider } from '../../mcp/oauth/bevel-oauth-provider.js';
 import type { VirtualTree } from '../../plugins/compile/compile-marketplace.js';
@@ -55,7 +54,7 @@ function tree(files: Record<string, string>, sourceCommit: string): VirtualTree 
 /** Connection keys, in memory: what the service does minus the database. */
 function makeKeys() {
   const byToken = new Map<string, { tokenId: string; user: AuthUser; label: string; kind: string }>();
-  const kinds: Record<string, string> = { key: 'bevel_', [CLAUDE_LINK_KEY_KIND]: CLAUDE_LINK_KEY_PREFIX };
+  const kinds: Record<string, string> = { key: 'bevel_', [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_PREFIX };
   return {
     byToken,
     looksLikeExternalApiKey: (t: string) => Object.values(kinds).some((p) => t.startsWith(p)),
@@ -80,23 +79,24 @@ function makeKeys() {
 
 /** One replica: its own bridge over the SHARED stores, its own HTTP listener. */
 async function replica(shared: {
-  credentials: MemoryClaudeBridgeCredentialsStore;
-  codes: MemoryClaudeBridgeCodeStore;
+  credentials: MemoryGitHubFacadeCredentialsStore;
+  codes: MemoryGitHubFacadeCodeStore;
   keys: ReturnType<typeof makeKeys>;
   repo: MarketplaceRepoService;
   admins: Set<string>;
 }) {
-  const credentials = new ClaudeBridgeCredentialsService(shared.credentials);
-  const bridge = new ClaudeMarketplaceBridge({
+  const credentials = new GitHubFacadeCredentialsService(shared.credentials);
+  const facade = new GitHubFacade({
     credentials,
     codes: shared.codes,
     keys: shared.keys,
+    consumers: [CLAUDE_CONSUMER],
     stateSecret: STATE_SECRET,
     publicFrontendUrl: FRONTEND,
   });
   const app = express();
   app.use(
-    createClaudeBridgeRoutes({ bridge, keys: shared.keys, repo: shared.repo, owner: 'git', repoName: 'marketplace', publicUrl: PUBLIC }),
+    createGitHubFacadeRoutes({ facade, keys: shared.keys, repo: shared.repo, owner: 'git', repoName: 'marketplace', publicUrl: PUBLIC }),
   );
   // The consent routes as the SPA reaches them: behind a session. The
   // session here is a header naming the person.
@@ -121,13 +121,13 @@ async function replica(shared: {
     createOAuthConsentRoutes({
       provider,
       stateSecret: STATE_SECRET,
-      bridge: {
-        isBridgeRequest: (st) => bridge.isBridgeRequest(st),
-        clientName: CLAUDE_CLIENT_NAME,
-        completeConsent: (userId, st) => bridge.completeConsent(userId, st),
+      facade: {
+        isFacadeRequest: (st) => facade.isFacadeRequest(st),
+        clientNameFor: (st) => facade.clientNameFor(st),
+        completeConsent: (userId, st) => facade.completeConsent(userId, st),
       },
     }),
-    createClaudeBridgeAdminRoutes({
+    createGitHubFacadeAdminRoutes({
       credentials,
       isAdmin: async (email) => shared.admins.has(email ?? ''),
       publicUrl: PUBLIC,
@@ -141,7 +141,7 @@ async function replica(shared: {
   return { credentials, base: `http://127.0.0.1:${port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
-describe('the Claude marketplace bridge', () => {
+describe('the GitHub facade', () => {
   let root: string;
   let shared: Parameters<typeof replica>[0];
   let a: Awaited<ReturnType<typeof replica>>;
@@ -158,8 +158,8 @@ describe('the Claude marketplace bridge', () => {
       compileFor: async ({ userEmail }) => tree(trees[userEmail] ?? {}, 'aaa111'),
     };
     shared = {
-      credentials: new MemoryClaudeBridgeCredentialsStore(),
-      codes: new MemoryClaudeBridgeCodeStore(),
+      credentials: new MemoryGitHubFacadeCredentialsStore(),
+      codes: new MemoryGitHubFacadeCodeStore(),
       keys: makeKeys(),
       repo: new MarketplaceRepoService(path.join(root, 'marketplace.git'), compiler),
       admins: new Set(['alice@x.io']),
@@ -219,7 +219,7 @@ describe('the Claude marketplace bridge', () => {
     expect(token.status).toBe(200);
     const body = (await token.json()) as { access_token: string; token_type: string; scope: string };
     expect(body.token_type).toBe('bearer');
-    expect(body.access_token.startsWith(CLAUDE_LINK_KEY_PREFIX)).toBe(true);
+    expect(body.access_token.startsWith(GITHUB_LINK_KEY_PREFIX)).toBe(true);
     return body.access_token;
   }
 
@@ -232,8 +232,8 @@ describe('the Claude marketplace bridge', () => {
     const token = await connect('alice');
     const minted = shared.keys.byToken.get(token)!;
     expect(minted.user.id).toBe('user-alice');
-    expect(minted.kind).toBe(CLAUDE_LINK_KEY_KIND);
-    expect(minted.label).toBe(CLAUDE_LINK_KEY_LABEL);
+    expect(minted.kind).toBe(GITHUB_LINK_KEY_KIND);
+    expect(minted.label).toBe(CLAUDE_CONSUMER.keyLabel);
   });
 
   it('serves the repository, the head commit and the zipball of that person’s own tree — from the origin, never the configured userinfo', async () => {
@@ -404,9 +404,9 @@ describe('the Claude marketplace bridge', () => {
   });
 
   it('hands an admin the registration fields uncached, and a rotation on one replica is what the other checks', async () => {
-    const forbidden = await fetch(`${a.base}/api/admin/claude-bridge`, { headers: { 'x-test-user': 'bob' } });
+    const forbidden = await fetch(`${a.base}/api/admin/github-facade`, { headers: { 'x-test-user': 'bob' } });
     expect(forbidden.status).toBe(403);
-    const shown = await fetch(`${a.base}/api/admin/claude-bridge`, { headers: { 'x-test-user': 'alice' } });
+    const shown = await fetch(`${a.base}/api/admin/github-facade`, { headers: { 'x-test-user': 'alice' } });
     expect(shown.status).toBe(200);
     expect(shown.headers.get('cache-control')).toBe('no-store');
     const before = (await shown.json()) as Record<string, string>;
@@ -417,7 +417,7 @@ describe('the Claude marketplace bridge', () => {
     expect(before.appId).toMatch(/^\d{6}$/);
 
     // Rotate on replica B…
-    const rotated = await fetch(`${b.base}/api/admin/claude-bridge/rotate`, { method: 'POST', headers: { 'x-test-user': 'alice' } });
+    const rotated = await fetch(`${b.base}/api/admin/github-facade/rotate`, { method: 'POST', headers: { 'x-test-user': 'alice' } });
     expect(rotated.headers.get('cache-control')).toBe('no-store');
     const after = (await rotated.json()) as Record<string, string>;
     for (const field of ['appId', 'clientId', 'clientSecret', 'webhookSecret', 'privateKeyPem']) {

@@ -8,13 +8,14 @@ export interface OAuthConsentRoutesDeps {
   /** Same HMAC secret the provider signs the authorize state with. */
   stateSecret: string;
   /**
-   * The Claude marketplace bridge, when the deployment has one: a state it
-   * signed (`gh`) is a person connecting their claude.ai account, and the
-   * code that flow needs is the bridge's, not the SDK's.
+   * The GitHub facade, when the deployment has one: a state it signed
+   * (`gh`) is a person connecting an account on a product that speaks to
+   * this deployment as a GitHub Enterprise host (claude.ai), and the code
+   * that flow needs is the facade's, not the SDK's.
    */
-  bridge?: {
-    isBridgeRequest(st: McpAuthRequestState): boolean;
-    clientName: string;
+  facade?: {
+    isFacadeRequest(st: McpAuthRequestState): boolean;
+    clientNameFor(st: McpAuthRequestState): string;
     completeConsent(userId: string, st: McpAuthRequestState): Promise<{ redirectTo: string }>;
   };
 }
@@ -27,8 +28,8 @@ export interface OAuthConsentRoutesDeps {
  * landing from the redirect chain authenticates via the HttpOnly bevel_token
  * cookie fallback, so THIS is where a Bevel user attaches to the flow.
  */
-/** A Claude-link state reaching a deployment whose routes were built without the bridge. */
-const NO_BRIDGE = 'Connecting a Claude account is not enabled on this deployment.';
+/** A facade state reaching a deployment whose routes were built without the facade. */
+const NO_FACADE = 'Connecting an external account this way is not enabled on this deployment.';
 
 export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.Router {
   const router = express.Router();
@@ -40,8 +41,8 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
     if (st.gh) {
-      if (!deps.bridge) return void res.status(400).json({ error: NO_BRIDGE });
-      res.json({ clientName: deps.bridge.clientName, scope: null, resource: null });
+      if (!deps.facade) return void res.status(400).json({ error: NO_FACADE });
+      res.json({ clientName: deps.facade.clientNameFor(st), scope: null, resource: null });
       return;
     }
     const client = await deps.provider.clientsStore.getClient(st.c);
@@ -60,10 +61,10 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     const raw = typeof (req.body ?? {}).state === 'string' ? req.body.state : '';
     const st = raw ? verifyAuthRequest(deps.stateSecret, raw) : null;
     if (!st) return void res.status(400).json({ error: 'Invalid or expired authorization request. Restart the connection from your agent.' });
-    if (st.gh && !deps.bridge) return void res.status(400).json({ error: NO_BRIDGE });
+    if (st.gh && !deps.facade) return void res.status(400).json({ error: NO_FACADE });
     try {
-      const { redirectTo } = st.gh && deps.bridge
-        ? await deps.bridge.completeConsent(userId, st)
+      const { redirectTo } = st.gh && deps.facade
+        ? await deps.facade.completeConsent(userId, st)
         : await deps.provider.issueAuthCode(userId, st);
       res.json({ redirectTo });
     } catch (err) {

@@ -35,10 +35,9 @@ import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { createMarketplaceGitRoutes } from '../modules/marketplace/index.js';
 import {
-  CLAUDE_CLIENT_NAME,
-  createClaudeBridgeAdminRoutes,
-  createClaudeBridgeRoutes,
-} from '../modules/marketplace/claude-bridge/index.js';
+  createGitHubFacadeAdminRoutes,
+  createGitHubFacadeRoutes,
+} from '../modules/marketplace/github-facade/index.js';
 import { DEFAULT_BRANCH, PROTECTED_BRANCHES, currentKbLayout, type AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import type { CoreServices } from './create-core-services.js';
@@ -251,14 +250,15 @@ export async function createCoreServer(
     }),
   );
 
-  // The SAME marketplace as claude.ai and Cowork fetch it: the GitHub-shaped
-  // OAuth pair at /login/oauth/* and the REST calls at /api/v3/*, reading the
-  // same per-user tree by the same connection key. At the app root because
-  // those paths are GitHub's, and ahead of the /api JWT mounts because
-  // Anthropic's backend arrives with a Bearer key, never a session.
+  // The SAME marketplace as a GitHub Enterprise consumer (claude.ai, Cowork)
+  // fetches it: the GitHub-shaped OAuth pair at /login/oauth/* and the REST
+  // calls at /api/v3/*, reading the same per-user tree by the same connection
+  // key. At the app root because those paths are GitHub's, and ahead of the
+  // /api JWT mounts because the consumer's backend arrives with a Bearer
+  // key, never a session.
   app.use(
-    createClaudeBridgeRoutes({
-      bridge: core.claudeBridge,
+    createGitHubFacadeRoutes({
+      facade: core.githubFacade,
       keys: core.externalApiKeyService,
       repo: core.marketplaceRepo,
       owner: 'git',
@@ -563,17 +563,17 @@ export async function createCoreServer(
   app.use('/api', core.authMiddleware, createOAuthConsentRoutes({
     provider: core.mcpOAuthProvider,
     stateSecret: core.config.jwtSecret,
-    bridge: {
-      isBridgeRequest: (st) => core.claudeBridge.isBridgeRequest(st),
-      clientName: CLAUDE_CLIENT_NAME,
-      completeConsent: (userId, st) => core.claudeBridge.completeConsent(userId, st),
+    facade: {
+      isFacadeRequest: (st) => core.githubFacade.isFacadeRequest(st),
+      clientNameFor: (st) => core.githubFacade.clientNameFor(st),
+      completeConsent: (userId, st) => core.githubFacade.completeConsent(userId, st),
     },
   }));
 
   // What an Owner pastes into Claude's admin settings to register this
   // deployment as a GitHub Enterprise Server — admins only.
-  app.use('/api', core.authMiddleware, createClaudeBridgeAdminRoutes({
-    credentials: core.claudeBridgeCredentials,
+  app.use('/api', core.authMiddleware, createGitHubFacadeAdminRoutes({
+    credentials: core.githubFacadeCredentials,
     isAdmin: (email) => core.adminAccess.isAdmin(email),
     publicUrl: core.config.publicBackendUrl,
     marketplaceUrl: marketplaceGitUrl.toString(),

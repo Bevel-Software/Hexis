@@ -3,7 +3,7 @@ import { authFetch } from '../../../lib/api';
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
-  /** `key` for one created by hand; `claude-link` for one a Claude connection minted. */
+  /** `key` for one created by hand; `github-link` for one minted when a product (Claude) connected through the GitHub facade. */
   kind: string;
   createdAt: number;
   lastUsedAt: number | null;

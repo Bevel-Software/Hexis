@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomBytes, randomInt } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Database } from '../../database/connection.js';
-import { claudeMarketplaceBridge } from '../../database/schema.js';
+import { githubFacadeIdentity } from '../../database/schema.js';
 import type { TokenCrypto } from '../../../shared/token-crypto.js';
 
 /**
@@ -17,7 +17,7 @@ import type { TokenCrypto } from '../../../shared/token-crypto.js';
  * marketplace would, and rotating everything together is simpler than
  * explaining which half matters.
  */
-export interface ClaudeBridgeCredentials {
+export interface GitHubFacadeCredentials {
   appId: string;
   clientId: string;
   clientSecret: string;
@@ -40,21 +40,21 @@ export interface ClaudeBridgeCredentials {
  * and a rotation replaces only the set the caller was looking at. Either way
  * the caller gets back what the store holds afterwards, never what it sent.
  */
-export interface ClaudeBridgeCredentialsStore {
-  load(): Promise<ClaudeBridgeCredentials | null>;
+export interface GitHubFacadeCredentialsStore {
+  load(): Promise<GitHubFacadeCredentials | null>;
   /**
    * Store `creds` only if no row exists yet, and return whichever row
    * exists afterwards — so two replicas initialising at once agree on one
    * set, and the loser's generated values are simply dropped.
    */
-  createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials>;
+  createIfAbsent(creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials>;
   /**
    * Replace the row only while it still carries `expectedClientId`, and
    * return what is stored afterwards. Two admins rotating at once: the first
    * write wins, the second finds a different client id, writes nothing, and
    * is shown the winner's set — the only one Claude will accept.
    */
-  replaceIfCurrent(expectedClientId: string, creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials>;
+  replaceIfCurrent(expectedClientId: string, creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials>;
 }
 
 const ROW_ID = 'default';
@@ -64,17 +64,17 @@ const ROW_ID = 'default';
  * key, exactly as stored settings are; without that key there is nowhere safe
  * to keep a client secret, so the store refuses rather than writing plaintext.
  */
-export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsStore {
+export class DbGitHubFacadeCredentialsStore implements GitHubFacadeCredentialsStore {
   constructor(
     private readonly db: Database,
     private readonly crypto: TokenCrypto | null,
   ) {}
 
-  async load(): Promise<ClaudeBridgeCredentials | null> {
+  async load(): Promise<GitHubFacadeCredentials | null> {
     const [row] = await this.db
       .select()
-      .from(claudeMarketplaceBridge)
-      .where(eq(claudeMarketplaceBridge.id, ROW_ID))
+      .from(githubFacadeIdentity)
+      .where(eq(githubFacadeIdentity.id, ROW_ID))
       .limit(1);
     if (!row) return null;
     const crypto = this.requireCrypto();
@@ -90,29 +90,29 @@ export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsSt
     };
   }
 
-  async createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+  async createIfAbsent(creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials> {
     await this.db
-      .insert(claudeMarketplaceBridge)
+      .insert(githubFacadeIdentity)
       .values({ id: ROW_ID, ...this.seal(creds) })
-      .onConflictDoNothing({ target: claudeMarketplaceBridge.id });
+      .onConflictDoNothing({ target: githubFacadeIdentity.id });
     return this.stored('insert');
   }
 
-  async replaceIfCurrent(expectedClientId: string, creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+  async replaceIfCurrent(expectedClientId: string, creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials> {
     await this.db
-      .update(claudeMarketplaceBridge)
+      .update(githubFacadeIdentity)
       .set(this.seal(creds))
-      .where(and(eq(claudeMarketplaceBridge.id, ROW_ID), eq(claudeMarketplaceBridge.clientId, expectedClientId)));
+      .where(and(eq(githubFacadeIdentity.id, ROW_ID), eq(githubFacadeIdentity.clientId, expectedClientId)));
     return this.stored('replace');
   }
 
-  private async stored(after: string): Promise<ClaudeBridgeCredentials> {
+  private async stored(after: string): Promise<GitHubFacadeCredentials> {
     const row = await this.load();
     if (!row) throw new Error(`claude bridge credentials vanished between ${after} and read`);
     return row;
   }
 
-  private seal(creds: ClaudeBridgeCredentials) {
+  private seal(creds: GitHubFacadeCredentials) {
     const crypto = this.requireCrypto();
     return {
       appId: creds.appId,
@@ -128,7 +128,7 @@ export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsSt
 
   private requireCrypto(): TokenCrypto {
     if (!this.crypto) {
-      throw new ClaudeBridgeUnavailableError(
+      throw new GitHubFacadeUnavailableError(
         'SECRETS_ENC_KEY is not set, so the Claude connection credentials cannot be stored.',
       );
     }
@@ -136,10 +136,10 @@ export class DbClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsSt
   }
 }
 
-export class ClaudeBridgeUnavailableError extends Error {
+export class GitHubFacadeUnavailableError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'ClaudeBridgeUnavailableError';
+    this.name = 'GitHubFacadeUnavailableError';
   }
 }
 
@@ -148,11 +148,11 @@ export class ClaudeBridgeUnavailableError extends Error {
  * every use after that. No in-process copy: the store is the one place the
  * truth lives, whichever replica asks.
  */
-export class ClaudeBridgeCredentialsService {
-  constructor(private readonly store: ClaudeBridgeCredentialsStore) {}
+export class GitHubFacadeCredentialsService {
+  constructor(private readonly store: GitHubFacadeCredentialsStore) {}
 
   /** The credentials, generated on first use. */
-  async ensure(): Promise<ClaudeBridgeCredentials> {
+  async ensure(): Promise<GitHubFacadeCredentials> {
     const existing = await this.store.load();
     if (existing) return existing;
     return this.store.createIfAbsent(generateCredentials(null));
@@ -165,13 +165,13 @@ export class ClaudeBridgeCredentialsService {
    * Owner re-enters the new set, and connected users' tokens (connection
    * keys) are untouched, since those are ours.
    */
-  async rotate(): Promise<ClaudeBridgeCredentials> {
+  async rotate(): Promise<GitHubFacadeCredentials> {
     const current = await this.ensure();
     return this.store.replaceIfCurrent(current.clientId, generateCredentials(current.createdAt));
   }
 }
 
-function generateCredentials(createdAt: Date | null): ClaudeBridgeCredentials {
+function generateCredentials(createdAt: Date | null): GitHubFacadeCredentials {
   // The shapes GitHub uses, because the form was built for them: a numeric
   // app id, an `Iv1.`-prefixed client id, hex secrets, a PKCS#1 RSA key.
   const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -192,16 +192,16 @@ function generateCredentials(createdAt: Date | null): ClaudeBridgeCredentials {
 }
 
 /** For tests: the row kept in memory, with the same conditional writes. */
-export class MemoryClaudeBridgeCredentialsStore implements ClaudeBridgeCredentialsStore {
-  private row: ClaudeBridgeCredentials | null = null;
-  async load(): Promise<ClaudeBridgeCredentials | null> {
+export class MemoryGitHubFacadeCredentialsStore implements GitHubFacadeCredentialsStore {
+  private row: GitHubFacadeCredentials | null = null;
+  async load(): Promise<GitHubFacadeCredentials | null> {
     return this.row;
   }
-  async createIfAbsent(creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+  async createIfAbsent(creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials> {
     this.row ??= creds;
     return this.row;
   }
-  async replaceIfCurrent(expectedClientId: string, creds: ClaudeBridgeCredentials): Promise<ClaudeBridgeCredentials> {
+  async replaceIfCurrent(expectedClientId: string, creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials> {
     if (this.row?.clientId === expectedClientId) this.row = creds;
     return this.row!;
   }

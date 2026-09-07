@@ -17,7 +17,7 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
-import { CLAUDE_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { useAdmin } from '../../admin/state/admin.context';
 import {
   type ExternalApiKeySummary,
@@ -173,7 +173,7 @@ export function ExternalAgentAccessPage() {
   // here), everything else — hand-made keys, and Claude links once
   // disconnected, so they can be deleted — to the autonomous tab. Told
   // apart by the stored kind, never the label.
-  const isClaudeLink = (k: ExternalApiKeySummary) => k.kind === CLAUDE_LINK_KIND;
+  const isClaudeLink = (k: ExternalApiKeySummary) => k.kind === GITHUB_LINK_KIND;
   const claudeLinks = keys.filter((k) => isClaudeLink(k) && k.revokedAt === null);
   const sortedKeys = keys.filter((k) => !isClaudeLink(k) || k.revokedAt !== null).sort((a, b) => {
     const aRevoked = a.revokedAt !== null;

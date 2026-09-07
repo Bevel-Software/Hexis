@@ -13,12 +13,12 @@ import { AdminContext, type AdminContextValue } from '../../../admin/state/admin
 const apiMock = vi.hoisted(() => ({ fetchSetupStatus: vi.fn(), saveSettings: vi.fn() }));
 // The Claude connection card fetches its credentials on mount; answer it so
 // its retry button never stands beside the page's own.
-vi.mock('../../services/claude-bridge.api', () => ({
-  fetchClaudeBridge: vi.fn(async () => ({
+vi.mock('../../services/github-facade.api', () => ({
+  fetchGitHubFacade: vi.fn(async () => ({
     host: 'kb.test', appId: '123456', clientId: 'Iv1.x', clientSecret: 's', webhookSecret: 'w',
     privateKeyPem: 'p', marketplaceUrl: 'https://kb.test/git/marketplace.git', createdAt: 0, rotatedAt: null,
   })),
-  rotateClaudeBridge: vi.fn(),
+  rotateGitHubFacade: vi.fn(),
 }));
 
 vi.mock('../../../setup/services/setup.api', async (importOriginal) => ({

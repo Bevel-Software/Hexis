@@ -3,10 +3,10 @@ import { Banner, Button } from '../../../shared/components';
 import { Dialog } from '../../../shared/components/Dialog';
 import { CopyBlock } from '../../../shared/mcp';
 import {
-  fetchClaudeBridge,
-  rotateClaudeBridge,
-  type ClaudeBridgeCredentials,
-} from '../services/claude-bridge.api';
+  fetchGitHubFacade,
+  rotateGitHubFacade,
+  type GitHubFacadeCredentials,
+} from '../services/github-facade.api';
 
 /**
  * The admin's half of "add this marketplace in Cowork or claude.ai".
@@ -30,7 +30,7 @@ import {
  * register a secret that no longer exists.
  */
 export function ClaudeConnectionCard() {
-  const [creds, setCreds] = useState<ClaudeBridgeCredentials | null>(null);
+  const [creds, setCreds] = useState<GitHubFacadeCredentials | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [confirmRotate, setConfirmRotate] = useState(false);
@@ -41,7 +41,7 @@ export function ClaudeConnectionCard() {
 
   const refresh = useCallback(() => {
     const seq = ++latest.current;
-    fetchClaudeBridge()
+    fetchGitHubFacade()
       .then((c) => {
         if (seq !== latest.current) return;
         setCreds(c);
@@ -63,7 +63,7 @@ export function ClaudeConnectionCard() {
     setRotating(true);
     setRotateError(null);
     try {
-      const next = await rotateClaudeBridge();
+      const next = await rotateGitHubFacade();
       if (seq !== latest.current) return;
       setCreds(next);
       setError(null);

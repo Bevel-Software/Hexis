@@ -503,9 +503,9 @@ export const deploymentSettings = pgTable('deployment_settings', {
  * client id and secrets an Owner pastes into Claude's admin settings. ONE row,
  * generated on first use, replaced whole on rotate. Secrets are sealed with
  * the secrets key, as stored settings are — see
- * `marketplace/claude-bridge/claude-bridge-credentials.service.ts`.
+ * `marketplace/github-facade/github-facade-credentials.service.ts`.
  */
-export const claudeMarketplaceBridge = pgTable('claude_marketplace_bridge', {
+export const githubFacadeIdentity = pgTable('github_facade_identity', {
   id: text('id').primaryKey(),
   appId: text('app_id').notNull(),
   clientId: text('client_id').notNull(),
@@ -533,9 +533,9 @@ export const claudeMarketplaceBridge = pgTable('claude_marketplace_bridge', {
  * the key: the bridge has one client, and a rotated client id must not leave
  * a dead row behind under the old one. The code's hash is the unique lookup
  * an exchange uses, spent by a conditional update. See
- * `marketplace/claude-bridge/claude-bridge-codes.store.ts`.
+ * `marketplace/github-facade/github-facade-codes.store.ts`.
  */
-export const claudeMarketplaceCodes = pgTable('claude_marketplace_codes', {
+export const githubFacadeCodes = pgTable('github_facade_codes', {
   userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
   clientId: text('client_id').notNull(),
   codeHash: text('code_hash').notNull().unique(),

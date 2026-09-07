@@ -57,13 +57,14 @@ export const MARKETPLACE_NAME = 'hexis';
 export const BUNDLE_PLUGIN = 'hexis-all';
 
 /**
- * The KIND stored on a connection key minted when a person connects their
- * claude.ai account (Cowork, claude.ai) to this deployment — the backend's
- * `CLAUDE_LINK_KEY_KIND`, spelled once more here so the key list can tell
- * those links from keys people created by hand. The kind, never the label:
- * a label is free text anyone can type.
+ * The KIND stored on a connection key minted when a person connects an
+ * account on a product that treats this deployment as a GitHub Enterprise
+ * host (claude.ai, Cowork) — the backend's `GITHUB_LINK_KEY_KIND`, spelled
+ * once more here so the key list can tell those links from keys people
+ * created by hand. The kind, never the label: a label is free text anyone
+ * can type.
  */
-export const CLAUDE_LINK_KIND = 'claude-link';
+export const GITHUB_LINK_KIND = 'github-link';
 
 /**
  * The three one-liners the settings page shows, with the key in the URL —

@@ -1,60 +1,80 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { MintedExternalApiKey } from '../../tool-auth/external-api-key.interface.js';
 import { signAuthRequest, type McpAuthRequestState } from '../../mcp/oauth/oauth-state.js';
-import type { ClaudeBridgeCredentialsService } from './claude-bridge-credentials.service.js';
-import type { ClaudeBridgeCodeStore } from './claude-bridge-codes.store.js';
+import type { GitHubFacadeCredentialsService } from './github-facade-credentials.service.js';
+import type { GitHubFacadeCodeStore } from './github-facade-codes.store.js';
 
 /**
- * The KIND stored on a connection key minted for a Claude link, and the
+ * The KIND stored on a connection key minted through the facade, and the
  * plaintext prefix that kind is minted with. `gho_` is what a GitHub OAuth
- * token looks like, and the shape claude.ai has been seen to accept from a
- * GitHub Enterprise host; the key is otherwise an ordinary connection key —
- * hashed at rest, revocable from the person's external-agent page, accepted
- * by every surface a connection key is. The kind, not the label, is what
- * tells such a key apart: a label is the person's to edit.
+ * token looks like — the shape a consumer expecting a GitHub Enterprise host
+ * accepts; the key is otherwise an ordinary connection key — hashed at rest,
+ * revocable from the person's external-agent page, accepted by every surface
+ * a connection key is. The kind, not the label, is what tells such a key
+ * apart: a label is the person's to edit.
  */
-export const CLAUDE_LINK_KEY_KIND = 'claude-link';
-export const CLAUDE_LINK_KEY_PREFIX = 'gho_';
+export const GITHUB_LINK_KEY_KIND = 'github-link';
+export const GITHUB_LINK_KEY_PREFIX = 'gho_';
 
-/** The label those keys carry, so the person recognises them in their list. */
-export const CLAUDE_LINK_KEY_LABEL = 'Claude (claude.ai and Cowork)';
+/**
+ * A product that talks to this deployment as if it were a GitHub Enterprise
+ * Server. The facade itself is consumer-neutral — GitHub's OAuth pair and
+ * REST subset are the contract — and a consumer is the one thing that is not:
+ * where its callback lives (the only place a code may be sent), what the
+ * consent page calls it, and how the keys it holds are labelled for the
+ * person. Claude is the first; another product with a "connect your GitHub
+ * Enterprise" flow is one more entry, not one more module.
+ */
+export interface GitHubFacadeConsumer {
+  id: string;
+  /** What the consent page says is asking. */
+  name: string;
+  /** Hostnames a redirect_uri may point at. */
+  redirectHosts: readonly string[];
+  /** The label on the connection keys minted for this consumer. */
+  keyLabel: string;
+}
 
-/** What "connect your GitHub Enterprise account" says on the consent page. */
-export const CLAUDE_CLIENT_NAME = 'Claude';
-
-/** The only place a code may be sent back to: claude.ai's own callback. */
-const ALLOWED_REDIRECT_HOSTS = new Set(['claude.ai']);
+/** claude.ai and Cowork: the consumer this facade was built against. */
+export const CLAUDE_CONSUMER: GitHubFacadeConsumer = {
+  id: 'claude',
+  name: 'Claude',
+  redirectHosts: ['claude.ai'],
+  keyLabel: 'Claude (claude.ai and Cowork)',
+};
 
 const CODE_TTL_MS = 10 * 60_000;
 const CODE_BYTES = 10;
 
-export interface ClaudeBridgeKeyMinter {
+export interface GitHubFacadeKeyMinter {
   mint(userId: string, label: string, options?: { kind?: string }): Promise<MintedExternalApiKey>;
 }
 
-export interface ClaudeMarketplaceBridgeDeps {
-  credentials: ClaudeBridgeCredentialsService;
-  codes: ClaudeBridgeCodeStore;
-  keys: ClaudeBridgeKeyMinter;
+export interface GitHubFacadeDeps {
+  credentials: GitHubFacadeCredentialsService;
+  codes: GitHubFacadeCodeStore;
+  keys: GitHubFacadeKeyMinter;
+  /** Who may connect through the facade. */
+  consumers: readonly GitHubFacadeConsumer[];
   /** HMAC secret for the signed authorize state — the same one the MCP flow uses. */
   stateSecret: string;
   /** SPA base URL — where the browser is sent to sign in and approve. */
   publicFrontendUrl: string;
 }
 
-export class ClaudeBridgeRequestError extends Error {
+export class GitHubFacadeRequestError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
   ) {
     super(message);
-    this.name = 'ClaudeBridgeRequestError';
+    this.name = 'GitHubFacadeRequestError';
   }
 }
 
 /**
- * The "connect your GitHub Enterprise account" flow, as claude.ai drives it
+ * The "connect your GitHub Enterprise account" flow, as a consumer such as claude.ai drives it
  * against a GitHub Enterprise host — with hexis standing where GitHub would.
  *
  *   1. The browser lands on `/login/oauth/authorize?client_id&redirect_uri&state`.
@@ -73,8 +93,8 @@ export class ClaudeBridgeRequestError extends Error {
  * from their stores on every step, so the replica that issued a code and the
  * replica that exchanges it need not be the same one.
  */
-export class ClaudeMarketplaceBridge {
-  constructor(private readonly deps: ClaudeMarketplaceBridgeDeps) {}
+export class GitHubFacade {
+  constructor(private readonly deps: GitHubFacadeDeps) {}
 
   /** Where to send the browser for an authorize request, or a 4xx to answer with. */
   async authorizeRedirect(query: Record<string, unknown>): Promise<string> {
@@ -83,10 +103,10 @@ export class ClaudeMarketplaceBridge {
     const state = str(query.state);
     const creds = await this.deps.credentials.ensure();
     if (!clientId || !safeEqual(clientId, creds.clientId)) {
-      throw new ClaudeBridgeRequestError(400, 'unknown_client', 'Unknown client_id.');
+      throw new GitHubFacadeRequestError(400, 'unknown_client', 'Unknown client_id.');
     }
-    if (!isAllowedRedirect(redirectUri)) {
-      throw new ClaudeBridgeRequestError(400, 'invalid_redirect', 'redirect_uri is not a Claude callback.');
+    if (!this.consumerFor(redirectUri)) {
+      throw new GitHubFacadeRequestError(400, 'invalid_redirect', 'redirect_uri does not belong to a known consumer.');
     }
     const signed = signAuthRequest(this.deps.stateSecret, {
       c: clientId,
@@ -99,9 +119,14 @@ export class ClaudeMarketplaceBridge {
     return url.toString();
   }
 
-  /** True when a verified state is one of ours (a Claude link, not an MCP client). */
-  isBridgeRequest(st: McpAuthRequestState): boolean {
+  /** True when a verified state is one of ours (a GitHub-shaped link, not an MCP client). */
+  isFacadeRequest(st: McpAuthRequestState): boolean {
     return st.gh === true;
+  }
+
+  /** What the consent page should say is asking, for one of our states. */
+  clientNameFor(st: McpAuthRequestState): string {
+    return this.consumerFor(st.r)?.name ?? 'an external product';
   }
 
   /**
@@ -111,8 +136,8 @@ export class ClaudeMarketplaceBridge {
    */
   async completeConsent(userId: string, st: McpAuthRequestState): Promise<{ redirectTo: string }> {
     const creds = await this.deps.credentials.ensure();
-    if (!safeEqual(st.c, creds.clientId) || !isAllowedRedirect(st.r)) {
-      throw new ClaudeBridgeRequestError(400, 'invalid_request', 'The authorization request is not a Claude link.');
+    if (!safeEqual(st.c, creds.clientId) || !this.consumerFor(st.r)) {
+      throw new GitHubFacadeRequestError(400, 'invalid_request', 'The authorization request is not one of ours.');
     }
     const code = randomBytes(CODE_BYTES).toString('hex');
     await this.deps.codes.put({
@@ -145,36 +170,44 @@ export class ClaudeMarketplaceBridge {
     const clientSecret = str(body.client_secret);
     const code = str(body.code);
     if (!clientId || !clientSecret || !safeEqual(clientId, creds.clientId) || !safeEqual(clientSecret, creds.clientSecret)) {
-      throw new ClaudeBridgeRequestError(401, 'incorrect_client_credentials', 'The client_id and/or client_secret passed are incorrect.');
+      throw new GitHubFacadeRequestError(401, 'incorrect_client_credentials', 'The client_id and/or client_secret passed are incorrect.');
     }
     const pending = code ? await this.deps.codes.peek(hashCode(code)) : null;
     if (!pending || pending.clientId !== clientId) {
-      throw new ClaudeBridgeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
+      throw new GitHubFacadeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
     }
     const redirectUri = str(body.redirect_uri);
     if (redirectUri && redirectUri !== pending.redirectUri) {
-      throw new ClaudeBridgeRequestError(400, 'redirect_uri_mismatch', 'The redirect_uri does not match the authorization.');
+      throw new GitHubFacadeRequestError(400, 'redirect_uri_mismatch', 'The redirect_uri does not match the authorization.');
     }
     const spent = await this.deps.codes.consume(pending.codeHash);
     if (!spent) {
-      throw new ClaudeBridgeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
+      throw new GitHubFacadeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
     }
-    const minted = await this.deps.keys.mint(spent.userId, CLAUDE_LINK_KEY_LABEL, { kind: CLAUDE_LINK_KEY_KIND });
+    // The consumer is the one the code was issued for — the redirect the
+    // person approved names it — so the key is labelled for that product.
+    const consumer = this.consumerFor(spent.redirectUri);
+    const minted = await this.deps.keys.mint(spent.userId, consumer?.keyLabel ?? 'GitHub-compatible link', {
+      kind: GITHUB_LINK_KEY_KIND,
+    });
     return { access_token: minted.plaintext, token_type: 'bearer', scope: '' };
+  }
+
+  /** The consumer whose callback a redirect_uri is, or null — https only, host exactly. */
+  private consumerFor(redirectUri: string): GitHubFacadeConsumer | null {
+    let parsed: URL;
+    try {
+      parsed = new URL(redirectUri);
+    } catch {
+      return null;
+    }
+    if (parsed.protocol !== 'https:') return null;
+    return this.deps.consumers.find((c) => c.redirectHosts.includes(parsed.hostname)) ?? null;
   }
 }
 
 function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
-}
-
-function isAllowedRedirect(uri: string): boolean {
-  try {
-    const parsed = new URL(uri);
-    return parsed.protocol === 'https:' && ALLOWED_REDIRECT_HOSTS.has(parsed.hostname);
-  } catch {
-    return false;
-  }
 }
 
 function str(v: unknown): string {
