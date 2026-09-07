@@ -66,7 +66,23 @@ describe('readAgentPreamble', () => {
     await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/directory, not a regular file/);
   });
 
-  it('any other read error throws, never an empty preamble', async () => {
+  it('an lstat that fails for any reason but absence throws, never an empty preamble', async () => {
+    // The KB dir is a regular file, so the lstat of the path beneath it fails
+    // with ENOTDIR: a real filesystem error that is not ENOENT.
+    await fs.rm(path.join(wsDir, KB), { recursive: true });
+    await fs.writeFile(path.join(wsDir, KB), 'not a directory', 'utf8');
+    await expect(readAgentPreamble(workspace(), KB)).rejects.toMatchObject({ code: 'ENOTDIR' });
+  });
+
+  // Root reads a mode-000 file, so the open would not fail for it.
+  it.skipIf(process.getuid?.() === 0)('an open that fails for any reason but absence throws too', async () => {
+    const file = path.join(wsDir, KB, 'mcp-description.md');
+    await fs.writeFile(file, 'Acme.', 'utf8');
+    await fs.chmod(file, 0o000); // the lstat still passes; the open is what fails
+    await expect(readAgentPreamble(workspace(), KB)).rejects.toMatchObject({ code: 'EACCES' });
+  });
+
+  it('a workspace that cannot be located throws too', async () => {
     const eio = Object.assign(new Error('disk'), { code: 'EIO' });
     const ws = workspace();
     ws.getWorkspacePath.mockImplementation(async () => {

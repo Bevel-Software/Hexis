@@ -25,7 +25,7 @@ None. There are no existing specs under `openspec/specs/`; this change introduce
 
 ## Impact
 
-- **core-backend**: a new `agent-instructions` module (composer, route); `McpService.createSession` fetches the text over loopback and passes `instructions` to the SDK `Server`; the KB template gains `mcp-description.md` and the managed `AGENTS.md` gains a pointer; `REQUIRED_FILES` in the startup phase grows by one.
+- **core-backend**: a new `agent-instructions` module (composer, route); `McpService.createSession` composes the text in-process at session creation and passes `instructions` to the SDK `Server`; the KB template gains `mcp-description.md` and the managed `AGENTS.md` gains a pointer; `REQUIRED_FILES` in the startup phase grows by one.
 - **hexis-mcp**: fetches the same endpoint at startup and passes `instructions` to its own `Server`. Older deployments without the endpoint still work; the bridge then sends no instructions.
 - **core-frontend**: a card on the External agent access page and one API function.
 - **Every deployment**: the platform header is sent to every session from the first boot after the upgrade. The text lands in every conversation's system prompt on every connected client, so its size is capped.

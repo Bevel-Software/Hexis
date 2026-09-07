@@ -143,30 +143,73 @@ const ATX_HEADING = /^#{1,6}(\s|$)/;
 const SETEXT_UNDERLINE = /^(=+|-+)$/;
 /** A thematic break: three or more `-`, `*` or `_`, optionally spaced. */
 const THEMATIC_BREAK = /^([-*_])(\s*\1){2,}$/;
+/** The opener of a fenced code block: three or more backticks or tildes, then an optional info string. */
+const CODE_FENCE = /^(`{3,}|~{3,})/;
+/** A list item or a blockquote line: a setext underline cannot be a lazy continuation of either. */
+const LIST_ITEM_OR_QUOTE = /^([-*+]|\d{1,9}[.)])(\s|$)|^>/;
 
 /**
  * The first paragraph that is not a markdown heading, collapsed to one line.
- * Blocks are separated by blank lines. Inside a block, ATX heading lines and
- * thematic breaks are dropped, and a setext heading (text with a `===` or
- * `---` underline directly beneath it) is dropped together with its
+ * Blocks are separated by blank lines and by fenced code blocks; a fence is
+ * code rather than a paragraph, so it and everything inside it (blank lines
+ * and rules included) are skipped, and a fence that never closes runs to the
+ * end of the text, as in CommonMark. Inside a block, ATX heading lines and
+ * thematic breaks are dropped, and a setext heading (paragraph text with a
+ * `===` or `---` underline directly beneath it) is dropped together with its
  * underline, so `Title\n===\nText` and `## Title\nText` both yield `Text`.
- * Empty when the text has no such paragraph (absent, empty or heading-only
- * preamble).
+ * A rule beneath a list item or a blockquote is not an underline (it cannot
+ * lazily continue either), so `- Item\n---` keeps the item and drops the
+ * rule. Empty when the text has no such paragraph (absent, empty, code-only
+ * or heading-only preamble).
  */
 function firstNonHeadingParagraph(text: string): string {
-  for (const block of text.split(/\n[ \t]*\n/)) {
-    let lines = block
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-    // A setext underline heads everything above it; keep only what follows
-    // the last one, since a block may open with `Title\n---` and go on.
-    const underline = lines.reduce((last, l, i) => (i > 0 && SETEXT_UNDERLINE.test(l) ? i : last), -1);
-    if (underline >= 0) lines = lines.slice(underline + 1);
+  for (const block of paragraphBlocks(text)) {
+    const underline = block.reduce(
+      (last, l, i) => (i > 0 && SETEXT_UNDERLINE.test(l) && isParagraphText(block[i - 1]) ? i : last),
+      -1,
+    );
+    const lines = underline >= 0 ? block.slice(underline + 1) : block;
     const content = lines.filter((l) => !ATX_HEADING.test(l) && !THEMATIC_BREAK.test(l));
     if (content.length > 0) return content.join(' ').replace(/\s+/g, ' ');
   }
   return '';
+}
+
+/** The text's blocks outside fenced code, each a list of trimmed non-blank lines. */
+function paragraphBlocks(text: string): string[][] {
+  const blocks: string[][] = [];
+  let block: string[] = [];
+  let fence: string | null = null; // the opener of the fenced code block being skipped
+  const flush = () => {
+    if (block.length > 0) blocks.push(block);
+    block = [];
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (fence !== null) {
+      // The closer: the same character as the opener, at least as many of it, nothing else.
+      if (line.startsWith(fence) && /^[`~]+$/.test(line)) fence = null;
+      continue;
+    }
+    const opener = CODE_FENCE.exec(line);
+    if (opener) {
+      flush();
+      fence = opener[1];
+    } else if (line.length === 0) {
+      flush();
+    } else {
+      block.push(line);
+    }
+  }
+  flush();
+  return blocks;
+}
+
+/** Whether a setext underline beneath this line would head it: only paragraph text can carry one. */
+function isParagraphText(line: string): boolean {
+  return (
+    !ATX_HEADING.test(line) && !SETEXT_UNDERLINE.test(line) && !THEMATIC_BREAK.test(line) && !LIST_ITEM_OR_QUOTE.test(line)
+  );
 }
 
 /**

@@ -139,6 +139,29 @@ describe('composeAgentInstructions: the tool prefix', () => {
     );
   });
 
+  it('a rule after a list item is a thematic break, not the underline of a setext heading', () => {
+    // CommonMark: the underline cannot be a lazy continuation of a list item or a
+    // blockquote, so the item survives and the rule is dropped like any other.
+    expect(composeAgentInstructions('- Permits\n---\n\nWhat we know about permits.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} - Permits`,
+    );
+    expect(composeAgentInstructions('> Permits\n---\n\nWhat we know about permits.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} > Permits`,
+    );
+  });
+
+  it('a fenced code block is not a paragraph: a rule inside it is code, and the prose after it is the prefix', () => {
+    expect(
+      composeAgentInstructions('```yaml\nkey: value\n---\nother: value\n```\n\nWhat we know about permits.').toolPrefix,
+    ).toBe(`${TOOL_PREFIX_LINE} What we know about permits.`);
+    // Blank lines inside the fence do not end it; only a closing fence does.
+    expect(composeAgentInstructions('~~~\nfoo\n\n---\n~~~\nAfter the block.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} After the block.`,
+    );
+    // A fence that never closes runs to the end of the file, as in CommonMark.
+    expect(composeAgentInstructions('```\nnever closed\n\nstill code').toolPrefix).toBe(TOOL_PREFIX_LINE);
+  });
+
   it('CRLF input still yields the first paragraph', () => {
     const out = composeAgentInstructions('# Title\r\n\r\nFirst paragraph.\r\n\r\nSecond.\r\n');
     expect(out.toolPrefix).toBe(`${TOOL_PREFIX_LINE} First paragraph.`);
