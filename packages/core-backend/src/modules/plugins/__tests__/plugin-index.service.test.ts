@@ -150,16 +150,15 @@ describe('PluginIndexService', () => {
     await pluginDir('Product');
     // The link index's view: GTM links two shared skills, one of which lost
     // its grant; Product's inline skill is granted by definition.
-    const links = {
-      membership: async () => ({
-        bySkill: new Map([
-          ['Skills/Eng/deploy', [{ name: 'gtm', linked: true, granted: false }]],
-          ['Skills/Eng/rollback', [{ name: 'gtm', linked: true, granted: true }]],
-          ['Plugins/Product/roadmap', [{ name: 'product', linked: false, granted: true }]],
-        ]),
-        byPlugin: new Map(),
-      }),
-    } as unknown as PluginLinkIndex;
+    const membership = vi.fn(async () => ({
+      bySkill: new Map([
+        ['Skills/Eng/deploy', [{ name: 'gtm', linked: true, granted: false }]],
+        ['Skills/Eng/rollback', [{ name: 'gtm', linked: true, granted: true }]],
+        ['Plugins/Product/roadmap', [{ name: 'product', linked: false, granted: true }]],
+      ]),
+      byPlugin: new Map(),
+    }));
+    const links = { membership } as unknown as PluginLinkIndex;
     const catalog = await new PluginIndexService(
       workspaceService,
       principals,
@@ -172,6 +171,9 @@ describe('PluginIndexService', () => {
 
     expect(catalog.find((g) => g.name === 'gtm')).toMatchObject({ skillCount: 2, brokenLinks: 1 });
     expect(catalog.find((g) => g.name === 'product')).toMatchObject({ skillCount: 1, brokenLinks: 0 });
+    // Both counts from ONE read of the index: its cache has no single-flight,
+    // so two concurrent reads of a cold catalog would build the tree twice.
+    expect(membership).toHaveBeenCalledTimes(1);
     // Without a link index there are no links to be broken.
     expect((await svc().catalog()).every((g) => g.brokenLinks === 0)).toBe(true);
   });

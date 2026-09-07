@@ -104,6 +104,19 @@ describe('WorkspaceService.listFiles — read filter', () => {
     expect(all).not.toContain('Secret');
   });
 
+  it('keeps a closed folder whose only readable content is an EMPTY sub-folder', async () => {
+    // A readable folder is kept on its own verdict, children or not — so the
+    // closed folder above it has a child, and stays as the way there.
+    await fs.mkdir(path.join(workspaceDir, 'Scopes', 'Empty'), { recursive: true });
+    const filter: ReadTreeFilter = async (ps) =>
+      new Map(ps.map((p) => [p, p === 'Scopes/Empty' || (!p.includes('Secret') && !p.includes('Scopes') && !p.endsWith('hidden.md'))]));
+    const all = paths(await svc.listFiles(workspaceId, filter));
+    expect(all).toContain('Scopes');
+    expect(all).toContain('Scopes/Empty');
+    expect(all).not.toContain('Scopes/Deploy');
+    expect(all).not.toContain('Scopes/other.md');
+  });
+
   it('keeps a readable directory left empty after filtering (D4)', async () => {
     const filter: ReadTreeFilter = async (ps) =>
       new Map(ps.map((p) => [p, !p.endsWith('hidden.md')]));

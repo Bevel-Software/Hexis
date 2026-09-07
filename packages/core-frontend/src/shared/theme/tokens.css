@@ -74,8 +74,10 @@
      like wait, but is blocking OTHER people right now — a plugin's members
      who cannot read a skill it ships — rather than only the reader's own
      setup. Orange, so it ranks above amber at a glance without borrowing
-     red's "broken" claim.                                                  */
-  --color-urgent: #c2410c;
+     red's "broken" claim. 5.1:1 on `urgent-soft`, 5.8:1 on white — it is
+     used as ink on both, unlike `wait`, which is too light for text on its
+     own soft ground.                                                       */
+  --color-urgent: #b8390a;
   --color-danger: #b3261e;
 
   --color-ok-soft: #ebf5ee;
