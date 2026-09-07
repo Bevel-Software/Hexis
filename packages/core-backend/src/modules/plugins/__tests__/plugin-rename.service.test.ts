@@ -309,20 +309,13 @@ describe('PluginRenameService', () => {
     expect(await read(tool)).toBe('---\nname: web\nread:\n  - plugin/go-to-market/read\n---\nbody\n');
   });
 
-  it('walks exactly what the resolver reads: an unreadable node_modules is no hole, because no grant could live there', async () => {
+  it('walks exactly what the resolver reads: a grant under node_modules is never rewritten, because the walk never enters it', async () => {
     await write('node_modules/some-dep/access.md', '---\n---\nread:\n  - plugin/gtm/read\n');
-    const realReaddir = fs.readdir;
-    const spy = vi.spyOn(fs, 'readdir').mockImplementation(((dir: string, opts: unknown) =>
-      String(dir).endsWith('node_modules')
-        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
-        : (realReaddir as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts)) as never);
-    try {
-      const result = await svc.rename(manager, 'gtm', { name: 'go-to-market' });
-      // The grant under node_modules is neither rewritten nor a reason to refuse: the resolver never reads it.
-      expect(result.rewritten).toEqual(['Skills/Eng/deploy/access.md']);
-    } finally {
-      spy.mockRestore();
-    }
+    const result = await svc.rename(manager, 'gtm', { name: 'go-to-market' });
+    // The resolver never reads that file, so the rename neither rewrites it
+    // nor counts it — the same walk, the same skip rule.
+    expect(result.rewritten).toEqual(['Skills/Eng/deploy/access.md']);
+    expect(await read('node_modules/some-dep/access.md')).toContain('plugin/gtm/read');
   });
 
   it('a folder it cannot list stops the rename before a byte is written', async () => {

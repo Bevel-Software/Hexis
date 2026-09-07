@@ -374,9 +374,11 @@ export class PluginProvisionService {
     const { plugins, unreadable } = await this.discovered();
     if (unreadable.length > 0) throw incompleteDiscovery(unreadable);
     const found = plugins.find((p) => p.folder === folder);
-    // Not listed and nothing unreadable: no manifest, no bundle — the folder
-    // is its own identity.
-    return found ? found.name : pluginManifestName(leaf);
+    // The lock key is the SLUG — what the marketplace publishes and what a
+    // creation of the name locks on — so a bundle declaring "Sales Team"
+    // and a creation of `sales-team` take one lock. Not listed and nothing
+    // unreadable: no manifest, no bundle — the folder is its own identity.
+    return pluginManifestName(found ? found.name : leaf);
   }
 
   /** One discovery over the knowledge base checkout. */

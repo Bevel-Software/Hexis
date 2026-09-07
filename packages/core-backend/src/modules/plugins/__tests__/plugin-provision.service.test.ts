@@ -245,9 +245,10 @@ describe('PluginProvisionService.deletePlugin', () => {
     }
   });
 
-  it('a bundle-shaped plugin locks on the identity its bundle declares — the one a creation would take', async () => {
+  it('a bundle-shaped plugin locks on the SLUG of the name its bundle declares — the one a creation would take', async () => {
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/Ext'), { recursive: true });
-    await fs.writeFile(path.join(h.dir, KB, 'Plugins/Ext/plugin.bundle.json'), '{"name":"ext-id"}');
+    // Declared as people write it, not as the marketplace publishes it.
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/Ext/plugin.bundle.json'), '{"name":"Ext Id"}');
     await fs.writeFile(path.join(h.dir, KB, 'Plugins/Ext/access.md'), '---\n---\n');
     let refuse: (err: Error) => void = () => {};
     h.commits.runPendingCommit.mockImplementationOnce(
