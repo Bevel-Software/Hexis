@@ -256,6 +256,18 @@ describe('PluginProvisionService.deletePlugin', () => {
     await expect(h.svc.deletePlugin(USER, 'teams/Nope')).rejects.toMatchObject({ status: 404 });
   });
 
+  it('deletes only the exact spelling, at every depth — a stale casing must not park a replacement at the same place', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/access.md'), '---\n---\n');
+
+    // On a case-insensitive filesystem both of these `stat` fine — and must still be refused.
+    await expect(h.svc.deletePlugin(USER, 'teams/deep')).rejects.toMatchObject({ status: 404 });
+    await expect(h.svc.deletePlugin(USER, 'Teams/Deep')).rejects.toMatchObject({ status: 404 });
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins/teams'))).toEqual(['Deep']);
+    expect(h.commits.runPendingCommit).not.toHaveBeenCalled();
+  });
+
   it('never deletes a personal folder through the plugin door', async () => {
     await h.svc.ensurePersonalPlugin(USER);
     const folder = personalPluginFolderName(USER.id);

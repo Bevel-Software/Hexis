@@ -81,7 +81,9 @@ describe('POST /skills/:name/access-request — the branch probe', () => {
     expect(await res.json()).toEqual({ ok: true, number: 42 });
     expect(h.workflow.listBranches).toHaveBeenCalledWith(wsId, { freshFetch: true, strictFetch: true });
     expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, joinBranchFor(MIA.email, FOLDER), DEFAULT_BRANCH);
+    // The whole chain the probe exists to enable: the grant is written AND committed.
     expect(h.workspaceService.writeFile).toHaveBeenCalledTimes(1);
+    expect(h.workflow.commitChanges).toHaveBeenCalledTimes(1);
   });
 
   it('a create that loses the race proceeds once the fresh re-probe shows the branch', async () => {
@@ -96,6 +98,7 @@ describe('POST /skills/:name/access-request — the branch probe', () => {
     expect(await res.json()).toEqual({ ok: true, number: 42 });
     expect(h.workflow.listBranches).toHaveBeenCalledTimes(2);
     expect(h.workspaceService.writeFile).toHaveBeenCalledTimes(1);
+    expect(h.workflow.commitChanges).toHaveBeenCalledTimes(1);
   });
 
   it('a create that fails with no branch to show for it stops the request — nothing is written on a branch that was not made', async () => {
