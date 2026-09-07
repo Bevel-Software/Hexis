@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useGit } from '../../git/state/git.context';
 import { useWorkspace } from '../state/workspace.context';
 import { authFetch } from '../../../lib/api';
+import { isExternalHref } from '../../../shared/markdown/hrefs';
 
 export const KB_ROUTE_PREFIX = '/workspace';
 
@@ -174,6 +175,67 @@ export function resolveRelativePath(basePath: string, relative: string): string 
   return parts.join('/');
 }
 
+/**
+ * A link destination as written in a knowledge page, classified and resolved.
+ */
+export type KbHref =
+  | { kind: 'external' }
+  | { kind: 'workspace'; branch: string | null; path: string; hash: string };
+
+/**
+ * The grammar of a link or image destination, as one function. `basePath` is
+ * the file the link sits in; `kbDirName` drives the junk-segment repair.
+ *
+ *   href                                    kind       branch    path                  hash
+ *   ──────────────────────────────────────  ─────────  ────────  ────────────────────  ──────
+ *   https://x.y/z, mailto:a@b, tel:…        external
+ *   //cdn.x.y/z  (protocol-relative)        external
+ *   /workspace/<b>/<p>#h  (absolute app)    workspace  <b>       <p>, junk stripped    #h
+ *   /workspace/<b>                          workspace  <b>       ''
+ *   ../NodeTypes/Process.md#goal            workspace  null      resolved vs basePath  #goal
+ *   /KB/x.png  (root-relative)              workspace  null      KB/x.png
+ *   ''  (empty)                             null
+ *
+ * Percent-escapes are decoded (react-markdown encodes the spaces in a
+ * destination; the file on disk has real spaces); a malformed escape is left
+ * as-is, the tolerance `safeDecode` has always given the URL form. `branch` is
+ * null for a relative link: the caller supplies the branch it is standing on.
+ *
+ * THE BRANCH RULE. A link handler navigates with the URL's branch, as
+ * `openFile` always has: an absolute citation URL names the branch the cited
+ * node lives on. An IMAGE resolver takes the path and ignores the branch: the
+ * bytes come from the workspace the page is rendered from, so a cross-branch
+ * image URL shows that tree's copy, or the placeholder when there is none.
+ * Serving bytes at another branch is the `?ref=` item in TODOS.md.
+ */
+export function resolveKbHref(
+  href: string,
+  { basePath, kbDirName }: { basePath: string; kbDirName: string | null },
+): KbHref | null {
+  if (!href) return null;
+  if (isExternalHref(href)) return { kind: 'external' };
+  const hashIdx = href.indexOf('#');
+  const hash = hashIdx >= 0 ? href.slice(hashIdx) : '';
+  const location = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
+  if (location.startsWith(`${KB_ROUTE_PREFIX}/`)) {
+    const rest = location.slice(KB_ROUTE_PREFIX.length + 1);
+    const slashIdx = rest.indexOf('/');
+    if (slashIdx < 0) return { kind: 'workspace', branch: safeDecode(rest), path: '', hash };
+    return {
+      kind: 'workspace',
+      branch: safeDecode(rest.slice(0, slashIdx)),
+      path: stripJunkBeforeKbDir(safeDecode(rest.slice(slashIdx + 1)), kbDirName),
+      hash,
+    };
+  }
+  return {
+    kind: 'workspace',
+    branch: null,
+    path: stripJunkBeforeKbDir(resolveRelativePath(basePath, safeDecode(location)), kbDirName),
+    hash,
+  };
+}
+
 export function useFileNav() {
   const navigate = useNavigate();
   const git = useGit();
@@ -182,38 +244,49 @@ export function useFileNav() {
 
   const openFile = useCallback(
     (pathOrUrl: string) => {
-      // Split off a trailing heading anchor (`…/Node.md#goal`) so it survives as
-      // a real URL fragment. Without this, `kbFileUrl` would percent-encode the
-      // `#` into the path (`Node.md%23goal`) and the deep-link scroll would never
-      // fire. The fragment is preserved verbatim and re-appended after the
-      // canonical file URL is built.
+      // Absolute workspace URLs (`/workspace/<branch>/<path>`) carry their own
+      // branch, which is never overridden with the current one. `resolveKbHref`
+      // parses out the branch and path segments and the route is rebuilt via
+      // kbFileUrl so encoding is canonical regardless of how the caller
+      // produced the URL (literal spaces, mixed encoding, etc.). FileRoute
+      // handles the actual git checkout if the URL's branch differs from the
+      // current one.
+      if (pathOrUrl.startsWith(`${KB_ROUTE_PREFIX}/`)) {
+        const target = resolveKbHref(pathOrUrl, { basePath: '', kbDirName });
+        if (target?.kind !== 'workspace' || target.branch === null) return;
+        navigate(kbFileUrl(target.branch, target.path) + target.hash);
+        return;
+      }
+      // A workspace path the caller has already resolved. Split off a trailing
+      // heading anchor (`…/Node.md#goal`) so it survives as a real URL
+      // fragment: otherwise `kbFileUrl` would percent-encode the `#` into the
+      // path (`Node.md%23goal`) and the deep-link scroll would never fire. Not
+      // decoded: this is a path, and a `%` in it is a character in a name.
       const hashIdx = pathOrUrl.indexOf('#');
       const hash = hashIdx >= 0 ? pathOrUrl.slice(hashIdx) : '';
       const path = hashIdx >= 0 ? pathOrUrl.slice(0, hashIdx) : pathOrUrl;
-
-      // Absolute workspace URLs (`/workspace/<branch>/<path>`) carry their
-      // own branch — never override with the current branch. Parse out the
-      // branch + path segments and re-route via kbFileUrl so encoding is
-      // canonical regardless of how the caller produced the URL (literal
-      // spaces, mixed encoding, etc.). FileRoute handles the actual git
-      // checkout if the URL's branch differs from the current one.
-      if (path.startsWith(`${KB_ROUTE_PREFIX}/`)) {
-        const rest = path.slice(KB_ROUTE_PREFIX.length + 1);
-        const slashIdx = rest.indexOf('/');
-        if (slashIdx < 0) {
-          navigate(kbFileUrl(safeDecode(rest)) + hash);
-        } else {
-          navigate(
-            kbFileUrl(
-              safeDecode(rest.slice(0, slashIdx)),
-              stripJunkBeforeKbDir(safeDecode(rest.slice(slashIdx + 1)), kbDirName),
-            ) + hash,
-          );
-        }
-        return;
-      }
       if (!branch) return;
       navigate(kbFileUrl(branch, stripJunkBeforeKbDir(path, kbDirName)) + hash);
+    },
+    [branch, kbDirName, navigate],
+  );
+
+  /**
+   * Follow a link DESTINATION out of a rendered document: the href as the
+   * author wrote it (or as react-markdown encoded it), resolved against
+   * `basePath`, the file the link sits in. The one entry for the markdown,
+   * HTML and review-diff link handlers, which used to resolve by hand and had
+   * drifted (one decoded, one did not). An external link is not ours to open
+   * and is ignored; an absolute app URL keeps its own branch; a relative one
+   * opens on the branch you are standing on. See {@link resolveKbHref}.
+   */
+  const openLink = useCallback(
+    (href: string, basePath: string) => {
+      const target = resolveKbHref(href, { basePath, kbDirName });
+      if (target?.kind !== 'workspace') return;
+      const onBranch = target.branch ?? branch;
+      if (!onBranch) return;
+      navigate(kbFileUrl(onBranch, target.path) + target.hash);
     },
     [branch, kbDirName, navigate],
   );
@@ -245,7 +318,7 @@ export function useFileNav() {
     navigate(kbFileUrl(branch));
   }, [branch, navigate]);
 
-  return { openFile, openWorkspacePath, closeFile };
+  return { openFile, openLink, openWorkspacePath, closeFile };
 }
 
 /**

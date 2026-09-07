@@ -3,7 +3,7 @@ import { renderHook } from '@testing-library/react';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { WorkspaceContext } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
-import { useFileNav } from '../kb-routes';
+import { useFileNav, resolveKbHref } from '../kb-routes';
 
 // Capture what openFile navigates to.
 const navigateMock = vi.hoisted(() => vi.fn());
@@ -120,5 +120,110 @@ describe('useFileNav.openFile', () => {
     expect(navigateMock).toHaveBeenCalledWith(
       '/workspace/alice%2Fdraft/knowledge-base-backup/x.md',
     );
+  });
+});
+
+/**
+ * The one grammar for a link or image destination. Link handlers and image
+ * resolvers both go through it, so a case here is a case for every surface.
+ */
+describe('resolveKbHref', () => {
+  const opts = { basePath: 'knowledge-base/Knowledge/Sub/Foo.md', kbDirName: 'knowledge-base' };
+
+  it('classifies an http(s) URL as external', () => {
+    expect(resolveKbHref('https://example.com/a.png', opts)).toEqual({ kind: 'external' });
+    expect(resolveKbHref('http://example.com/x.md', opts)).toEqual({ kind: 'external' });
+  });
+
+  it('classifies a protocol-relative URL as external', () => {
+    expect(resolveKbHref('//cdn.example.com/a.png', opts)).toEqual({ kind: 'external' });
+  });
+
+  it('parses an absolute app URL into its own branch, path and anchor', () => {
+    expect(
+      resolveKbHref('/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status', opts),
+    ).toEqual({
+      kind: 'workspace',
+      branch: 'target-company-state',
+      path: 'knowledge-base/GTM/Bundle.md',
+      hash: '#status',
+    });
+  });
+
+  it('repairs a junk segment before the kbDirName in an absolute URL, and decodes the branch', () => {
+    expect(
+      resolveKbHref('/workspace/alice%2Fdraft/bevel-process-of-truth/knowledge-base/x.md', opts),
+    ).toEqual({ kind: 'workspace', branch: 'alice/draft', path: 'knowledge-base/x.md', hash: '' });
+  });
+
+  it('resolves a relative destination against the base file, keeping the anchor', () => {
+    expect(resolveKbHref('../NodeTypes/Process.md#goal', opts)).toEqual({
+      kind: 'workspace',
+      branch: null,
+      path: 'knowledge-base/Knowledge/NodeTypes/Process.md',
+      hash: '#goal',
+    });
+    expect(resolveKbHref('./assets/shot.png', opts)).toEqual({
+      kind: 'workspace',
+      branch: null,
+      path: 'knowledge-base/Knowledge/Sub/assets/shot.png',
+      hash: '',
+    });
+  });
+
+  it('anchors a root-relative destination at the workspace root', () => {
+    expect(resolveKbHref('/knowledge-base/assets/x.png', opts)).toMatchObject({
+      kind: 'workspace',
+      path: 'knowledge-base/assets/x.png',
+    });
+  });
+
+  it('decodes percent-escapes, and leaves a malformed one as written', () => {
+    expect(resolveKbHref('Some%20File.md', opts)).toMatchObject({
+      path: 'knowledge-base/Knowledge/Sub/Some File.md',
+    });
+    expect(resolveKbHref('100%.md', opts)).toMatchObject({
+      path: 'knowledge-base/Knowledge/Sub/100%.md',
+    });
+  });
+
+  it('keeps a name with a colon in it inside the workspace', () => {
+    expect(resolveKbHref('Notes: today.md', opts)).toMatchObject({
+      kind: 'workspace',
+      path: 'knowledge-base/Knowledge/Sub/Notes: today.md',
+    });
+  });
+
+  it('returns null for an empty destination', () => {
+    expect(resolveKbHref('', opts)).toBeNull();
+  });
+});
+
+describe('useFileNav.openLink', () => {
+  it('opens a relative link on the current branch, decoded and resolved against the file it sits in', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('Some%20File.md#goal', 'knowledge-base/Knowledge/Foo.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Some%20File.md#goal',
+    );
+  });
+
+  // The branch rule: a link keeps the branch its URL names.
+  it('keeps the branch of an absolute app URL', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink(
+      '/workspace/target-company-state/knowledge-base/x.md',
+      'knowledge-base/Knowledge/Foo.md',
+    );
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/target-company-state/knowledge-base/x.md');
+  });
+
+  it("ignores an external link: that one is the browser's", () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('https://example.com/x.md', 'knowledge-base/Knowledge/Foo.md');
+    expect(navigateMock).not.toHaveBeenCalled();
   });
 });
