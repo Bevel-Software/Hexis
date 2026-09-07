@@ -34,15 +34,15 @@ This requirement covers only an agent working in a git clone of the repository w
 - **THEN** it finds a line directing it to `mcp-description.md` before the platform mechanics
 
 ### Requirement: The app shows what connected agents are told
-The External agent access page SHALL show a section titled "What connected agents are told" containing two blocks: "On connect", the composed instructions as they would be sent with the preamble's character count against the 6,000 cap and the clients that read the handshake; and "On the four knowledge-base tools", the tool prefix as it will appear with its count against the 300 cap and the clients that read only descriptions. The section SHALL warn when either text is truncated and when a comment is left open, and SHALL state that every connected agent sees the text whatever its access. Admins SHALL see an Edit link that opens `mcp-description.md` on the default branch in the Knowledge editor, at `kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/mcp-description.md`)`, rendered only once `kbDirName` is known. Non-admins SHALL see the text read-only with a line saying admins edit it in `mcp-description.md` at the repository root. A failed fetch SHALL show an inline message and leave the rest of the page working.
+The External agent access page SHALL show a section titled "What agents are told about this knowledge base", organised around the part the admin owns: the fixed platform message in a closed drawer (sent first, not editable); "Your description", the preamble body as sent with its character count against the 6,000 cap, or an empty state saying agents get the platform message only; and "Short version", the tool prefix as it will appear on the four knowledge-base tools with its count against the 300 cap, the fixed sentence shown muted and the admin's first paragraph in normal ink, with the clients that read only descriptions named. The section SHALL warn when either text is truncated and when a comment is left open, and SHALL state that every connected agent sees the text whatever its access. Admins SHALL see an Edit action that opens `mcp-description.md` on the default branch in the Knowledge editor, at `kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/mcp-description.md`)`, rendered only once `kbDirName` is known. Non-admins SHALL see the text read-only with a line saying admins edit it in `mcp-description.md` at the repository root. A failed fetch SHALL show an inline message and leave the rest of the page working.
 
 #### Scenario: Admin views the page
 - **WHEN** an admin opens External agent access
-- **THEN** the section shows both blocks, counts such as `1,240 / 6,000 characters` and `212 / 300 characters`, and an Edit link to `mcp-description.md` on the default branch
+- **THEN** the section shows the description and the short version, counts such as `1,240 / 6,000 characters` and `212 / 300 characters`, the platform message in a closed drawer, and an Edit action opening `mcp-description.md` on the default branch
 
 #### Scenario: Non-admin views the page
 - **WHEN** a non-admin opens External agent access
-- **THEN** the section shows the same two blocks and counts, no Edit link, and the line saying admins edit the file
+- **THEN** the section shows the same texts and counts, no Edit action, and the line saying admins edit the file
 
 #### Scenario: Preamble over the cap
 - **WHEN** the preamble exceeds 6,000 characters

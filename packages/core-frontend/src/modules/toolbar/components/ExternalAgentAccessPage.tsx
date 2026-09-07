@@ -18,6 +18,7 @@ import {
   workspaceBaseUrl,
 } from '../../../shared/mcp';
 import { marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { AgentInstructionsCard } from './AgentInstructionsCard';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -171,6 +172,9 @@ export function ExternalAgentAccessPage() {
   return (
     <>
       <PageShell title="External agent access" padded={false}>
+        {/* Above the tab strip because it applies to BOTH tabs: whichever way
+            an agent connects, this is what it is told at session start. */}
+        <AgentInstructionsCard />
         <div className="flex border-b border-line px-4 shrink-0" role="tablist">
           {(
             [

@@ -92,7 +92,7 @@ The preamble SHALL be read from the default-branch workspace at `${kbDirName}/mc
 - **THEN** the reader throws, the route answers 500, and the caller's own fallback decides what to send
 
 ### Requirement: The composed text is served by an agent-facing endpoint
-The backend SHALL serve the composed text at `GET /api/agent/instructions` under the same authentication the tool catalogue endpoint (`/api/agent/all-tools`) accepts. The response SHALL be JSON carrying `instructions`, `toolPrefix`, `truncated`, `preambleChars` and `unterminatedComment`, with `Cache-Control: no-store`. The local bridge and the frontend card SHALL read this endpoint. The hosted proxy SHALL call the composer in-process rather than this endpoint.
+The backend SHALL serve the composed text at `GET /api/agent/instructions` under the same authentication the tool catalogue endpoint (`/api/agent/all-tools`) accepts. The response SHALL be JSON carrying `instructions`, `header`, `preamble`, `toolPrefix`, `toolPrefixLine`, `truncated`, `preambleChars`, `toolPrefixTruncated`, `toolPrefixChars` and `unterminatedComment`, with `Cache-Control: no-store`. `header`, `preamble` and `toolPrefixLine` are the parts `instructions` and `toolPrefix` are built from, so the card can show the admin's part apart from the platform's; the two prefix fields let it show the prefix's count against its cap and warn when it was cut, exactly as it does for the preamble. The local bridge and the frontend card SHALL read this endpoint. The hosted proxy SHALL call the composer in-process rather than this endpoint.
 
 #### Scenario: Authenticated request
 - **WHEN** a request carries a valid connection key, internal token or browser session token

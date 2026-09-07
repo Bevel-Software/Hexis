@@ -22,9 +22,10 @@ import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
  * regression cases below name all six.
  */
 
-const { listMock, createMock } = vi.hoisted(() => ({
+const { listMock, createMock, instructionsMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
+  instructionsMock: vi.fn(),
 }));
 
 vi.mock('../../services/external-api-keys.api', () => ({
@@ -32,6 +33,14 @@ vi.mock('../../services/external-api-keys.api', () => ({
   createExternalApiKey: createMock,
   disconnectExternalApiKey: vi.fn(async () => {}),
   deleteExternalApiKey: vi.fn(async () => {}),
+}));
+
+// The "What connected agents are told" card fetches on mount; its own cases
+// live in AgentInstructionsCard.test.tsx. Here it only has to stay out of the
+// way of the snippet assertions, which read every textbox on the page.
+vi.mock('../../services/agent-instructions.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/agent-instructions.api')>()),
+  fetchAgentInstructions: instructionsMock,
 }));
 
 /** A deployment configured the way a real one is: public, https, its own domain. */
@@ -43,6 +52,18 @@ const KEY = 'bvl_live_s3cret';
 
 beforeEach(() => {
   listMock.mockResolvedValue([]);
+  instructionsMock.mockResolvedValue({
+    instructions: 'Search the knowledge base first.',
+    header: 'Search the knowledge base first.',
+    preamble: '',
+    toolPrefix: 'Search it before answering from memory.',
+    toolPrefixLine: 'Search it before answering from memory.',
+    truncated: false,
+    preambleChars: 0,
+    toolPrefixTruncated: false,
+    toolPrefixChars: 40,
+    unterminatedComment: false,
+  });
   createMock.mockResolvedValue({
     plaintext: KEY,
     summary: {
