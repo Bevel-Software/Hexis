@@ -176,18 +176,45 @@ describe('ManageAccessDialog: removing public read', () => {
         ],
         roles: ['everyone', 'plugin/open/read'],
         users: [],
+        publicVia: ['plugin/open/read'],
       },
       sources: { 'r:everyone': {}, 'p:plugin/open/read': { read: [{ kind: 'direct' }] } },
     } as AccessResponse);
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
     await screen.findByText('Anyone can read');
-    expect(screen.getByText(/through a plugin anyone can read/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+    expect(screen.getByText(/through a plugin anyone can read \(open · readers\)/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Remove/ })).toBeNull();
     // The plugin principal IS a row here, with its read grant to act on…
     expect(screen.getByText('open · readers')).toBeInTheDocument();
     // …while the built-in everyone is not a second row beside its band.
     expect(screen.queryByText('everyone')).toBeNull();
     expect(api.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it('says what Remove removes when a literal grant AND a public plugin both make the node public', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      readers: {
+        restricted: false,
+        principals: [
+          { name: 'everyone', kind: 'role' },
+          { name: 'plugin/open/read', kind: 'plugin' },
+        ],
+        roles: ['everyone', 'plugin/open/read'],
+        users: [],
+        publicVia: ['plugin/open/read'],
+      },
+      sources: {
+        'r:everyone': { read: [{ kind: 'direct' }] },
+        'p:plugin/open/read': { read: [{ kind: 'direct' }] },
+      },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Anyone can read');
+    // The button is honest about its reach, and the band says what remains.
+    expect(screen.getByRole('button', { name: 'Remove direct grant' })).toBeInTheDocument();
+    expect(screen.getByText(/also through open · readers/)).toBeInTheDocument();
+    expect(screen.getByText(/keeps it public until that plugin's read grant is removed/)).toBeInTheDocument();
   });
 });
 

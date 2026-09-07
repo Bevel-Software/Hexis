@@ -54,8 +54,14 @@ export interface AccessEligible {
 }
 
 export interface AccessReaders extends AccessEligible {
-  /** False when `read: everyone` applies cleanly (the lists are then empty). */
+  /** False when `read: everyone` applies cleanly — the node is public. */
   restricted: boolean;
+  /**
+   * The PUBLIC plugin principals (`plugin/<name>/read` tokens whose plugin
+   * anyone can read) granted read here — why the node is public besides any
+   * literal `everyone` line. Optional for version skew.
+   */
+  publicVia?: string[];
 }
 
 /**

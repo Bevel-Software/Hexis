@@ -953,7 +953,7 @@ describe('AccessControlService', () => {
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
-        expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [] });
+        expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [], publicVia: [] });
       });
 
       it('reports restricted=false when read: everyone applies', async () => {
@@ -972,6 +972,7 @@ describe('AccessControlService', () => {
           ],
           roles: ['Admin', 'everyone'],
           users: [],
+          publicVia: [], // public by a literal line, through no plugin
         });
       });
 
@@ -987,7 +988,13 @@ describe('AccessControlService', () => {
         // node really is readable by everyone — not restricted.
         expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Open/Foo.md')).toBe(true);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Open/Foo.md');
-        expect(e).toEqual({ restricted: false, principals: [{ name: 'everyone', kind: 'role' }], roles: ['everyone'], users: [] });
+        expect(e).toEqual({
+          restricted: false,
+          principals: [{ name: 'everyone', kind: 'role' }],
+          roles: ['everyone'],
+          users: [],
+          publicVia: [],
+        });
       });
 
       it('restricted=true when a same-scope by-name deny carves someone out of read: everyone', async () => {

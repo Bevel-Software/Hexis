@@ -232,6 +232,9 @@ describe('plugin principals', () => {
         { name: 'everyone', kind: 'role' },
         { name: 'plugin/open/read', kind: 'plugin' },
       ]);
+      // And WHY it is public: the resolver names the public plugin principal,
+      // which the lists alone cannot tell from an ordinary one.
+      expect(readers.publicVia).toEqual(['plugin/open/read']);
       // A revoke of `everyone` here would strip no line — so no source claims one.
       expect(await svc.grantSources(workspaceId, 'file', skill, { kind: 'role', role: 'everyone' })).toEqual({});
       // The plugin grant IS the line, and the one whose removal ends public read.

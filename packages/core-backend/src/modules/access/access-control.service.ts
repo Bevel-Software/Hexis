@@ -1100,6 +1100,7 @@ export class AccessControlService implements IAccessControl {
     principals: ResolvedPrincipal[];
     roles: string[];
     users: { name: string; email: string }[];
+    publicVia: string[];
   }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
@@ -1111,7 +1112,18 @@ export class AccessControlService implements IAccessControl {
     // node is public read the flag; the lists may be empty for a
     // default-denied path with no grants.
     const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users };
+    // WHY it is public, when it is: the public plugin principals granted read
+    // here — the one thing the dialog cannot tell from the lists alone (a
+    // plugin principal in them may or may not be public), so the resolver,
+    // which knows, says it. A literal `everyone` line shows up as a source
+    // of the `everyone` row instead; together the two answer "what remains
+    // public after this grant is removed".
+    const collapsed = resolveAtPath(model, 'read', relativePath, own);
+    const publicVia = [...collapsed.byRole]
+      .filter(([key, state]) => state === 'grant' && model.roles.publicKeys?.has(key))
+      .map(([key]) => key)
+      .sort();
+    return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users, publicVia };
   }
 
   async eligibleDownloaders(

@@ -17,6 +17,12 @@ import type { DiscoveredPlugin } from './plugin-source.js';
  * carrying `plugin.json`, optionally `mcp.json`, and the `access.md` that
  * makes it exist to the index. Called by the walker for every folder it
  * decides is a native plugin; reads the files, decides nothing else.
+ *
+ * Null when the manifest exists but could not be READ: the manifest is the
+ * identity, and a plugin whose identity nobody could see is not listed under
+ * a guessed one — it is a hole (`unreadable`), like a folder that could not
+ * be listed. The optional `mcp.json` carries no identity, so its read
+ * failure is a warning and nothing more.
  */
 export async function readNativePlugin(
   dir: string,
@@ -24,10 +30,15 @@ export async function readNativePlugin(
   relFolder: string,
   warnings: string[],
   unreadable: string[],
-): Promise<DiscoveredPlugin> {
+): Promise<DiscoveredPlugin | null> {
   const folderName = path.posix.basename(relFolder);
-  const manifestText = await readText(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings, unreadable);
-  const mcpJsonText = await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings, unreadable);
+  const manifestRead = await readText(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings);
+  if (manifestRead.failed) {
+    unreadable.push(`${folder}/${PLUGIN_MANIFEST_FILE}`);
+    return null;
+  }
+  const manifestText = manifestRead.text;
+  const mcpJsonText = (await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
   const manifest = parseObject(manifestText);
   if (manifestText !== null && manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
@@ -71,20 +82,21 @@ export async function readNativePlugin(
 }
 
 /**
- * A file's text, or null when there is no such file. A file that is there
- * but cannot be read is ALSO null to the caller — the plugin still stands,
- * on its folder's name — but it is said and counted: a manifest nobody could
- * read is an identity nobody could see.
+ * A file's text — null when there is no such file — and whether a file that
+ * IS there could not be read. Absence and failure are different answers;
+ * the caller decides what a failure means for the file in question.
  */
-async function readText(abs: string, folder: string, warnings: string[], unreadable: string[]): Promise<string | null> {
+async function readText(
+  abs: string,
+  folder: string,
+  warnings: string[],
+): Promise<{ text: string | null; failed: boolean }> {
   try {
-    return await fs.readFile(abs, 'utf-8');
+    return { text: await fs.readFile(abs, 'utf-8'), failed: false };
   } catch (err) {
-    if (!isAbsence(err)) {
-      warnings.push(`${folder}/${path.basename(abs)} could not be read — ${err instanceof Error ? err.message : String(err)}`);
-      unreadable.push(`${folder}/${path.basename(abs)}`);
-    }
-    return null;
+    if (isAbsence(err)) return { text: null, failed: false };
+    warnings.push(`${folder}/${path.basename(abs)} could not be read — ${err instanceof Error ? err.message : String(err)}`);
+    return { text: null, failed: true };
   }
 }
 

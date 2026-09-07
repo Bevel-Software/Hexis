@@ -842,10 +842,16 @@ export function ManageAccessDialog({
     }
   }, [workspaceId, repoRelative, entry.relativePath, targetKind, reload]);
 
-  // Whether public read is a LINE somewhere — here or in a parent — that a
-  // revoke of `everyone` can remove. Public through a plugin anyone can read
-  // has no such line: that plugin's own read grant is what ends it.
+  // WHY the node is public, from the resolver's two answers: the literal
+  // `everyone` lines (here or in a parent) that a revoke of `everyone` can
+  // remove, and the public plugin principals granted read, which only their
+  // own rows can remove. The band says both, so removing one never reads as
+  // removing public access when the other remains.
   const publicReadSources = lookupSources(data?.sources, 'r:everyone')?.read ?? [];
+  const publicViaLabels = (data?.readers.publicVia ?? []).map((token) => {
+    const parsed = parsePluginPrincipalToken(token);
+    return parsed ? pluginPrincipalLabel(parsed.plugin, parsed.verb) : token;
+  });
 
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
@@ -1428,9 +1434,11 @@ export function ManageAccessDialog({
                 <div className="min-w-0 flex-1">
                   <div className="text-ui text-ink">Anyone can read</div>
                   <div className="text-detail text-ink-muted">
-                    {publicReadSources.length > 0
+                    {publicReadSources.length > 0 && publicViaLabels.length === 0
                       ? `Public: every signed-in user can read this ${targetKind}`
-                      : `Public through a plugin anyone can read. Remove that plugin's read grant to restrict this ${targetKind}.`}
+                      : publicReadSources.length > 0
+                        ? `Public: every signed-in user can read this ${targetKind} — also through ${publicViaLabels.join(', ')}. Removing the direct grant keeps it public until that plugin's read grant is removed too.`
+                        : `Public through a plugin anyone can read${publicViaLabels.length > 0 ? ` (${publicViaLabels.join(', ')})` : ''}. Remove that plugin's read grant to restrict this ${targetKind}.`}
                   </div>
                 </div>
                 {canManage && publicReadSources.length > 0 && (
@@ -1441,7 +1449,7 @@ export function ManageAccessDialog({
                     disabled={busy}
                     onClick={removePublicRead}
                   >
-                    Remove
+                    {publicViaLabels.length > 0 ? 'Remove direct grant' : 'Remove'}
                   </Button>
                 )}
               </div>

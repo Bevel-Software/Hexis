@@ -60,8 +60,9 @@ export class KbPluginSource implements PluginSource {
       const folder = relFolder ? `${PLUGINS_DIR}/${relFolder}` : PLUGINS_DIR;
       const isRoot = relFolder === '';
       if (!isRoot && (await isFile(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings, unreadable))) {
-        claim(await readNativePlugin(dir, folder, relFolder, warnings, unreadable));
-        return 1;
+        const native = await readNativePlugin(dir, folder, relFolder, warnings, unreadable);
+        if (native) claim(native);
+        return 1; // a manifest that could not be read: a hole, and still not descended into
       }
       if (!isRoot && (await isFile(path.join(dir, BUNDLE_FILE), folder, warnings, unreadable))) {
         const bundle = await readBundlePlugin(dir, folder, relFolder, registry, warnings, unreadable);

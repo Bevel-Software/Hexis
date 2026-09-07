@@ -134,6 +134,45 @@ describe('PluginRenameService', () => {
     expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
   });
 
+  it('tells a NON-manager nothing about the tree — a holed discovery is still just "unknown plugin" to them', async () => {
+    const real = new KbPluginSource();
+    const holed = {
+      dialect: 'kb',
+      discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
+    };
+    const svcOverHole = new PluginRenameService(
+      { getWorkspacePath: async (id: string) => path.join(root, id) } as unknown as WorkspaceService,
+      { commitChanges: async () => { throw new Error('must not commit'); } },
+      access,
+      holed,
+      KB_DIR,
+    );
+    const refusal = await svcOverHole.rename(member, 'gtm', { name: 'go-to-market' }).catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ status: 404, payload: { kind: 'unknown-plugin' } });
+    expect(JSON.stringify(refusal)).not.toContain('Hidden');
+  });
+
+  it('a grant file it cannot open is the same hole as a folder it cannot list: refused before any write', async () => {
+    const tool = 'Plugins/GTM/software.bevel.hexis/tools/web.tool';
+    await write(tool, '---\nname: web\nread:\n  - plugin/gtm/read\n---\nbody\n');
+    const realReadFile = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith('web.tool')
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({
+        status: 503,
+        payload: { kind: 'incomplete-discovery', unreadable: [tool] },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
+    expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
+    expect(commits).toEqual([]);
+  });
+
   it('renames the identifier: the manifest and every grant that spells the old one, in ONE commit', async () => {
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
 
