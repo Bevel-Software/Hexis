@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
-import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
+import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
@@ -25,6 +25,10 @@ import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 const { listMock, createMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
+}));
+
+vi.mock('../../../admin/state/admin.context', () => ({
+  useAdmin: () => ({ isAdmin: false }),
 }));
 
 vi.mock('../../services/external-api-keys.api', () => ({
@@ -246,6 +250,77 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 });
 
+describe('the Marketplaces tab', () => {
+  it('is the third tab, and the interactive tab points at it instead of carrying the remote', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      'Your agent',
+      'Marketplaces',
+      'Autonomous agents',
+    ]);
+    // The remote no longer lives on the interactive tab.
+    expect(snippets().some((v) => v.includes('marketplace.git'))).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Marketplaces' }));
+    expect(screen.getByRole('tab', { name: 'Marketplaces' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('leads with the Cowork route and follows with the git remote, both closed, one URL for both', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai');
+    const git = screen.getByText('Claude Code, Codex and the skills CLI');
+    expect(cowork.compareDocumentPosition(git) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    for (const drawer of [cowork, git]) {
+      expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
+    }
+    const remote = `${new URL(PUBLIC_URL).origin}/git/marketplace.git`;
+    // The same address in both drawers: what Cowork adds is what Claude Code clones.
+    expect(snippets().filter((v) => v === remote)).toHaveLength(2);
+    // The keyed commands point at the deployment's host.
+    const commands = snippets().filter((v) => v.includes('key:'));
+    expect(commands.length).toBeGreaterThan(0);
+    for (const v of commands) expect(v).toContain(new URL(PUBLIC_URL).host);
+  });
+
+  it('tells Claude connections from keys by their stored kind — never by the label', async () => {
+    listMock.mockResolvedValue([
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      // A hand-made key wearing the link's usual label is still a key.
+      { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+    ]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    await screen.findByText('My Cowork link');
+    expect(cowork).toHaveTextContent('My Cowork link');
+    expect(cowork).not.toHaveTextContent('Claude (claude.ai and Cowork)');
+
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText('Claude (claude.ai and Cowork)');
+    expect(screen.queryByText('My Cowork link')).toBeNull();
+  });
+
+  it('says where the keys went when only Claude connections exist, and shows a load error on both tabs', async () => {
+    listMock.mockResolvedValue([
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+    ]);
+    const user = userEvent.setup();
+    const first = mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText(/Your Claude connections are on the Marketplaces tab/);
+    first.unmount();
+
+    listMock.mockRejectedValue(new Error('keys are down'));
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    await screen.findByText('keys are down');
+    expect(screen.queryByText(/None yet/)).toBeNull();
+  });
+});
+
 describe('the one-click install link', () => {
   it('offers Add to Claude on a reachable deployment', () => {
     mount(PUBLIC_URL);
@@ -321,7 +396,7 @@ describe('tabs', () => {
   it('starts on the interactive tab', () => {
     mount(PUBLIC_URL);
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Autonomous agents']);
+    expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Marketplaces', 'Autonomous agents']);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
   });

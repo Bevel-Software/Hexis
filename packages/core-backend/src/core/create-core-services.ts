@@ -62,6 +62,15 @@ import {
 } from '../modules/plugins/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
 import {
+  GitHubFacadeCredentialsService,
+  GitHubFacade,
+  DbGitHubFacadeCodeStore,
+  DbGitHubFacadeCredentialsStore,
+  CLAUDE_CONSUMER,
+  GITHUB_LINK_KEY_KIND,
+  GITHUB_LINK_KEY_PREFIX,
+} from '../modules/marketplace/github-facade/index.js';
+import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
   registerBevelSecretsVariableLoader,
@@ -158,6 +167,9 @@ export interface CoreServices {
   marketplaceCompiler: MarketplaceCompilerService;
   /** The bare repository the per-user marketplace git endpoint serves from. */
   marketplaceRepo: MarketplaceRepoService;
+  /** The GitHub Enterprise facade products such as claude.ai add the marketplace through. */
+  githubFacade: GitHubFacade;
+  githubFacadeCredentials: GitHubFacadeCredentialsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -680,7 +692,30 @@ export async function createCoreServices(
   // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
   // over loopback and re-exposes every tool, dispatching calls back through the
   // REST tool surface (so agent logic + metering live there, once).
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix);
+  // Connection keys also come as GitHub-shaped links (`gho_…`, kind
+  // `github-link`): the same key, minted by the marketplace facade below when
+  // a person connects an account on claude.ai, told apart by its stored kind.
+  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
+    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_PREFIX,
+  });
+
+  // The facade that lets products which sync marketplaces only from a GitHub
+  // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
+  // generated app credentials an Owner registers once, and the connect flow
+  // that turns a hexis session into a connection key the product holds.
+  // Reuses the MCP flow's signed state and /connect page — see
+  // modules/marketplace/github-facade.
+  const githubFacadeCredentials = new GitHubFacadeCredentialsService(
+    new DbGitHubFacadeCredentialsStore(db, config.secretsEncKey ? new TokenCrypto(config.secretsEncKey) : null),
+  );
+  const githubFacade = new GitHubFacade({
+    credentials: githubFacadeCredentials,
+    codes: new DbGitHubFacadeCodeStore(db),
+    keys: externalApiKeyService,
+    consumers: [CLAUDE_CONSUMER],
+    stateSecret: config.jwtSecret,
+    publicFrontendUrl: config.publicFrontendUrl,
+  });
   const mcpSessionStore = new McpSessionStore();
   const mcpService = new McpService(
     mcpSessionStore,
@@ -902,6 +937,8 @@ export async function createCoreServices(
     pluginRenameService,
     marketplaceCompiler,
     marketplaceRepo,
+    githubFacade,
+    githubFacadeCredentials,
     authService,
     authMiddleware,
     accountErasureService,

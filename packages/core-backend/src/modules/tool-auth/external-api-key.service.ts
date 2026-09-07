@@ -8,36 +8,53 @@ import {
   TokenNotFoundError,
   TokenStillActiveError,
 } from './external-api-key.errors.js';
-import type {
-  ExternalApiKeySummary,
-  IExternalApiKeyService,
-  MintedExternalApiKey,
+import {
+  DEFAULT_KEY_KIND,
+  type ExternalApiKeySummary,
+  type IExternalApiKeyService,
+  type MintOptions,
+  type MintedExternalApiKey,
 } from './external-api-key.interface.js';
 
-// Plaintext format: `<tenant>_<43 base64url chars>`. 32 random bytes encoded
+// Plaintext format: `<prefix><43 base64url chars>`. 32 random bytes encoded
 // base64url is 43 chars and gives 256 bits of entropy — overkill against
-// brute force, cheap to copy. The tenant prefix (default `bevel_`) lets the
-// auth middleware route key-vs-JWT requests without parsing both shapes.
+// brute force, cheap to copy. The prefix lets the auth middleware route
+// key-vs-JWT requests without parsing both shapes.
 const TOKEN_BYTES = 32;
 
 const MAX_LABEL_LEN = 200;
 
 export class ExternalApiKeyService implements IExternalApiKeyService {
+  private readonly prefixes: readonly string[];
+
   /**
    * @param keyPrefix Tenant-derived plaintext prefix (e.g. `bevel_`) — injected
    *   from {@link AppConfig.externalApiKeyPrefix} so a deploy can brand its keys.
+   *   Every key of the default kind is minted with it.
+   * @param kinds Other kinds a key may be minted as, each with the plaintext
+   *   prefix that kind is spelled with — a Claude link's `gho_`, the shape
+   *   claude.ai expects from a GitHub host. Same key, same table, same
+   *   revocation; the KIND is stored on the row and is what tells such keys
+   *   apart (a label is the person's to edit), the prefix is only what the
+   *   outside world sees and what routes the bearer back here.
    */
   constructor(
     private readonly db: Database,
     private readonly keyPrefix: string,
-  ) {}
-
-  /** True if a bearer string carries this tenant's external-API-key prefix. */
-  looksLikeExternalApiKey(token: string): boolean {
-    return typeof token === 'string' && token.startsWith(this.keyPrefix);
+    private readonly kinds: Readonly<Record<string, string>> = {},
+  ) {
+    this.prefixes = [keyPrefix, ...Object.values(kinds)];
   }
 
-  async mint(userId: string, label: string): Promise<MintedExternalApiKey> {
+  /** True if a bearer string carries one of this service's key prefixes. */
+  looksLikeExternalApiKey(token: string): boolean {
+    return typeof token === 'string' && this.prefixes.some((p) => token.startsWith(p));
+  }
+
+  async mint(userId: string, label: string, options: MintOptions = {}): Promise<MintedExternalApiKey> {
+    const kind = options.kind ?? DEFAULT_KEY_KIND;
+    const prefix = kind === DEFAULT_KEY_KIND ? this.keyPrefix : this.kinds[kind];
+    if (!prefix) throw new Error(`Unknown key kind "${kind}"`);
     const trimmed = (label ?? '').trim();
     if (trimmed.length === 0) {
       throw new InvalidTokenLabelError('Label cannot be empty');
@@ -48,12 +65,12 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       );
     }
 
-    const plaintext = this.keyPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
+    const plaintext = prefix + randomBytes(TOKEN_BYTES).toString('base64url');
     const tokenHash = hashToken(plaintext);
 
     const [row] = await this.db
       .insert(externalApiKeys)
-      .values({ userId, tokenHash, label: trimmed })
+      .values({ userId, tokenHash, label: trimmed, kind })
       .returning();
 
     return {
@@ -202,6 +219,7 @@ function toSummary(row: typeof externalApiKeys.$inferSelect): ExternalApiKeySumm
   return {
     id: row.id,
     label: row.label,
+    kind: row.kind,
     createdAt: row.createdAt.getTime(),
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.getTime() : null,
     revokedAt: row.revokedAt ? row.revokedAt.getTime() : null,
