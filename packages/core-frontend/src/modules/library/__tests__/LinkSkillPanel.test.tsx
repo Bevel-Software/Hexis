@@ -80,11 +80,14 @@ describe('LinkSkillPanel', () => {
     // The clicked row says what is happening; the others wait, still saying Link.
     const linking = await screen.findByRole('button', { name: 'Linking…' });
     expect(linking).toBeDisabled();
-    expect(linking).toHaveAttribute('aria-busy', 'true');
     expect(screen.getByRole('button', { name: 'Link' })).toBeDisabled();
+    // A disabled button drops focus, so the word is ALSO in a live region
+    // that assistive tech reads out — and it clears once the link lands.
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('Linking deploy…');
 
     settle({ root: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
     await waitFor(() => expect(onLinked).toHaveBeenCalled());
+    expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('');
   });
 
   it('turns the server\'s needs-skill-write refusal into a request, and says when it is sent', async () => {

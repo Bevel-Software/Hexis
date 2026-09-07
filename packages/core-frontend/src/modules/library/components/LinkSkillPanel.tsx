@@ -85,6 +85,12 @@ export function LinkSkillPanel({
       <p className="text-ui text-ink-muted">
         {`Link a skill that already exists. It stays where it is; ${plugin}'s members get to read it and its managers get to edit it.`}
       </p>
+      {/* The in-flight word for assistive tech. The clicked button says
+          "Linking…" too, but a button that goes disabled drops focus, so a
+          label change there is never read out; a live region is. */}
+      <span role="status" aria-live="polite" aria-label="Link progress" className="sr-only">
+        {busy !== null ? `Linking ${busy}…` : ''}
+      </span>
       <input
         type="search"
         value={query}
@@ -141,12 +147,12 @@ export function LinkSkillPanel({
                   variant="outline"
                   size="tiny"
                   disabled={busy !== null}
-                  aria-busy={busy === item.id}
                   onClick={() => void link(item)}
                 >
                   {/* A link is a commit and a push — a second or two. The
                       button says so, or a greyed "Link" reads as a page that
-                      froze. Same word as the panel beside it: "Creating…". */}
+                      froze. Same word as the panel beside it: "Creating…";
+                      the live region above says it for screen readers. */}
                   {busy === item.id ? 'Linking…' : 'Link'}
                 </Button>
               )}
