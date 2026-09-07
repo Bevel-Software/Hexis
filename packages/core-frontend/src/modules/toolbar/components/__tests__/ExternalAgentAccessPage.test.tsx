@@ -258,11 +258,14 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
-   * The placeholder on the keyless tab is a placeholder, not a percent-encoded
-   * one: `%3Cexternal-api-key%3E` looked like a secret to paste.
+   * The placeholder in the keyless marketplace commands is a placeholder, not
+   * a percent-encoded one: `%3Cexternal-api-key%3E` looked like a secret to
+   * paste. The commands live on the Marketplaces tab now.
    */
-  it('shows the marketplace placeholder verbatim on the keyless tab', () => {
+  it('shows the marketplace placeholder verbatim in the keyless commands', async () => {
+    const user = userEvent.setup();
     mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const marketplace = snippets().filter((v) => v.includes('marketplace.git'));
     expect(marketplace.length).toBeGreaterThan(0);
     for (const v of marketplace) expect(v).not.toContain('%3C');
