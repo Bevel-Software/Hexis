@@ -282,6 +282,13 @@ export function createWorkspaceRoutes(
       );
       res.json({ workspace, fileTree });
     } catch (error) {
+      // A typed domain answer — a branch origin no longer has (410), a name
+      // git refuses (400) — is the client's to act on, not a failure of ours;
+      // it keeps its status so the browser can say what happened.
+      if (error instanceof WorkflowDomainError) {
+        sendError(res, error);
+        return;
+      }
       // Log the full stack so the next 500 isn't a guessing game — the
       // bare `error.message` we returned before lost most diagnostic
       // signal (cause chain, stack frames, error class).

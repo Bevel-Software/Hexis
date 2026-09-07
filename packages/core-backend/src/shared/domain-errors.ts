@@ -184,6 +184,18 @@ export class RemoteBranchGoneError extends WorkflowDomainError {
 }
 
 /**
+ * Whether a failed clone or fetch failed because origin has no such branch, as
+ * opposed to being unreachable or refusing the credential. Git's wording for
+ * the two shapes: `Remote branch <x> not found in upstream origin` (clone) and
+ * `couldn't find remote ref refs/heads/<x>` (fetch). The ONE classifier for
+ * this fact — the workspace bootstrap and the git layer both consult it, so
+ * a wording learned by one is learned by both.
+ */
+export function isMissingRemoteBranchFailure(message: string): boolean {
+  return /Remote branch .* not found in upstream|couldn't find remote ref/i.test(message);
+}
+
+/**
  * Generic 400 for workflow-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the

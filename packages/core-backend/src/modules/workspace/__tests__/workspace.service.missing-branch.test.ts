@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isMissingRemoteBranchFailure } from '../workspace.service.js';
+import { isMissingRemoteBranchFailure } from '../../../shared/domain-errors.js';
 
 /**
  * The one line that decides whether a failed bootstrap is "this branch does

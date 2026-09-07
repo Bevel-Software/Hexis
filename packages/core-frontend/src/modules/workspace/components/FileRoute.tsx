@@ -330,13 +330,23 @@ export function FileRoute() {
     );
   }
 
-  if (error?.kind === 'branch-gone') {
-    // The branch was deleted on the git host and its clone retired; there
-    // is nothing here to load or to retry. Point at the branch that exists.
+  // The branch was deleted on the git host and its clone retired; there is
+  // nothing here to load or to retry. Two ways to learn it: a file read on a
+  // workspace we already had (410 from the read → `error`), or the bootstrap
+  // of the branch itself failing before there was a workspace at all (410
+  // from `GET /workspace` → `bootstrapError`, matched to THIS branch so a
+  // stale failure from a branch we left cannot paint over the current one).
+  const goneBranch =
+    error?.kind === 'branch-gone'
+      ? error.branch
+      : workspace.bootstrapError?.status === 410 && workspace.bootstrapError.branch === branchFromUrl
+        ? branchFromUrl
+        : null;
+  if (goneBranch !== null) {
     return (
       <ErrorScreen title="This branch no longer exists">
         <p className="text-ui text-ink-muted">
-          <span className="font-mono text-ink">{error.branch}</span> was deleted in the git
+          <span className="font-mono text-ink">{goneBranch}</span> was deleted in the git
           repository. Anything merged from it lives on{' '}
           <span className="font-mono text-ink">{DEFAULT_BRANCH}</span>.
         </p>

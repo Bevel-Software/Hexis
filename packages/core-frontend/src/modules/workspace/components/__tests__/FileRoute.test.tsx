@@ -265,6 +265,29 @@ describe('FileRoute', () => {
     expect(screen.getByRole('button', { name: /Go to/ })).toBeInTheDocument();
     expect(screen.queryByText(/Couldn't load this file/i)).not.toBeInTheDocument();
   });
+  it('renders the branch-gone screen when the BOOTSTRAP of the URL branch answered 410', async () => {
+    // No workspace ever came up for this branch: GET /workspace said the
+    // branch is gone. The state surfaces that; the route must not sit waiting.
+    const workspace = makeWorkspace({ bootstrapError: { branch: 'alice/draft', status: 410 } });
+    const git = makeGit({ status: makeStatus('main') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => {
+      expect(screen.getByText(/This branch no longer exists/i)).toBeInTheDocument();
+    });
+  });
+
+  it('a stale bootstrap failure from another branch does not paint over this one', async () => {
+    const workspace = makeWorkspace({ bootstrapError: { branch: 'someone/else', status: 410 } });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/This branch no longer exists/i)).not.toBeInTheDocument();
+    });
+  });
   it('renders file-load-failed when hydrate throws a non-404 error', async () => {
     const hydrateTabs = vi.fn(async () => {
       throw new WorkspaceApiError(500);

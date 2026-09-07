@@ -99,6 +99,7 @@ interface UseWorkspaceStateReturn extends WorkspaceContextValue {
 
 export function useWorkspaceState(): UseWorkspaceStateReturn {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<{ branch: string; status: number } | null>(null);
   const [kbDirName, setKbDirName] = useState<string | null>(null);
   const [fileTree, setFileTree] = useState<FileTreeEntry | null>(null);
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
@@ -173,8 +174,17 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         setWorkspaceId(workspace.id);
         setKbDirName(workspace.kbDirName);
         setFileTree(tree);
+        setBootstrapError(null);
       } catch (err) {
-        if (!cancelled) console.error('Failed to bootstrap workspace:', err);
+        if (cancelled) return;
+        console.error('Failed to bootstrap workspace:', err);
+        // Surfaced, not just logged: a bootstrap that fails leaves
+        // `workspaceId` where it was, and the route waiting on it needs to
+        // know why — a branch the host deleted (410) has its own screen.
+        setBootstrapError({
+          branch: branch ?? '',
+          status: err instanceof WorkspaceApiError ? err.status : 0,
+        });
       }
     })();
     return () => { cancelled = true; };
@@ -1371,6 +1381,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     workspaceId,
     kbDirName,
     fileTree,
+    bootstrapError,
     openTabs,
     activeTab,
     dirtyTabFilenames,
@@ -1412,7 +1423,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setPersistenceBranch,
     deleteWorkspace,
   }), [
-    workspaceId, kbDirName, fileTree, openTabs, activeTab, dirtyTabFilenames,
+    workspaceId, kbDirName, fileTree, bootstrapError, openTabs, activeTab, dirtyTabFilenames,
     openFilePath, openFileContent, openFileSavedContent, hasUnsavedFileChanges, pendingFileContent,
     setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadError, uploadNotice, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,

@@ -7,7 +7,11 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
-import { RemoteBranchGoneError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import {
+  RemoteBranchGoneError,
+  WorkflowDomainError,
+  isMissingRemoteBranchFailure,
+} from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import {
   cloneCredentialArgs,
@@ -100,16 +104,6 @@ const FETCH_CACHE_TTL_MS = 30_000;
  * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
  */
 export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
-
-/**
- * Whether a failed `git clone -b <branch>` failed because origin has no such
- * branch, as opposed to being unreachable or refusing the credential. Git's
- * wording for the two shapes: `Remote branch <x> not found in upstream origin`
- * (clone) and `couldn't find remote ref refs/heads/<x>` (fetch).
- */
-export function isMissingRemoteBranchFailure(message: string): boolean {
-  return /Remote branch .* not found in upstream|couldn't find remote ref/i.test(message);
-}
 
 export class WorkspaceService implements IWorkspaceService {
   /** Maps branch → absolute directory path. Lazily populated. */
