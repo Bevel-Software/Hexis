@@ -226,9 +226,11 @@ describe('GitService.syncFromRemote — an unborn clone that already holds stage
     await runGit(repo, ['config', 'user.email', 'workspace@bevel.test']);
     await runGit(repo, ['config', 'user.name', 'bevel Workspace']);
     await runGit(repo, ['checkout', '-b', BRANCH]).catch(() => undefined);
-    // Someone wrote and staged a file before the first commit ever existed.
-    await fs.writeFile(path.join(repo, 'Draft.md'), 'not yet committed\n');
-    await runGit(repo, ['add', 'Draft.md']);
+    // Someone wrote and staged a file before the first commit ever existed —
+    // with a name git's line output would quote ("Entw\\303\\274rfe.md"), so
+    // the outcome has to carry the real spelling.
+    await fs.writeFile(path.join(repo, 'Entwürfe.md'), 'not yet committed\n');
+    await runGit(repo, ['add', 'Entwürfe.md']);
     // Origin gains its first commit meanwhile.
     const seed = path.join(root, '.first');
     await fs.mkdir(seed);
@@ -243,9 +245,9 @@ describe('GitService.syncFromRemote — an unborn clone that already holds stage
 
     await expect(git.syncFromRemote('ws')).rejects.toMatchObject({
       name: 'PullRebaseConflictError',
-      conflictedPaths: ['Draft.md'],
+      conflictedPaths: ['Entwürfe.md'],
     });
-    expect(await fs.readFile(path.join(repo, 'Draft.md'), 'utf8')).toBe('not yet committed\n');
-    expect(await gitOut(repo, ['ls-files', '--cached'])).toBe('Draft.md');
+    expect(await fs.readFile(path.join(repo, 'Entwürfe.md'), 'utf8')).toBe('not yet committed\n');
+    expect((await gitOut(repo, ['ls-files', '--cached', '-z'])).replace(/\0$/, '')).toBe('Entwürfe.md');
   });
 });

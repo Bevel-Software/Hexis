@@ -53,7 +53,11 @@ export class KbSyncService implements IKbSyncService {
   sync(request: SyncRequest): Promise<SyncResult> {
     if (!this.inFlight) return this.start(request);
     return new Promise<SyncResult>((resolve, reject) => {
-      this.waiters.push({ branches: request.branches, by: request.by, resolve, reject });
+      // Copied on entry: the caller keeps its array, and a caller that reuses
+      // or edits it before the follow-up runs must not change what is pulled
+      // or what it is answered for.
+      const branches = request.branches === 'all' ? 'all' : [...request.branches];
+      this.waiters.push({ branches, by: request.by, resolve, reject });
     });
   }
 

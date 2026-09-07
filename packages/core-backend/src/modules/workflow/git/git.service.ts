@@ -1623,8 +1623,11 @@ export class GitService implements IGitService {
     // is refused as a conflict, naming the staged paths, and takes the same
     // recovery path a rebase conflict does; nothing on disk is touched.
     if ((await this.revParseOrNull(cwd, 'HEAD')) === null) {
-      const { stdout: stagedOut } = await this.git(cwd, ['ls-files', '--cached']);
-      const staged = stagedOut.split('\n').map((l) => l.trim()).filter(Boolean);
+      // `-z`: NUL-delimited and unquoted. Line output quotes a path with a
+      // non-ASCII or control character ("Entw\303\274rfe.md"), and that
+      // spelling would name a file that does not exist to whoever recovers.
+      const { stdout: stagedOut } = await this.git(cwd, ['ls-files', '--cached', '-z']);
+      const staged = stagedOut.split('\0').filter(Boolean);
       if (staged.length > 0) {
         throw new PullRebaseConflictError(
           branch,

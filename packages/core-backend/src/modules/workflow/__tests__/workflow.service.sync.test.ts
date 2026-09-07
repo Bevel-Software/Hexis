@@ -413,3 +413,25 @@ describe('WorkflowService.syncWorkspaceFromRemote — an announcement is owed un
     expect(emit.mock.calls[1][0]).toMatchObject({ newSha: 'ccc' });
   });
 });
+
+describe('WorkflowService.syncWorkspaceFromRemote — a debt dies with its clone', () => {
+  it('an announcement owed to a branch the host deleted is not replayed against a branch recreated under that name', async () => {
+    let pulls = 0;
+    const { svc, prs, emit } = build({
+      sync: async () => {
+        pulls++;
+        if (pulls === 1) return { before: 'aaa', after: 'bbb', treeChanged: true, changedPaths: ['Old/a.md'] };
+        if (pulls === 2) throw new RemoteBranchGoneError('ali/x');
+        // The recreated branch: a fresh clone with nothing new to announce.
+        return { before: 'ccc', after: 'ccc', treeChanged: false, changedPaths: [] };
+      },
+    });
+    (prs.invalidateListCache as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('cache exploded');
+    });
+    expect(await svc.syncWorkspaceFromRemote('ali%2Fx')).toMatchObject({ outcome: 'error' });
+    expect(await svc.syncWorkspaceFromRemote('ali%2Fx')).toEqual({ branch: 'ali/x', outcome: 'remote-gone' });
+    expect(await svc.syncWorkspaceFromRemote('ali%2Fx')).toEqual({ branch: 'ali/x', outcome: 'up-to-date', to: 'ccc' });
+    expect(emit).not.toHaveBeenCalled();
+  });
+});

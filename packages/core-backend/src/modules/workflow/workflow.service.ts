@@ -543,6 +543,8 @@ export class WorkflowService implements IWorkflowService {
       if (this.workspaceService.isBootstrapInFlight(branch)) return false;
       if (await this.git.remoteBranchExists(branch, branch)) return false;
       await this.workspaceService.deleteWorkspace(id);
+      // Whatever a sync still owed that clone is owed to nothing now.
+      this.owedAnnouncements.delete(id);
       return true;
     });
   }
@@ -584,7 +586,11 @@ export class WorkflowService implements IWorkflowService {
       if (err instanceof RemoteBranchGoneError) {
         // Not a failure: the host deleted the branch, so there is nothing to
         // sync and the caller retires the stale clone. No banner — nobody is
-        // editing a branch that no longer exists.
+        // editing a branch that no longer exists. An announcement still owed
+        // for that clone dies with it: a branch recreated under the same name
+        // is a different tree, and replaying the old paths against it would
+        // announce changes that never happened there.
+        this.owedAnnouncements.delete(id);
         console.log(`[sync] branch "${branch}" no longer exists on the host`);
         return { branch, outcome: 'remote-gone' };
       }

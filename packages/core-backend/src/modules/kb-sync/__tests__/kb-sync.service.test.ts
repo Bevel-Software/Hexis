@@ -268,3 +268,28 @@ describe('KbSyncService — a coalesced caller is judged by its own branches', (
     expect(svc.lastSync()?.results.map((r) => r.branch)).toEqual(['ali/x', 'juan/y']);
   });
 });
+
+describe('KbSyncService — a waiter keeps the branches it asked for', () => {
+  it('a caller that edits its array after queueing changes nothing about its sync or its answer', async () => {
+    const gate = deferred<void>();
+    const workflow: SyncWorkflowPort = {
+      syncWorkspaceFromRemote: vi.fn(async (id: string) => {
+        if (id === 'main') await gate.promise;
+        return updated(decodeURIComponent(id));
+      }),
+      closeChangeRequestsWithDeletedBranches: vi.fn(async () => 0),
+      retireRemoteGoneClone: vi.fn(async () => true),
+    };
+    const svc = new KbSyncService(workflow, workspaces(['main', 'ali/x', 'juan/y']));
+    const first = svc.sync({ branches: ['main'] });
+    const asked = ['ali/x'];
+    const waiting = svc.sync({ branches: asked });
+    asked.push('juan/y');
+    asked[0] = 'main';
+    gate.resolve();
+    await first;
+    const r = await waiting;
+    expect(r.results.map((x) => x.branch)).toEqual(['ali/x']);
+    expect(workflow.syncWorkspaceFromRemote).not.toHaveBeenCalledWith('juan%2Fy');
+  });
+});
