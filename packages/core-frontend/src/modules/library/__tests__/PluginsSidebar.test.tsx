@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, type Mock } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { PluginsSidebar, type PluginsSidebarProps } from '../components/PluginsSidebar';
 import type { LibraryFilter } from '../utils/status';
 
@@ -168,9 +168,24 @@ describe('PluginsSidebar', () => {
     renderSidebar();
     // GTM: 3 items but 2 integrations need setup — amber wins the slot.
     expect(row(/^GTM/)).toHaveAccessibleName('GTM 2');
+    expect(within(row(/^GTM/)).getByText('2')).toHaveClass('text-wait');
     expect(row(/^Engineering/)).toHaveAccessibleName('Engineering 4');
     // Never a grey 0: an empty plugin shows no count at all.
     expect(row(/^Product/)).toHaveAccessibleName('Product');
+  });
+
+  it('turns the count orange when members are locked out of a linked skill', () => {
+    renderSidebar({
+      plugins: [
+        { plugin: 'GTM', count: 3, attention: 2, urgent: true },
+        { plugin: 'Ops', count: 3, attention: 1, urgent: false },
+      ],
+    });
+    // Blocking other people outranks a tool the reader has not set up.
+    const gtm = within(row(/^GTM/)).getByText('2');
+    expect(gtm).toHaveClass('text-urgent');
+    expect(gtm).not.toHaveClass('text-wait');
+    expect(within(row(/^Ops/)).getByText('1')).toHaveClass('text-wait');
   });
 
   it('emits the right LibraryFilter per row', () => {

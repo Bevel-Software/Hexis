@@ -28,7 +28,18 @@ export interface PluginsSidebarProps {
   /** A row was clicked — the layout navigates; the sidebar owns no state. */
   onSelect(filter: LibraryFilter): void;
   /** Readable plugins, with their item count and how many integrations need setup. `label` is what the row shows; `plugin` is the identity it navigates by. */
-  plugins: { plugin: string; label?: string; count: number; attention: number }[];
+  plugins: {
+    plugin: string;
+    label?: string;
+    count: number;
+    attention: number;
+    /**
+     * Some of the attention is a linked skill the plugin's members cannot
+     * read. That outranks a tool the reader has not set up for themselves —
+     * it blocks other people — so the count turns orange, not amber.
+     */
+    urgent?: boolean;
+  }[];
   /**
    * Plugins the caller cannot read, alphabetical. Rendered after a gap, with a
    * lock instead of a count. A bare string is a plugin whose label is its name.
@@ -172,7 +183,7 @@ export function PluginsSidebar({
     label: string,
     target: LibraryFilter,
     count: number,
-    tone: 'count' | 'pending' = 'count',
+    tone: 'count' | 'pending' | 'urgent' = 'count',
   ) => (
     <button
       // Keyed by what the row IS (its target), never by what it says: two
@@ -190,7 +201,11 @@ export function PluginsSidebar({
         <span
           className={cn(
             'h-4.5 shrink-0 basis-5.5 rounded-md text-center text-meta leading-[18px] tabular-nums',
-            tone === 'pending' ? 'bg-wait-soft font-bold text-wait' : 'text-ink-faint',
+            tone === 'urgent'
+              ? 'bg-urgent-soft font-bold text-urgent'
+              : tone === 'pending'
+                ? 'bg-wait-soft font-bold text-wait'
+                : 'text-ink-faint',
           )}
         >
           {count}
@@ -295,14 +310,16 @@ export function PluginsSidebar({
           {/* Your own space leads the plugins, as in the prototype (line 2487):
               it is the one you are always in. */}
           {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
-          {plugins.map(({ plugin, label, count, attention }) =>
+          {plugins.map(({ plugin, label, count, attention, urgent }) =>
             // Amber wins the count slot: a plugin that needs setup is telling you
-            // something, and how many items it holds is not the news.
+            // something, and how many items it holds is not the news. Orange
+            // wins over amber: members locked out of a skill outrank a tool
+            // the reader has not set up for themselves.
             row(
               label ?? plugin,
               { kind: 'group', plugin },
               attention > 0 ? attention : count,
-              attention > 0 ? 'pending' : 'count',
+              attention > 0 ? (urgent ? 'urgent' : 'pending') : 'count',
             ),
           )}
           {/* The heading's `+` is hover-revealed, and a person with no plugins

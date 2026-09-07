@@ -8,6 +8,7 @@ import {
   withLinkHealth,
   type AttentionStatus,
 } from '../utils/status';
+import { attentionOf, brokenLinksOf, type LibraryItem } from '../state/library-data';
 
 /**
  * Membership by LINK, alongside membership by folder. A shared skill under
@@ -82,5 +83,26 @@ describe('membership by link', () => {
     const needsTools = { ...shared, status: { state: 'warn' as const, text: 'Needs setup: 1 tool' } };
     // Ops's link is broken too — but the card's own reason comes first.
     expect(withLinkHealth(needsTools, 'Ops').status).toBe(needsTools.status);
+  });
+
+  it("a broken link counts in the plugin's attention, apart from its tools", () => {
+    const unsetTool = {
+      kind: 'integration' as const,
+      name: 'hubspot',
+      description: '',
+      owned: false,
+      plugin: 'Ops',
+      status: { state: 'warn' as const, text: 'Needs setup' },
+    };
+    const items = [shared, inline, personal, unsetTool] as unknown as LibraryItem[];
+    // Ops: one tool to set up, one linked skill its members cannot read.
+    expect(brokenLinksOf(items, 'Ops')).toBe(1);
+    expect(attentionOf(items, 'Ops')).toBe(2);
+    // GTM's link is granted: nothing to report.
+    expect(brokenLinksOf(items, 'GTM')).toBe(0);
+    expect(attentionOf(items, 'GTM')).toBe(0);
+    // An inline skill is never a broken link, whatever `granted` says.
+    const oddInline = { ...inline, plugins: [{ name: 'GTM', linked: false, granted: false }] };
+    expect(brokenLinksOf([oddInline] as unknown as LibraryItem[], 'GTM')).toBe(0);
   });
 });

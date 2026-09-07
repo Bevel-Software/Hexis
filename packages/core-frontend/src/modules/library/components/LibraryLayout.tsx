@@ -4,7 +4,7 @@ import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
+import { attentionOf, brokenLinksOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import {
   isPluginsIndexPath,
@@ -116,6 +116,7 @@ export function LibraryLayout() {
         label: pluginLabel(plugin, pluginSummaries),
         count: counts.get(plugin) ?? 0,
         attention: attentionOf(items, plugin),
+        urgent: brokenLinksOf(items, plugin) > 0,
       }));
   }, [items, pluginSummaries]);
   /**

@@ -271,7 +271,23 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  * one, and belong to a different surface.
  */
 export function attentionOf(items: LibraryItem[], plugin: string): number {
+  return (
+    items.filter(
+      (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
+    ).length + brokenLinksOf(items, plugin)
+  );
+}
+
+/**
+ * How many of `plugin`'s LINKED skills its members cannot read: the link is
+ * in the manifest but the skill folder no longer grants the plugin's readers.
+ * Counted apart from the integrations because it is a different kind of
+ * problem — a tool that needs setup blocks the reader's own use; a link
+ * without its grant blocks every member of the plugin, right now — and the
+ * sidebar and the plugin page rank it above amber for that reason.
+ */
+export function brokenLinksOf(items: LibraryItem[], plugin: string): number {
   return items.filter(
-    (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
+    (i) => i.kind === 'skill' && (i.plugins ?? []).some((m) => m.name === plugin && m.linked && m.granted === false),
   ).length;
 }

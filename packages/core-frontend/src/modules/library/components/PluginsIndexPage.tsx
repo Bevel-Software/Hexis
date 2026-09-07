@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Badge, Banner } from '../../../shared/components';
 import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
-import { attentionOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
+import { attentionOf, brokenLinksOf, useLibrary, workspaceHasNoPlugins, type LibraryItem } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
 import { ownersTextOf, pluginLabel } from '../utils/plugin-summary';
@@ -36,6 +36,8 @@ interface IndexEntry {
   skillCount: number;
   toolCount: number;
   attention: number;
+  /** Some of the attention locks members out of a skill — orange, not amber. */
+  urgent: boolean;
   /** The caller can see inside: folder read, manage rights, or item grants. */
   member: boolean;
 }
@@ -72,6 +74,7 @@ export function PluginsIndexPage() {
           skillCount: summary ? summary.skillCount : derivedSkills,
           toolCount: summary ? summary.toolCount : derivedTools,
           attention: attentionOf(items, name),
+          urgent: brokenLinksOf(items, name) > 0,
           member: summary ? summary.canRead || summary.canWrite || hasItems : hasItems,
         };
       });
@@ -158,7 +161,7 @@ export function PluginsIndexPage() {
                 {...describe(entry)}
                 trailing={
                   entry.attention > 0 ? (
-                    <Badge tone="wait" size="xs">
+                    <Badge tone={entry.urgent ? 'urgent' : 'wait'} size="xs">
                       {entry.attention}
                     </Badge>
                   ) : undefined

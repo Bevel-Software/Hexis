@@ -469,6 +469,31 @@ describe('PluginPage', () => {
     await waitFor(() => expect(href()).toBe('/connect'));
   });
 
+  it('names a linked skill the members cannot read, above the integrations banner', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      tools: [connectedTool(), unsetTool()],
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'deploy',
+          description: 'Ships it.',
+          path: 'Skills/Eng/deploy',
+          plugins: [{ name: 'GTM', linked: true, granted: false }],
+        },
+      ],
+    });
+    renderPlugin('GTM');
+    const urgent = await screen.findByText(
+      /1 linked skill can't be read by GTM's members: its access rules no longer name them\. Repair the link from the skill page\./,
+    );
+    expect(urgent.closest('[role="status"]')).toHaveClass('bg-urgent-soft');
+    // The tools banner still counts only the tools: the broken link is not
+    // an integration to connect.
+    const tools = screen.getByText("1 integration needs setup: connect it to unblock this plugin's skills.");
+    expect(urgent.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('pluralises the attention banner', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,

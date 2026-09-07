@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
-import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
+import { attentionOf, brokenLinksOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
 import {
@@ -142,6 +142,11 @@ export function PluginPage() {
   const releasedSkillItems = skillItems.filter((i) => !i.pending);
   const toolItems = pluginItems.filter((i) => i.kind === 'integration');
   const attention = attentionOf(data.items, plugin);
+  // Two kinds of attention, two banners: a link without its grant locks the
+  // plugin's members out of a skill NOW, so it outranks an integration the
+  // reader has not connected for themselves.
+  const brokenLinks = brokenLinksOf(data.items, plugin);
+  const integrationsNeedingSetup = attention - brokenLinks;
   // What the Skills band actually renders. The filter is a VIEW over the band,
   // not a different query — flipping it back must show exactly what was there.
   const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
@@ -302,11 +307,20 @@ export function PluginPage() {
         />
       )}
 
-      {attention > 0 && (
+      {brokenLinks > 0 && (
+        <Banner role="status" tone="urgent" className="mt-4">
+          {`${brokenLinks} ${
+            brokenLinks === 1
+              ? `linked skill can't be read by ${label}'s members: its access rules no longer name them. Repair the link`
+              : `linked skills can't be read by ${label}'s members: their access rules no longer name them. Repair the links`
+          } from the skill page${brokenLinks === 1 ? '' : 's'}.`}
+        </Banner>
+      )}
+      {integrationsNeedingSetup > 0 && (
         <Banner role="status" tone="wait" className="mt-4">
           <span>
-            {`${attention} ${
-              attention === 1
+            {`${integrationsNeedingSetup} ${
+              integrationsNeedingSetup === 1
                 ? 'integration needs setup: connect it'
                 : 'integrations need setup: connect them'
             } to unblock this plugin's skills.`}
