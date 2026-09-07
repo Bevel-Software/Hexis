@@ -1522,23 +1522,25 @@ export class WorkspaceService implements IWorkspaceService {
       });
     }
 
-    // Read-permission filter: ONE batched check per directory. Drops files AND
-    // directories the caller can't read; a hidden directory's subtree is never
-    // walked (skip-and-don't-recurse). A readable directory left empty after
-    // filtering stays visible (the folder itself is readable). Fail-closed:
-    // anything not explicitly readable is dropped. No filter → identical to the
-    // pre-feature tree (regression-safe).
-    let visible = candidates;
-    if (readFilter && candidates.length > 0) {
-      const verdict = await readFilter(candidates.map((c) => c.rel));
-      visible = candidates.filter((c) => verdict.get(c.rel) === true);
-    }
+    // Read-permission filter: ONE batched check per directory. Drops files the
+    // caller can't read. A directory is kept when the caller can read it — a
+    // readable directory left empty after filtering stays visible, the folder
+    // itself is readable — OR when something readable survives beneath it: a
+    // grant below (a linked skill's folder opened to a plugin's readers, a
+    // sub-folder shared on its own) makes the folders above it the way there,
+    // shown as containers whose own contents stay filtered. So an unreadable
+    // directory is walked, not skipped, and dropped only when the walk finds
+    // nothing. Fail-closed: anything not explicitly readable is dropped. No
+    // filter → identical to the pre-feature tree (regression-safe).
+    const verdict = readFilter && candidates.length > 0 ? await readFilter(candidates.map((c) => c.rel)) : null;
+    const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
 
     const children: FileTreeEntry[] = [];
-    for (const { entry, entryPath, rel } of visible) {
+    for (const { entry, entryPath, rel } of candidates) {
       if (entry.isDirectory()) {
-        children.push(await this.buildFileTree(entryPath, workspaceRoot, ignoreStack, readFilter));
-      } else {
+        const sub = await this.buildFileTree(entryPath, workspaceRoot, ignoreStack, readFilter);
+        if (readable(rel) || (sub.children?.length ?? 0) > 0) children.push(sub);
+      } else if (readable(rel)) {
         children.push({ name: entry.name, relativePath: rel, type: 'file' });
       }
     }
