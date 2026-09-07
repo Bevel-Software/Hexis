@@ -27,14 +27,22 @@ export function isImagePath(path: string): boolean {
  * (`useWorkspaceState`), but nothing re-read the images it embeds.
  *
  * One counter per workspace, not a map per path. A per-path map was the first
- * design, and it had three holes with one cause: it carried counters across a
- * workspace switch, it missed a bulk change (`fs-tree-changed`, which the
- * backend sends instead of per-file events for a folder delete or a large
- * sync), and it grew for the life of the tab. A single revision cannot express
- * any of them: a switch starts at 0, any tree change bumps it, and there is
- * nothing to evict. The cost is that one changed image revalidates every image
- * on the page; with `Cache-Control: private, no-cache` and the ETag Express
- * sets, each of those is a 304 with no bytes.
+ * design, and it had two holes with one cause: it carried counters across a
+ * workspace switch, and it grew for the life of the tab. A single revision
+ * cannot express either: a switch starts at 0, and there is nothing to evict.
+ * The cost is that one changed image revalidates every image on the page;
+ * with `Cache-Control: private, no-cache` and the ETag Express sets, each of
+ * those is a 304 with no bytes.
+ *
+ * Only `file-changed` feeds it, never `fs-tree-changed`. The tree event names
+ * no file and follows EVERY write (`withLock` in `workspace.routes.ts` emits
+ * it after each save, text or image), so it would revalidate every screenshot
+ * on each text save and bump twice on an image save. The per-file event is
+ * enough: a folder delete, a move, a bulk upload and a sync each announce the
+ * paths they touched one `file-changed` at a time (the sync up to its cap),
+ * and where the backend sends the tree event alone (a plugin install, a sync
+ * past the cap) the document's text is as stale as its pictures, and the same
+ * reload fixes both.
  *
  * `fsRevision` is not this signal: it is bumped by the local user's own
  * mutations, never by the SSE handler, and every bump re-polls git status.
@@ -56,27 +64,15 @@ export function useImageRevision(workspaceId: string | null): number {
     // Canonicalise once: the event carries the decoded branch, local state the
     // encoded one. See `canonicalizeWorkspaceId`.
     const subscribedCanon = canonicalizeWorkspaceId(workspaceId);
-    const bump = () =>
+    return bus.subscribe('file-changed', (event) => {
+      if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
+      // A text save must not revalidate every screenshot on the page.
+      if (!isImagePath(event.path)) return;
       setRevision((prev) => ({
         workspaceId,
         count: prev.workspaceId === workspaceId ? prev.count + 1 : 1,
       }));
-    const offFileChanged = bus.subscribe('file-changed', (event) => {
-      if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
-      // A text save must not revalidate every screenshot on the page.
-      if (!isImagePath(event.path)) return;
-      bump();
     });
-    // A folder delete, a rename, a sync of many paths: the backend announces
-    // those as one tree change and names no file, so every image may be stale.
-    const offTreeChanged = bus.subscribe('fs-tree-changed', (event) => {
-      if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
-      bump();
-    });
-    return () => {
-      offFileChanged();
-      offTreeChanged();
-    };
   }, [bus, workspaceId]);
 
   return revision.workspaceId === workspaceId ? revision.count : 0;

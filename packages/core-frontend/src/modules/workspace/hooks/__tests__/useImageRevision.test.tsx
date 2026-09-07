@@ -83,13 +83,19 @@ describe('useImageRevision', () => {
     expect(result.current).toBe(0);
   });
 
-  // A folder delete or a large sync arrives as one tree change naming no file.
-  it('bumps on a tree change, which may have replaced any image', () => {
+  // The backend emits a tree change after EVERY write, text or image, and
+  // names no file in it; the paths a bulk change touched arrive as per-file
+  // events of their own. Counting the tree event would revalidate every
+  // screenshot on each text save and bump twice on an image save.
+  it('ignores a tree change: the per-file events already name every image that changed', () => {
     const bus = makeFakeBus();
     const { result } = renderRevision(bus, 'ws-1');
     act(() => bus.emit(treeChanged('ws-1')));
-    expect(result.current).toBe(1);
-    act(() => bus.emit(treeChanged('ws-2')));
+    expect(result.current).toBe(0);
+    act(() => {
+      bus.emit(fileChanged('ws-1', 'KB/assets/shot.png'));
+      bus.emit(treeChanged('ws-1'));
+    });
     expect(result.current).toBe(1);
   });
 
