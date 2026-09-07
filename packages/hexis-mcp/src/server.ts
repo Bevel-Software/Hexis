@@ -39,7 +39,8 @@ import {
   callKbTool,
   fetchAllManuals,
   fetchLocalOnlyManuals,
-  resolveMcpUrl,
+  resolveDeployment,
+  fetchAgentInstructions,
   type LocalManualInfo,
 } from './deployment.js';
 import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './materialize.js';
@@ -294,7 +295,7 @@ export async function createHexisMcpServer(
   config: HexisMcpConfig,
   version: string,
 ): Promise<HexisMcpHandle> {
-  const mcpUrl = await resolveMcpUrl(config);
+  const { mcpUrl, agentInstructions } = await resolveDeployment(config);
 
   /**
    * CREDENTIAL SWAP (OAuth mode). The remote manual's MCP session captured
@@ -370,10 +371,20 @@ export async function createHexisMcpServer(
     config.onConnectionKeyRenewed = swapRemoteCredential;
   }
 
-  const [allManuals, localOnly] = await Promise.all([
+  // The deployment's session instructions ride along with the two manual
+  // fetches, and only when the config advertised them: an older deployment
+  // gets one line saying so and a server that starts exactly as before.
+  const [allManuals, localOnly, instructions] = await Promise.all([
     fetchAllManuals(config),
     fetchLocalOnlyManuals(config),
+    agentInstructions ? fetchAgentInstructions(config) : Promise.resolve(undefined),
   ]);
+  if (!agentInstructions) {
+    console.error(
+      '[hexis-mcp] this deployment predates agent instructions (no agentInstructions in /api/config); ' +
+        'sessions start without them.',
+    );
+  }
   const local = await prepareLocalManuals(
     config,
     localManualTemplates(allManuals, new Set(localOnly.keys())),
@@ -438,7 +449,9 @@ export async function createHexisMcpServer(
 
     server = new Server(
       { name: SERVER_NAME, version },
-      { capabilities: { tools: {}, prompts: {} } },
+      // The same text the hosted endpoint sends on its handshake, so a client
+      // connected here is told what the knowledge base is and to search it.
+      { capabilities: { tools: {}, prompts: {} }, ...(instructions !== undefined ? { instructions } : {}) },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools(tools) }));

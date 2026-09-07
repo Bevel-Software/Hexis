@@ -4,7 +4,14 @@ import { flattenManualTool, type ProxiedTool } from '@bevel-software/platform-mc
 import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '../manuals.js';
 import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { discoverTools, getSkillPrompt, listSkillPrompts, listedTools, withoutRemoteMetaTools } from '../server.js';
-import { DeploymentError, fetchAllManuals, fetchLocalOnlyManuals, resolveMcpUrl } from '../deployment.js';
+import {
+  DeploymentError,
+  fetchAgentInstructions,
+  fetchAllManuals,
+  fetchLocalOnlyManuals,
+  resolveDeployment,
+  resolveMcpUrl,
+} from '../deployment.js';
 
 function tool(mcpName: string, manualName = REMOTE_MANUAL_NAME): ProxiedTool {
   return {
@@ -260,6 +267,73 @@ describe('resolveMcpUrl', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<!doctype html><title>login</title>', { status: 200 })));
     await expect(resolveMcpUrl(config)).rejects.toBeInstanceOf(DeploymentError);
     await expect(resolveMcpUrl(config)).rejects.toThrow(/not JSON/);
+  });
+});
+
+describe('resolveDeployment', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  function stubConfigEndpoint(body: unknown) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+  }
+
+  it('reads the endpoint and the agent-instructions flag from the one config fetch', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true });
+    expect(await resolveDeployment(config)).toEqual({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an absent flag as an older deployment', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp' });
+    expect((await resolveDeployment(config)).agentInstructions).toBe(false);
+  });
+
+  it('only a literal true advertises the capability', async () => {
+    stubConfigEndpoint({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: 'yes' });
+    expect((await resolveDeployment(config)).agentInstructions).toBe(false);
+  });
+
+  it('still falls back to <base>/api/mcp on a deployment too old to advertise either', async () => {
+    stubConfigEndpoint({ branchModel: { defaultBranch: 'main' } });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await resolveDeployment(config)).toEqual({ mcpUrl: 'https://x.example/api/mcp', agentInstructions: false });
+  });
+});
+
+describe('fetchAgentInstructions', () => {
+  const config = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+
+  it('returns the instructions string, sent with the connection key', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ instructions: 'Hexis is…', toolPrefix: 'x' }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await fetchAgentInstructions(config)).toBe('Hexis is…');
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://x.example/api/agent/instructions');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer bevel_k');
+  });
+
+  it('a body without an instructions string logs one line and resolves to undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ nope: 1 }), { status: 200 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await fetchAgentInstructions(config)).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('without an "instructions" string'));
+  });
+
+  it('a 500 logs one line and resolves to undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await fetchAgentInstructions(config)).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('could not fetch the agent instructions'));
+  });
+
+  it('a network error logs one line and resolves to undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED'); }));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await fetchAgentInstructions(config)).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('ECONNREFUSED'));
   });
 });
 
