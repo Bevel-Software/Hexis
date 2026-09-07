@@ -141,9 +141,13 @@ export function LinkSkillPanel({
                   variant="outline"
                   size="tiny"
                   disabled={busy !== null}
+                  aria-busy={busy === item.id}
                   onClick={() => void link(item)}
                 >
-                  Link
+                  {/* A link is a commit and a push — a second or two. The
+                      button says so, or a greyed "Link" reads as a page that
+                      froze. Same word as the panel beside it: "Creating…". */}
+                  {busy === item.id ? 'Linking…' : 'Link'}
                 </Button>
               )}
             </li>

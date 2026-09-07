@@ -72,6 +72,21 @@ describe('LinkSkillPanel', () => {
     await waitFor(() => expect(onLinked).toHaveBeenCalled());
   });
 
+  it('says it is linking while the commit is in flight — a greyed button reads as a freeze', async () => {
+    let settle: (v: { root: string; skills: string[] }) => void = () => undefined;
+    api.linkSkill.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    const { onLinked } = renderPanel();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Link' })[0]);
+    // The clicked row says what is happening; the others wait, still saying Link.
+    const linking = await screen.findByRole('button', { name: 'Linking…' });
+    expect(linking).toBeDisabled();
+    expect(linking).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByRole('button', { name: 'Link' })).toBeDisabled();
+
+    settle({ root: 'Skills/Eng/deploy', skills: ['Skills/Eng/deploy'] });
+    await waitFor(() => expect(onLinked).toHaveBeenCalled());
+  });
+
   it('turns the server\'s needs-skill-write refusal into a request, and says when it is sent', async () => {
     api.linkSkill.mockRejectedValue(new NeedsSkillWriteError('Skills/Eng/deploy'));
     api.requestSkillAccess.mockResolvedValue({ number: 7 });

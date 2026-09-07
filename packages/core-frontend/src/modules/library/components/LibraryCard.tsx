@@ -56,6 +56,7 @@ export interface LibraryCardCommonProps {
 const STATUS_INK: Record<GemState, string> = {
   ok: 'text-ok',
   warn: 'text-wait',
+  urgent: 'text-urgent',
   err: 'text-danger',
 };
 

@@ -7,6 +7,7 @@ import { NeedsSkillWriteError, linkSkill, repairSkillLink, unlinkSkill } from '.
 import { requestSkillAccess, type PluginMembership } from '../../services/library.api';
 import { pathForPlugin } from '../../routes/library-paths';
 import { StatusDot } from '../StatusDot';
+import { cn } from '../../../../lib/utils';
 
 /**
  * "In plugins" — every plugin this skill belongs to, and the two ways the
@@ -102,7 +103,7 @@ export function SharedViaPlugins({
                     {m.linked ? 'Linked' : 'Inline'}
                   </Badge>
                 </div>
-                <small className="block text-meta text-ink-faint">
+                <small className={cn('block text-meta', broken ? 'text-urgent' : 'text-ink-faint')}>
                   {broken
                     ? owned
                       ? `Needs setup: ${m.name}'s members can't read this skill until the link is repaired.`
@@ -113,7 +114,7 @@ export function SharedViaPlugins({
                 </small>
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">
-                {broken && <StatusDot state="warn" />}
+                {broken && <StatusDot state="urgent" />}
                 {broken && owned && (
                   <Button
                     variant="outline"

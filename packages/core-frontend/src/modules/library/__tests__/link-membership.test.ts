@@ -70,8 +70,9 @@ describe('membership by link', () => {
   it('a link whose grant is missing wears the amber note on THAT plugin\'s page only', () => {
     // Granted on GTM: untouched.
     expect(withLinkHealth(shared, 'GTM').status).toBe(OK);
-    // Not granted on Ops: needs setup, and says whose job it is.
-    expect(withLinkHealth(shared, 'Ops').status).toMatchObject({ state: 'warn', text: 'Needs setup' });
+    // Not granted on Ops: needs setup, in ORANGE (it locks members out), and
+    // says whose job it is.
+    expect(withLinkHealth(shared, 'Ops').status).toMatchObject({ state: 'urgent', text: 'Needs setup' });
     expect(withLinkHealth({ ...shared, owned: true }, 'Ops').status.text).toBe(
       'Needs setup: share with plugin members',
     );

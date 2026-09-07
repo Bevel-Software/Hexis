@@ -12,15 +12,20 @@ import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vau
  */
 
 /**
- * Three states, and no fourth.
+ * Four states, and no fifth.
  *
  * There used to be an `off` — "not set up yet", drawn in grey. Grey reads as
  * *disabled*, or as *not your problem*: an unconfigured integration looked like
  * furniture next to the amber ones, when in fact it is the state that most
  * needs somebody. Anything that needs a person is amber; anything that was
  * working and stopped is red. Nothing that needs a person is grey.
+ *
+ * `urgent` sits between the two: it needs a person, like amber, but it is
+ * blocking OTHER people right now — a plugin's members locked out of a skill
+ * it ships — where amber blocks only the reader's own use. Orange, the same
+ * colour the sidebar count turns for it, so the card and the count agree.
  */
-export type GemState = 'ok' | 'warn' | 'err';
+export type GemState = 'ok' | 'warn' | 'urgent' | 'err';
 
 export interface AttentionStatus {
   state: GemState;
@@ -55,7 +60,7 @@ const SIGNED_IN: AttentionStatus = { state: 'ok', text: 'Signed in' };
 const KEY_SAVED: AttentionStatus = { state: 'ok', text: 'Key saved' };
 
 /** Severity order for aggregation: broken sign-in beats anything merely unset. */
-const RANK: Record<GemState, number> = { ok: 0, warn: 1, err: 2 };
+const RANK: Record<GemState, number> = { ok: 0, warn: 1, urgent: 2, err: 3 };
 
 /**
  * What ONE variable is: in place, or `Needs <the thing>`.
@@ -268,9 +273,11 @@ export function isInPlugin(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>, 
 
 /**
  * The item as the plugin page should show it: a LINK whose grant is missing
- * gets the amber note in the tools' grammar — "Needs setup", and "yours to set
- * up" for someone who can edit the skill's rules — because until the grant is
- * back, the plugin's members cannot read it. Healthy links are untouched.
+ * gets the note in the tools' grammar — "Needs setup", and "share with plugin
+ * members" for someone who can edit the skill's rules — because until the
+ * grant is back, the plugin's members cannot read it. In ORANGE (`urgent`),
+ * not amber: it locks other people out, and the sidebar count for the plugin
+ * is the same colour. Healthy links are untouched.
  */
 export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus }>(
   item: T,
@@ -287,7 +294,7 @@ export function withLinkHealth<T extends LibraryFilterable & { status: Attention
   return {
     ...item,
     status: {
-      state: 'warn',
+      state: 'urgent',
       text: item.owned ? 'Needs setup: share with plugin members' : 'Needs setup',
       hint: `The skill's access rules no longer name ${plugin}'s members. Repair the link from the skill page.`,
     },
