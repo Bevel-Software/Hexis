@@ -54,7 +54,7 @@
 
 ### One extension-to-MIME table with per-consumer allow-lists
 
-**What:** Replace three hand-maintained maps with one table in a shared module and three small allow-lists on top: the raw route's serve map in `workspace.routes.ts` (png, jpg, gif, webp, svg, bmp, ico, pdf, docx, xlsx), the MCP image-read set in `image-read.ts` (png, jpg, jpeg, gif, webp, deliberately no svg), and the text-reader notice map in `text-reader.ts` (archives and legacy Office).
+**What:** Replace three hand-maintained maps with one table in a shared module and three small allow-lists on top: the raw route's serve map in `workspace.routes.ts` (png, jpg, jpeg, gif, webp, svg, bmp, ico, pdf, docx, xlsx), the MCP image-read set in `image-read.ts` (png, jpg, jpeg, gif, webp, deliberately no svg), and the text-reader notice map `MIME_BY_EXT` in `text-reader.ts`, which names everything a text read refuses with a notice: the same images, archives (zip, gz, tar, 7z, rar), legacy Office (doc, ppt, xls), media (mp3, wav, mp4, mov), fonts (woff, woff2, ttf), pdf, wasm and exe. The frontend's `IMAGE_EXTENSIONS` in `useImageRevision.ts` is a fourth copy of the image subset.
 
 **Why:** Same data, three copies, and each copy bakes its own policy into the map itself. The next format (avif, heic from phone screenshots) has to be added in three places or it silently works in one surface and not another.
 
@@ -63,5 +63,3 @@
 **Effort:** S
 **Priority:** P3
 **Depends on:** None
-
-## Completed

@@ -105,7 +105,7 @@ Surfaces and what they inject:
    returning `{ branch, path, hash }`; `openFile` calls it. Unit tests in
    `kb-routes.test.tsx`.
 3. `img` override in `useKbMarkdownComponents`, driven by a new
-   `resolveImage?: (src: string) => string | null` option. A small `KbImage` component
+   `resolveImage?: (src: string) => { src: string; path: string } | null` option. A small `KbImage` component
    owns the error state and the placeholder. Attributes per D7 on every image.
 4. Wire `resolveImage` from `MarkdownRenderer`, `SkillPage` (through `SkillFilePane` and
    `KbMarkdownView`) and `MarkdownDiffViewer` callers that hold a path.
@@ -295,11 +295,11 @@ expecting 200. Total new cases: 49.
 
 1. `rawFileUrl(workspaceId, path, { download? })` in `services/workspace.api.ts`; swap the
    nine hand-built URLs (D8). Each swapped renderer test asserts its fetch URL (D15).
-2. `resolveKbHref(basePath, href)` in `routing/kb-routes.ts` with `workspacePathFromKbUrl`
+2. `resolveKbHref(href, { basePath, kbDirName })` in `routing/kb-routes.ts` with `workspacePathFromKbUrl`
    inside it (D11, D12). `openFile` and the three link handlers call it. SkillPage's
    handler gains decode and the absolute guard (drift fix). Unit suite of 8 cases.
 3. `KbImage` component and the `img` override in `kbMarkdownPipeline.tsx`, driven by
-   `resolveImage?: (src: string) => string | null` (D5, D7, D13). Ten cases.
+   `resolveImage?: (src: string) => { src: string; path: string } | null` (D5, D7, D13). Ten cases.
 4. `resolveImage` prop through `KbMarkdownView` and `SkillFilePane`; wired from
    `MarkdownRenderer` and `SkillPage`; `MarkdownDiffViewer` prop wired from `ReviewPanel`,
    `ChangeRequestDialog` and `FileHistoryPanel`, bound to the checked-out workspace with a
