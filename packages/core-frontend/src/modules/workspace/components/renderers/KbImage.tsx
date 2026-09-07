@@ -1,4 +1,4 @@
-import { useState, type ImgHTMLAttributes } from 'react';
+import { useState, type HTMLAttributes, type ImgHTMLAttributes } from 'react';
 import { ImageOff } from 'lucide-react';
 import { isExternalHref } from '../../../../shared/markdown/hrefs';
 
@@ -27,6 +27,26 @@ const PLACEHOLDER_CLASS =
   'inline-flex max-w-full items-center gap-1.5 rounded-sm border border-dashed border-line-strong bg-sunken px-2 py-1 align-middle text-xs text-ink-muted';
 
 /**
+ * What a placeholder inherits from the image it stands in for: the attributes
+ * that tie the image to the DOCUMENT, never the ones that draw it. Its `id`,
+ * so a link to the figure still lands; its ARIA relationships, so a caption
+ * still describes it; its language and direction. `width`, `height`, `align`
+ * and the rest size a picture that is not there. The sanitizer bounds what
+ * can arrive (of ARIA, only `aria-describedby`, `aria-label` and
+ * `aria-labelledby`; nothing that hides an element); this bounds what a span
+ * may carry.
+ */
+function inheritedAttributes(rest: ImgHTMLAttributes<HTMLImageElement>): HTMLAttributes<HTMLElement> {
+  const inherited: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(rest)) {
+    if (name === 'id' || name === 'lang' || name === 'dir' || name.startsWith('aria-')) {
+      inherited[name] = value;
+    }
+  }
+  return inherited;
+}
+
+/**
  * What an image leaves behind when there is nothing to show. A `role="img"`
  * whose accessible name is the note, so a screen reader hears what a sighted
  * reader sees; the alt text stays, so the author's description is not lost
@@ -37,15 +57,20 @@ const PLACEHOLDER_CLASS =
  * load error on a URL that does not change (a network blip, a 403 that lifts,
  * a file fixed on disk with no event), and the reader is the one who knows it
  * is worth another try; retrying on our own would loop error → image → error.
+ *
+ * The author's attributes come first, so ours hold: the name of a placeholder
+ * must say the picture is missing, whatever `aria-label` the image carried.
  */
 function ImagePlaceholder({
   alt,
   note,
   onRetry,
+  attributes = {},
 }: {
   alt?: string;
   note: string;
   onRetry?: () => void;
+  attributes?: HTMLAttributes<HTMLElement>;
 }) {
   const label = alt ? `${alt}. ${note}` : note;
   const body = (
@@ -61,6 +86,7 @@ function ImagePlaceholder({
   if (onRetry) {
     return (
       <button
+        {...attributes}
         type="button"
         onClick={onRetry}
         aria-label={`${label}. Retry`}
@@ -72,7 +98,7 @@ function ImagePlaceholder({
     );
   }
   return (
-    <span role="img" aria-label={label} title={note} className={PLACEHOLDER_CLASS}>
+    <span {...attributes} role="img" aria-label={label} title={note} className={PLACEHOLDER_CLASS}>
       {body}
     </span>
   );
@@ -100,7 +126,9 @@ function ImagePlaceholder({
  * link, or a teammate who uploads the missing file (which bumps the revision
  * in the URL), sees the image without a reload; the same URL is tried again
  * on request. Every attribute the sanitizer let through reaches the element
- * (`id`, `align`, `aria-*`; `srcset` and `class` never survive it), and every
+ * (`id`, `align`, `aria-*`; `srcset` and `class` never survive it), and a
+ * placeholder keeps the ones that place the image in the document (see
+ * `inheritedAttributes`). Every
  * `<img>` carries `loading="lazy"` (thirty screenshots on a Loop export must
  * not all fetch at once) and `referrerPolicy="no-referrer"` (an external image
  * host learns nothing about which page of the knowledge base cited it).
@@ -113,7 +141,8 @@ export function KbImage({
   ...rest
 }: ImgHTMLAttributes<HTMLImageElement> & { resolve?: KbImageResolver }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  if (!src) return <ImagePlaceholder alt={alt} note={NO_SOURCE_NOTE} />;
+  const attributes = inheritedAttributes(rest);
+  if (!src) return <ImagePlaceholder alt={alt} note={NO_SOURCE_NOTE} attributes={attributes} />;
   // Ours come after the author's, so they hold on every image.
   const shared = {
     ...rest,
@@ -124,9 +153,17 @@ export function KbImage({
   };
   if (!resolve || isExternalHref(src)) return <img src={src} {...shared} />;
   const resolved = resolve(src);
-  if (!resolved) return <ImagePlaceholder alt={alt} note={`Couldn't load image: ${src}`} />;
+  if (!resolved) {
+    return <ImagePlaceholder alt={alt} note={`Couldn't load image: ${src}`} attributes={attributes} />;
+  }
   if (resolved.src === null) {
-    return <ImagePlaceholder alt={alt} note={`${resolved.note}: ${resolved.path}`} />;
+    return (
+      <ImagePlaceholder
+        alt={alt}
+        note={`${resolved.note}: ${resolved.path}`}
+        attributes={attributes}
+      />
+    );
   }
   if (failedSrc === resolved.src) {
     return (
@@ -134,6 +171,7 @@ export function KbImage({
         alt={alt}
         note={`Couldn't load image: ${resolved.path}`}
         onRetry={() => setFailedSrc(null)}
+        attributes={attributes}
       />
     );
   }

@@ -275,6 +275,40 @@ describe('KbMarkdownView images', () => {
     expect(img).toHaveAttribute('src', RAW_URL);
   });
 
+  // A placeholder stands in for the image in the document: an anchor to the
+  // figure still lands, a caption still describes it, and nothing sizes a
+  // picture that is not there.
+  it("gives a placeholder the image's place in the document, not its dimensions", () => {
+    render(
+      <KbMarkdownView
+        source={'<img src="./assets/shot.png" alt="Shot" id="fig-1" aria-describedby="cap" width="300">\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    const img = screen.getByRole('img', { name: 'Shot' });
+    expect(img).toHaveAttribute('width', '300');
+    fireEvent.error(img);
+    const placeholder = screen.getByRole('button', { name: /Couldn't load image/ });
+    // The sanitizer prefixes ids and id references alike.
+    expect(placeholder).toHaveAttribute('id', 'user-content-fig-1');
+    expect(placeholder).toHaveAttribute('aria-describedby', 'user-content-cap');
+    expect(placeholder).not.toHaveAttribute('width');
+  });
+
+  it("names the placeholder for what it is, whatever aria-label the image carried", () => {
+    render(
+      <KbMarkdownView
+        source={'<img src="./assets/rule.png" alt="Rule" aria-label="Decorative rule">\n'}
+        onOpenFile={vi.fn()}
+        resolveImage={serve}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'Decorative rule' }));
+    expect(screen.getByRole('button', { name: /^Rule\. Couldn't load image/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Decorative rule' })).toBeNull();
+  });
+
   it('keeps alt and title, and leaks no hast node onto the element', () => {
     render(
       <KbMarkdownView
