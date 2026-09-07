@@ -19,10 +19,12 @@ import {
  * move, drop to upload, the caller's proposed files shown in accent. One tree
  * component in the app, holding a different root.
  *
- * The root's row is drawn as the section's HEADING (`FileTreeNode.heading`),
- * so the heading is a real row: drop files on it to upload into `Skills/`,
- * hover it for the create buttons and the pickers, right-click it for the
- * folder's menu. Its scopes sit directly under it at the nav's own indent.
+ * The root is a collapsible folder row called Skills, exactly as Knowledge
+ * and Data are top-level folders in the Knowledge explorer: open by default
+ * with its scopes collapsed under it, a drop target for uploads into
+ * `Skills/`, the create buttons on hover, the folder's menu on right-click —
+ * minus what a platform-owned root must not offer (`FileTreeNode.reserved`:
+ * no rename, delete, drag or pin).
  *
  * Two things differ from Knowledge, and both are the surroundings' (see
  * `TreeChrome`), not the rows':
@@ -35,8 +37,8 @@ import {
  *    open tab, which the Library never sets.
  *
  * Renders nothing while the tree is loading or when the caller can read no
- * part of the root — an empty "SKILLS" heading over nothing would be a
- * question, not a section.
+ * part of the root — an empty Skills folder would be a question, not a
+ * section.
  */
 export function SkillsTree() {
   const { kbDirName } = useWorkspace();
@@ -64,10 +66,10 @@ export function SkillsTree() {
       {/* A right-click that lands between the tree's rows is the tree's, not
           the plugin nav's behind it: with nothing wired for the gap the
           browser's own menu is the honest answer, as in Knowledge. The rows
-          and the heading stop their own events before reaching here. */}
+          stop their own events before reaching here. */}
       <div data-testid="skills-tree" onContextMenu={(e) => e.stopPropagation()}>
         <UploadNotices />
-        <FileTreeNode entry={root} depth={0} heading="Skills" collapseChildren />
+        <FileTreeNode entry={root} depth={0} reserved collapseChildren />
       </div>
     </TreeChrome>
   );
