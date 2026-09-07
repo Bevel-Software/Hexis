@@ -250,6 +250,34 @@ describe('compileMarketplace', () => {
     expect(tree.warnings.some((w) => w.includes('Plugins/Twin') && w.includes('already used'))).toBe(true);
   });
 
+  it('a compile reads the checkout as it is now, not the catalogs a moment ago', async () => {
+    // Warm every cache: the skill catalog, the link index, the access model.
+    const before = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect([...before.files.keys()]).not.toContain('skills/late/SKILL.md');
+    expect([...before.files.keys()].some((p) => p.includes('secret'))).toBe(false);
+
+    // Then the knowledge base moves under them, the way an MCP `write_files`
+    // moves it: a new public skill, linked into GTM by its manifest, and a
+    // grant that opens the secret skill — all within every cache's TTL.
+    await write('Skills/Sales/late/SKILL.md', '---\ndescription: Just landed.\n---\n');
+    await write(
+      'Plugins/GTM/plugin.json',
+      JSON.stringify({
+        name: 'gtm',
+        version: '2.1.0',
+        description: 'Go to market',
+        extensions: { 'software.bevel.hexis': { skills: ['Skills/Eng/deploy', 'Skills/Sales/late'] } },
+      }),
+    );
+    await write('Skills/Eng/secret/access.md', '---\n---\nread:\n  - everyone\n');
+
+    const after = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const paths = [...after.files.keys()];
+    expect(paths).toContain('skills/late/SKILL.md');
+    expect(paths).toContain('plugins/gtm/skills/late/SKILL.md');
+    expect(paths).toContain('skills/secret/SKILL.md');
+  });
+
   it('a name clash inside one plugin keeps the first by path and says so', async () => {
     // A second `deploy` skill, linked from the same plugin via a folder root.
     await write('Skills/Ops/deploy/SKILL.md', '---\ndescription: Ops deploy.\n---\n');

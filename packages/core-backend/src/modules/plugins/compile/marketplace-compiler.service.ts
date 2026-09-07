@@ -73,6 +73,19 @@ export class MarketplaceCompilerService {
     // one). A compile of a checkout git cannot describe still yields a
     // correct tree; only its README and bundle version lose the sha.
     const sourceCommit = knownCommit ?? (await this.sourceCommit().catch(() => 'unknown'));
+    // The tree is stamped with the checkout's commit, so every input must be
+    // read from that checkout NOW — not from a catalog scanned before the
+    // commit landed. The skill catalog, the link index and the access memo
+    // are TTL caches that nothing drops on an ordinary write (an MCP
+    // `write_files` moves HEAD and invalidates none of them), and the repo
+    // service keys freshness on the stamped commit: a tree compiled from a
+    // stale catalog under a fresh sha would be "current" until the NEXT
+    // commit, with the caller's marketplace frozen on content the knowledge
+    // base no longer has. Compiles run once per moved commit per caller, so
+    // the rescan is cheap where it matters.
+    this.skillService.invalidate();
+    this.links.invalidate();
+    this.accessControl.invalidate(wsId);
     const skills = await this.skillService.listSkills(undefined);
     const membership = await this.links.membership();
     const { plugins, warnings: discoveryWarnings } = await this.source.discover(kbRoot);
