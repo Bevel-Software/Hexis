@@ -119,9 +119,24 @@ describe('composeAgentInstructions: the tool prefix', () => {
   });
 
   it('falls back to the fixed line alone for an empty or heading-only preamble', () => {
-    for (const raw of [null, '', '# Only a title\n\n## And a subtitle']) {
+    for (const raw of [null, '', '# Only a title\n\n## And a subtitle', 'Setext title\n===\n\nAnother\n---', '---\n\n***']) {
       expect(composeAgentInstructions(raw).toolPrefix, JSON.stringify(raw)).toBe(TOOL_PREFIX_LINE);
     }
+  });
+
+  it('skips setext headings and thematic breaks the same way it skips ATX headings', () => {
+    expect(composeAgentInstructions('Acme knowledge base\n===\n\nWhat we know about permits.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} What we know about permits.`,
+    );
+    // The underline directly above text in the same block heads only what is above it.
+    expect(composeAgentInstructions('Scope\n---\nWhat we know about permits.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} What we know about permits.`,
+    );
+    expect(composeAgentInstructions('---\n\nAfter the rule.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} After the rule.`);
+    // A lone dash line is a rule, not an underline: it never swallows text above it.
+    expect(composeAgentInstructions('- - -\n\nList-looking rule first.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} List-looking rule first.`,
+    );
   });
 
   it('CRLF input still yields the first paragraph', () => {

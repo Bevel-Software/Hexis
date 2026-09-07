@@ -94,5 +94,7 @@ describe('GET /agent/instructions', () => {
     });
     const res = await fetch(url, { headers: { Authorization: `Bearer ${CONNECTION_KEY}` } });
     expect(res.status).toBe(500);
+    // The failure is no more cacheable than a success.
+    expect(res.headers.get('cache-control')).toBe('no-store');
   });
 });

@@ -77,7 +77,7 @@ The preamble contribution SHALL be limited to 6,000 characters after comment str
 - **THEN** the cut moves before that character, so no broken character is sent
 
 ### Requirement: The preamble is read with platform privileges
-The preamble SHALL be read from the default-branch workspace at `${kbDirName}/mcp-description.md` by the platform, not as the calling user. Every connected agent receives the same composed text regardless of the caller's access to the repository root. The composed text SHALL NOT include anything else from the repository. Only a missing file (ENOENT) SHALL count as "no preamble"; any other read error SHALL surface as a failure, never as an empty preamble.
+The preamble SHALL be read from the default-branch workspace at `${kbDirName}/mcp-description.md` by the platform, not as the calling user. Every connected agent receives the same composed text regardless of the caller's access to the repository root. The composed text SHALL NOT include anything else from the repository. Only a missing file (ENOENT) SHALL count as "no preamble"; a symlink or any other non-regular entry at that name SHALL be refused (the file is read as the platform and broadcast, so a link would leak whatever the server can read), and any other read error SHALL surface as a failure, never as an empty preamble.
 
 #### Scenario: Caller cannot read the repository root
 - **WHEN** a user whose access resolution denies reading the repository root initialises an MCP session

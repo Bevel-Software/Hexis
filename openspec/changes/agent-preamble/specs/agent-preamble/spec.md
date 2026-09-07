@@ -8,7 +8,7 @@ The admin-written part of the agent instructions SHALL be the file `mcp-descript
 - **THEN** the save commits like any other repository file, with history, and the next MCP session carries the new text
 
 ### Requirement: The file is seeded, never rewritten
-The startup phase SHALL add `mcp-description.md` from the template to any protected branch that lacks it, and SHALL leave an existing `mcp-description.md` untouched. The template file SHALL be a single HTML comment whose first line says that removing the wrapper broadcasts the text, followed inside the same comment by the explanation that every connected agent reads the file at session start whatever its access, that the content should stay under 6,000 characters and its first paragraph under 300, and a starter skeleton the admin fills in.
+The startup phase SHALL add `mcp-description.md` from the template to any protected branch that lacks it, and SHALL leave an existing `mcp-description.md` untouched. The template file SHALL be a single HTML comment whose first line says that removing the wrapper broadcasts the text, followed inside the same comment by the explanation that every connected agent reads the file at session start whatever its access, that the content should stay under 6,000 characters and its first paragraph under about 220 (the fixed purpose sentence and it together are cut at 300), and a starter skeleton the admin fills in. When the configured template lacks the file, the packaged template's copy SHALL be seeded instead, with one line logged, so a deployment with an older custom template does not fail its first boot after upgrading.
 
 #### Scenario: Fresh knowledge base
 - **WHEN** a deployment seeds an empty remote or boots against a repository with no `mcp-description.md`

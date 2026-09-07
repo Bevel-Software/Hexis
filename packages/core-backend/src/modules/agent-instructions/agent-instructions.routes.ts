@@ -22,10 +22,11 @@ export function createAgentInstructionsRoutes(manualAuth: RequestHandler, readPr
   const router = express.Router();
 
   router.get('/agent/instructions', manualAuth, async (_req, res) => {
+    // Set before the read, so a failure answer is no more cacheable than a
+    // successful one: the contract is on the route, not on the happy path.
+    res.setHeader('Cache-Control', 'no-store');
     try {
-      const composed = composeAgentInstructions(await readPreamble());
-      res.setHeader('Cache-Control', 'no-store');
-      res.json(composed);
+      res.json(composeAgentInstructions(await readPreamble()));
     } catch (err) {
       console.error('[agent-instructions] reading mcp-description.md failed:', err instanceof Error ? err.message : err);
       res.status(500).json({ error: 'Failed to read the agent instructions' });

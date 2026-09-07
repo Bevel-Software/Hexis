@@ -394,13 +394,45 @@ describe('TemplateFilesStep', () => {
     // The first line says how to turn the text on; the caps are stated inside.
     expect(shipped.split('\n')[0]).toMatch(/Remove this comment wrapper/);
     expect(shipped).toContain('6,000 characters');
-    expect(shipped).toContain('first paragraph under 300');
+    expect(shipped).toContain('first paragraph under about 220');
     expect(shipped).not.toContain('{{');
     const composed = composeAgentInstructions(shipped);
     expect(composed.instructions).toBe(PLATFORM_HEADER);
     expect(composed.toolPrefix).toBe(TOOL_PREFIX_LINE);
     expect(composed.unterminatedComment).toBe(false);
     expect(composed.preambleChars).toBe(0);
+  });
+
+  it('seeds mcp-description.md from the packaged template when a custom template predates it, instead of failing the boot', async () => {
+    // A distribution's own KB_TEMPLATE_DIR forked before this file existed:
+    // the upgrade must not stop startup over a file whose content is one
+    // comment. The packaged copy stands in, and the log says so once.
+    const customTemplate = path.join(root, 'custom-template-old');
+    await fs.mkdir(customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    await fs.writeFile(path.join(customTemplate, 'access.md'), await template('access.md'), 'utf8');
+    const scaffold = await fullScaffold();
+    delete scaffold['mcp-description.md'];
+    await seedUpstream(scaffold);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8'))).toBe(
+      norm(await template('mcp-description.md')),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no "mcp-description.md"'));
+  });
+
+  it('gives the stand-in to that file only: a custom template missing access.md still fails loudly', async () => {
+    const stricter = path.join(root, 'custom-template-broken');
+    await fs.mkdir(stricter, { recursive: true });
+    await fs.writeFile(path.join(stricter, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    const scaffold = await fullScaffold();
+    delete scaffold['access.md'];
+    await seedUpstream(scaffold);
+    await expect(makeRunner([new TemplateFilesStep()], stricter).runAll()).rejects.toThrow(/ENOENT/);
   });
 
   it('points a clone at mcp-description.md from the managed AGENTS.md, before the platform mechanics', async () => {

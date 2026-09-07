@@ -93,26 +93,40 @@ afterAll(async () => {
   }
 });
 
-/** Start the bridge, connect a real client to it, hand back what the handshake said. */
-async function handshake(): Promise<{ instructions: string | undefined; stderr: string[]; shutdown: () => Promise<void> }> {
+/**
+ * Start the bridge, connect a real client to it, hand back what the handshake
+ * said and what `tools/list` served. A failure between creating the handle
+ * and returning it shuts the handle down before rethrowing: the caller has
+ * nothing to close yet, and a leaked UTCP client (with, in general, its
+ * spawned stdio children) outlives the test.
+ */
+async function handshake(): Promise<{
+  instructions: string | undefined;
+  toolNames: string[];
+  stderr: string[];
+  shutdown: () => Promise<void>;
+}> {
   const stderr: string[] = [];
   vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
     stderr.push(args.map(String).join(' '));
   });
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_e2e' };
   const handle = await createHexisMcpServer(config, '0.0.0');
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await handle.server.connect(serverTransport);
   const client = new Client({ name: 'probe', version: '0.0.0' }, { capabilities: {} });
-  await client.connect(clientTransport);
-  return {
-    instructions: client.getInstructions(),
-    stderr,
-    shutdown: async () => {
-      await client.close().catch(() => {});
-      await handle.shutdown();
-    },
+  const shutdown = async (): Promise<void> => {
+    await client.close().catch(() => {});
+    await handle.shutdown();
   };
+  try {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await handle.server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const { tools } = await client.listTools();
+    return { instructions: client.getInstructions(), toolNames: tools.map((t) => t.name), stderr, shutdown };
+  } catch (err) {
+    await shutdown();
+    throw err;
+  }
 }
 
 describe('agent instructions at the bridge handshake', () => {
@@ -146,6 +160,8 @@ describe('agent instructions at the bridge handshake', () => {
       expect(h.instructions).toBeUndefined();
       expect(instructionsRequests).toBe(1);
       expect(h.stderr.some((l) => l.includes('could not fetch the agent instructions'))).toBe(true);
+      // "Still serves": a real tools/list round-trip answers with the toolset.
+      expect(h.toolNames).toEqual(expect.arrayContaining(['call_tool_chain', 'list_tools', 'tools_info']));
     } finally {
       await h.shutdown();
     }

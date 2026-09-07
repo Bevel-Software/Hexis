@@ -126,6 +126,8 @@ afterEach(async () => {
   for (const c of cleanups.splice(0)) await c().catch(() => {});
   if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
   httpServer = undefined;
+  // A console spy left in place would silently swallow the next test's output.
+  vi.restoreAllMocks();
 });
 
 describe('McpService (UTCP→MCP proxy)', () => {

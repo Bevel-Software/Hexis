@@ -137,19 +137,34 @@ function stripHtmlComments(text: string): { text: string; unterminated: boolean 
   }
 }
 
+/** An ATX heading line: `#` to `######`, then a space or the end. */
+const ATX_HEADING = /^#{1,6}(\s|$)/;
+/** The underline of a setext heading: a run of `=` or `-` on its own line. */
+const SETEXT_UNDERLINE = /^(=+|-+)$/;
+/** A thematic break: three or more `-`, `*` or `_`, optionally spaced. */
+const THEMATIC_BREAK = /^([-*_])(\s*\1){2,}$/;
+
 /**
  * The first paragraph that is not a markdown heading, collapsed to one line.
- * Blocks are separated by blank lines; heading lines inside a block are
- * dropped, so `## Title\nText` yields `Text`. Empty when the text has no
- * such paragraph (absent, empty or heading-only preamble).
+ * Blocks are separated by blank lines. Inside a block, ATX heading lines and
+ * thematic breaks are dropped, and a setext heading (text with a `===` or
+ * `---` underline directly beneath it) is dropped together with its
+ * underline, so `Title\n===\nText` and `## Title\nText` both yield `Text`.
+ * Empty when the text has no such paragraph (absent, empty or heading-only
+ * preamble).
  */
 function firstNonHeadingParagraph(text: string): string {
   for (const block of text.split(/\n[ \t]*\n/)) {
-    const lines = block
+    let lines = block
       .split('\n')
       .map((l) => l.trim())
-      .filter((l) => l.length > 0 && !/^#{1,6}(\s|$)/.test(l));
-    if (lines.length > 0) return lines.join(' ').replace(/\s+/g, ' ');
+      .filter((l) => l.length > 0);
+    // A setext underline heads everything above it; keep only what follows
+    // the last one, since a block may open with `Title\n---` and go on.
+    const underline = lines.reduce((last, l, i) => (i > 0 && SETEXT_UNDERLINE.test(l) ? i : last), -1);
+    if (underline >= 0) lines = lines.slice(underline + 1);
+    const content = lines.filter((l) => !ATX_HEADING.test(l) && !THEMATIC_BREAK.test(l));
+    if (content.length > 0) return content.join(' ').replace(/\s+/g, ' ');
   }
   return '';
 }
