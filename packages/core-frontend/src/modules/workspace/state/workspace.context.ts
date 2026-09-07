@@ -59,6 +59,14 @@ export interface WorkspaceContextValue {
    */
   kbDirName: string | null;
   fileTree: FileTreeEntry | null;
+  /**
+   * Why the last workspace bootstrap failed, or null. A bootstrap that fails
+   * leaves `workspaceId` on whatever it was, so without this a route could
+   * only wait forever; `status` is the HTTP status the bootstrap answered
+   * (410: the branch no longer exists on the git host), 0 for a transport
+   * failure. Cleared by the next successful bootstrap.
+   */
+  bootstrapError: { branch: string; status: number } | null;
 
   /** All tabs currently open in the editor strip. */
   openTabs: OpenTab[];

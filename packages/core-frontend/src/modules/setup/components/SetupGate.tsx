@@ -63,5 +63,5 @@ export function SetupGate({ children }: { children: ReactNode }) {
     );
   }
 
-  return <SetupScreen settings={status.settings} onSaved={refresh} />;
+  return <SetupScreen settings={status.settings} sync={status.sync} onSaved={refresh} />;
 }

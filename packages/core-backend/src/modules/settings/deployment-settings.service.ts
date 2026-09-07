@@ -146,6 +146,25 @@ export const CORE_SETTINGS: SettingDef[] = [
     restartToApply: true,
   },
 
+  {
+    /**
+     * The credential a git host's webhook or a pipeline presents to
+     * `POST /api/sync` (see `modules/kb-sync/`). Deployment-level on purpose:
+     * a person's connection key would stop the pipeline the day they leave.
+     * Optional — without it the endpoint only admits an admin's own session.
+     * Read per request, so it applies without a restart.
+     */
+    key: 'kbSyncSecret',
+    envVar: 'KB_SYNC_SECRET',
+    section: 'knowledge-base',
+    secret: true,
+    // The same floor `sync-auth.ts` enforces at request time (which is what
+    // covers a secret set through the environment); this one just says so
+    // before the save.
+    validate: (v) =>
+      v.trim().length >= 16 ? null : 'Use at least 16 characters — a random string is best.',
+  },
+
   /**
    * Single sign-on. Restart-to-apply because the provider is built once at boot
    * and pushed into the auth plugin array the server mounts from.

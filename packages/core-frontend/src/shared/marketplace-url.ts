@@ -43,12 +43,16 @@ export function marketplaceGitUrl(): string {
  * Basic, and what Claude Code's background refresh needs because it disables
  * credential helpers. `key` is the placeholder when the person has not
  * minted one yet.
+ *
+ * Spliced as TEXT, not set through `URL.password`: the URL parser
+ * percent-encodes what it is given, and the placeholder `<external-api-key>`
+ * came out as `%3Cexternal-api-key%3E` — a thing to paste that looks like a
+ * secret. A real key never needs encoding: it is a tenant prefix plus base64url,
+ * all of it URL-safe by construction.
  */
 export function withConnectionKey(key: string): string {
-  const parsed = new URL(marketplaceGitUrl());
-  parsed.username = 'key';
-  parsed.password = key;
-  return parsed.toString();
+  const { protocol, host, pathname } = new URL(marketplaceGitUrl());
+  return `${protocol}//key:${key}@${host}${pathname}`;
 }
 
 /** The marketplace's registered name — what `plugin@<name>` refers to in Claude Code. */
