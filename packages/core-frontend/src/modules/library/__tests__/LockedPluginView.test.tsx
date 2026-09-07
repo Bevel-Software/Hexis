@@ -80,6 +80,12 @@ describe('LockedPluginView', () => {
     );
   });
 
+  it('calls the plugin by its display name — the same name the unlocked page uses', () => {
+    renderLocked(finance({ name: 'finance', displayName: 'Finance & Ops' }));
+    expect(screen.getByRole('heading', { name: 'Finance & Ops', level: 1 })).toBeInTheDocument();
+    expect(screen.queryByText('finance')).toBeNull();
+  });
+
   it('never leaks an address, even when the summary carries one', () => {
     // The backend nulls emails for non-readers; this asserts the view would not
     // print one if a future wire change ever handed it one anyway.

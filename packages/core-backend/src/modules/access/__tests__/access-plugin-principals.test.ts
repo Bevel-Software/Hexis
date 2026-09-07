@@ -240,6 +240,31 @@ describe('plugin principals', () => {
       });
     });
 
+    it('a DENIAL of a public principal denies everyone — it beats a literal everyone grant beside it and a farther one', async () => {
+      // Every NAMED person still reads (Admin is granted by name, and a grant
+      // wins among a caller's own keys), so re-checking named people finds
+      // nothing wrong; only the derived everyone verdict can say that the
+      // unnamed caller — who holds the public key and nothing else — is denied.
+      const svc = await makeService({
+        // The admin is the only named person in the whole knowledge base.
+        'roles.yaml': 'roles:\n  Admin:\n    - admin@x.io\n',
+        'groups.yaml': 'groups: {}\n',
+        'access.md': '---\nwrite:\n  - Admin\n---\n',
+        'Plugins/Open/plugin.json': '{"name":"open"}',
+        'Plugins/Open/access.md': pluginAccessMd('read:\n  - everyone\nwrite:\n  - Admin\n'),
+        // Public at the scope above; the folder itself carves everyone back out
+        // through the public principal, next to a literal grant that must lose.
+        'Skills/Common/access.md': '---\n---\nread:\n  - everyone\n',
+        'Skills/Common/tips/access.md': '---\n---\nread:\n  - everyone\n  - Admin\n  - deny plugin/Open/read\n',
+      });
+      const skill = 'Skills/Common/tips/SKILL.md';
+      expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(true);
+      expect(await svc.canRead(workspaceId, 'nobody@elsewhere.io', skill)).toBe(false);
+      expect((await svc.eligibleReaders(workspaceId, skill)).restricted).toBe(true);
+      // The parent, where nothing denies, stays public.
+      expect((await svc.eligibleReaders(workspaceId, 'Skills/Common/SKILL.md')).restricted).toBe(false);
+    });
+
     it('a plugin readable by everyone yields a public principal', async () => {
       const svc = await makeService({
         ...BASE,
@@ -308,18 +333,23 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'mallory@x.io', 'Skills/S/x/SKILL.md')).toBe(false);
     });
 
-    it('kbPrincipals lists plugin folders once each, personal folders excluded', async () => {
+    it('kbPrincipals lists plugin folders once each, personal SHELVES excluded — by folder, never by name', async () => {
       const svc = await makeService({
         ...BASE,
         'Plugins/Ops/plugin.json': '{"name":"ops"}',
         'Plugins/Ops/access.md': pluginAccessMd('read:\n  - Admin\n'),
         'Plugins/personal-abc123/plugin.json': '{"name":"personal-abc123"}',
         'Plugins/personal-abc123/access.md': '---\n---\nread:\n  - Ali <ali@x.io>\n',
+        // A plugin whose hand-written manifest name wears the prefix is a
+        // plugin all the same: the shelf is a place, decided by the folder.
+        'Plugins/Odd/plugin.json': '{"name":"personal-odd"}',
+        'Plugins/Odd/access.md': pluginAccessMd('read:\n  - Admin\n'),
       });
       const { plugins } = await svc.kbPrincipals(workspaceId);
       // Named by identity — the manifest — with the folder beside it.
-      expect(plugins).toEqual([
+      expect([...plugins].sort((a, b) => a.folder.localeCompare(b.folder))).toEqual([
         { name: 'gtm', folder: 'Plugins/GTM' },
+        { name: 'personal-odd', folder: 'Plugins/Odd' },
         { name: 'ops', folder: 'Plugins/Ops' },
       ]);
     });

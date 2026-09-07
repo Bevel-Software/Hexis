@@ -167,15 +167,17 @@ export function createPluginsRoutes(
   const memberProbe = (folder: string) => folder;
   /** The FILE probe for discovery/management — the folder's access.md. */
   const accessMdOf = (folder: string) => `${folder}/access.md`;
-  /** The last segment of a repo-relative folder path. */
-  const folderNameOf = (folder: string) => folder.slice(folder.lastIndexOf('/') + 1);
+  /** A plugin folder's path BELOW the plugins root: `GTM`, or `teams/deep`. */
+  const folderBelowRoot = (folder: string) => folder.slice(folder.indexOf('/') + 1);
   /**
-   * What a join request is keyed by: the plugin's primary FOLDER name, not
-   * its identity. The request writes into that folder's rules, every join
-   * branch already on a remote was cut from the folder name, and a rename
-   * of the identity must not orphan the requests that are open.
+   * What a join request is keyed by: the plugin's primary FOLDER path below
+   * the root, not its identity. The request writes into that folder's rules;
+   * a top-level folder keys exactly as every join branch already on a remote
+   * was cut (its name), a nested one by its whole path, so two plugins whose
+   * folders share a basename never share a branch; and a rename of the
+   * identity moves no folder, so it orphans no open request.
    */
-  const joinKeyOf = (g: PluginCatalogEntry) => folderNameOf(g.folders[0]);
+  const joinKeyOf = (g: PluginCatalogEntry) => folderBelowRoot(g.folders[0]);
 
   const probesFor = (plugins: PluginCatalogEntry[]): string[] => [
     ...new Set(plugins.flatMap((g) => g.folders.flatMap((f) => [memberProbe(f), accessMdOf(f)]))),
@@ -353,8 +355,9 @@ export function createPluginsRoutes(
         return;
       }
       // Provisioning works on FOLDERS (it created one); the identity only
-      // found the plugin.
-      await provision.deletePlugin(user, folderNameOf(plugin.folders[0]));
+      // found the plugin. The whole path below the root, so a nested plugin
+      // is deleted where it is.
+      await provision.deletePlugin(user, folderBelowRoot(plugin.folders[0]));
       pluginIndex.invalidate();
       res.json({ ok: true });
     } catch (err) {

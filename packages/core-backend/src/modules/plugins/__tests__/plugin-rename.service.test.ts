@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -6,9 +6,23 @@ import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { PluginRenameError, PluginRenameService, renamePluginPrincipalInText } from '../plugin-rename.service.js';
+
+// The walk the rename rewrites through, with a switch that makes it refuse
+// exactly when asked to be strict — the way a folder it cannot list would.
+const walkMock = vi.hoisted(() => ({ holeInTheWalk: false }));
+vi.mock('../../../shared/fs-walk.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../shared/fs-walk.js')>();
+  return {
+    walkFiles: (root: string, match: (b: string) => boolean, opts?: { strict?: boolean }) => {
+      if (walkMock.holeInTheWalk && opts?.strict) throw new Error('EACCES: a folder could not be listed');
+      return actual.walkFiles(root, match, opts);
+    },
+  };
+});
 
 /**
  * Renaming over a real tree: the real resolver decides who may rename and
@@ -34,6 +48,7 @@ describe('PluginRenameService', () => {
   let repo: string;
   let commits: { summary: string; paths: string[] }[];
   let failNextCommit: Error | null;
+  let failWriteMatching: string | null;
   let invalidated: number;
   let access: AccessControlService;
   let svc: PluginRenameService;
@@ -51,12 +66,18 @@ describe('PluginRenameService', () => {
     repo = path.join(root, wsId, KB_DIR);
     commits = [];
     failNextCommit = null;
+    failWriteMatching = null;
+    walkMock.holeInTheWalk = false;
     invalidated = 0;
     const workspaceService = {
       getOrCreateForBranch: async () => ({ id: wsId }),
       getWorkspacePath: async (id: string) => path.join(root, id),
       readFile: async (id: string, rel: string) => fs.readFile(path.join(root, id, rel), 'utf-8'),
       writeFile: async (id: string, rel: string, text: string) => {
+        if (failWriteMatching && rel.endsWith(failWriteMatching)) {
+          failWriteMatching = null;
+          throw new Error('disk full');
+        }
         const abs = path.join(root, id, rel);
         await fs.mkdir(path.dirname(abs), { recursive: true });
         await fs.writeFile(abs, text);
@@ -178,6 +199,48 @@ describe('PluginRenameService', () => {
 
     await svc.rename(manager, 'gtm', { name: 'go-to-market' });
     expect((await manifest()).name).toBe('go-to-market');
+  });
+
+  it('a name is taken by SLUG: a bundle spelled "Sales Team" already holds sales-team', async () => {
+    await write('Plugins/Ext/plugin.bundle.json', '{"name":"Sales Team"}');
+    await expect(svc.rename(manager, 'gtm', { name: 'sales-team' })).rejects.toMatchObject({
+      status: 409,
+      payload: { kind: 'name-taken' },
+    });
+    expect(commits).toEqual([]);
+  });
+
+  it('rewrites the grant in every file kind the resolver reads from — a .tool frontmatter included', async () => {
+    const tool = 'Plugins/GTM/software.bevel.hexis/tools/web.tool';
+    await write(tool, '---\nname: web\nread:\n  - plugin/gtm/read\n---\nbody\n');
+    const result = await svc.rename(manager, 'gtm', { name: 'go-to-market' });
+    expect(result.rewritten).toEqual([tool, 'Skills/Eng/deploy/access.md']);
+    expect(await read(tool)).toBe('---\nname: web\nread:\n  - plugin/go-to-market/read\n---\nbody\n');
+  });
+
+  it('a folder it cannot list stops the rename before a byte is written', async () => {
+    walkMock.holeInTheWalk = true;
+    await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toThrow('could not be listed');
+    expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
+    expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
+    expect(commits).toEqual([]);
+  });
+
+  it('puts every file back when a write in the batch fails — the ones already written included', async () => {
+    failWriteMatching = 'Skills/Eng/deploy/access.md';
+    await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toThrow('disk full');
+    expect(await read('Plugins/GTM/plugin.json')).toBe(GTM_MANIFEST);
+    expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
+    expect(commits).toEqual([]);
+  });
+
+  it('leaves a rename that COMMITTED but could not push alone — the recovery flow owns that state', async () => {
+    failNextCommit = new PushNeedsAgentResolutionError(DEFAULT_BRANCH, 'Plugins/GTM/plugin.json', 'rejected', 'n/a');
+    await expect(svc.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toBeInstanceOf(PushNeedsAgentResolutionError);
+    // Restoring the old bytes here would stack an uncommitted inverse on a
+    // real commit; the working tree stays as the commit left it.
+    expect((await manifest()).name).toBe('go-to-market');
+    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/go-to-market/read');
   });
 
   it('will not rename a plugin read from an external format — that repository owns its name', async () => {

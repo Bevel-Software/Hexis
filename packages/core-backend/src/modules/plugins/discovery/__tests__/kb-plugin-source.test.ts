@@ -54,6 +54,8 @@ describe('KbPluginSource — bundles', () => {
       JSON.stringify({ name: 'close', version: '0.1.0', mcpProfile: 'empty', sourceSkillRoots: ['skills/departments/business/finance'] }),
     );
     await write('plugins/departments/engineering/shared/unnamed/plugin.bundle.json', JSON.stringify({ sourceSkillRoots: ['../escape', 'skills/x'] }));
+    // A bundle whose name is not its folder's, with no display name of its own.
+    await write('plugins/departments/business/finance/ledger-folder/plugin.bundle.json', JSON.stringify({ name: 'ledger' }));
     await write('plugins/broken/plugin.bundle.json', '{ not json');
   });
   afterEach(async () => {
@@ -64,7 +66,10 @@ describe('KbPluginSource — bundles', () => {
   it('finds bundles at any depth and reads them as plugins that link skill roots', async () => {
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
-    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'unnamed']);
+    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'unnamed']);
+    // The shared contract: a declared display name, else the FOLDER — never the identity.
+    expect(byName.get('example-plugin')!.displayName).toBe('Example Plugin');
+    expect(byName.get('ledger')!.displayName).toBe('ledger-folder');
 
     const example = byName.get('example-plugin')!;
     expect(example.folder).toBe('plugins/functional/cluster-a/example-plugin');
@@ -222,15 +227,19 @@ describe('KbPluginSource — one walk, both shapes', () => {
 
   it('the manifest name is the identity and the folder only the label — unless the name is no identifier', async () => {
     await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', displayName: 'Go To Market' }));
+    await write('Plugins/Numeric/plugin.json', '{"name":42}');
     await write('Plugins/Ops/plugin.json', JSON.stringify({ name: 'Not An Identifier' }));
     await write('Plugins/Plain/plugin.json', '{}');
     const { plugins, warnings } = await new KbPluginSource().discover(kb);
     expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
       ['go-to-market', 'Go To Market', 'Plugins/GTM'],
+      ['numeric', 'Numeric', 'Plugins/Numeric'],
       ['ops', 'Ops', 'Plugins/Ops'],
       ['plain', 'Plain', 'Plugins/Plain'],
     ]);
+    // Every PRESENT name that is no identifier is said out loud — whatever its type.
     expect(warnings).toEqual([
+      'Plugins/Numeric/plugin.json names 42, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "numeric"',
       'Plugins/Ops/plugin.json names "Not An Identifier", which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "ops"',
     ]);
   });

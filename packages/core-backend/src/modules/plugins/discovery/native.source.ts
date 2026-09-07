@@ -3,7 +3,7 @@ import path from 'node:path';
 import {
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
-  isPersonalPluginFolder,
+  isPersonalPluginDir,
   isPluginIdentifier,
   linkedSkillRoots,
   pluginDisplayNameOf,
@@ -37,9 +37,12 @@ export async function readNativePlugin(
   // manifest's spelling is not a mystery.
   const name = pluginIdentityOf(manifest, folderName);
   const displayName = pluginDisplayNameOf(manifest, folderName);
-  if (manifest && typeof manifest.name === 'string' && !isPluginIdentifier(manifest.name)) {
+  // Any PRESENT name that is not an identifier is worth a word — a number or
+  // an object as much as a capitalised string. Only an absent name is silent.
+  if (manifest && manifest.name !== undefined && !isPluginIdentifier(manifest.name)) {
+    const spelled = typeof manifest.name === 'string' ? `"${manifest.name}"` : JSON.stringify(manifest.name);
     warnings.push(
-      `${folder}/${PLUGIN_MANIFEST_FILE} names "${manifest.name}", which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "${name}"`,
+      `${folder}/${PLUGIN_MANIFEST_FILE} names ${spelled}, which is not a plugin identifier (lowercase kebab-case) — the folder stands in as "${name}"`,
     );
   }
   const mcp = parseObject(mcpJsonText);
@@ -53,8 +56,8 @@ export async function readNativePlugin(
     displayName,
     folder,
     relFolder,
-    // Personal folders sit directly under the root; a deeper `personal-x` is just a name.
-    personal: !relFolder.includes('/') && isPersonalPluginFolder(folderName),
+    // The one structural rule: a direct child of the root with the prefix.
+    personal: isPersonalPluginDir(folder),
     exists,
     manifest,
     manifestText,

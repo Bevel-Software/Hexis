@@ -323,6 +323,34 @@ describe('PluginPage', () => {
     expect(pluginsMock.renamePlugin).not.toHaveBeenCalled();
   });
 
+  it('refuses the reserved personal prefix before asking the server', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: 'personal-gtm' } });
+    expect(within(dialog).getByText(/reserved for personal folders/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
+  });
+
+  it('offers no Rename plugin for a plugin read from an external format — its repository owns the name', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', canWrite: true, linksAreManaged: false })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    await screen.findByRole('menu');
+    expect(screen.queryByRole('menuitem', { name: 'Rename plugin' })).toBeNull();
+  });
+
+  it('opens the manifest at the plugin FOLDER, which is not its identity', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'go-to-market', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('go-to-market');
+    fireEvent.click(await screen.findByRole('button', { name: 'Manifest' }));
+    await waitFor(() =>
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/plugin.json`),
+    );
+  });
+
   it('shows no Rename plugin to a non-manager', async () => {
     renderPlugin('GTM'); // gtm() defaults to canWrite: false
     fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));

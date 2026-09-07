@@ -53,6 +53,8 @@ interface HarnessOpts {
   email?: string | null;
   skills?: SkillSummary[];
   tools?: ToolManualSummary[];
+  /** More plugins: folder path below `Plugins/` → manifest name. */
+  extraPlugins?: Record<string, string>;
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {
@@ -77,11 +79,16 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const kbRoot = path.join(workspaceDir, KB);
   // Both carry the manifest that makes a folder a plugin to discovery, and
   // the access.md that makes it exist to the index.
-  for (const name of ['GTM', 'Finance']) {
-    await fs.mkdir(path.join(kbRoot, 'Plugins', name), { recursive: true });
-    await fs.writeFile(path.join(kbRoot, 'Plugins', name, 'plugin.json'), `{"name":"${name.toLowerCase()}"}`);
+  const fixtures: [string, string][] = [
+    ['GTM', 'gtm'],
+    ['Finance', 'finance'],
+    ...Object.entries(opts.extraPlugins ?? {}),
+  ];
+  for (const [folder, name] of fixtures) {
+    await fs.mkdir(path.join(kbRoot, 'Plugins', folder), { recursive: true });
+    await fs.writeFile(path.join(kbRoot, 'Plugins', folder, 'plugin.json'), `{"name":"${name}"}`);
     await fs.writeFile(
-      path.join(kbRoot, 'Plugins', name, 'access.md'),
+      path.join(kbRoot, 'Plugins', folder, 'access.md'),
       '---\nread:\n  - everyone\n---\nread: []\n',
     );
   }
@@ -391,6 +398,19 @@ describe('/api/plugins routes', () => {
         title: 'Join request: Finance',
       }),
     );
+  });
+
+  it('keys a join request by the folder PATH below the root — two folders sharing a basename never share a branch', async () => {
+    const h = await makeHarness({
+      extraPlugins: { 'teams/GTM': 'team-gtm' },
+      readable: { [ALI]: ['Plugins/teams/GTM/access.md'] },
+    });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/team-gtm/join-request`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const branch = joinBranchFor(ALI, 'teams/GTM');
+    expect(branch).not.toBe(joinBranchFor(ALI, 'GTM'));
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
   });
 
   it('join-request is idempotent: an existing open join CR is returned, nothing new is created', async () => {

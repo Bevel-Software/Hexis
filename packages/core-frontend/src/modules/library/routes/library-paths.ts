@@ -217,12 +217,14 @@ export function libraryHomeForItemPath(
   path: string;
 } {
   const folder = pluginOfPath(repoRelativePath);
-  const plugin = pluginName === undefined ? folder : pluginName;
-  if (plugin !== null && folder !== null && !isPersonalPluginFolder(folder)) {
-    return { label: labelOf(plugin), path: pathForPlugin(plugin) };
-  }
-  if (plugin !== null) {
+  // A personal shelf is decided by the FOLDER, whatever identity the caller
+  // resolved (a personal item's identity is null: a shelf is not a plugin).
+  if (folder !== null && isPersonalPluginFolder(folder)) {
     return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
+  }
+  const plugin = pluginName ?? folder;
+  if (plugin !== null) {
+    return { label: labelOf(plugin), path: pathForPlugin(plugin) };
   }
   return { label: 'All skills & tools', path: LIBRARY_ROOT };
 }

@@ -41,7 +41,7 @@ import {
   pluginManifestName,
   renderPluginManifest,
   PERSONAL_PLUGIN_PREFIX,
-  isPersonalPluginFolder,
+  isPersonalPluginDir,
   personalPluginFolderName,
   type AuthUser,
 } from '@bevel-software/platform-shared';
@@ -206,27 +206,38 @@ export class PluginProvisionService {
    * never interleave with a re-creation of the same name (the key derives
    * from the name, so both spell it identically).
    */
-  async deletePlugin(user: AuthUser, rawName: string): Promise<void> {
-    const name = rawName.trim();
-    if (!name) throw new PluginProvisionError('A plugin needs a name.', 422);
-    if (isPersonalPluginFolder(name)) {
+  async deletePlugin(user: AuthUser, rawFolder: string): Promise<void> {
+    // The folder's path BELOW the plugins root — `GTM`, or `teams/deep` for a
+    // plugin nested where discovery found it. Segments only: nothing that
+    // could climb out of the root.
+    const name = rawFolder.trim();
+    const segments = name.split('/');
+    if (!name || segments.some((s) => !s || s === '.' || s === '..')) {
+      throw new PluginProvisionError('A plugin needs a name.', 422);
+    }
+    if (isPersonalPluginDir(`${PLUGINS_DIR}/${name}`)) {
       // Personal folders are not plugins (the catalog never lists them), and
       // nobody deletes somebody's private shelf through the plugin door.
       throw new PluginProvisionError('Unknown plugin', 404);
     }
     return this.creations.run(`plugin:${pluginManifestName(name)}`, async () => {
-      const existing = await this.existingFolder(name);
-      // Exact match only — the catalog hands the route the on-disk casing,
-      // so a mismatch means the plugin is gone (or was never there).
-      if (existing !== name) throw new PluginProvisionError('Unknown plugin', 404);
-
       const wsId = await this.readyWorkspaceId();
       const wsDir = await this.workspaceService.getWorkspacePath(wsId);
       const pluginsDir = path.join(wsDir, this.kbDirName, PLUGINS_DIR);
-      const folderDir = path.join(pluginsDir, name);
+      const folderDir = path.join(pluginsDir, ...segments);
+      // Exact match only — the catalog hands the route the on-disk spelling,
+      // so a mismatch means the plugin is gone (or was never there). A
+      // top-level folder is checked against the root's listing (the same
+      // case-insensitive index creation collides on); a nested one by its path.
+      const present =
+        segments.length === 1
+          ? (await this.existingFolder(name)) === name
+          : await fs.stat(folderDir).then((s) => s.isDirectory(), () => false);
+      if (!present) throw new PluginProvisionError('Unknown plugin', 404);
+
       // Dot-prefixed ⇒ invisible to the plugin scanner and the collision
       // check for the whole window the commit is in flight.
-      const parkedDir = path.join(pluginsDir, `.${name}.deleting`);
+      const parkedDir = path.join(path.dirname(folderDir), `.${segments[segments.length - 1]}.deleting`);
 
       await fs.rm(parkedDir, { recursive: true, force: true }); // a stale park from a crashed run
       await fs.rename(folderDir, parkedDir);

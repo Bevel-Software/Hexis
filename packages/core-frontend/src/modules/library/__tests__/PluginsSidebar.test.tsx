@@ -60,6 +60,27 @@ describe('PluginsSidebar', () => {
     expect(screen.queryByRole('button', { name: /^finance/ })).toBeNull();
   });
 
+  it('two plugins wearing one label are still two rows, each navigating to its own identity', () => {
+    // React tells on a list keyed by something two children share; the rows
+    // are keyed by what they ARE, so it has nothing to say.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { onSelect } = renderSidebar({
+        plugins: [
+          { plugin: 'sales-eu', label: 'Sales', count: 1, attention: 0 },
+          { plugin: 'sales-us', label: 'Sales', count: 2, attention: 0 },
+        ],
+      });
+      const rows = screen.getAllByRole('button', { name: /^Sales/ });
+      expect(rows).toHaveLength(2);
+      fireEvent.click(rows[1]);
+      expect(onSelect).toHaveBeenLastCalledWith({ kind: 'group', plugin: 'sales-us' });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('leads with All plugins. The Library opens there, so the nav starts there', () => {
     const { onOpenPluginsIndex } = renderSidebar();
     const rows = screen.getAllByRole('button');

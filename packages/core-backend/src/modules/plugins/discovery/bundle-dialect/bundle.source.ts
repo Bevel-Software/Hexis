@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isPersonalPluginFolder, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
+import { isPersonalPluginDir, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 
@@ -106,12 +106,14 @@ export async function readBundlePlugin(
 
   return {
     name,
-    displayName: typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : name,
+    // The shared contract (`DiscoveredPlugin.displayName`): the declared
+    // display name, else the FOLDER — never the identity.
+    displayName: typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf,
     folder,
     relFolder,
     // The same rule as the native reader: a reserved personal folder directly
     // under the root is a place, not a plugin, whatever file it carries.
-    personal: !relFolder.includes('/') && isPersonalPluginFolder(leaf),
+    personal: isPersonalPluginDir(folder),
     exists: true,
     manifest,
     manifestText: null,

@@ -14,7 +14,11 @@ export function pluginNameForPath(
   summaries: readonly Pick<PluginSummary, 'name' | 'folders'>[],
 ): string | null {
   const folder = pluginOfPath(repoPath);
-  if (folder === null || isPersonalPluginFolder(folder)) return null;
+  if (folder === null) return null;
+  // The catalog is the authority: whatever folder it lists as holding the
+  // path names the plugin. Only a path no listed folder holds falls back to
+  // the folder name — and a personal shelf, which the catalog never lists,
+  // to null.
   let best: { name: string; length: number } | null = null;
   for (const s of summaries) {
     for (const f of s.folders) {
@@ -23,7 +27,8 @@ export function pluginNameForPath(
       }
     }
   }
-  return best?.name ?? folder;
+  if (best) return best.name;
+  return isPersonalPluginFolder(folder) ? null : folder;
 }
 
 /** What a plugin is called on screen — its display name, else its identity. */

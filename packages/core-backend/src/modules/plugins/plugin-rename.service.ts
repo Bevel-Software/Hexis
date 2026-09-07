@@ -8,9 +8,15 @@ import {
   pluginManifestName,
 } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
+import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import { walkFiles } from '../../shared/fs-walk.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { PLUGIN_TOKEN_PREFIX, canonicalPluginToken, parsePluginPrincipalKey } from '../access-model/access-grammar.js';
+import {
+  PLUGIN_TOKEN_PREFIX,
+  canonicalPluginToken,
+  hasAccessFrontmatterExtension,
+  parsePluginPrincipalKey,
+} from '../access-model/access-grammar.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { PluginSource } from './discovery/plugin-source.js';
 import { linksWorkspaceId } from './plugin-links.js';
@@ -106,7 +112,10 @@ export class PluginRenameService {
         { kind: 'bad-name' },
       );
     }
-    if (nextName !== plugin.name && plugins.some((p) => p.name === nextName)) {
+    // Taken by SLUG, not by spelling: a bundle may declare a name that is not
+    // an identifier, and the marketplace folds every name to its slug — a
+    // collision there drops one of the two from the catalog.
+    if (nextName !== plugin.name && plugins.some((p) => p !== plugin && pluginManifestName(p.name) === nextName)) {
       throw new PluginRenameError(`A plugin named "${nextName}" already exists.`, 409, { kind: 'name-taken' });
     }
     const folderName = path.posix.basename(plugin.folder);
@@ -124,8 +133,12 @@ export class PluginRenameService {
 
     if (nextName !== plugin.name) {
       // Every access entry in the knowledge base that names the old
-      // principal — in a folder's access.md or in a page's own frontmatter.
-      for (const rel of await walkFiles(kbRoot, (b) => b.toLowerCase().endsWith('.md'))) {
+      // principal — in a folder's access.md or in the own frontmatter of any
+      // file kind the resolver reads grants from (`.md`, `.tool`, whatever
+      // an overlay registered). STRICT walk: a folder that could not be
+      // listed would leave the old spelling live in it, and a principal
+      // renamed in some files and not others is two principals.
+      for (const rel of await walkFiles(kbRoot, hasAccessFrontmatterExtension, { strict: true })) {
         const abs = path.join(kbRoot, rel);
         const before = await fs.readFile(abs, 'utf-8');
         const after = renamePluginPrincipalInText(before, plugin.name, nextName);
@@ -145,8 +158,11 @@ export class PluginRenameService {
       }
     }
 
-    for (const w of writes) await this.workspaceService.writeFile(wsId, w.rel, w.text);
+    // Writes and commit share ONE failure envelope: whichever of them fails,
+    // the working tree goes back to what origin has — a half-written batch
+    // is as much a split principal as a refused commit.
     try {
+      for (const w of writes) await this.workspaceService.writeFile(wsId, w.rel, w.text);
       const summary =
         nextName === plugin.name
           ? `Rename plugin ${plugin.name}: display name`
@@ -158,10 +174,14 @@ export class PluginRenameService {
         writes.map((w) => w.rel),
       );
     } catch (err) {
-      // The commit did not land: put every file back, so a retry starts from
-      // what origin has rather than from a half-renamed working tree.
-      for (const w of writes) {
-        if (w.before !== null) await this.workspaceService.writeFile(wsId, w.rel, w.before).catch(() => undefined);
+      // One failure is NOT a failed commit: the commit landed locally and only
+      // the push did not (the typed hand-off the workflow throws). Restoring
+      // the old bytes then would stack an uncommitted inverse of a real
+      // commit; the recovery flow owns that state, so it is left alone.
+      if (!(err instanceof PushNeedsAgentResolutionError)) {
+        for (const w of writes) {
+          if (w.before !== null) await this.workspaceService.writeFile(wsId, w.rel, w.before).catch(() => undefined);
+        }
       }
       throw err;
     }

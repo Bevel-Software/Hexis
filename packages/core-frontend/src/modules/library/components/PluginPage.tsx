@@ -236,6 +236,9 @@ export function PluginPage() {
   // What the page CALLS the plugin — its display name. `plugin` stays the
   // identity: the URL, the grants, the API.
   const label = pluginLabel(plugin, data.pluginSummaries);
+  // Where its files ARE, below the plugins root — what the manifest button
+  // and the extensions listing build paths from. The identity is not a path.
+  const folderBelowRoot = primaryFolder ? primaryFolder.slice(primaryFolder.indexOf('/') + 1) : plugin;
 
   return (
     <div className="pb-14">
@@ -261,7 +264,7 @@ export function PluginPage() {
           )}
         </div>
         <div className="mt-1.5 flex items-center gap-1">
-          <ManifestButton kbDirName={kbDirName} folder={plugin} canWrite={summary?.canWrite === true} />
+          <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
             // The dialog needs both to mount (`addOpen && summary &&
@@ -276,8 +279,10 @@ export function PluginPage() {
             // route enforces, so the item appears for exactly the people the
             // backend will let through.
             onDelete={summary?.isOwner ? () => setDeleteOpen(true) : undefined}
-            // The MANAGER's verb: the same gate as linking and the join banner.
-            onRename={summary?.canWrite ? () => setRenameOpen(true) : undefined}
+            // The MANAGER's verb: the same gate as linking and the join banner —
+            // and, like linking, only for a plugin this platform writes (an
+            // external format is renamed in its own repository).
+            onRename={summary?.canWrite && summary.linksAreManaged !== false ? () => setRenameOpen(true) : undefined}
             addLabel={`Add a skill or tool to ${label}`}
           />
         </div>
@@ -464,7 +469,7 @@ export function PluginPage() {
         />
       )}
 
-      <ClientExtensionsSection kbDirName={kbDirName} folder={plugin} />
+      <ClientExtensionsSection kbDirName={kbDirName} folder={folderBelowRoot} />
       {manageDialog}
     </div>
   );

@@ -1,4 +1,5 @@
 import { useId, useState } from 'react';
+import { PERSONAL_PLUGIN_PREFIX } from '@bevel-software/platform-shared';
 import { Banner, Button, Dialog, TextField } from '../../../shared/components';
 import { renamePlugin, type PluginSummary } from '../services/plugins.api';
 import { useLibraryToast } from '../state/toast.context';
@@ -33,7 +34,15 @@ export function RenamePluginDialog({
   const [error, setError] = useState<string | null>(null);
 
   const trimmedName = name.trim();
-  const nameError = trimmedName && !IDENTIFIER_RE.test(trimmedName) ? 'Lowercase letters, digits and single hyphens, like sales-team.' : null;
+  // The same two rules the server applies, so the dialog never submits a
+  // guaranteed refusal: the identifier shape, and the reserved personal prefix.
+  const nameError = !trimmedName
+    ? null
+    : !IDENTIFIER_RE.test(trimmedName)
+      ? 'Lowercase letters, digits and single hyphens, like sales-team.'
+      : trimmedName.startsWith(PERSONAL_PLUGIN_PREFIX)
+        ? `"${PERSONAL_PLUGIN_PREFIX}" is reserved for personal folders. Pick another identifier.`
+        : null;
   const identifierChanges = trimmedName !== plugin.name;
   const changed = identifierChanges || displayName.trim() !== (plugin.displayName ?? plugin.name);
   const canSubmit = trimmedName.length > 0 && nameError === null && changed && !busy;

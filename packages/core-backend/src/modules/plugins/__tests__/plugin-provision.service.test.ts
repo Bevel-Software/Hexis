@@ -233,6 +233,27 @@ describe('PluginProvisionService.deletePlugin', () => {
     expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toEqual(['GTM']);
   });
 
+  it('deletes a plugin nested below the root by its folder PATH, parking it beside itself', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/access.md'), '---\n---\n');
+
+    await h.svc.deletePlugin(USER, 'teams/Deep');
+
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/teams/Deep'))).rejects.toThrow();
+    expect(await fs.readdir(path.join(h.dir, KB, 'Plugins/teams'))).toEqual([]);
+    expect(h.commits.runPendingCommit).toHaveBeenCalledWith(
+      'ws-main',
+      DEFAULT_BRANCH,
+      `${KB}/Plugins/teams/Deep`,
+      USER,
+      { systemAuthorized: true },
+    );
+    // Segments only — nothing climbs out of the root; a missing nested folder is unknown.
+    await expect(h.svc.deletePlugin(USER, '../etc')).rejects.toMatchObject({ status: 422 });
+    await expect(h.svc.deletePlugin(USER, 'teams/Nope')).rejects.toMatchObject({ status: 404 });
+  });
+
   it('never deletes a personal folder through the plugin door', async () => {
     await h.svc.ensurePersonalPlugin(USER);
     const folder = personalPluginFolderName(USER.id);

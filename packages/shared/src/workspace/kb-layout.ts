@@ -434,6 +434,18 @@ export function isPersonalPluginFolder(folderName: string): boolean {
 }
 
 /**
+ * THE structural rule for a personal shelf: a repo-relative folder that is a
+ * DIRECT child of the plugins root and carries the personal prefix. A deeper
+ * folder so named is just a name, and a plugin whose manifest name happens
+ * to start with the prefix is a plugin — discovery, the principal picker and
+ * the item pages all ask this one question of the FOLDER.
+ */
+export function isPersonalPluginDir(repoRelDir: string): boolean {
+  const segments = repoRelDir.split('/').filter(Boolean);
+  return segments.length === 2 && segments[0] === PLUGINS_DIR && isPersonalPluginFolder(segments[1]!);
+}
+
+/**
  * The plugin a repo-root-relative path belongs to, or `null` for content that
  * sits outside any plugin.
  *

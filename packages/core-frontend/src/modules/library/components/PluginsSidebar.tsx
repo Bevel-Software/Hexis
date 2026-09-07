@@ -175,7 +175,9 @@ export function PluginsSidebar({
     tone: 'count' | 'pending' = 'count',
   ) => (
     <button
-      key={label}
+      // Keyed by what the row IS (its target), never by what it says: two
+      // plugins may share a label, and React must still tell their rows apart.
+      key={target.kind === 'group' ? `group:${target.plugin}` : target.kind}
       type="button"
       aria-current={isCurrent(target)}
       className={rowClass(isCurrent(target))}

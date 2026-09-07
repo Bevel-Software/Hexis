@@ -13,7 +13,7 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginFolder,
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
   pluginIdentityOf,
 } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
@@ -338,22 +338,28 @@ function resolveScopes(
         set(entry, 'grant');
       }
     }
-    // A PUBLIC plugin principal (its plugin grants `everyone`) is held by
-    // every signed-in person, so a grant to it IS a grant to everyone at this
-    // scope. Derived HERE, where a scope's verdicts are built, so every reader
-    // of the everyone verdict — the permission check, the eligible lists, the
-    // `restricted` flag, the compiler's everyone audience — sees one truth;
-    // and derived into its own field, never into `byRole`, so the entries a
-    // person can remove stay exactly the lines the files hold.
-    let everyone = byRole.get(EVERYONE_CANONICAL);
-    if (everyone !== 'grant') {
-      for (const [key, state] of byRole) {
-        if (state === 'grant' && model.roles.publicKeys?.has(key)) {
-          everyone = 'grant';
-          break;
-        }
-      }
+    // The anonymous caller's verdict at this scope — what someone who holds
+    // exactly the PUBLIC keys (a plugin principal whose plugin admits
+    // everyone, so everyone holds it) resolves to, by the same tiers a named
+    // caller gets: a grant via any public key wins, else a denial via one
+    // denies, else the built-in `everyone` entry decides. Derived HERE, where
+    // a scope's verdicts are built, so every reader of it — the permission
+    // check, the eligible lists, the `restricted` flag, the compiler's
+    // everyone audience — sees one truth; and derived into its own field,
+    // never into `byRole`, so the entries a person can remove stay exactly
+    // the lines the files hold.
+    let publicGrant = false;
+    let publicDeny = false;
+    for (const [key, state] of byRole) {
+      if (!model.roles.publicKeys?.has(key)) continue;
+      if (state === 'grant') publicGrant = true;
+      else if (state === 'denied') publicDeny = true;
     }
+    const everyone: GrantState | undefined = publicGrant
+      ? 'grant'
+      : publicDeny
+        ? 'denied'
+        : byRole.get(EVERYONE_CANONICAL);
     return { byRole, byEmail, everyone, source };
   };
 
@@ -1191,9 +1197,10 @@ export class AccessControlService implements IAccessControl {
     // direct-access.md edit).
     const roles = [EVERYONE_DISPLAY];
     const groups: string[] = [];
-    // Plugins = the FOLDER names behind the synthesised `plugin/<Name>/<verb>`
-    // principals, once each (three keys share a folder). Personal folders are
-    // plugins to the resolver but not to a person picking a grantee.
+    // Plugins = the identities behind the synthesised `plugin/<name>/<verb>`
+    // principals, once each (three keys share a folder). Personal shelves are
+    // plugins to the resolver but not to a person picking a grantee — told
+    // apart by their FOLDER (the one structural rule), never by their name.
     const plugins = new Map<string, string>();
     for (const [key, principal] of model.roles.byCanonical) {
       if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
@@ -1202,7 +1209,7 @@ export class AccessControlService implements IAccessControl {
         principal.kind === 'plugin' &&
         principal.pluginName &&
         principal.pluginDir &&
-        !isPersonalPluginFolder(principal.pluginName)
+        !isPersonalPluginDir(principal.pluginDir)
       ) {
         plugins.set(principal.pluginName, principal.pluginDir);
       }

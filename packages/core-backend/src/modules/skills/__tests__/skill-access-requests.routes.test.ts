@@ -66,6 +66,9 @@ async function makeHarness(listBranches: IWorkflowService['listBranches']) {
 describe('POST /skills/:name/access-request — the branch probe', () => {
   let server: Server | null = null;
   afterEach(async () => {
+    // Released here, not after the assertions: a failing assertion must not
+    // leave the console muted for every test that follows.
+    vi.restoreAllMocks();
     if (server) await new Promise<void>((r) => server!.close(() => r()));
     server = null;
   });
@@ -82,7 +85,7 @@ describe('POST /skills/:name/access-request — the branch probe', () => {
   });
 
   it('a listing that could not prove anything stops the request before a branch or a byte is written', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = await makeHarness(async () => {
       throw new Error('the fetch from origin failed, so the branch list cannot prove absence');
     });
@@ -92,6 +95,5 @@ describe('POST /skills/:name/access-request — the branch probe', () => {
     expect(h.workflow.createBranch).not.toHaveBeenCalled();
     expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
     expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
-    error.mockRestore();
   });
 });
