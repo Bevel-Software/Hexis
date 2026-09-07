@@ -19,16 +19,19 @@ export interface PendingClaudeCode {
  * Where pending codes live. The database in production, so the consent
  * finish on one replica and the exchange on another see the same row.
  *
- * The rule "one live code per person and client" is the TABLE'S: the pair is
- * its primary key, so issuing is an upsert — the newest code overwrites the
- * last in one statement, two finishes racing each other cannot both leave a
- * row behind, and the table holds at most one row per person and client,
- * which is why nothing here ever sweeps. Spending is one conditional update:
- * the first exchange wins, on whichever replica, and every later attempt
- * finds the code spent. Nothing in memory takes part in either guarantee.
+ * The rule "one live code per person" is the TABLE'S: the person is its
+ * primary key, so issuing is an upsert — the newest code overwrites the last
+ * in one statement, two finishes racing each other cannot both leave a row
+ * behind, and the table holds at most one row per user, which goes when the
+ * user does. That is the whole bound; nothing here ever sweeps, and no
+ * rotation of the client id can strand a row, because the client id is data
+ * the exchange checks rather than part of the key. Spending is one
+ * conditional update: the first exchange wins, on whichever replica, and
+ * every later attempt finds the code spent. Nothing in memory takes part in
+ * either guarantee.
  */
 export interface ClaudeBridgeCodeStore {
-  /** Store a fresh code, replacing whatever the same person and client had. */
+  /** Store a fresh code, replacing whatever the same person had. */
   put(code: PendingClaudeCode): Promise<void>;
   /** The live (unspent, unexpired) code with this hash, without spending it. */
   peek(codeHash: string): Promise<PendingClaudeCode | null>;
@@ -41,6 +44,7 @@ export class DbClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
 
   async put(code: PendingClaudeCode): Promise<void> {
     const fresh = {
+      clientId: code.clientId,
       codeHash: code.codeHash,
       redirectUri: code.redirectUri,
       expiresAt: code.expiresAt,
@@ -49,11 +53,8 @@ export class DbClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
     };
     await this.db
       .insert(claudeMarketplaceCodes)
-      .values({ userId: code.userId, clientId: code.clientId, ...fresh })
-      .onConflictDoUpdate({
-        target: [claudeMarketplaceCodes.userId, claudeMarketplaceCodes.clientId],
-        set: fresh,
-      });
+      .values({ userId: code.userId, ...fresh })
+      .onConflictDoUpdate({ target: claudeMarketplaceCodes.userId, set: fresh });
   }
 
   async peek(codeHash: string): Promise<PendingClaudeCode | null> {
@@ -104,7 +105,7 @@ export class MemoryClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
   private readonly rows = new Map<string, PendingClaudeCode & { consumedAt: Date | null }>();
 
   async put(code: PendingClaudeCode): Promise<void> {
-    this.rows.set(`${code.userId} ${code.clientId}`, { ...code, consumedAt: null });
+    this.rows.set(code.userId, { ...code, consumedAt: null });
   }
 
   async peek(codeHash: string): Promise<PendingClaudeCode | null> {
@@ -119,7 +120,7 @@ export class MemoryClaudeBridgeCodeStore implements ClaudeBridgeCodeStore {
     return strip(row);
   }
 
-  /** How many rows the store holds — at most one per person and client. */
+  /** How many rows the store holds — at most one per person. */
   get size(): number {
     return this.rows.size;
   }

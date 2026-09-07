@@ -11,14 +11,13 @@ CREATE TABLE "claude_marketplace_bridge" (
 );
 --> statement-breakpoint
 CREATE TABLE "claude_marketplace_codes" (
-	"user_id" uuid NOT NULL,
+	"user_id" uuid PRIMARY KEY NOT NULL,
 	"client_id" text NOT NULL,
 	"code_hash" text NOT NULL,
 	"redirect_uri" text NOT NULL,
 	"expires_at" timestamp NOT NULL,
 	"consumed_at" timestamp,
 	"created_at" timestamp DEFAULT now() NOT NULL,
-	CONSTRAINT "claude_marketplace_codes_user_id_client_id_pk" PRIMARY KEY("user_id","client_id"),
 	CONSTRAINT "claude_marketplace_codes_code_hash_unique" UNIQUE("code_hash")
 );
 --> statement-breakpoint

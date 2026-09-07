@@ -1,5 +1,5 @@
 {
-  "id": "3e39ad87-9684-4151-ae84-e7f4afeef3c1",
+  "id": "77d10bf3-bf95-4f0e-a290-ce9e8f97f6c2",
   "prevId": "16b22a96-7e97-4951-afd7-6bd2dcfd8ec7",
   "version": "7",
   "dialect": "postgresql",
@@ -243,7 +243,7 @@
         "user_id": {
           "name": "user_id",
           "type": "uuid",
-          "primaryKey": false,
+          "primaryKey": true,
           "notNull": true
         },
         "client_id": {
@@ -300,15 +300,7 @@
           "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {
-        "claude_marketplace_codes_user_id_client_id_pk": {
-          "name": "claude_marketplace_codes_user_id_client_id_pk",
-          "columns": [
-            "user_id",
-            "client_id"
-          ]
-        }
-      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "claude_marketplace_codes_code_hash_unique": {
           "name": "claude_marketplace_codes_code_hash_unique",

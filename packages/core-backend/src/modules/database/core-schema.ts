@@ -525,21 +525,22 @@ export const claudeMarketplaceBridge = pgTable('claude_marketplace_bridge', {
  * Anthropic's backend exchanges seconds later — in the database so the
  * replica that issued a code and the replica asked to exchange it agree.
  *
- * Keyed by (person, client): "one live code per person and client" is the
- * table's own rule, not a cleanup's. Issuing upserts the row — the newest
- * code overwrites the last in one statement — so the table never holds more
- * than one row per pair and nothing has to sweep it; the code's hash is the
- * unique lookup an exchange uses, spent by a conditional update. See
+ * Keyed by the PERSON: "one live code per person" is the table's own rule,
+ * not a cleanup's. Issuing upserts their row — the newest code overwrites
+ * the last in one statement — so the table holds at most one row per user,
+ * for as long as the user exists (the row goes with them), and nothing ever
+ * has to sweep it. The client id is data the exchange checks, not part of
+ * the key: the bridge has one client, and a rotated client id must not leave
+ * a dead row behind under the old one. The code's hash is the unique lookup
+ * an exchange uses, spent by a conditional update. See
  * `marketplace/claude-bridge/claude-bridge-codes.store.ts`.
  */
 export const claudeMarketplaceCodes = pgTable('claude_marketplace_codes', {
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
   clientId: text('client_id').notNull(),
   codeHash: text('code_hash').notNull().unique(),
   redirectUri: text('redirect_uri').notNull(),
   expiresAt: timestamp('expires_at').notNull(),
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-}, (t) => ({
-  pk: primaryKey({ columns: [t.userId, t.clientId] }),
-}));
+});

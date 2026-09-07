@@ -310,6 +310,11 @@ describe('the Claude marketplace bridge', () => {
       codes.map((code) => exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code })),
     );
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    // Nor does a rotated client id strand a row under the old one: the
+    // person's row is the person's, whatever client it was last issued for.
+    await a.credentials.rotate();
+    await approve(a.base, 'alice', 'after-rotation');
+    expect(shared.codes.size).toBe(2);
   });
 
   it('two exchanges of one code at the same instant mint exactly one token', async () => {
