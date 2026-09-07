@@ -5,11 +5,13 @@
  * Everything else is a path in the workspace.
  *
  * A bare name with a colon in it (`Notes: today.md`) reads as a scheme too,
- * and that is fine: react-markdown's URL transform and rehype-sanitize both
- * drop an href whose scheme they do not know before the pipeline sees it, so
- * such a name cannot reach us either way. A path with a segment before the
- * colon (`./Notes: today.md`, `Knowledge/Notes: today.md`) starts with a
- * character no scheme may contain and stays a workspace path.
+ * as it does to a browser, and that is fine: react-markdown's URL transform
+ * and rehype-sanitize both drop an href whose scheme they do not know before
+ * the pipeline sees it, the frontmatter panel applies the same transform to
+ * its own links, and an HTML file's anchor is parsed by the browser, which
+ * agrees. So such a name cannot reach us as a link. A path with a segment
+ * before the colon (`./Notes: today.md`, `Knowledge/Notes: today.md`) starts
+ * with a character no scheme may contain and stays a workspace path.
  *
  * Shared by the routing module (link resolution) and the markdown pipeline
  * (image sources), which must not import each other: the pipeline is bundled

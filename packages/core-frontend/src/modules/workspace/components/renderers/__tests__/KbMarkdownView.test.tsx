@@ -19,6 +19,26 @@ describe('KbMarkdownView', () => {
     expect(onOpenFile).toHaveBeenCalledWith('../NodeTypes/Process.md');
   });
 
+  // The panel never goes through the markdown pipeline, so it applies the
+  // pipeline's URL policy itself: what the body would refuse, it refuses.
+  it('holds a frontmatter link to the URL policy the body follows', () => {
+    const onOpenFile = vi.fn();
+    const source = (dest: string) => `---\nnodeType: "[Today](${dest})"\n---\n\nBody.\n`;
+    const { rerender } = render(<KbMarkdownView source={source('./Notes: today.md')} onOpenFile={onOpenFile} />);
+    fireEvent.click(screen.getByRole('link', { name: 'Today' }));
+    expect(onOpenFile).toHaveBeenCalledWith('./Notes: today.md');
+
+    // A bare name with a colon reads as a scheme, to react-markdown and to a
+    // browser alike; the value stays text so the author sees what to fix.
+    rerender(<KbMarkdownView source={source('Notes: today.md')} onOpenFile={onOpenFile} />);
+    expect(screen.queryByRole('link', { name: 'Today' })).toBeNull();
+    expect(screen.getByText('[Today](Notes: today.md)')).toBeInTheDocument();
+
+    rerender(<KbMarkdownView source={source('javascript:alert(1)')} onOpenFile={onOpenFile} />);
+    expect(screen.queryByRole('link', { name: 'Today' })).toBeNull();
+    expect(document.querySelector('a[href^="javascript"]')).toBeNull();
+  });
+
   it('routes internal .md body links (incl. anchors) through onOpenFile', () => {
     const onOpenFile = vi.fn();
     render(<KbMarkdownView source={SOURCE} onOpenFile={onOpenFile} />);

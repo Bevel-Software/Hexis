@@ -1,5 +1,5 @@
 import { useMemo, type Ref } from 'react';
-import Markdown from 'react-markdown';
+import Markdown, { defaultUrlTransform } from 'react-markdown';
 import { parseFrontmatter, labelFor } from '../../utils/frontmatter';
 import { escapeSpacesInLinkDestinations } from '../../../../shared/markdown/Markdown';
 import {
@@ -21,6 +21,12 @@ const FRONTMATTER_LINK_RE = /^\[([^\]]+)\]\(<?([^)>]+)>?\)$/;
  * `nodeType`) renders as a clickable link; everything else is plain text.
  * `onOpenFile` receives the raw href — the caller decides how to resolve and
  * open it (in-workspace navigation, or a new tab for the embed).
+ *
+ * The panel never goes through the markdown pipeline, so it applies the
+ * pipeline's URL policy itself: a destination react-markdown would refuse in
+ * the body (`javascript:`, or a bare `Notes: today.md`, which reads as a
+ * scheme; `./Notes: today.md` does not) is refused here too and the value
+ * stays text. One rule for a link, wherever it sits in the file.
  */
 function FrontmatterValue({
   value,
@@ -30,8 +36,9 @@ function FrontmatterValue({
   onOpenFile: (href: string) => void;
 }) {
   const match = value.match(FRONTMATTER_LINK_RE);
-  if (match) {
-    const [, label, href] = match;
+  const href = match ? defaultUrlTransform(match[2]) : '';
+  if (match && href) {
+    const label = match[1];
     return (
       <a
         href={href}
