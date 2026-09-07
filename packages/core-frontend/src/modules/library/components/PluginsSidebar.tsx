@@ -267,6 +267,10 @@ export function PluginsSidebar({
           >
             <span className="truncate">All plugins</span>
           </button>
+          {/* The shared Skills root, a folder right under the home row: the
+              two places the Library hangs off — every plugin, every skill —
+              before any lens slices the catalog. The tree is its own row. */}
+          {skillsTree}
 
           {/* Lenses — the whole catalog, sliced — which is exactly what the
               plugin rows below are not. Naming the section is what keeps that
@@ -286,9 +290,6 @@ export function PluginsSidebar({
             ownedAttention > 0 ? ownedAttention : ownedCount,
             ownedAttention > 0 ? 'pending' : 'count',
           )}
-          {/* Skills first, plugins after: a skill is the thing, a plugin is
-              a bundle of them. The tree brings its own label. */}
-          {skillsTree}
           <PluginsLabel onCreate={onCreatePlugin} />
 
           {/* Your own space leads the plugins, as in the prototype (line 2487):
