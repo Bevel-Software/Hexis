@@ -265,7 +265,7 @@ artifact `empire23-feat-kb-images-eng-review-test-plan-20260904-2040.md`.
 | # | Finding | Decision |
 |---|---------|----------|
 | D16 | `workspace.routes.ts:577` buffers the whole file and `res.send` makes Express hash it for a weak ETag on every request, so each revalidation is a full read plus sha1 per image; the route sets no `Cache-Control`, so a shared cache may store one user's authenticated file | 16A: `workspaceService.resolveFilePath(workspaceId, relativePath)` lifts the traversal check out of `readFileBinary`; the route keeps its gates, Content-Type map, nosniff, SVG CSP and Content-Disposition, sets `Cache-Control: private, no-cache` itself, then `res.sendFile(abs, { dotfiles: 'allow', cacheControl: false, etag: true, lastModified: true, acceptRanges: true })`. `dotfiles: 'allow'` is mandatory or every file under Loop's `.assets/` 404s. Tests: If-None-Match → 304 with no body, a dotfile path serves, Cache-Control on inline and download, `..` traversal still rejected, existing gate and header tests unchanged. Replaces D4's "ETag on raw route" item, which Express already provided. **Superseded by D18 (outside voice):** `res.sendFile` routes failures through a callback, bypassing the catch block that maps errors to 404/400 (`workspace.routes.ts:604-620`), and both route harnesses stub `readFileBinary` (`download.test.ts:87`, `read-gate.test.ts:71`). Uploads are capped at 50 MB. Final: keep `readFileBinary` + `res.send`; add `Cache-Control: private, no-cache` on inline and download; one test pins If-None-Match → 304. Streaming via `sendFile` (with `dotfiles: 'allow'` and a callback that maps ENOENT → 404) is a TODO with a measurement trigger. |
-| D17 | `file-changed` re-reads the document (`useWorkspaceState.ts:1242-1260`) but a replaced image under the same name keeps its old bytes in an open tab until reload | 17A: `useImageVersions(workspaceId)` hook in the workspace module subscribes to `file-changed`, keeps a Map path → counter for image extensions, and the Knowledge view's and skill page's `resolveImage` append `&v=<n>`. Diff viewers do not use it. Tests: bump on a matching event, no bump for another workspace's event, non-image paths ignored. **Challenged by the outside voice (D20), kept:** `fsRevision` (`workspace.context.ts:100-106`) is bumped only by the local user's own mutations (`useWorkspaceState.ts:114,1046-1064`), never by the SSE `file-changed` handler (`:1242-1260`), and `CoreAppShell.tsx:136` re-polls git status on every bump, so it does not carry the teammate signal this feature needs. |
+| D17 | `file-changed` re-reads the document (`useWorkspaceState.ts:1242-1260`) but a replaced image under the same name keeps its old bytes in an open tab until reload | 17A: `useImageRevision(workspaceId)` hook in the workspace module subscribes to `file-changed`, keeps a Map path → counter for image extensions, and the Knowledge view's and skill page's `resolveImage` append `&v=<n>`. **Revised in review (PR #145):** renamed `useImageRevision`, one integer per workspace instead of a map (a switch resets it, nothing to evict), fed by `file-changed` on image paths only; `fs-tree-changed` follows every write and names no file, so it is not a signal. Diff viewers do not use it. Tests: bump on a matching event, no bump for another workspace's event, non-image paths ignored. **Challenged by the outside voice (D20), kept:** `fsRevision` (`workspace.context.ts:100-106`) is bumped only by the local user's own mutations (`useWorkspaceState.ts:114,1046-1064`), never by the SSE `file-changed` handler (`:1242-1260`), and `CoreAppShell.tsx:136` re-polls git status on every bump, so it does not carry the teammate signal this feature needs. |
 
 ## Outside voice (Codex, gpt reasoning high, read-only, 2026-09-04)
 
@@ -304,7 +304,7 @@ expecting 200. Total new cases: 49.
    `MarkdownRenderer` and `SkillPage`; `MarkdownDiffViewer` prop wired from `ReviewPanel`,
    `ChangeRequestDialog` and `FileHistoryPanel`, bound to the checked-out workspace with a
    comment (D14).
-5. `useImageVersions(workspaceId)` hook; Knowledge view and skill page append `&v=` (D17).
+5. `useImageRevision(workspaceId)` hook; Knowledge view and skill page append `&v=` (D17).
 6. Backend: `resolveFilePath` on the service; raw route switches to `res.sendFile` with
    `dotfiles: 'allow'`, `cacheControl: false`, and sets `Cache-Control: private, no-cache`
    (D16). Four route tests.
@@ -328,7 +328,7 @@ IS INJECTED, NEVER LOOKED UP" should gain "and so is image resolution".
 | resolveKbHref | Malformed percent-escape makes `decodeURIComponent` throw | Yes | Left as-is, same as today's handlers | Link or image resolves against the raw string; image likely placeholders. Clear. |
 | resolveImage | `workspaceId` still null when content renders | Yes (resolver returns null case) | Resolver returns null → failure placeholder naming the raw src | Not reachable in practice: content itself is fetched by workspaceId. Clear if it happens. |
 | Diff per-fragment | Replaced screenshot under the same name | Yes (one per fragment kind) | Removed fragments never resolve | "baseline image not shown: <path>" on the red side; current bytes on the green side of a working-tree review. Clear. |
-| useImageVersions | SSE disconnected when a teammate replaces an image | No (documented) | SSE layer reconnects; `no-cache` fixes it on next mount | Old image until reload or next visit. Silent but bounded; text has the same property today. Not critical. |
+| useImageRevision | SSE disconnected when a teammate replaces an image | No (documented) | SSE layer reconnects; `no-cache` fixes it on next mount | Old image until reload or next visit. Silent but bounded; text has the same property today. Not critical. |
 | Cache-Control | A CDN configured to ignore `private` | Yes (header present) | None beyond the header | No worse than today, where no header exists. |
 | Auth middleware | Malformed cookie value | Yes (D24 case) | 401 | Placeholders, and SSE stops, which the app already treats as a broken session. |
 
@@ -374,9 +374,9 @@ Run with Claude Code or Codex; checkbox as you ship.
   - Surfaced by: Code Quality D14, outside voice D19
   - Files: review/MarkdownDiffViewer.tsx, review/ReviewPanel.tsx, change-requests/ChangeRequestDialog.tsx, git/FileHistoryPanel.tsx, their tests
   - Verify: one case per fragment kind; no-providers case stays green; two no-resolver caller cases
-- [ ] **T6 (P2, human: ~2h / CC: ~10min)** — workspace/hooks — `useImageVersions(workspaceId)` fed by `file-changed`; Knowledge view and skill page append `&v=`
+- [ ] **T6 (P2, human: ~2h / CC: ~10min)** — workspace/hooks — `useImageRevision(workspaceId)` fed by `file-changed`; Knowledge view and skill page append `&v=`
   - Surfaced by: Performance D17, kept in D20
-  - Files: workspace/hooks/useImageVersions.ts (new), MarkdownRenderer.tsx, SkillPage.tsx, hook test
+  - Files: workspace/hooks/useImageRevision.ts (new), MarkdownRenderer.tsx, SkillPage.tsx, hook test
   - Verify: bump on matching event; no bump for another workspace; non-image paths ignored
 - [ ] **T7 (P1, human: ~30min / CC: ~3min)** — workspace.routes — `Cache-Control: private, no-cache` on inline and download raw responses; pin If-None-Match → 304
   - Surfaced by: Performance D16, outside voice D18
