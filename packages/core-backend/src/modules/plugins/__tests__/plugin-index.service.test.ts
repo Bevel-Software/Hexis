@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { PluginIndexService } from '../plugins.service.js';
+import type { PluginLinkIndex } from '../plugin-links.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -142,6 +143,37 @@ describe('PluginIndexService', () => {
     const product = catalog.find((g) => g.name === 'product')!;
     expect(product.skillCount).toBe(1);
     expect(product.toolCount).toBe(0);
+  });
+
+  test("counts the linked skills a plugin's members cannot read, from the unfiltered link index", async () => {
+    await pluginDir('GTM');
+    await pluginDir('Product');
+    // The link index's view: GTM links two shared skills, one of which lost
+    // its grant; Product's inline skill is granted by definition.
+    const links = {
+      membership: async () => ({
+        bySkill: new Map([
+          ['Skills/Eng/deploy', [{ name: 'gtm', linked: true, granted: false }]],
+          ['Skills/Eng/rollback', [{ name: 'gtm', linked: true, granted: true }]],
+          ['Plugins/Product/roadmap', [{ name: 'product', linked: false, granted: true }]],
+        ]),
+        byPlugin: new Map(),
+      }),
+    } as unknown as PluginLinkIndex;
+    const catalog = await new PluginIndexService(
+      workspaceService,
+      principals,
+      skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
+      toolService(),
+      KB_DIR,
+      Date.now,
+      links,
+    ).catalog();
+
+    expect(catalog.find((g) => g.name === 'gtm')).toMatchObject({ skillCount: 2, brokenLinks: 1 });
+    expect(catalog.find((g) => g.name === 'product')).toMatchObject({ skillCount: 1, brokenLinks: 0 });
+    // Without a link index there are no links to be broken.
+    expect((await svc().catalog()).every((g) => g.brokenLinks === 0)).toBe(true);
   });
 
   test('resolves principals on the plugin folder', async () => {

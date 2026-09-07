@@ -261,20 +261,28 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
 }
 
 /**
- * How many of a plugin's integrations need setup — the amber count on the
- * sidebar row and the plugin page's banner, computed from one place so the two
- * can never disagree.
+ * How much of a plugin needs a person — the count on the sidebar row, the
+ * index badge and the plugin page's banners, computed from one place so they
+ * can never disagree. Two kinds, added together:
  *
- * Only integrations count. A skill that reports `warn` is warning about the
- * very integration already counted here, so counting both would double every
- * broken connection; pending change requests are a review concern, not a setup
- * one, and belong to a different surface.
+ *  - integrations that need setup (`brokenLinksOf` subtracted from this
+ *    gives that number alone);
+ *  - linked skills the plugin's members cannot read (`brokenLinksOf`).
+ *
+ * A skill that reports `warn` about a tool is NOT counted: it is warning
+ * about the very integration already counted here, so counting both would
+ * double every broken connection. Pending change requests are a review
+ * concern, not a setup one, and belong to a different surface.
  */
-export function attentionOf(items: LibraryItem[], plugin: string): number {
+export function attentionOf(
+  items: LibraryItem[],
+  plugin: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+): number {
   return (
     items.filter(
       (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
-    ).length + brokenLinksOf(items, plugin)
+    ).length + brokenLinksOf(items, plugin, summaries)
   );
 }
 
@@ -285,8 +293,20 @@ export function attentionOf(items: LibraryItem[], plugin: string): number {
  * problem — a tool that needs setup blocks the reader's own use; a link
  * without its grant blocks every member of the plugin, right now — and the
  * sidebar and the plugin page rank it above amber for that reason.
+ *
+ * The SERVER's count wins when the summary carries one: it comes from the
+ * unfiltered link index, so a manager whom the missing grant locks out of
+ * the skill still sees it. The caller's own catalog is only the fallback for
+ * an older server — it cannot list a skill the caller may not read, which is
+ * exactly the skill this is about.
  */
-export function brokenLinksOf(items: LibraryItem[], plugin: string): number {
+export function brokenLinksOf(
+  items: LibraryItem[],
+  plugin: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+): number {
+  const served = summaries.find((s) => s.name === plugin)?.brokenLinks;
+  if (served !== undefined) return served;
   return items.filter(
     (i) => i.kind === 'skill' && (i.plugins ?? []).some((m) => m.name === plugin && m.linked && m.granted === false),
   ).length;

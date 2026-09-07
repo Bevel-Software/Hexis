@@ -243,6 +243,7 @@ export function createPluginsRoutes(
           linksAreManaged: g.linksAreManaged,
           skillCount: g.skillCount,
           toolCount: g.toolCount,
+          brokenLinks: g.brokenLinks,
           owners: g.owners,
           writers: g.writers,
           readers: g.readers,

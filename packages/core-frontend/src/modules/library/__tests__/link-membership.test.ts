@@ -105,4 +105,15 @@ describe('membership by link', () => {
     const oddInline = { ...inline, plugins: [{ name: 'GTM', linked: false, granted: false }] };
     expect(brokenLinksOf([oddInline] as unknown as LibraryItem[], 'GTM')).toBe(0);
   });
+
+  it("the server's broken-link count wins over the caller's catalog", () => {
+    // The catalog cannot list a skill the caller may not read — which is the
+    // skill a missing grant is about — so the summary's count decides.
+    const items = [shared, inline] as unknown as LibraryItem[];
+    expect(brokenLinksOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toBe(2);
+    expect(attentionOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toBe(2);
+    // An older server sends no count: the catalog is the fallback.
+    expect(brokenLinksOf(items, 'Ops', [{ name: 'Ops' }])).toBe(1);
+    expect(brokenLinksOf(items, 'Ops', [])).toBe(1);
+  });
 });

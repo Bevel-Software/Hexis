@@ -99,8 +99,9 @@ export interface PluginsSidebarProps {
    */
   onContextMenu?(target: SidebarContextTarget): void;
   /**
-   * The Skills section — a file tree of the shared `Skills/` root — rendered
-   * between the lenses and the plugins. A SLOT rather than a component this
+   * The Skills folder — a file tree of the shared `Skills/` root — rendered
+   * right under the All plugins home row, before the Library lenses: the two
+   * places the Library hangs off. A SLOT rather than a component this
    * nav names: the tree reads the workspace and navigates on its own, and the
    * sidebar stays what it is, a pure view of names and counts. Omitted, the
    * nav has no Skills section, which keeps a host rendering the shipped nav

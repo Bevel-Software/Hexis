@@ -494,6 +494,19 @@ describe('PluginPage', () => {
     expect(urgent.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("warns about a broken link even when the caller cannot read that skill — the server's count wins", async () => {
+    // The manager the missing grant locks out: the skill is NOT in their
+    // catalog, so nothing in `items` could say a link is broken. The summary
+    // carries the index's own count.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 2 })]);
+    renderPlugin('GTM');
+    expect(
+      await screen.findByText(/2 linked skills can't be read by GTM's members: their access rules no longer name them\. Repair the links from the skill pages\./),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/integrations? needs? setup/)).not.toBeInTheDocument();
+  });
+
   it('pluralises the attention banner', async () => {
     dataMock.useLibraryData.mockReturnValue({
       ...CATALOG,

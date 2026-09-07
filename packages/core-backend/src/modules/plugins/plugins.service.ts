@@ -107,9 +107,10 @@ export class PluginIndexService implements IPluginIndexService {
       if (scanned.size === 0) return [];
       const folders = new Map([...scanned].map(([name, p]) => [name, p.folders]));
 
-      const [skillCounts, toolCounts] = await Promise.all([
+      const [skillCounts, toolCounts, brokenLinkCounts] = await Promise.all([
         this.countSkills(folders),
         this.countTools(folders),
+        this.countBrokenLinks(),
       ]);
 
       const entries: PluginCatalogEntry[] = [];
@@ -128,6 +129,7 @@ export class PluginIndexService implements IPluginIndexService {
           linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
           toolCount: toolCounts.get(name) ?? 0,
+          brokenLinks: brokenLinkCounts.get(name) ?? 0,
           owners,
           writers,
           readers,
@@ -177,6 +179,23 @@ export class PluginIndexService implements IPluginIndexService {
     const counts = new Map<string, number>();
     for (const memberships of (await this.links.membership()).bySkill.values()) {
       for (const m of memberships) counts.set(m.name, (counts.get(m.name) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  /**
+   * How many linked skills each plugin's members cannot read: memberships the
+   * link index reports as linked but not granted. From the UNFILTERED index,
+   * so the count reaches the plugin's managers even when the missing grant
+   * locks them out of the skill too. Empty without a link index.
+   */
+  private async countBrokenLinks(): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    if (!this.links) return counts;
+    for (const memberships of (await this.links.membership()).bySkill.values()) {
+      for (const m of memberships) {
+        if (m.linked && !m.granted) counts.set(m.name, (counts.get(m.name) ?? 0) + 1);
+      }
     }
     return counts;
   }

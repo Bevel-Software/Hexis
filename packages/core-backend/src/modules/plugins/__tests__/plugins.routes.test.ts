@@ -245,6 +245,29 @@ describe('/api/plugins routes', () => {
     expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0 });
   });
 
+  it("carries the index's broken-link count into the summary — the server's, not the caller's slice", async () => {
+    const entry = {
+      name: 'gtm',
+      displayName: 'GTM',
+      folders: ['Plugins/GTM'],
+      linksAreManaged: true,
+      skillCount: 2,
+      toolCount: 0,
+      brokenLinks: 2,
+      owners: { roles: [], users: [] },
+      writers: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+    };
+    const h = await makeHarness({
+      readable: MEMBER_OF_BOTH,
+      index: { catalog: async () => [entry], invalidate: () => {} } as unknown as IPluginIndexService,
+    });
+    server = h.server;
+    const { plugins } = await listPlugins(h.baseUrl);
+    expect(plugins).toHaveLength(1);
+    expect(plugins[0]).toMatchObject({ name: 'gtm', brokenLinks: 2 });
+  });
+
   it('a DISCOVERABLE plugin (access.md readable, folder not) lists locked with hasRequested from the join CR', async () => {
     const h = await makeHarness({
       readable: { [ALI]: ['Plugins/Finance/access.md'] },

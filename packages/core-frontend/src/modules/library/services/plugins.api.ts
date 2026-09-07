@@ -53,6 +53,13 @@ export interface PluginSummary {
   /** The plugin's TOTALS, not the caller's slice. */
   skillCount: number;
   toolCount: number;
+  /**
+   * How many of the plugin's linked skills its members cannot read, counted
+   * by the server from the unfiltered link index — so a manager the missing
+   * grant locks out of the skill still sees the count. Absent from an older
+   * server: fall back to what the caller's own catalog shows.
+   */
+  brokenLinks?: number;
   owners: PluginPrincipals;
   writers: PluginPrincipals;
   readers: PluginReaders;

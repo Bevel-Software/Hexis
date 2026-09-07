@@ -77,6 +77,16 @@ export interface PluginSummary {
   /** Caller-INDEPENDENT total (the plugin's whole content, not the caller's slice). */
   skillCount: number;
   toolCount: number;
+  /**
+   * Caller-INDEPENDENT: how many of the plugin's LINKED skills its members
+   * cannot read — the link is in the manifest, but the skill folder no
+   * longer grants the plugin's readers. Counted here, from the unfiltered
+   * link index, because the people who most need the warning are the
+   * plugin's managers, and they are exactly the people a missing grant
+   * locks out: a count derived from what the caller can read would be zero
+   * for them. Zero for a plugin whose links are not managed here.
+   */
+  brokenLinks: number;
   /** For display: "Run by …" (fallback chain: owners → writers → 'the workspace admins'). */
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
@@ -109,6 +119,8 @@ export interface PluginCatalogEntry {
   linksAreManaged: boolean;
   skillCount: number;
   toolCount: number;
+  /** Linked skills the members cannot read — see `PluginSummary.brokenLinks`. */
+  brokenLinks: number;
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;

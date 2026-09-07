@@ -73,8 +73,8 @@ export function PluginsIndexPage() {
           // "4 skills" here as on the plugin page.
           skillCount: summary ? summary.skillCount : derivedSkills,
           toolCount: summary ? summary.toolCount : derivedTools,
-          attention: attentionOf(items, name),
-          urgent: brokenLinksOf(items, name) > 0,
+          attention: attentionOf(items, name, pluginSummaries),
+          urgent: brokenLinksOf(items, name, pluginSummaries) > 0,
           member: summary ? summary.canRead || summary.canWrite || hasItems : hasItems,
         };
       });

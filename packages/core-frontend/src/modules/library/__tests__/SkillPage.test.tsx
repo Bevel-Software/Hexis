@@ -372,7 +372,9 @@ describe('SkillPage', () => {
     expect(apiMock.getSkill).toHaveBeenCalledWith('newsletter');
 
     // Needed integration derived from allowed-tools, with its connection state.
-    expect(screen.getByText('slack')).toBeInTheDocument();
+    // Its own load, not the heading's: awaited, or a slow runner sees the
+    // heading before the integrations have resolved.
+    expect(await screen.findByText('slack')).toBeInTheDocument();
     expect(screen.getByText('Needs your sign-in')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Connect/ })).toBeInTheDocument();
 
@@ -1310,7 +1312,8 @@ describe('SkillPage: deciding on a change', () => {
       expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
 
       // Reached by keyboard, so no outside pointerdown ever dismissed the menu.
-      fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+      // Edit appears once the access verdict lands — its own load, awaited.
+      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 

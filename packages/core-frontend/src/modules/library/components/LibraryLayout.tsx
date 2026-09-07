@@ -115,8 +115,8 @@ export function LibraryLayout() {
         plugin,
         label: pluginLabel(plugin, pluginSummaries),
         count: counts.get(plugin) ?? 0,
-        attention: attentionOf(items, plugin),
-        urgent: brokenLinksOf(items, plugin) > 0,
+        attention: attentionOf(items, plugin, pluginSummaries),
+        urgent: brokenLinksOf(items, plugin, pluginSummaries) > 0,
       }));
   }, [items, pluginSummaries]);
   /**
