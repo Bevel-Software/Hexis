@@ -201,7 +201,7 @@ function ContextMenu({
   y: number;
   entry: FileTreeEntry;
   isRoot: boolean;
-  /** False for a folder the platform owns (a reserved root drawn as a heading): no Delete. */
+  /** False for a folder the platform owns (a reserved root): no Delete. */
   deletable?: boolean;
   onClose: () => void;
   onCreateFile?: () => void;
@@ -468,8 +468,7 @@ export function FileTreeNode({
   depth,
   initiallyExpanded,
   collapseChildren,
-  heading,
-  outdent = false,
+  reserved = false,
 }: {
   entry: FileTreeEntry;
   depth: number;
@@ -481,26 +480,13 @@ export function FileTreeNode({
   // reveals the ontologies without cascading them all open).
   collapseChildren?: boolean;
   /**
-   * Draw this folder's row as a SECTION HEADING carrying this text, always
-   * open, with its children at the nav's own indent. For a reserved root the
-   * Library heads a section with — "SKILLS" over its scopes, not a folder
-   * row called Skills with the scopes indented under it.
-   *
-   * The heading IS the row, not a label standing in for one: it takes drops,
-   * offers the create buttons and the file/folder pickers, and opens the
-   * folder's menu on right-click — everything the row does, minus what a
-   * reserved root must not do (rename, delete, be dragged, be pinned).
-   * Rendering the label elsewhere and hiding the row here is how a section
-   * ends up without a drop target.
+   * The folder is a root the platform owns (`Skills/` in the Library). It is
+   * an ordinary collapsible folder row — the same row Knowledge and Data get
+   * at the top of the explorer: it takes drops, offers the create buttons,
+   * opens the folder's menu on right-click — minus what a reserved root must
+   * not do: be renamed, deleted, dragged, or pinned.
    */
-  heading?: string;
-  /**
-   * Draw this node's descendants one indent step to the left. Set by a
-   * heading row for its whole subtree: the children keep their LOGICAL depth
-   * (so what starts open and what starts shut is exactly as under a plain
-   * row), but sit where the nav's first level sits.
-   */
-  outdent?: boolean;
+  reserved?: boolean;
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
@@ -584,7 +570,7 @@ export function FileTreeNode({
   const [dragging, setDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  const paddingLeft = indentFor(depth) - (outdent ? 13 : 0);
+  const paddingLeft = indentFor(depth);
   const isRoot = entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
   // A folder with nothing in it doesn't get a caret, because there is nothing
@@ -592,9 +578,6 @@ export function FileTreeNode({
   const hasChildren = (entry.children?.length ?? 0) > 0;
   // Escape inside the context menu hands focus back to the row it came from.
   const rowRef = useRef<HTMLButtonElement>(null);
-  // The heading form of the row is a div, not a button; it is focusable so
-  // Escape in its menu has somewhere to hand focus back to.
-  const headingRef = useRef<HTMLDivElement>(null);
 
   // Auto-expand a directory whenever the open file lives inside it (so
   // deep-link URLs reveal the file's row in the tree) or while files
@@ -617,8 +600,7 @@ export function FileTreeNode({
     }
   }, [autoTrigger]);
 
-  const isHeading = heading !== undefined;
-  const isExpanded = isHeading || (userIntent ?? (autoExpanded || (initiallyExpanded ?? depth < 2)));
+  const isExpanded = userIntent ?? (autoExpanded || (initiallyExpanded ?? depth < 2));
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -628,11 +610,11 @@ export function FileTreeNode({
 
   // ── Drag source (internal reorder) ──
   const handleDragStart = useCallback((e: React.DragEvent) => {
-    if (isRoot) { e.preventDefault(); return; }
+    if (isRoot || reserved) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, isRoot]);
+  }, [entry.relativePath, isRoot, reserved]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -700,8 +682,6 @@ export function FileTreeNode({
 
   if (entry.type === 'directory') {
     const dirPath = isRoot ? '' : entry.relativePath;
-    // The verbs a folder row offers, built once so the plain row and the
-    // heading row cannot offer different ones.
     const createButtons = (
       <>
         <IconButton
@@ -773,31 +753,6 @@ export function FileTreeNode({
     );
     return (
       <div>
-        {isHeading ? (
-          // The same heading as the Library's `SectionLabel` and the
-          // explorer's "Company Context" — a heading over a list of places —
-          // that happens to be this folder's row: it takes drops, opens the
-          // folder's menu, and shows the row's verbs on hover.
-          <div
-            ref={headingRef}
-            tabIndex={0}
-            className={cn(
-              'group/label flex items-center gap-1 rounded-sm px-2.5 pb-1.5 pt-5',
-              'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
-              dragOver && 'bg-hover ring-1 ring-accent/40',
-            )}
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onContextMenu={handleContextMenu}
-          >
-            <span className="text-label uppercase text-ink-faint">{heading}</span>
-            <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/label:opacity-100">
-              {createButtons}
-              {pickerButtons}
-            </span>
-          </div>
-        ) : (
         <div
           className={cn(
             ROW_CLASS,
@@ -806,7 +761,7 @@ export function FileTreeNode({
             dragOver && 'bg-hover text-ink ring-1 ring-accent/40',
           )}
           style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
-          draggable={!isRoot && !renaming && !isPending}
+          draggable={!isRoot && !reserved && !renaming && !isPending}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onDrop={handleDrop}
@@ -853,16 +808,13 @@ export function FileTreeNode({
           </div>
           {isRoot && pickerButtons}
         </div>
-        )}
         {isExpanded && (
           <div>
             {creating && (
               // Line the input up with the child rows it is about to join:
               // one more indent step (13px), plus the caret slot (13px) and
-              // the row gap (6px) the child's name starts after. A heading's
-              // children are outdented a step, so only the slot and the gap
-              // remain.
-              <div style={{ paddingLeft: paddingLeft + (isHeading ? 19 : 32) }} className="px-2 py-0.5">
+              // the row gap (6px) the child's name starts after.
+              <div style={{ paddingLeft: paddingLeft + 32 }} className="px-2 py-0.5">
                 <InlineInput
                   placeholder={creating === 'file' ? 'filename' : 'folder name'}
                   onSubmit={async (name) => {
@@ -896,7 +848,6 @@ export function FileTreeNode({
                 key={child.relativePath}
                 entry={child}
                 depth={depth + 1}
-                outdent={isHeading || outdent}
                 initiallyExpanded={collapseChildren ? false : undefined}
               />
             ))}
@@ -911,11 +862,13 @@ export function FileTreeNode({
             onClose={() => setContextMenu(null)}
             onCreateFile={() => { setUserIntent(true); setCreating('file'); }}
             onCreateFolder={() => { setUserIntent(true); setCreating('directory'); }}
-            // A reserved root drawn as a heading is the platform's: no rename, no delete.
-            onRename={isHeading ? undefined : () => setRenaming(true)}
-            deletable={!isHeading}
+            // A reserved root is the platform's: no rename, no delete. (No pin
+            // either, but that needs no gate: only the Knowledge explorer
+            // offers pinning, and its roots are not reserved.)
+            onRename={reserved ? undefined : () => setRenaming(true)}
+            deletable={!reserved}
             onDownload={handleDownload}
-            returnFocusTo={isHeading ? headingRef : rowRef}
+            returnFocusTo={rowRef}
           />
         )}
       </div>
