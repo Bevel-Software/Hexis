@@ -8,9 +8,10 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
-import { WorkflowService } from '../workflow.service.js';
+import { WorkflowService, syncConflictMessage } from '../workflow.service.js';
 import type { Database } from '../../database/connection.js';
 import {
+  PullRebaseConflictError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
   WorkflowValidationError,
@@ -87,7 +88,7 @@ function makePending(): PendingCommitsService {
 function makeGit(overrides: Partial<{
   commitFile: Change | null;
   pushBehavior: 'ok' | 'nff' | 'auth-fail';
-  pullBehavior: 'ok' | 'fail';
+  pullBehavior: 'ok' | 'fail' | 'conflict';
   pushAfterPullBehavior: 'ok' | 'fail';
   hasUnpushedCommits: boolean;
 }> = {}): GitService {
@@ -120,6 +121,7 @@ function makeGit(overrides: Partial<{
     }),
     pull: vi.fn().mockImplementation(async () => {
       if (pullBehavior === 'fail') throw new Error('git pull failed: merge conflict');
+      if (pullBehavior === 'conflict') throw new PullRebaseConflictError('feat/x', ['foo.md'], 'CONFLICT (content)');
       return { treeChanged: true };
     }),
   } as unknown as GitService;
@@ -459,6 +461,29 @@ describe('WorkflowService.runPendingCommit — worker entry point', () => {
     expect(emitSpy.mock.calls.map((c) => (c[0] as { kind: string }).kind)).toEqual([
       'git-sync-failed',
     ]);
+  });
+
+  it('a rebase CONFLICT on the recovery path raises the banner WITH its files, like the remote sync does', async () => {
+    // The banner keeps the latest failure per branch. The remote sync raises
+    // the conflict variant (files as links); if this path then raised the
+    // generic variant for the same conflict, the retry would take the links
+    // away — seen on staging. Every path names the files.
+    const git = makeGit({
+      commitFile: null,
+      hasUnpushedCommits: true,
+      pushBehavior: 'nff',
+      pullBehavior: 'conflict',
+    });
+    const svc = makeFacade(git, makeFileLocks(USER.id), makePending(), events);
+    await expect(svc.runPendingCommit('ws-1', 'feat/x', 'foo.md', USER)).rejects.toBeInstanceOf(
+      PushNeedsAgentResolutionError,
+    );
+    const failed = emitSpy.mock.calls.map((c) => c[0] as Record<string, unknown>).find((e) => e.kind === 'git-sync-failed');
+    expect(failed).toMatchObject({
+      branch: 'feat/x',
+      conflictedPaths: ['foo.md'],
+      reason: syncConflictMessage('feat/x', ['foo.md']),
+    });
   });
 
   it('recovers from non-fast-forward push via pull --rebase + retry, emits file-changed exactly once', async () => {

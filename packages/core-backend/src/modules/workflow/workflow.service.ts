@@ -1258,15 +1258,29 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     err: unknown,
     /**
-     * Set only by a remote-sync conflict: the files a person must reconcile,
-     * and the sentence we composed about them. That sentence is ours (branch
-     * name + repo paths, no git stderr), so it goes out verbatim — the same
-     * string the sync response and the log carry — rather than through the
-     * sanitiser, whose 200-character clip would make the banner disagree
-     * with them.
+     * The files a person must reconcile, and the sentence we composed about
+     * them. That sentence is ours (branch name + repo paths, no git stderr),
+     * so it goes out verbatim — the same string the sync response and the
+     * log carry — rather than through the sanitiser, whose 200-character
+     * clip would make the banner disagree with them. Callers that already
+     * hold the sentence pass it; otherwise it is derived below.
      */
-    conflict?: { paths: string[]; message: string },
+    explicitConflict?: { paths: string[]; message: string },
   ): void {
+    // A rebase conflict is a conflict whichever path ran into it. The remote
+    // sync names its files on purpose; the push-recovery paths (autosave, the
+    // lock release, the queued retries) raise the same banner with the raw
+    // error — and the banner keeps the LATEST failure per branch, so a retry
+    // landing after the sync would replace the conflict variant, with the
+    // files as links, by the generic "check the server logs" one. Seen on
+    // staging: the sync's 409 named the file, the worker's retry a moment
+    // later took the links away. Derive the paths from the error itself so
+    // every path agrees.
+    const conflict =
+      explicitConflict ??
+      (err instanceof PullRebaseConflictError
+        ? { paths: err.conflictedPaths, message: syncConflictMessage(branch, err.conflictedPaths) }
+        : undefined);
     // Same canonicalization as `noteGitSyncOk` — the pair must agree on keys.
     const id = branchForWorkspaceId(workspaceId);
     this.gitSyncFailing.add(id);
