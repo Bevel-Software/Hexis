@@ -297,6 +297,23 @@ describe('KbPluginSource — one walk, both shapes', () => {
     }
   });
 
+  it('a manifest that vanishes between the probe and the read is no plugin — never one under a guessed name', async () => {
+    await write('Plugins/GTM/plugin.json', '{"name":"gtm"}');
+    await write('Plugins/Gone/plugin.json', '{"name":"gone"}');
+    const realReadFile = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith(path.join('Gone', 'plugin.json'))
+        ? Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }))
+        : (realReadFile as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      const { plugins, unreadable } = await new KbPluginSource().discover(kb);
+      expect(plugins.map((p) => p.name)).toEqual(['gtm']);
+      expect(unreadable).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('a knowledge base without a plugins root has no plugins and no complaint', async () => {
     const { plugins, warnings, unreadable } = await new KbPluginSource().discover(kb);
     expect(plugins).toEqual([]);

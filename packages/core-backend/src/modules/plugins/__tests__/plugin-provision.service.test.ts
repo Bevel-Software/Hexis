@@ -231,6 +231,21 @@ describe('PluginProvisionService.deletePlugin', () => {
     }
   });
 
+  it('a manifest that is there but cannot be read stops the delete — never a guessed identity lock', async () => {
+    await h.svc.createPlugin(USER, 'GTM');
+    const real = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, opts: unknown) =>
+      String(file).endsWith(path.join('GTM', 'plugin.json'))
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (f: string, o: unknown) => Promise<unknown>).call(fs, file, opts)) as never);
+    try {
+      await expect(h.svc.deletePlugin(USER, 'GTM')).rejects.toThrow('EACCES');
+    } finally {
+      spy.mockRestore();
+    }
+    await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM/plugin.json'))).resolves.toBeDefined();
+  });
+
   it('a nested plugin holds its identity against a creation at the root — taken is discovery\'s answer', async () => {
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/teams/Deep'), { recursive: true });
     await fs.writeFile(path.join(h.dir, KB, 'Plugins/teams/Deep/plugin.json'), '{"name":"deep"}');

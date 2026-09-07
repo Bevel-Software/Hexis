@@ -125,7 +125,11 @@ export class PluginRenameService {
     // prefix, say) must not block a display-name change, and cannot be
     // "fixed" by a rename that keeps it.
     const identifierChanges = nextName !== plugin.name;
-    if (identifierChanges && !isPluginIdentifier(nextName)) {
+    // An identifier must be its own slug: the marketplace and the collision
+    // checks key on `pluginManifestName(name)`, so a name that does not
+    // round-trip (longer than the slug's 64 characters, say) would be one
+    // thing here and another everywhere it is published.
+    if (identifierChanges && (!isPluginIdentifier(nextName) || pluginManifestName(nextName) !== nextName)) {
       throw new PluginRenameError(
         'A plugin identifier is lowercase kebab-case: letters, digits and single hyphens, like "sales-team".',
         422,

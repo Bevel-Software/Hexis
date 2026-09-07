@@ -37,10 +37,13 @@ export async function readNativePlugin(
     unreadable.push(`${folder}/${PLUGIN_MANIFEST_FILE}`);
     return null;
   }
+  // The walker probed the manifest a moment ago; gone now means it vanished
+  // between probe and read — then this is no plugin, not one under a guessed name.
+  if (manifestRead.text === null) return null;
   const manifestText = manifestRead.text;
   const mcpJsonText = (await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
   const manifest = parseObject(manifestText);
-  if (manifestText !== null && manifest === null) {
+  if (manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
   }
   // The manifest's `name` IS the identity — the grants, the URLs, the

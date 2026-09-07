@@ -245,6 +245,8 @@ describe('PluginRenameService', () => {
       ['Sales Team', 'bad-name'],
       ['sales--team', 'bad-name'],
       ['personal-mia', 'bad-name'],
+      // Kebab-case but longer than the slug the marketplace keys on: not its own slug.
+      [`${'a'.repeat(60)}-${'b'.repeat(10)}`, 'bad-name'],
       ['ops', 'name-taken'],
     ] as const) {
       await expect(svc.rename(manager, 'gtm', { name })).rejects.toMatchObject({ payload: { kind } });

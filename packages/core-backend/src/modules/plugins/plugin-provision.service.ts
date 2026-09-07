@@ -272,10 +272,14 @@ export class PluginProvisionService {
     // creation of that name takes — not on a slug of the folder path, which
     // for a nested plugin is a different string and would let a creation of
     // the same identity run inside the delete's window.
-    const identity = pluginIdentityOf(
-      parseManifestOrNull(await fs.readFile(path.join(folderDir, PLUGIN_MANIFEST_FILE), 'utf-8').catch(() => null)),
-      segments[segments.length - 1]!,
-    );
+    // Only ABSENCE of the manifest falls back to the folder's slug; a manifest
+    // that is there but cannot be read is an identity nobody could see, and a
+    // delete must not proceed under a guessed lock.
+    const manifestText = await fs.readFile(path.join(folderDir, PLUGIN_MANIFEST_FILE), 'utf-8').catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    const identity = pluginIdentityOf(parseManifestOrNull(manifestText), segments[segments.length - 1]!);
     return this.creations.run(`plugin:${identity}`, async () => {
       // Exact spelling of EVERY component — the catalog hands the route the
       // on-disk spelling, so a mismatch means the plugin is gone (or was
