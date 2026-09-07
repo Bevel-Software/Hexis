@@ -28,20 +28,22 @@ const PLACEHOLDER_CLASS =
 
 /**
  * What a placeholder inherits from the image it stands in for: the attributes
- * that tie the image to the DOCUMENT, never the ones that draw it. Its `id`,
- * so a link to the figure still lands; its ARIA relationships, so a caption
- * still describes it; its language and direction. `width`, `height`, `align`
- * and the rest size a picture that is not there. The sanitizer bounds what
- * can arrive (of ARIA, only `aria-describedby`, `aria-label` and
- * `aria-labelledby`; nothing that hides an element); this bounds what a span
- * may carry.
+ * that tie the image to the DOCUMENT, never the ones that draw it or name it.
+ * Its `id`, so a link to the figure still lands; `aria-describedby`, so a
+ * caption still describes it; its language and direction. `width`, `height`,
+ * `align` and the rest size a picture that is not there. `aria-label` and
+ * `aria-labelledby` stay behind: the placeholder's NAME must say the picture
+ * is missing, and `aria-labelledby` outranks the `aria-label` we set, so
+ * inheriting it would name the placeholder after the caption instead. The
+ * sanitizer keeps no other ARIA attribute on an image (hast-util-sanitize's
+ * `aria` list), so nothing that hides an element can arrive.
  */
+const INHERITED_ATTRIBUTES = new Set(['id', 'lang', 'dir', 'aria-describedby']);
+
 function inheritedAttributes(rest: ImgHTMLAttributes<HTMLImageElement>): HTMLAttributes<HTMLElement> {
   const inherited: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(rest)) {
-    if (name === 'id' || name === 'lang' || name === 'dir' || name.startsWith('aria-')) {
-      inherited[name] = value;
-    }
+    if (INHERITED_ATTRIBUTES.has(name)) inherited[name] = value;
   }
   return inherited;
 }
@@ -58,8 +60,7 @@ function inheritedAttributes(rest: ImgHTMLAttributes<HTMLImageElement>): HTMLAtt
  * a file fixed on disk with no event), and the reader is the one who knows it
  * is worth another try; retrying on our own would loop error → image → error.
  *
- * The author's attributes come first, so ours hold: the name of a placeholder
- * must say the picture is missing, whatever `aria-label` the image carried.
+ * The author's attributes come first, so ours hold.
  */
 function ImagePlaceholder({
   alt,

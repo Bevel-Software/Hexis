@@ -296,23 +296,26 @@ describe('KbMarkdownView images', () => {
   });
 
   // A placeholder stands in for the image in the document: an anchor to the
-  // figure still lands, a caption still describes it, and nothing sizes a
-  // picture that is not there.
-  it("gives a placeholder the image's place in the document, not its dimensions", () => {
+  // figure still lands, a caption still describes it, nothing sizes a
+  // picture that is not there, and nothing names it but itself.
+  it("gives a placeholder the image's place in the document, not its dimensions or its name", () => {
     render(
       <KbMarkdownView
-        source={'<img src="./assets/shot.png" alt="Shot" id="fig-1" aria-describedby="cap" width="300">\n'}
+        source={
+          '<p id="ttl">Figure 1</p><img src="./assets/shot.png" alt="Shot" id="fig-1" aria-describedby="cap" aria-labelledby="ttl" width="300">\n'
+        }
         onOpenFile={vi.fn()}
         resolveImage={serve}
       />,
     );
-    const img = screen.getByRole('img', { name: 'Shot' });
+    const img = screen.getByRole('img', { name: 'Figure 1' });
     expect(img).toHaveAttribute('width', '300');
     fireEvent.error(img);
-    const placeholder = screen.getByRole('button', { name: /Couldn't load image/ });
+    const placeholder = screen.getByRole('button', { name: /^Shot\. Couldn't load image/ });
     // The sanitizer prefixes ids and id references alike.
     expect(placeholder).toHaveAttribute('id', 'user-content-fig-1');
     expect(placeholder).toHaveAttribute('aria-describedby', 'user-content-cap');
+    expect(placeholder).not.toHaveAttribute('aria-labelledby');
     expect(placeholder).not.toHaveAttribute('width');
   });
 
