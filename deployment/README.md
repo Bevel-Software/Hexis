@@ -26,6 +26,8 @@ so an orchestrator can be pointed at it directly — in Coolify, set the
 resource's *Docker Compose Location* to `/deployment/docker-compose.build.yml`.
 
 ```sh
+docker compose --project-directory . -f deployment/docker-compose.build.yml \
+  build --build-arg SOURCE_COMMIT=$(git rev-parse HEAD)
 docker compose --project-directory . -f deployment/docker-compose.build.yml up -d
 ```
 
@@ -33,6 +35,15 @@ docker compose --project-directory . -f deployment/docker-compose.build.yml up -
 ceremony: compose resolves the build context and the `.env` file against the
 PROJECT directory, which orchestrators set to the checkout root — this pins
 the manual command to the same behavior.
+
+The explicit `build` step is what gives `GET /api/health` its `sha`. The
+commit is baked into the image from the one build arg, `SOURCE_COMMIT` — the
+compose file deliberately does not name it, because Coolify turns every
+`${VAR}` it finds in a compose file into a resource variable of its own, and
+an existing `SOURCE_COMMIT` variable is exactly what stops Coolify injecting
+the real commit. Coolify passes the arg itself when the resource's *Include
+SOURCE_COMMIT in build* setting is on; a manual deploy passes it as above. An
+`up -d --build` with no arg still works, but health then reports `unknown`.
 
 It mirrors the root file's services and env list; the root file's comments
 are the reference for what each knob means.
