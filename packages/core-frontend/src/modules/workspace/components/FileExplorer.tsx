@@ -469,6 +469,7 @@ export function FileTreeNode({
   initiallyExpanded,
   collapseChildren,
   reserved = false,
+  absent = false,
 }: {
   entry: FileTreeEntry;
   depth: number;
@@ -487,6 +488,13 @@ export function FileTreeNode({
    * not do: be renamed, deleted, dragged, or pinned.
    */
   reserved?: boolean;
+  /**
+   * The folder is not on disk yet — a reserved root drawn before the
+   * knowledge base has it, so the way to create it is on screen. Everything
+   * that WRITES works (each write creates its parents); what READS the folder
+   * is withheld: no Download, which would ask the server for a zip of nothing.
+   */
+  absent?: boolean;
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
@@ -772,7 +780,10 @@ export function FileTreeNode({
           <button
             ref={rowRef}
             type="button"
-            aria-expanded={isExpanded}
+            // A folder with nothing in it has no caret and nothing to expand,
+            // so it claims neither state: `aria-expanded` is for a control
+            // that can open, and an empty folder cannot.
+            aria-expanded={hasChildren ? isExpanded : undefined}
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
             onClick={() => { if (hasChildren) setUserIntent(!isExpanded); }}
           >
@@ -867,7 +878,7 @@ export function FileTreeNode({
             // offers pinning, and its roots are not reserved.)
             onRename={reserved ? undefined : () => setRenaming(true)}
             deletable={!reserved}
-            onDownload={handleDownload}
+            onDownload={absent ? undefined : handleDownload}
             returnFocusTo={rowRef}
           />
         )}

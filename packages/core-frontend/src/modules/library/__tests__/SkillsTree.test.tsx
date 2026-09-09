@@ -106,10 +106,18 @@ describe('SkillsTree', () => {
     const createDirectory = vi.fn().mockResolvedValue(undefined);
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderTree('/skills-and-tools', { fileTree: noSkills, createDirectory, dispatchUpload });
-    // The row is there, empty: no caret, nothing beneath it.
+    // The row is there, empty: nothing beneath it, and — with nothing to
+    // open — no claim to be expanded either.
     const skills = row('Skills');
     expect(skills).toBeInTheDocument();
+    expect(skills).not.toHaveAttribute('aria-expanded');
     expect(screen.queryByRole('button', { name: 'Engineering' })).not.toBeInTheDocument();
+    // What writes is offered; what would read a folder that is not there is not.
+    fireEvent.contextMenu(skills);
+    const menu = screen.getByRole('menu', { name: 'Actions for Skills' });
+    expect(within(menu).getByRole('menuitem', { name: /New folder/ })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: /Download/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
 
     // A new scope goes to the folder's future path — the write creates it.
     fireEvent.click(screen.getByRole('button', { name: 'New folder in Skills' }));

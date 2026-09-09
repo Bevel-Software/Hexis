@@ -49,17 +49,21 @@ export function SkillsTree() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const root = useMemo((): FileTreeEntry | null => {
+  const root = useMemo((): { entry: FileTreeEntry; absent: boolean } | null => {
     const kbRoot = findKbRoot(tree);
     if (!kbRoot) return null;
     const found = kbRoot.children?.find((c) => c.type === 'directory' && c.name === SKILLS_DIR);
-    if (found) return found;
+    if (found) return { entry: found, absent: false };
     // No `Skills/` folder yet (a knowledge base from before the root existed,
     // or one whose folder was removed): the row is drawn anyway, empty, at
     // the path the folder will have. Every write creates its parents, so
-    // the first drop, file or scope made here creates the folder itself.
+    // the first drop, file or scope made here creates the folder itself;
+    // what would READ the folder (download) is withheld until then.
     const base = kbRoot.relativePath === '.' ? '' : `${kbRoot.relativePath}/`;
-    return { name: SKILLS_DIR, relativePath: `${base}${SKILLS_DIR}`, type: 'directory', children: [] };
+    return {
+      entry: { name: SKILLS_DIR, relativePath: `${base}${SKILLS_DIR}`, type: 'directory', children: [] },
+      absent: true,
+    };
   }, [tree]);
 
   const nav = useMemo<TreeNav>(
@@ -80,7 +84,7 @@ export function SkillsTree() {
           stop their own events before reaching here. */}
       <div data-testid="skills-tree" onContextMenu={(e) => e.stopPropagation()}>
         <UploadNotices />
-        <FileTreeNode entry={root} depth={0} reserved collapseChildren />
+        <FileTreeNode entry={root.entry} depth={0} reserved absent={root.absent} collapseChildren />
       </div>
     </TreeChrome>
   );
