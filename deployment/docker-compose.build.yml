@@ -58,8 +58,17 @@ services:
       # replaces was materialized by Coolify as an EMPTY LITERAL that
       # overrode the real value; a sha baked into the image leaves no runtime
       # variable to blank.
+      #
+      # LIST form, deliberately, to match `environment` below. Coolify's
+      # parser merges a service's `build.args` INTO its `environment` before
+      # reading either; a map here beside a list there makes the union
+      # associative, and every bare pass-through in the list (`- GIT_TOKEN`)
+      # then keeps its list index as its key — which docker compose rejects
+      # as "non-string key in services.app.environment: <n>", a different n
+      # each run. Two lists merge into one list, and the parser reads it as
+      # it always did.
       args:
-        SOURCE_COMMIT: ${SOURCE_COMMIT:-}
+        - SOURCE_COMMIT=${SOURCE_COMMIT:-}
     expose:
       - "3001"
     environment:
