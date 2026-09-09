@@ -17,6 +17,7 @@ import {
   type GroupsRoster,
 } from '../services/groups.api';
 import { EMAIL_RE, isGroupPrefixed } from '../../../lib/email';
+import { AddMemberInput } from './AddMemberInput';
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
@@ -415,8 +416,11 @@ function ManualGroupCard({
     }
   };
 
-  const submitAdd = async () => {
-    const trimmed = email.trim();
+  // `value` is whatever the input handed over: the typed text, or the email of
+  // a chosen suggestion. A suggestion is a shortcut for typing, nothing more —
+  // both land on exactly these rules and exactly this request.
+  const submitAdd = async (value: string) => {
+    const trimmed = value.trim();
     // Mirror the backend's refusal of `group:`-prefixed member values with an
     // inline hint — group members are emails; groups don't contain groups.
     if (isGroupPrefixed(trimmed)) {
@@ -543,30 +547,18 @@ function ManualGroupCard({
         )}
       </div>
 
-      <div className="mt-2 flex items-center gap-1.5">
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submitAdd();
-          }}
-          placeholder="Add member by email"
-          disabled={busy}
-          className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent flex-1 min-w-0 max-w-[16rem]"
-          aria-label={`Add member to ${group.displayName}`}
-          autoComplete="off"
-        />
-        <button
-          type="button"
-          onClick={submitAdd}
-          disabled={busy}
-          className="shrink-0 px-3 py-1 text-xs rounded-sm border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
-        >
-          {busy && <Loader2 size={12} className="animate-spin" />}
-          Add
-        </button>
-      </div>
+      {/* Add member — the same input the roles page uses, so a group member is
+          picked from people suggestions exactly the way a role member is.
+          Current members are excluded: they are already here. */}
+      <AddMemberInput
+        value={email}
+        onValueChange={setEmail}
+        onSubmit={submitAdd}
+        exclude={group.members}
+        inputLabel={`Add member to ${group.displayName}`}
+        busy={busy}
+        className="mt-2"
+      />
 
       {error && (
         <div className="mt-2 text-xs text-danger bg-danger-soft border border-danger/30 rounded-sm px-2 py-1">
