@@ -10,12 +10,6 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
-// PullRequestsForMe pulls in router/git wiring we don't want to exercise here;
-// stub it so the toolbar can be tested in isolation.
-vi.mock('../../../git/components/PullRequestsForMe', () => ({
-  PullRequestsForMe: () => null,
-}));
-
 // authFetch is the bearer-token wrapper around window.fetch. The Download
 // click test asserts the URL + ?download=1 flag, so we mock it at the
 // module level rather than monkey-patching globalThis.fetch.

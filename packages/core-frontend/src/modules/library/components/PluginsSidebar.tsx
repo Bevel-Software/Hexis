@@ -294,7 +294,7 @@ export function PluginsSidebar({
           // is nobody's to answer, so it must not reach the nav behind it.
           onContextMenu={(e) => e.stopPropagation()}
         >
-          {tab('teams', 'IdP Groups')}
+          {tab('teams', 'Groups')}
           {tab('advanced', 'Advanced')}
         </div>
 

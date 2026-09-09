@@ -50,6 +50,7 @@ import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
+import { PullRequestsForMe } from '../modules/git/components/PullRequestsForMe';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
@@ -289,6 +290,10 @@ function KnowledgeSurface() {
       panes={panes}
       onController={setController}
       sidebarHeader={<ConnectAgentPill />}
+      // The change-request dock, pinned under the tree — and under the
+      // Library's nav, which passes the same one: the requests waiting on
+      // you are the same whichever app you are in.
+      sidebarFooter={<PullRequestsForMe />}
     />
   );
 }

@@ -55,6 +55,7 @@ export function SidebarFrame({
   children,
   label,
   header,
+  footer,
 }: {
   children: ReactNode;
   /** Names the region and its resize handle, e.g. `Library navigation`. */
@@ -70,6 +71,13 @@ export function SidebarFrame({
    * not know that, and the next thing to go there costs no edit here.
    */
   header?: ReactNode;
+  /**
+   * Pinned below `children`, outside whatever list the surface is holding —
+   * the same slot as `header`, at the other end. Both surfaces pass the
+   * change-request dock, which is what makes it one queue in one place
+   * across Knowledge and Skills & Tools; the frame does not know that.
+   */
+  footer?: ReactNode;
 }) {
   // `narrow` comes off the store rather than straight off `viewportNarrow`
   // below, because the store is where it lands in the same write as
@@ -279,6 +287,7 @@ export function SidebarFrame({
         >
           {header}
           {children}
+          {footer}
         </div>
       </aside>
 

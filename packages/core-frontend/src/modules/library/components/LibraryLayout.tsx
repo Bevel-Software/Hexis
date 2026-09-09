@@ -15,6 +15,7 @@ import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
+import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
 import { PluginsTree, SkillsTree } from './SkillsTree';
 import { PluginsSidebarMenu } from './PluginsSidebarMenu';
@@ -121,8 +122,10 @@ export function LibraryLayout() {
           `ResizableThreePaneLayout`, which is what keeps it one pill in one
           place — a person who skipped the welcome page and stayed in
           Knowledge still sees it. It renders nothing once onboarding is
-          done. */}
-      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
+          done. The change-request dock below the nav is the same one
+          Knowledge pins under its tree — the requests waiting on you are
+          the same whichever app you are in. */}
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />} footer={<PullRequestsForMe />}>
         <PluginsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}

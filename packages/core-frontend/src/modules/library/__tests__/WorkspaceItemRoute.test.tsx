@@ -22,6 +22,8 @@ const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
 vi.mock('../services/teams.api', () => ({ listTeams: vi.fn().mockResolvedValue([]) }));
+// The sidebar's change-request dock pulls in git wiring these routes do not exercise.
+vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
 vi.mock('../services/plugins.api', () => ({
   listPlugins: vi.fn().mockResolvedValue([]),
   listJoinRequests: vi.fn().mockResolvedValue([]),

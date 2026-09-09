@@ -62,9 +62,9 @@ describe('PluginsSidebar', () => {
   it('offers two views under the lenses — Teams by default — and lists no plugins of its own', () => {
     renderSidebar();
     const tabs = screen.getByRole('tablist', { name: 'Sidebar view' });
-    expect(within(tabs).getByRole('tab', { name: 'IdP Groups' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tabs).getByRole('tab', { name: 'Groups' })).toHaveAttribute('aria-selected', 'true');
     expect(within(tabs).getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'false');
-    expect(screen.getByRole('tabpanel', { name: 'IdP Groups' })).toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'Groups' })).toBeInTheDocument();
     expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
     expect(screen.queryByText('All plugins')).not.toBeInTheDocument();
     expect(screen.queryByText('Library')).not.toBeInTheDocument();
@@ -72,7 +72,7 @@ describe('PluginsSidebar', () => {
 
   it("leads the Teams view with the caller's own space, and lists it even when empty", () => {
     renderSidebar({ filter: { kind: 'ungrouped' }, ungroupedCount: 0 });
-    const panel = screen.getByRole('tabpanel', { name: 'IdP Groups' });
+    const panel = screen.getByRole('tabpanel', { name: 'Groups' });
     const own = within(panel).getByRole('button', { name: /^Juan's Plugin/ });
     const first = within(panel).getByRole('button', { name: /^Engineering/ });
     expect(own.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -115,12 +115,12 @@ describe('PluginsSidebar', () => {
     window.localStorage.removeItem('bevel-library-sidebar-view');
     cleanup();
     renderSidebar();
-    expect(screen.getByRole('tab', { name: 'IdP Groups' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Groups' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('is one tab stop: the arrows move between the views and choose as they go, Home and End go to the ends', () => {
     renderSidebar();
-    const teams = screen.getByRole('tab', { name: 'IdP Groups' });
+    const teams = screen.getByRole('tab', { name: 'Groups' });
     const advanced = screen.getByRole('tab', { name: 'Advanced' });
     // Roving tabIndex: only the chosen tab is in the Tab order.
     expect(teams).toHaveAttribute('tabindex', '0');
