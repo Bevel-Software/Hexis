@@ -10,10 +10,8 @@ import {
   Badge,
   Button,
   IconButton,
-  MenuItem,
-  MenuPanel,
   Surface,
-  useDismissableMenu,
+  useFocusHandoff,
 } from '../../../../shared/components';
 import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
@@ -107,7 +105,7 @@ export function SkillPage({
   const selected = activeFile ?? selectedState;
   const [compareCr, setCompareCr] = useState<PullRequestSummary | null>(null);
   /**
-   * The `⋯` menu's one destination: the git log for the file on screen,
+   * The clock-arrow's destination: the git log for the file on screen,
    * rendered in place of the reading pane. Local state rather than a URL,
    * matching the Knowledge viewer's `activeTab` — a skill's canonical address
    * names the FILE, and history is a lens on it, not a different file.
@@ -116,14 +114,6 @@ export function SkillPage({
    * matter of taste.
    */
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuTriggerRef = useRef<HTMLButtonElement>(null);
-  const closeMenu = useCallback(() => setMenuOpen(false), []);
-  const menuRef = useDismissableMenu<HTMLDivElement>({
-    open: menuOpen,
-    onClose: closeMenu,
-    returnFocusTo: menuTriggerRef,
-  });
   /** Ties the tabs to the panel they control; unique per mounted page. */
   const tabsId = useId();
   const git = useGit();
@@ -308,20 +298,42 @@ export function SkillPage({
   // log back over the file minutes after the reader returned to reading. Once
   // it is gone they ask for it again, which is one click.
   //
-  // BOTH flags, for one reason: the trigger and its panel live behind
-  // `historyAvailable` together, so an open menu unmounts with them and its
-  // flag is left set behind an element nobody can see. Closing only the log
-  // fixed the panel and left the menu to spring open by itself on the next
-  // good poll.
-  //
-  // `editing` is the second door into the same state, and it is reachable
-  // without a mouse: `useDismissableMenu` dismisses on outside POINTERDOWN, so
-  // tabbing from the open menu to Edit and pressing Enter never dismisses it.
-  // The editor then withdraws `historyAvailable`, and Cancel used to hand the
-  // menu back open.
+  // `editing` is the second door into the same state: the editor withdraws
+  // `historyAvailable` (its draft would be discarded under the panel), and
+  // Cancel must not hand the log back open over the file.
   if (historyOpen && !historyAvailable) setHistoryOpen(false);
-  if (menuOpen && !historyAvailable) setMenuOpen(false);
   const viewingHistory = historyAvailable && historyOpen;
+  /**
+   * The clock that opens the log sits in the file bar, and the bar unmounts
+   * with the file; the pressed clock that closes it sits in the history row,
+   * which unmounts with the log. Either way the control a keyboard user just
+   * activated is gone from the DOM, so the two clocks hand focus to each
+   * other (`useFocusHandoff`): opening lands on the pressed clock, closing
+   * lands on the bar's. Only for a swap the USER made; the log closing
+   * because git stopped answering names no target and moves nothing.
+   *
+   * The bar's clock is not guaranteed to come back: `historyAvailable`
+   * withdraws it, and a failed status poll can land in the same commit as the
+   * click. The page's own title is named last for that, since it is on screen
+   * in every state and names the skill the user came back to.
+   *
+   * Knowledge states the same rule with its document title, where the case is
+   * routine rather than a race: a comparison outlives `historyAvailable` on
+   * purpose, so leaving one while git is silent finds no clock at all. See
+   * `FileViewer.backToDocument` and the test beside it.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const pressedClockRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const handoff = useFocusHandoff(viewingHistory);
+  const openHistory = () => {
+    handoff(true, pressedClockRef);
+    setHistoryOpen(true);
+  };
+  const closeHistory = () => {
+    handoff(false, paneClockRef, titleRef);
+    setHistoryOpen(false);
+  };
   /**
    * Change requests a merge attempt has REFUSED as unmergeable. Git is the only
    * thing that can answer "does this still apply?", and it answers when asked
@@ -552,58 +564,23 @@ export function SkillPage({
 
       <header className="mt-4">
         <div className="flex items-center gap-3">
-          <h1 className="min-w-0 text-display font-semibold text-ink">{skill?.name ?? name}</h1>
+          {/* `tabIndex={-1}` keeps the heading out of the tab order while
+              letting `.focus()` land on it — where focus goes when closing
+              the log finds no clock to hand back to. No focus ring: it is a
+              programmatic landing after the user's own click. */}
+          <h1
+            ref={titleRef}
+            tabIndex={-1}
+            className="min-w-0 text-display font-semibold text-ink focus:outline-none"
+          >
+            {skill?.name ?? name}
+          </h1>
           {skill && owned && (
             <Badge tone="outline" size="xs" className="shrink-0 uppercase">
               Owner
             </Badge>
           )}
 
-          {/* The same overflow a Knowledge page carries, for the same reason:
-              a skill is a file in the repository, and "who changed this, when"
-              is answerable about it exactly as it is about any other file. It
-              was unanswerable HERE and nowhere else, because this page is the
-              only surface a `Plugins/` file has — the shell routes those URLs
-              to the Library (`isLibraryLocation`) and the Knowledge tree does
-              not list `Plugins/` at all, so there was no viewer to fall back
-              to and no row to right-click.
-
-              Version history is the whole menu, so the trigger goes where the
-              menu goes — see `historyAvailable`. */}
-          {historyAvailable && (
-            <div className="relative ml-auto flex-none">
-              <IconButton
-                ref={menuTriggerRef}
-                aria-label="More actions"
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-                active={menuOpen}
-                onClick={() => setMenuOpen((v) => !v)}
-              >
-                <span aria-hidden className="text-strong leading-none">
-                  ⋯
-                </span>
-              </IconButton>
-              {menuOpen && (
-                <div ref={menuRef} className="absolute right-0 top-[calc(100%+5px)] z-40">
-                  <MenuPanel role="menu" aria-label="More actions" className="min-w-[212px]">
-                    <MenuItem
-                      role="menuitem"
-                      onClick={() => {
-                        closeMenu();
-                        setHistoryOpen(true);
-                      }}
-                    >
-                      <span className="flex items-center gap-2.5">
-                        <History size={14} />
-                        Version history
-                      </span>
-                    </MenuItem>
-                  </MenuPanel>
-                </div>
-              )}
-            </div>
-          )}
         </div>
         {/* No description line here — the file pane renders the raw SKILL.md,
             and its frontmatter panel already says what the skill is for.
@@ -687,17 +664,33 @@ export function SkillPage({
       {viewingHistory && historyPath !== null ? (
         <>
           {/* An explicit way back. Without it the only route to the file would
-              be reopening it, since history is not in the URL. */}
+              be reopening it, since history is not in the URL. The clock that
+              opened the log sits in the file bar, and the bar leaves with the
+              file, so the same clock is drawn here PRESSED: the control that
+              opened the view stays on screen showing that it is open, and a
+              second click on it is the other way back. Same shape as the
+              Knowledge header while its log is open. */}
           <div className="mb-3 mt-4 flex items-center gap-2">
             <Button
               variant="quiet"
               size="sm"
               leadingIcon={<ArrowLeft size={13} />}
-              onClick={() => setHistoryOpen(false)}
+              onClick={closeHistory}
             >
               Back to the file
             </Button>
             <span className="text-detail text-ink-faint">{`Version history: ${active}`}</span>
+            <IconButton
+              ref={pressedClockRef}
+              aria-label="Version history"
+              aria-pressed
+              title="Back to the file"
+              active
+              className="ml-auto"
+              onClick={closeHistory}
+            >
+              <History size={14} />
+            </IconButton>
           </div>
           {/* A DEFINITE height, and a flex column to hold it. The panel is
               built for the Knowledge viewer's full-height pane: its list and
@@ -763,11 +756,32 @@ export function SkillPage({
            * fork, never a silent restart from the published text.
            */
           actions={
-            // Only a RESOLVED verdict earns a button: `null` (lookup in
-            // flight) briefly shows no action rather than an Edit that might
-            // open the wrong mode — a writer's text must never ride the
-            // proposal path just because they clicked before the ACL answered.
-            fileAccess.canWrite === true
+            <>
+              {/* "Who changed this, when" — the clock-arrow beside Edit, where
+                  Google Docs keeps it. This page is the only surface a
+                  `Plugins/` file has: the shell routes those URLs here
+                  (`isLibraryLocation`) and the Knowledge tree does not list
+                  `Plugins/`, so this button is the deployment's one way into a
+                  skill's git log. It used to be the lone item behind a ⋯ in
+                  the page header — two clicks and a menu for a question people
+                  ask often. Withdrawn with `historyAvailable`: git not
+                  answering, or no path to ask about. */}
+              {historyAvailable && (
+                <IconButton
+                  ref={paneClockRef}
+                  aria-label="Version history"
+                  title="Version history"
+                  onClick={openHistory}
+                >
+                  <History size={14} />
+                </IconButton>
+              )}
+              {/* Only a RESOLVED verdict earns a write button: `null` (lookup
+                  in flight) briefly shows none rather than an Edit that might
+                  open the wrong mode — a writer's text must never ride the
+                  proposal path just because they clicked before the ACL
+                  answered. */}
+              {fileAccess.canWrite === true
               ? rawOnMain !== null && (
                   <Button
                     variant="outline"
@@ -791,7 +805,8 @@ export function SkillPage({
                   >
                     Propose changes
                   </Button>
-                )
+                )}
+            </>
           }
         />
       )}

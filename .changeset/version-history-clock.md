@@ -1,0 +1,7 @@
+---
+"@bevel-software/platform-core-frontend": patch
+---
+
+Version history is a button of its own: the clock-arrow beside Edit, where Google Docs keeps it, on the skill page and on Knowledge pages alike. It used to be the lone item behind a `⋯` in the page header, two clicks and a menu away for a question people ask often, and on the skill page nothing hinted that the header's overflow was where the file's history lived. The `⋯` is gone from both headers. Prose documents carry the clock in the file bar next to Edit; full-bleed Knowledge files, which have no bar, keep it in the header next to their Edit. The button withdraws when git cannot answer, and on both pages while an editor holds a draft the history panel would discard: on a Knowledge page, coming back from the log re-mounted the editor from its seed while the send buffer still held the newer keystrokes, so the page showed one text and sent another. A comparison opened from chat is no longer cancelled when it lands before git has answered its first status poll.
+
+Keyboard focus follows the swap in both directions on both pages, and it now moves before the browser paints rather than a frame after it. Where the swap leaves no clock on screen to hand focus to, which is what happens when you leave a comparison while git has stopped answering, focus lands on the page's own title instead of falling to the top of the document.

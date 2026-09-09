@@ -1,12 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { cn } from '../../../lib/utils';
 import {
   Button,
   buttonClasses,
+  Dialog,
   IconButton,
+  useDismissableMenu,
+  useModalLayer,
   Surface,
   ListRow,
   Badge,
@@ -329,5 +332,49 @@ describe('Menu', () => {
   it('MenuLabel renders its section heading', () => {
     render(<MenuLabel>Appearance</MenuLabel>);
     expect(screen.getByText('Appearance')).toBeInTheDocument();
+  });
+});
+
+describe('Dialog', () => {
+  /**
+   * A menu hosted inside the dialog, built the way `ManageAccessDialog`'s
+   * are: it dismisses on an outside `mousedown` and holds the top modal layer
+   * while open. The layer pops when it unmounts — before the same gesture's
+   * `click` reaches the scrim.
+   */
+  function HostedMenu({ onClose }: { onClose(): void }) {
+    const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose });
+    useModalLayer(true);
+    return <div ref={ref} role="menu" />;
+  }
+  // The menu opens from a control inside the dialog, so its layer lands on
+  // the stack ABOVE the dialog's — mounted together, the child's effect
+  // would run first and put it underneath.
+  function Host({ onClose }: { onClose(): void }) {
+    const [menuOpen, setMenuOpen] = useState(false);
+    return (
+      <Dialog open onClose={onClose} title="Host">
+        <button onClick={() => setMenuOpen(true)}>Open the menu</button>
+        {menuOpen && <HostedMenu onClose={() => setMenuOpen(false)} />}
+      </Dialog>
+    );
+  }
+
+  it('a scrim click that dismissed a nested layer on mousedown does not also close the dialog', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<Host onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Open the menu' }));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    const scrim = screen.getByRole('dialog').parentElement!;
+    await user.click(scrim);
+    // The menu went on mousedown; the click that followed belonged to it.
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The next scrim click began with the dialog on top, and closes it.
+    await user.click(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

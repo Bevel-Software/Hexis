@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
@@ -16,6 +17,8 @@ import {
   Dialog,
   MenuItem,
   MenuPanel,
+  useDismissableMenu,
+  useModalLayer,
 } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
@@ -304,8 +307,32 @@ const MENU_MIN_WIDTH = 200;
  * attached yet when this component's layout effect runs (React attaches refs
  * bottom-up, children first), so the first placement would silently no-op and
  * the panel would stay hidden.
+ *
+ * Dismissal is the caller's to opt into with `onDismiss`. A menu whose open
+ * state is a boolean the caller owns (the verb checklists) has to close on an
+ * outside click and on Escape, or it sits open until something inside it is
+ * picked — a trap for anyone driving the app from the keyboard, and a surprise
+ * for everyone else. That is `useDismissableMenu`'s job, plus one thing the
+ * hook's own docstring warns it does NOT do: co-exist with the `Dialog` this
+ * menu lives in, which also listens for Escape on `document` and would close
+ * itself on the same keypress. Registering the open menu as a modal layer
+ * makes it the topmost, so `Dialog` stands down until the menu is gone. The
+ * suggestion list leaves `onDismiss` unset: its openness is derived from what
+ * is typed, not from a flag a click could clear.
  */
 function AnchoredMenu({
+  /**
+   * Close the menu. Called on a mousedown outside the panel and its trigger,
+   * and on Escape (which also hands focus back to the trigger). Leave unset
+   * for a panel whose visibility is not an open flag.
+   */
+  onDismiss,
+  /**
+   * The control that opened us. Clicks on it are the trigger's own business
+   * (its handler toggles), and Escape returns focus to it. Goes with
+   * `onDismiss`; a stable ref, as `useDismissableMenu` lists it in its deps.
+   */
+  triggerRef,
   /**
    * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
    * Clamped up to {@link MENU_MIN_WIDTH} either way.
@@ -316,12 +343,31 @@ function AnchoredMenu({
   className = '',
   children,
 }: {
+  onDismiss?: () => void;
+  triggerRef?: RefObject<HTMLElement | null>;
   width?: number | 'anchor';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  const dismissable = onDismiss !== undefined;
+  // Callers pass a fresh `onDismiss` arrow each render, and the hook lists
+  // `onClose` in its effect deps: handed the arrow directly it would tear down
+  // and re-add its document listeners on every render of the open menu — each
+  // verb toggled in the checklist included. Mirror the arrow into a ref (the
+  // same shape `Dialog` uses for its `onClose`) and give the hook one stable
+  // callback, so it subscribes once for the life of the open menu.
+  const onDismissRef = useRef(onDismiss);
+  useEffect(() => {
+    onDismissRef.current = onDismiss;
+  }, [onDismiss]);
+  const close = useCallback(() => onDismissRef.current?.(), []);
+  const panelRef = useDismissableMenu<HTMLDivElement>({
+    open: dismissable,
+    onClose: close,
+    returnFocusTo: triggerRef,
+  });
+  useModalLayer(dismissable);
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useLayoutEffect(() => {
@@ -379,7 +425,7 @@ function AnchoredMenu({
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [width, align]);
+  }, [width, align, panelRef]);
 
   return (
     <div
@@ -441,6 +487,11 @@ export function ManageAccessDialog({
   const [mutateError, setMutateError] = useState<string | null>(null);
   // Which existing row's verb checklist is open (one at a time).
   const [openRowKey, setOpenRowKey] = useState<string | null>(null);
+  // The triggers the two verb menus return focus to on Escape. One ref serves
+  // every grantee row: only the OPEN row's trigger carries it (one menu at a
+  // time), so it always names the button whose menu is on screen.
+  const openRowTriggerRef = useRef<HTMLButtonElement>(null);
+  const verbTriggerRef = useRef<HTMLButtonElement>(null);
   // When set, the "Remove from parent?" confirmation is open for this principal.
   // `ancestors` are the granting access.md path(s) (repo-relative, opaque) to
   // echo back on remove-from-parent. `verb` scopes the action to a single verb
@@ -1083,17 +1134,22 @@ export function ManageAccessDialog({
           </span>
         ) : canManage ? (
           <div className="ml-auto shrink-0">
+            {/* Not `disabled={busy}`: the checklist's items freeze while a
+                grant or revoke is in flight, and this button only opens or
+                closes the checklist. Disabled, it could not take focus back
+                on Escape (`.focus()` on a disabled button is a no-op), and
+                focus fell to `document`. */}
             <Button
+              ref={openRowKey === p.key ? openRowTriggerRef : undefined}
               variant="quiet"
               size="sm"
-              disabled={busy}
               onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
               trailingIcon={<ChevronDown size={14} />}
             >
               {summarizeVerbs(p.verbs)}
             </Button>
             {openRowKey === p.key && (
-              <AnchoredMenu>
+              <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
                 {/* Everyone is public READ only (the grant route refuses the
                     rest), so its row offers exactly the verb it can hold. */}
                 {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : TIER_ROLES).map((role) => {
@@ -1294,6 +1350,7 @@ export function ManageAccessDialog({
 
               <div className="shrink-0">
                 <Button
+                  ref={verbTriggerRef}
                   variant="outline"
                   size="sm"
                   className="max-w-44"
@@ -1303,7 +1360,7 @@ export function ManageAccessDialog({
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <AnchoredMenu>
+                  <AnchoredMenu onDismiss={() => setVerbOpen(false)} triggerRef={verbTriggerRef}>
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
