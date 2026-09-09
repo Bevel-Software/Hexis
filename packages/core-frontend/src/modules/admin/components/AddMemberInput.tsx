@@ -225,31 +225,26 @@ export function AddMemberInput({
             className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1"
           >
             {suggestions.map((p, i) => (
-              <li key={p.email}>
-                <button
-                  type="button"
-                  id={optionId(i)}
-                  role="option"
-                  aria-selected={i === activeIdx}
-                  // Out of the Tab order: focus stays in the field and the
-                  // arrows walk the rows (the active-descendant model); Tab
-                  // leaves the widget. A pointer still clicks a row.
-                  tabIndex={-1}
-                  // preventDefault on mousedown keeps focus in the input, so a
-                  // mouse click never blurs the widget out from under itself.
-                  // The submit hangs off onClick, which a pointer AND a
-                  // keyboard (Enter/Space on the focused row) both raise —
-                  // onMouseDown alone was unreachable without a mouse.
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => onSubmit(p.email)}
-                  className={`w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2 ${i === activeIdx ? 'bg-hover' : ''}`}
-                >
-                  <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
-                    {initials(p.email)}
-                  </span>
-                  <span className="flex-1 truncate text-xs text-ink">{p.name || p.email}</span>
-                  <span className="text-[10px] text-ink-faint truncate">{p.email}</span>
-                </button>
+              // The option IS the list item — a direct child of the listbox,
+              // which is what `aria-activedescendant` may point at. Not a
+              // tab stop: focus stays in the field and the arrows walk the
+              // rows; a pointer still clicks one. preventDefault on mousedown
+              // keeps focus in the input, so a click never blurs the widget
+              // out from under itself; the submit hangs off click.
+              <li
+                key={p.email}
+                id={optionId(i)}
+                role="option"
+                aria-selected={i === activeIdx}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onSubmit(p.email)}
+                className={`cursor-pointer px-2 py-1.5 hover:bg-hover flex items-center gap-2 ${i === activeIdx ? 'bg-hover' : ''}`}
+              >
+                <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
+                  {initials(p.email)}
+                </span>
+                <span className="flex-1 truncate text-xs text-ink">{p.name || p.email}</span>
+                <span className="text-[10px] text-ink-faint truncate">{p.email}</span>
               </li>
             ))}
           </ul>
