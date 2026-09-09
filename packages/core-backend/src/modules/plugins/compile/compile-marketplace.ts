@@ -277,7 +277,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
   if (bundleEmitted) {
     const base = `plugins/${bundle}`;
     const shortSha = options.sourceCommit.slice(0, 12) || '0';
-    const description = `Everything in ${options.owner}'s marketplace you may read — one install.`;
+    const description = `Everything in ${options.owner}'s marketplace you may read, in one install.`;
     put(
       `${base}/.claude-plugin/plugin.json`,
       `${JSON.stringify({ name: bundle, version: `0.0.0-${shortSha}`, description }, null, 2)}\n`,

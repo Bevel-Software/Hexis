@@ -16,14 +16,15 @@ they may read.
   fetch the marketplace from it).
 - `SECRETS_ENC_KEY` set, since the registration credentials are stored sealed.
 
-## Register the platform once (admin, then a Claude Owner)
+## Register the platform once (an Owner of your Claude organization)
 
 1. In the platform, open **Deployment** and find **Claude connection**. It
    shows generated credentials: hostname, App ID, Client ID, client secret,
    webhook secret and private key.
-2. In Claude, go to **Admin settings → Claude Code → GitHub Enterprise
-   Server** and choose **Add manually**. Paste the fields from step 1. Any
-   display name will do.
+2. In Claude, open **Admin settings → Claude Code**, scroll to **Self-hosted
+   infrastructure**, and choose **Add manually** beside GitHub Enterprise.
+   Paste the fields from step 1. Any display name will do, port 443 is right,
+   and read replicas stay empty. Choose **Add configuration** to save them.
 
 The webhook URL Claude generates can be ignored. Rotate the credentials from
 the same card if they are ever exposed; the Owner then re-enters them.
@@ -42,15 +43,20 @@ they can add the marketplace.
    and you are back in Claude.
 2. Copy the marketplace URL from **External agent access → Marketplaces**.
    It is the same URL Claude Code clones.
-3. In Cowork (or claude.ai), open **Plugins → Add marketplace** and paste it.
-4. Install **hexis-all** for everything you may read in one plugin (every
-   skill, and the knowledge base as an MCP server), or single plugins for a
-   subset. **Update** in Claude pulls what changed.
+3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
+   marketplace**, paste the URL and choose **Sync**.
+4. Syncing lists the plugins, it installs none of them. Open **Discover** and
+   choose **Add** on **hexis-all** for everything you may read in one plugin
+   (every skill, and the knowledge base as an MCP server), or single plugins
+   for a subset. **Update** in Claude pulls what changed.
 
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
 from Claude resumes them. "Repository not found" or "GitHub access is
 required" on the marketplace means step 1 has not happened for your account.
+
+The same steps, with a screenshot of every screen, are on the **External agent
+access** page in the app. The registration half is shown to admins only.
 
 ## When connecting does not take
 
