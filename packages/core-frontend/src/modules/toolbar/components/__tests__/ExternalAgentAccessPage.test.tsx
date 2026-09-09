@@ -412,6 +412,32 @@ describe('the Marketplaces tab', () => {
     expect(snippets().some((v) => v === FACADE.privateKeyPem)).toBe(true);
   });
 
+  /**
+   * The invariant, across the one event that used to break it: credentials are
+   * in the DOM if and only if the drawer holding them is open. This subtree
+   * unmounts on a tab switch, and a fresh <details> comes back closed, so a
+   * React state that merely WATCHED the element went stale and put the secrets
+   * back into a closed drawer. Binding `open` as well is what makes the two
+   * impossible to disagree.
+   */
+  it('keeps the credentials and the drawer in step across a tab switch', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const drawer = () => screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    const secretShown = () => within(drawer()).queryByDisplayValue(FACADE.clientSecret) !== null;
+
+    await user.click(within(drawer()).getByText('Cowork and claude.ai'));
+    await within(drawer()).findByDisplayValue(FACADE.clientSecret);
+    expect(drawer().open).toBe(true);
+
+    await user.click(screen.getByRole('tab', { name: 'Your agent' }));
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+
+    expect(secretShown()).toBe(drawer().open);
+  });
+
   it('never asks the admin endpoint for credentials a non-admin cannot have', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);

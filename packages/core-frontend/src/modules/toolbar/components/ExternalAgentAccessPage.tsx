@@ -335,14 +335,19 @@ export function ExternalAgentAccessPage() {
               claude.ai fetch it as a repository once your account is connected.
             </p>
 
-            {/* `onToggle` because a closed <details> still MOUNTS its children:
-                without it, selecting this tab fetched the registration
-                credentials and put a client secret and a private key in the
-                DOM of a drawer nobody had opened. The drawer stays native
-                (uncontrolled); this only watches it. */}
+            {/* CONTROLLED, both attributes together. A closed <details> still
+                MOUNTS its children, so the registration credentials wait on
+                `coworkOpen` rather than loading a client secret and a private
+                key into a drawer nobody opened. Watching the element with
+                `onToggle` alone was not enough: this subtree unmounts on a tab
+                switch and the fresh <details> comes back closed while the
+                state stayed true, which put the secrets right back in a closed
+                drawer. With `open` bound too, the element cannot disagree with
+                the state that gates them. */}
             <details
               className="border border-line rounded"
               data-testid="cowork-section"
+              open={coworkOpen}
               onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
             >
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
