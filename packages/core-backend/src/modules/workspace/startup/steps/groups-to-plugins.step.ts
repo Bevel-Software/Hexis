@@ -229,7 +229,7 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // protected branches, never visits a draft. BEFORE the early returns: a
   // branch with both roots (refused below) or neither (nothing to migrate)
   // is no less stale. Idempotent: nothing to drop, nothing declared.
-  let changed = await retireIgnoreRootRules(repoDir, branch, details);
+  const changed = await retireIgnoreRootRules(repoDir, branch, details);
   const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ ignore rules`;
 
   if (hasLegacy && hasPlugins) {
@@ -264,11 +264,14 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // per-folder ops apply, the tree is already under `Plugins/`.
   const rootOnDisk = hasLegacy ? legacyDir : pluginsDir;
 
+  // Whether any MIGRATION op was declared — apart from the ignore retirement
+  // above, which is its own subject when it is all that happened.
+  let migrated = false;
   if (hasLegacy) {
     // The Groups→Plugins root rename is ONE declared op, directory and all.
     branch.move(LEGACY_GROUPS_DIR, PLUGINS_DIR);
     details.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
-    changed = true;
+    migrated = true;
   }
 
   // Runs whether or not the rename just happened, so a KB already on
@@ -283,16 +286,20 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
       details,
       refusals,
     );
-    changed = changed || folderChanged;
+    migrated = migrated || folderChanged;
   }
 
-  if (!changed) return;
+  if (!changed && !migrated) return;
   // First note becomes the commit subject — the same messages the lazy
-  // top-up committed under; the detail notes become its body.
+  // top-up committed under; the detail notes become its body. The subject
+  // names what happened: a branch that only lost its stale ignore rules
+  // was not reorganised.
   branch.note(
     hasLegacy
       ? `Move ${LEGACY_GROUPS_DIR}/ to ${PLUGINS_DIR}/ (Agent Plugins layout)`
-      : `Reorganise ${PLUGINS_DIR}/ to the Agent Plugins layout`,
+      : migrated
+        ? `Reorganise ${PLUGINS_DIR}/ to the Agent Plugins layout`
+        : retiredSubject,
   );
   for (const line of details) branch.note(line);
 }

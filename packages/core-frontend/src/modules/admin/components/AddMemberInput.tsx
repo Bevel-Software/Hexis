@@ -140,6 +140,16 @@ export function AddMemberInput({
   const setActive = (index: number) => setActiveEmail(suggestions[index]?.email ?? null);
   const optionId = (index: number) => `${listId}-option-${index}`;
 
+  // Focus never leaves the field, so the browser reveals nothing on its own:
+  // the active row is scrolled into the list's view as it changes, or a
+  // longer list than the popup holds would highlight a row nobody can see.
+  useEffect(() => {
+    if (activeIdx < 0) return;
+    document.getElementById(optionId(activeIdx))?.scrollIntoView?.({ block: 'nearest' });
+    // `optionId` is derived from `listId`, which is stable for the mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIdx, listId]);
+
   return (
     <div className={`flex items-center gap-1.5 ${className}`}>
       {/* The input is capped rather than fixed-width, and its wrapper may shrink,

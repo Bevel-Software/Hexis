@@ -150,6 +150,26 @@ describe('AddMemberInput', () => {
     expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
   });
 
+  it('scrolls the active row into the list as the arrows move it — focus stays in the field, so nothing else would', async () => {
+    vi.mocked(suggestPrincipals).mockResolvedValue(people(ALICE, PAT));
+    const scrolled = vi.fn();
+    const proto = window.HTMLElement.prototype as HTMLElement & { scrollIntoView?: (o?: unknown) => void };
+    const before = proto.scrollIntoView;
+    proto.scrollIntoView = scrolled;
+    try {
+      render(<Harness />);
+      const input = screen.getByRole('combobox', { name: 'Member email' });
+      await userEvent.type(input, 'al');
+      await screen.findByText('Alice Green');
+      await userEvent.keyboard('{ArrowDown}{ArrowDown}');
+      const pat = screen.getByRole('option', { name: /Pat Kim/ });
+      expect(scrolled).toHaveBeenCalledWith({ block: 'nearest' });
+      expect(scrolled.mock.instances.at(-1)).toBe(pat);
+    } finally {
+      proto.scrollIntoView = before;
+    }
+  });
+
   it('the active row follows the person, not the position, when the list refreshes underneath', async () => {
     vi.mocked(suggestPrincipals).mockResolvedValue(people(ALICE, PAT));
     const onSubmit = vi.fn();

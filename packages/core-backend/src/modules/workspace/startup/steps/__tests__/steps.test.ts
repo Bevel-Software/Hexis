@@ -963,6 +963,19 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       expect(log).toContain('.bevelignore: Groups/, Plugins/ dropped');
     });
 
+    it('names the commit for what happened: a migrated branch that only lost the rules was not reorganised', async () => {
+      await seedUpstream({
+        'Plugins/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore': 'Plugins/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+      expect(log.split('\n')[0]).toBe('Retire the stale Groups/ and Plugins/ ignore rules');
+      expect(log).not.toContain('Reorganise');
+    });
+
     it('retires the rules on a run that does not rename — a branch migrated by an earlier release, a draft included', async () => {
       // An earlier release renamed `Groups/` to `Plugins/` in the ignore file
       // of every branch it migrated; the template step retires that line on
