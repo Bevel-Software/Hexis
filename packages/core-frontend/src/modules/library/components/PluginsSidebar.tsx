@@ -294,7 +294,7 @@ export function PluginsSidebar({
           // is nobody's to answer, so it must not reach the nav behind it.
           onContextMenu={(e) => e.stopPropagation()}
         >
-          {tab('teams', 'Teams')}
+          {tab('teams', 'IdP Groups')}
           {tab('advanced', 'Advanced')}
         </div>
 
@@ -329,7 +329,6 @@ export function PluginsSidebar({
           hidden={view !== 'advanced'}
           className="flex flex-col gap-px"
         >
-            <TreesLabel onCreate={onCreatePlugin} />
             {/* The heading's `+` is hover-revealed, and a person with no
                 plugins yet is exactly the person who has not learned to hover
                 it. While the workspace holds no plugins AT ALL, the way to the
@@ -425,30 +424,5 @@ export function SectionLabel({
         </span>
       )}
     </div>
-  );
-}
-
-/**
- * The Advanced view's heading, and the one way to make a new plugin from
- * the nav — the prototype's `.lbladd` (line 78). It heads the trees because
- * a new plugin is a new folder under the second of them.
- */
-function TreesLabel({ onCreate }: { onCreate(): void }) {
-  return (
-    <SectionLabel
-      actions={
-        <button
-          type="button"
-          onClick={onCreate}
-          title="New plugin"
-          aria-label="New plugin"
-          className="flex size-4.5 items-center justify-center rounded-xs text-ui leading-none text-ink-faint hover:bg-hover hover:text-ink"
-        >
-          +
-        </button>
-      }
-    >
-      Files on disk
-    </SectionLabel>
   );
 }

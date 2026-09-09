@@ -62,9 +62,9 @@ describe('PluginsSidebar', () => {
   it('offers two views under the lenses — Teams by default — and lists no plugins of its own', () => {
     renderSidebar();
     const tabs = screen.getByRole('tablist', { name: 'Sidebar view' });
-    expect(within(tabs).getByRole('tab', { name: 'Teams' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tabs).getByRole('tab', { name: 'IdP Groups' })).toHaveAttribute('aria-selected', 'true');
     expect(within(tabs).getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'false');
-    expect(screen.getByRole('tabpanel', { name: 'Teams' })).toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'IdP Groups' })).toBeInTheDocument();
     expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
     expect(screen.queryByText('All plugins')).not.toBeInTheDocument();
     expect(screen.queryByText('Library')).not.toBeInTheDocument();
@@ -72,7 +72,7 @@ describe('PluginsSidebar', () => {
 
   it("leads the Teams view with the caller's own space, and lists it even when empty", () => {
     renderSidebar({ filter: { kind: 'ungrouped' }, ungroupedCount: 0 });
-    const panel = screen.getByRole('tabpanel', { name: 'Teams' });
+    const panel = screen.getByRole('tabpanel', { name: 'IdP Groups' });
     const own = within(panel).getByRole('button', { name: /^Juan's Plugin/ });
     const first = within(panel).getByRole('button', { name: /^Engineering/ });
     expect(own.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -93,11 +93,11 @@ describe('PluginsSidebar', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
     const panel = screen.getByRole('tabpanel', { name: 'Advanced' });
-    const heading = within(panel).getByText('Files on disk');
     const skills = within(panel).getByTestId('skills-tree');
     const plugins = within(panel).getByTestId('plugins-tree');
-    expect(heading.compareDocumentPosition(skills) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(skills.compareDocumentPosition(plugins) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // No heading over the trees: the tab already names the view.
+    expect(within(panel).queryByText('Files on disk')).toBeNull();
     expect(screen.queryByRole('button', { name: /^Engineering/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Juan's Plugin/ })).toBeNull();
     // The lenses belong to neither view and stay put.
@@ -115,12 +115,12 @@ describe('PluginsSidebar', () => {
     window.localStorage.removeItem('bevel-library-sidebar-view');
     cleanup();
     renderSidebar();
-    expect(screen.getByRole('tab', { name: 'Teams' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'IdP Groups' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('is one tab stop: the arrows move between the views and choose as they go, Home and End go to the ends', () => {
     renderSidebar();
-    const teams = screen.getByRole('tab', { name: 'Teams' });
+    const teams = screen.getByRole('tab', { name: 'IdP Groups' });
     const advanced = screen.getByRole('tab', { name: 'Advanced' });
     // Roving tabIndex: only the chosen tab is in the Tab order.
     expect(teams).toHaveAttribute('tabindex', '0');
@@ -194,14 +194,6 @@ describe('PluginsSidebar', () => {
     renderSidebar({ teams: [{ name: 'Everything', count: 1, urgent: 0 }] });
     const rows = screen.getAllByRole('button', { name: /^Everything/ });
     expect(rows).toHaveLength(2);
-  });
-
-  it("offers a way to make a plugin from the Advanced view's heading", () => {
-    const { onCreatePlugin } = renderSidebar();
-    expect(screen.queryByRole('button', { name: 'New plugin' })).toBeNull();
-    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
-    fireEvent.click(screen.getByRole('button', { name: 'New plugin' }));
-    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
   });
 
   it('spells out Create a plugin in the Advanced view when told the workspace is untouched — the `+` alone is hover-hidden', () => {
