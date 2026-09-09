@@ -18,7 +18,6 @@ import {
   MenuItem,
   MenuPanel,
   useDismissableMenu,
-  useModalLayer,
 } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
@@ -351,23 +350,16 @@ function AnchoredMenu({
   children: ReactNode;
 }) {
   const dismissable = onDismiss !== undefined;
-  // Callers pass a fresh `onDismiss` arrow each render, and the hook lists
-  // `onClose` in its effect deps: handed the arrow directly it would tear down
-  // and re-add its document listeners on every render of the open menu — each
-  // verb toggled in the checklist included. Mirror the arrow into a ref (the
-  // same shape `Dialog` uses for its `onClose`) and give the hook one stable
-  // callback, so it subscribes once for the life of the open menu.
-  const onDismissRef = useRef(onDismiss);
-  useEffect(() => {
-    onDismissRef.current = onDismiss;
-  }, [onDismiss]);
-  const close = useCallback(() => onDismissRef.current?.(), []);
+  // The hook owns both contracts this component used to carry by hand: it
+  // mirrors a fresh `onDismiss` arrow into a ref itself (so its document
+  // listeners subscribe once per open menu), and it registers the open menu
+  // as a modal layer (so Escape peels it before the Dialog hosting it, and
+  // one press never closes two layers).
   const panelRef = useDismissableMenu<HTMLDivElement>({
     open: dismissable,
-    onClose: close,
+    onClose: () => onDismiss?.(),
     returnFocusTo: triggerRef,
   });
-  useModalLayer(dismissable);
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useLayoutEffect(() => {

@@ -160,7 +160,7 @@ function roleKnown(roles: RolesIndex, canonicalRole: string): boolean {
  * nothing, bare grant tokens fall through to roles, and group-backed denies
  * drop (the owner's explicit degrade-loudly decision, NOT fail-closed). The
  * marker is carried on the loaded model and surfaced by the groups admin
- * endpoints so the Groups page can banner it.
+ * endpoints so the Groups & Members page can banner it.
  */
 export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: string };
 

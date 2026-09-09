@@ -997,7 +997,7 @@ export function createAccessRoutes(
   });
 
   // -------------------------------------------------------------------------
-  // Roles & Members (admin) — MEMBERSHIP editing on the DEFAULT-branch
+  // App roles (admin) — MEMBERSHIP editing on the DEFAULT-branch
   // roles.yaml. Roles are app-defined capabilities: there is deliberately NO
   // create/rename/delete route — the admin surface cannot mint, rebrand, or
   // retire a role (legacy people-set roles migrate out via convert-to-group).

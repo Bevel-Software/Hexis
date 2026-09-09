@@ -746,23 +746,28 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
   });
 
-  it('subscribes its document listeners once per open menu, not once per render', async () => {
+  it('a menu re-rendered with fresh callbacks still dismisses cleanly, once', async () => {
+    // The dismiss hook mirrors a fresh-per-render `onDismiss` arrow into a
+    // ref itself. Asserted through the surface a user sees: after re-renders
+    // of the OPEN menu (each verb toggle re-renders the dialog with new
+    // arrows), one Escape closes the menu — and only the menu, exactly once,
+    // with the dialog left standing.
     const user = userEvent.setup();
-    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
     const [addRowTrigger] = await screen.findAllByRole('button', { name: /^can edit$/i });
 
-    const addSpy = vi.spyOn(document, 'addEventListener');
     await user.click(addRowTrigger);
-    const mousedowns = () => addSpy.mock.calls.filter(([type]) => type === 'mousedown').length;
-    expect(mousedowns()).toBe(1);
-
-    // Toggling a verb re-renders the dialog with the menu still open. The
-    // dismiss hook lists `onClose` in its deps, so a fresh arrow per render
-    // would tear the listeners down and re-add them here.
+    // Two re-renders of the open menu with fresh callback identities.
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
     await user.click(screen.getByRole('button', { name: /^owner$/i }));
     expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
-    expect(mousedowns()).toBe(1);
-    addSpy.mockRestore();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
+    // The dialog is still up: the menu's layer owned that Escape.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
   it('the trigger itself still toggles: one click opens, a second closes', async () => {

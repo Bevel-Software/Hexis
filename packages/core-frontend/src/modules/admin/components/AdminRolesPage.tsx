@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Loader2, UsersRound, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
+import { useLatestRef } from '../../../shared/components/useLatestRef';
 import { useAdmin } from '../state/admin.context';
 import {
   addMember,
@@ -47,7 +48,7 @@ export function AdminRolesPage() {
 
   // Bump on every load so a stale in-flight response never overwrites the
   // current roster. (The initial fetch does NOT go through the exclusive
-  // runner, so — unlike the Groups page — a mutation response can still race
+  // runner, so — unlike the Groups & Members page — a mutation response can still race
   // it; the bump in applyRoster is what drops the superseded load.)
   const requestId = useRef(0);
 
@@ -154,7 +155,7 @@ function RoleCard({
 
   // Add-member input + people autocomplete (same suggest source as Manage
   // Access, scoped to people/emails — a role's members are emails). The
-  // suggestion mechanics live in AddMemberInput, shared with the Groups page;
+  // suggestion mechanics live in AddMemberInput, shared with the Groups & Members page;
   // the submit rules below stay here.
   const [memberEmail, setMemberEmail] = useState('');
 
@@ -554,10 +555,7 @@ function ConfirmDialog({
   const panelRef = useRef<HTMLDivElement>(null);
   // Latest onCancel without re-running the mount effect on every parent render
   // (the parent passes a fresh closure each time, e.g. when `busy` flips).
-  const onCancelRef = useRef(onCancel);
-  useEffect(() => {
-    onCancelRef.current = onCancel;
-  }, [onCancel]);
+  const onCancelRef = useLatestRef(onCancel);
 
   // Real modal behaviour: hand focus to the dialog on open, restore it to the
   // trigger on close, close on Escape, and trap Tab/Shift+Tab inside the panel
@@ -600,7 +598,8 @@ function ConfirmDialog({
       document.removeEventListener('keydown', onKeyDown, true);
       previouslyFocused?.focus?.();
     };
-  }, []);
+    // The ref is stable for the component's life; listed for the linter.
+  }, [onCancelRef]);
 
   return (
     <div

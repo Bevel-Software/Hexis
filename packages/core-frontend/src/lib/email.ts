@@ -1,6 +1,6 @@
 /**
  * ONE email-validation rule for every access/admin surface (Manage Access,
- * Roles & Members, Groups). Mirrors the backend's `EMAIL_REGEX`
+ * App roles, Groups). Mirrors the backend's `EMAIL_REGEX`
  * (access-control.service.ts): no whitespace, no `<`/`>` (angle-bracket
  * forms like `Name <a@b.c>` are a different grammar), and exactly one `@`.
  *

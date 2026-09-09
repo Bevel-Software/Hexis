@@ -2412,7 +2412,7 @@ export class WorkflowService implements IWorkflowService {
     // roles.yaml differs from the base branch's, we restore the base version on
     // the source branch (commit + push) BEFORE merging, so the merged diff
     // carries no roles.yaml change. roles.yaml is mutable ONLY via the admin
-    // Roles & Members surface (itself admin-gated). The rest of the CR merges
+    // App roles surface (itself admin-gated). The rest of the CR merges
     // normally. Best-effort by design is NOT acceptable here — a failure to
     // neutralise must abort the merge, never fall through.
     const preserved = await this.preserveBaseRolesYaml(number, user, baseBranch);

@@ -322,7 +322,7 @@ export interface IAccessControl {
 
   /**
    * Validate a candidate `roles.yaml` text against the resolver's OWN loader,
-   * WITHOUT writing it. The single safety gate behind the admin Roles & Members
+   * WITHOUT writing it. The single safety gate behind the admin App roles
    * surface: `roles.yaml` has no admin-rescue and `loadModel` hard-throws on a
    * parse failure (which `isAdmin` swallows into `false` for everyone), so a
    * malformed write would be a permanent, app-wide, in-app-unrecoverable admin

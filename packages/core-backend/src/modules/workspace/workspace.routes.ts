@@ -877,7 +877,7 @@ export function createWorkspaceRoutes(
     try {
       // Refuse a hand-edit that would leave roles.yaml unparseable BEFORE any
       // byte hits disk — a broken roles.yaml is an app-wide admin lockout
-      // (loadModel hard-throws). The dedicated Roles & Members surface has its
+      // (loadModel hard-throws). The dedicated App roles surface has its
       // own validate gate; this covers the raw-text editor path.
       if (isRolesYamlPath(filePath, kbDirName)) assertRolesYamlParsable(content);
       // Creator read grant: a brand-new file at a spot whose access chain
