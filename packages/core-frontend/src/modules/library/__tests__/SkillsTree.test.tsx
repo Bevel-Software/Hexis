@@ -101,9 +101,31 @@ describe('SkillsTree', () => {
     );
   });
 
-  it('renders nothing when the tree has no Skills root — no folder over nothing', () => {
+  it('draws the Skills folder even when the knowledge base has none yet, and creates it on first use', () => {
     const noSkills = dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
-    renderTree('/skills-and-tools', { fileTree: noSkills });
+    const createDirectory = vi.fn().mockResolvedValue(undefined);
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderTree('/skills-and-tools', { fileTree: noSkills, createDirectory, dispatchUpload });
+    // The row is there, empty: no caret, nothing beneath it.
+    const skills = row('Skills');
+    expect(skills).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Engineering' })).not.toBeInTheDocument();
+
+    // A new scope goes to the folder's future path — the write creates it.
+    fireEvent.click(screen.getByRole('button', { name: 'New folder in Skills' }));
+    const input = screen.getByPlaceholderText('folder name');
+    fireEvent.change(input, { target: { value: 'Marketing' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
+
+    // So does a drop.
+    const dropped = new File(['x'], 'SKILL.md');
+    fireEvent.drop(skills, { dataTransfer: { getData: () => '', items: undefined, files: [dropped] } });
+    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+  });
+
+  it('renders nothing while the tree has not loaded', () => {
+    renderTree('/skills-and-tools', { fileTree: null });
     expect(screen.queryByText('Skills')).not.toBeInTheDocument();
   });
 

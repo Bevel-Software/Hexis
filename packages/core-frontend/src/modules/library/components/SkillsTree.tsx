@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { DEFAULT_BRANCH, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { findKbRoot } from '../../workspace/utils/fileTree';
 import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
@@ -36,9 +36,12 @@ import {
  *  - The current row is the file the URL names, not the pane workspace's
  *    open tab, which the Library never sets.
  *
- * Renders nothing while the tree is loading or when the caller can read no
- * part of the root — an empty Skills folder would be a question, not a
- * section.
+ * Renders nothing only while the tree is loading. Once it is here the Skills
+ * folder is always drawn — empty when the knowledge base has none yet, at
+ * the path it will get — because the folder is where new shared skills go,
+ * and a person cannot put one there if the way there is not on screen. The
+ * reserved root is forced visible by the tree filter even to a reader who
+ * may open nothing beneath it, so the row is present for everyone.
  */
 export function SkillsTree() {
   const { kbDirName } = useWorkspace();
@@ -46,9 +49,17 @@ export function SkillsTree() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const root = useMemo(() => {
-    const kids = findKbRoot(tree)?.children;
-    return kids?.find((c) => c.type === 'directory' && c.name === SKILLS_DIR) ?? null;
+  const root = useMemo((): FileTreeEntry | null => {
+    const kbRoot = findKbRoot(tree);
+    if (!kbRoot) return null;
+    const found = kbRoot.children?.find((c) => c.type === 'directory' && c.name === SKILLS_DIR);
+    if (found) return found;
+    // No `Skills/` folder yet (a knowledge base from before the root existed,
+    // or one whose folder was removed): the row is drawn anyway, empty, at
+    // the path the folder will have. Every write creates its parents, so
+    // the first drop, file or scope made here creates the folder itself.
+    const base = kbRoot.relativePath === '.' ? '' : `${kbRoot.relativePath}/`;
+    return { name: SKILLS_DIR, relativePath: `${base}${SKILLS_DIR}`, type: 'directory', children: [] };
   }, [tree]);
 
   const nav = useMemo<TreeNav>(
