@@ -68,9 +68,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # `GET /api/health` reports this sha; the compose file's comment
-          # about the GIT_SHA build arg is pointing at exactly this line.
+          # `GET /api/health` reports this sha. One build arg, named as Coolify
+          # names the checked-out commit, so a from-source deploy and this
+          # publish feed the Dockerfile the same way.
           build-args: |
-            GIT_SHA=${{ github.sha }}
+            SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

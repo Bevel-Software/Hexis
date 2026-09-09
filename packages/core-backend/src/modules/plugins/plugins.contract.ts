@@ -33,6 +33,8 @@
  * change requests; only the UI dresses them up.
  */
 
+export type { PluginMembership } from '../skills/skills.contract.js';
+
 /** Access-rule principals as the resolver hands them back. */
 export interface ResolvedPrincipals {
   roles: string[];
@@ -45,10 +47,14 @@ export interface ResolvedReaders extends ResolvedPrincipals {
 
 /** One plugin as `GET /api/plugins` reports it, resolved for ONE caller. */
 export interface PluginSummary {
-  /** Plugin folder name, e.g. `GTM`. */
+  /** The plugin's identity — its manifest name, e.g. `gtm`. */
   name: string;
+  /** What a person sees it called, e.g. `GTM`. */
+  displayName: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /** Whether this platform writes the plugin's links — see `PluginCatalogEntry`. */
+  linksAreManaged: boolean;
   /**
    * Per-caller: the caller can read the FOLDER (membership). Every returned
    * plugin has at least one of `canRead` / `canWrite` / discoverability; a
@@ -71,6 +77,16 @@ export interface PluginSummary {
   /** Caller-INDEPENDENT total (the plugin's whole content, not the caller's slice). */
   skillCount: number;
   toolCount: number;
+  /**
+   * Caller-INDEPENDENT: how many of the plugin's LINKED skills its members
+   * cannot read — the link is in the manifest, but the skill folder no
+   * longer grants the plugin's readers. Counted here, from the unfiltered
+   * link index, because the people who most need the warning are the
+   * plugin's managers, and they are exactly the people a missing grant
+   * locks out: a count derived from what the caller can read would be zero
+   * for them. Zero for a plugin whose links are not managed here.
+   */
+  brokenLinks: number;
   /** For display: "Run by …" (fallback chain: owners → writers → 'the workspace admins'). */
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
@@ -90,10 +106,21 @@ export interface PluginSummary {
  * appears at all) are resolved per request in the route.
  */
 export interface PluginCatalogEntry {
+  /** The plugin's identity — its manifest name. */
   name: string;
+  /** What a person sees it called — the manifest's `displayName`, else the folder name. */
+  displayName: string;
   folders: string[];
+  /**
+   * Whether this platform writes the plugin's links (a native `plugin.json`)
+   * — false for a plugin read from an external format, whose links are
+   * edited in that repository and which the link endpoints refuse.
+   */
+  linksAreManaged: boolean;
   skillCount: number;
   toolCount: number;
+  /** Linked skills the members cannot read — see `PluginSummary.brokenLinks`. */
+  brokenLinks: number;
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;

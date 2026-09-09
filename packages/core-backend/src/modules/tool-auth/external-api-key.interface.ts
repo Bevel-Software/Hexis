@@ -22,6 +22,12 @@ declare global {
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
+  /**
+   * What the key was minted AS — `key` for one a person created by hand,
+   * another kind for one a flow minted on their behalf (a Claude link).
+   * Stored with the row; the label is the person's to edit and proves nothing.
+   */
+  kind: string;
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
@@ -35,6 +41,34 @@ export interface ExternalApiKeySummary {
 export interface MintedExternalApiKey {
   plaintext: string;
   summary: ExternalApiKeySummary;
+}
+
+/** The kind of a key a person creates by hand. */
+export const DEFAULT_KEY_KIND = 'key';
+
+/**
+ * How the plaintext of one kind of key is spelled: the prefix the outside
+ * world sees (and that routes the bearer back here), and the shape of the
+ * random part after it. `base64url` is the platform's own — 43 characters
+ * from a 32-byte draw. `github-token` is what a GitHub OAuth token looks
+ * like after its `gho_`: letters and digits only, 40 of them, so a consumer
+ * that validates the shape of a GitHub token (they are documented as
+ * alphanumeric) keeps it. Both hash the same way; the shape is only what a
+ * client is shown.
+ */
+export interface KeyKindSpec {
+  prefix: string;
+  shape?: 'base64url' | 'github-token';
+}
+
+/**
+ * How a key is minted. `kind` names one of the kinds the service was built
+ * with, each of which carries its own spelling (the tenant's prefix for the
+ * default kind, a GitHub-shaped token for a Claude link); an unknown kind is
+ * refused, since nothing would route its bearer back.
+ */
+export interface MintOptions {
+  kind?: string;
 }
 
 /**
@@ -59,7 +93,7 @@ export interface IExternalApiKeyService {
    * plaintext is **only** returned here — there is no read path that can
    * surface it again.
    */
-  mint(userId: string, label: string): Promise<MintedExternalApiKey>;
+  mint(userId: string, label: string, options?: MintOptions): Promise<MintedExternalApiKey>;
 
   /**
    * Resolve a plaintext token to the owning user. Returns null when the

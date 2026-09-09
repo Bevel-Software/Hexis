@@ -7,11 +7,13 @@ import path from 'node:path';
 import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
+import { PluginManifestsStep } from '../plugin-manifests.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
+import { DEFAULT_KB_LAYOUT, configureKbLayout, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 
 const execFileAsync = promisify(execFile);
 
@@ -54,6 +56,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  configureKbLayout({ ...DEFAULT_KB_LAYOUT });
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -109,8 +112,9 @@ async function exists(dir: string, rel: string): Promise<boolean> {
 
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
 
+/** The template as the step writes it under the default layout — placeholders rendered. */
 async function template(name: string): Promise<string> {
-  return fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8');
+  return renderKbLayoutPlaceholders(await fs.readFile(path.join(TEMPLATE_DIR, name), 'utf8'), DEFAULT_KB_LAYOUT);
 }
 
 /** Every required file + reserved root already present, from the real template. */
@@ -122,6 +126,7 @@ async function fullScaffold(): Promise<Record<string, string>> {
     '.gitignore': await template('gitignore.template'),
     'KnowledgeBase/.gitkeep': '',
     'Plugins/.gitkeep': '',
+    'Skills/.gitkeep': '',
   };
 }
 
@@ -144,10 +149,39 @@ describe('TemplateFilesStep', () => {
       // Reserved roots materialize as <dir>/.gitkeep.
       expect(await exists(dir, 'KnowledgeBase/.gitkeep')).toBe(true);
       expect(await exists(dir, 'Plugins/.gitkeep')).toBe(true);
+      expect(await exists(dir, 'Skills/.gitkeep')).toBe(true);
       const subject = (await git(dir, ['log', '--format=%s', '-1'])).trim();
       expect(subject).toMatch(/^Add missing KB scaffolding: /);
       expect(subject).toContain('.gitignore');
     }
+  });
+
+  it('renders the managed files with the deployment\'s own root names', async () => {
+    // A deployment that renamed its roots must hand the agent a guide naming
+    // the folders it will find, and an ignore file hiding the real ones.
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+    expect(agents).toContain('plugins/<Plugin>/plugin.json');
+    expect(agents).toContain('`docs/`');
+    expect(agents).not.toContain('{{');
+    expect(agents).not.toContain('KnowledgeBase/');
+    const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    // Both roots stay VISIBLE, whatever they are called: the Skills & Tools
+    // sidebar reads each from the workspace tree.
+    expect(ignore).not.toContain('plugins/');
+    expect(ignore).not.toContain('skills/');
+    expect(ignore).not.toContain('Plugins/');
+    expect(ignore).toContain('roles.yaml');
+    expect(await exists(dir, 'docs/.gitkeep')).toBe(true);
+
+    // And a second boot sees the rendered guide as current: no churn commit.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + scaffolding
   });
 
   it('replaces a drifted AGENTS.md, and says so when that is the only change', async () => {
@@ -184,20 +218,199 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).toContain('MyStuff/'); // the operator's rules survive
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
+    expect(lines).not.toContain('Skills/'); // never the skills root — the Library's tree needs it
   });
 
-  it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
-    // Appending the positive rule after the negation would WIN under ordered
-    // matching and silently defeat the operator's stated choice to show it.
+  it('drops the Skills/ rule an earlier release appended, and its comment, keeping every other rule', async () => {
+    // A knowledge base whose ignore file was topped up by the release that
+    // hid the skills root: the platform's comment + line sit at the end. The
+    // Skills & Tools sidebar reads that root from the workspace tree now, so
+    // the rule comes out exactly as it went in — nothing of the operator's moves.
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\n';
+    scaffold['.bevelignore'] =
+      '# mine\n.git/\nAGENTS.md\nPlugins/\n\n# Added by the platform: the conventions doc is not node content.\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    // The plugins-root rule goes with it — the same sidebar draws that root now.
+    expect(text).toBe('# mine\n.git/\nAGENTS.md\n');
+    // Idempotent: a second boot has nothing to change.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
+  });
+
+  it("drops the template's own Skills/ rule from a KB seeded by that release, comment included — whatever root the comment named", async () => {
+    // The previous template listed the rule under its own explanatory line,
+    // ending with the plugins root's name of the day; a deployment may have
+    // renamed that root since, so the line is known by its opening.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
+  });
+
+  it('recognises the legacy comment for a renamed plugins root with a space in its name', async () => {
+    // The name between the fixed opening and closing is judged by the one
+    // root-name rule the platform has, so every name it could have rendered
+    // there is recognised — and nothing a root cannot be called is.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like My Plugins/.\nSkills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
+  });
+
+  it("keeps an operator's Skills/ rule whose own comment merely opens like the platform's", async () => {
+    // Provenance is the platform's EXACT comment. A comment that begins the
+    // same way and goes on differently was never written by the platform.
+    const scaffold = await fullScaffold();
+    const text =
+      'AGENTS.md\n# The shared-skills root is rendered by the Skills & Tools app, and I hide it anyway\nSkills/\n';
+    scaffold['.bevelignore'] = text;
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(text);
+  });
+
+  it("keeps a Skills/ rule the operator wrote themselves — provenance is the platform's comment", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\n# I hide skills on purpose\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      '# operator wants the doc visible\n!AGENTS.md\n',
+      'AGENTS.md\n# I hide skills on purpose\nSkills/\n',
+    );
+  });
+
+  it('drops EVERY Plugins/ rule, whoever wrote it — the sidebar draws that root now, and the seed left no comment to know it by', async () => {
+    // The first template ever seeded hid the plugins root as a bare line at
+    // the end of the file, so provenance cannot tell the platform's copy
+    // from an operator's; both would empty the Plugins tree, and both go.
+    // One under the platform's own comment loses the comment with it; a
+    // `!Plugins/` negation is not the rule and stays.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      '# mine\nAGENTS.md\nPlugins/\nMy-Own-Rule/\n# Added by the platform: the conventions doc is not node content.\nPlugins/\n!Plugins/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text).toBe('# mine\nAGENTS.md\nMy-Own-Rule/\n!Plugins/\n');
+    // Idempotent: a second boot has nothing to change.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
+  });
+
+  it("declares a custom template's ignore file without the Plugins/ rule it still ships", async () => {
+    // A distribution's own template may still carry the rule the packaged
+    // one dropped; a KB seeded from it must not start out hiding the root.
+    const customTemplate = path.join(root, 'custom-template-plugins-rule');
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, '.bevelignore'), '.git/\nAGENTS.md\n\nPlugins/\n');
+    await seedUpstream({ 'marker.txt': 'seeded' });
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    expect(lines).not.toContain('Plugins/');
+    expect(lines).toContain('AGENTS.md');
+  });
+
+  it('seeds a binary template file byte for byte and keeps a script executable — text is what decodes', async () => {
+    const customTemplate = path.join(root, 'custom-template-bytes');
+    // The packaged template as a base, plus two files it does not ship.
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.mkdir(path.join(customTemplate, 'assets'), { recursive: true });
+    await fs.mkdir(path.join(customTemplate, 'scripts'), { recursive: true });
+    // Not UTF-8, and holding a NUL: text by no reading of the bytes. A
+    // name-based rule once sent this through the decoder and changed it.
+    const binary = Buffer.from([0x89, 0x50, 0x00, 0xff, 0xfe, 0x7b, 0x7b, 0x7d, 0x7d]);
+    await fs.writeFile(path.join(customTemplate, 'assets', '.logo.bin'), binary);
+    await fs.writeFile(path.join(customTemplate, 'scripts', 'run.sh'), '#!/bin/sh\necho {{skillsDir}}\n', { mode: 0o755 });
+    // The empty-remote seed is the one path that copies a whole template.
+    const dir = path.join(root, 'seeded-bytes');
+    await fs.mkdir(dir, { recursive: true });
+    await buildSeedTree(customTemplate, [], ['admin@example.com'])(dir);
+
+    expect(await fs.readFile(path.join(dir, 'assets', '.logo.bin'))).toEqual(binary);
+    expect(norm(await fs.readFile(path.join(dir, 'scripts', 'run.sh'), 'utf8'))).toBe('#!/bin/sh\necho Skills\n');
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(path.join(dir, 'scripts', 'run.sh'))).mode & 0o111).not.toBe(0);
+    }
+  });
+
+  it("declares a custom template's ignore file without the stale Skills/ rule it still ships", async () => {
+    // A KB with NO ignore file gets the template's copy — and a distribution's
+    // template may still carry the rule the previous release had. The on-disk
+    // reconciliation never runs on an absent file, so the declared content
+    // must arrive already reconciled.
+    const customTemplate = path.join(root, 'custom-template-stale');
+    await fs.mkdir(customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    await fs.writeFile(
+      path.join(customTemplate, '.bevelignore'),
+      '# custom\nMyStuff/\n# The shared-skills root is rendered by the Skills & Tools app, like {{pluginsDir}}/.\n{{skillsDir}}/\n',
+      'utf8',
+    );
+    const scaffold = await fullScaffold();
+    delete scaffold['.bevelignore'];
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text).toContain('MyStuff/');
+    expect(text.split('\n').map((l) => l.trim())).not.toContain('Skills/');
+    expect(text).not.toContain('shared-skills root');
+  });
+
+  it("leaves an operator's !Skills/ negation alone — there is nothing of the platform's to remove", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\n!Skills/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n!Skills/\n');
+  });
+
+  it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
+    // Appending the positive rule after the negation would WIN under ordered
+    // matching and silently defeat the operator's stated choice to show it.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n',
     );
   });
 
@@ -294,8 +507,51 @@ describe('buildSeedTree', () => {
     expect(await fs.readFile(path.join(dest, 'docs/guide.md'), 'utf8')).toBe('guide');
     expect(await fs.readFile(path.join(dest, 'access.md'), 'utf8')).toBe('policy');
     // The generated paths — what the runner force-adds past a template .gitignore.
-    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'roles.yaml']);
+    expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
+  });
+});
+
+describe('PluginManifestsStep', () => {
+  it('writes plugin.json into legacy plugin folders on every branch, and leaves scopes and real plugins alone', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Legacy shapes: access.md only; mcp.json only; a bare skill tree.
+      'Plugins/GTM/access.md': '---\n---\nread:\n  - everyone\n',
+      'Plugins/GTM/outreach/SKILL.md': '---\ndescription: x\n---\n',
+      'Plugins/Servers/mcp.json': '{"mcpServers":{}}',
+      'Plugins/Bare/deploy/SKILL.md': '---\ndescription: y\n---\n',
+      // Already a plugin, both shapes.
+      'Plugins/Modern/plugin.json': '{"name":"modern"}',
+      'Plugins/functional/cluster/example/plugin.bundle.json': '{"name":"example"}',
+      // A scope with rules of its own above a bundle: not a plugin.
+      'Plugins/functional/access.md': '---\n---\nread:\n  - everyone\n',
+      // Nothing plugin-shaped at all.
+      'Plugins/notes/README.md': 'just a folder',
+    });
+
+    await makeRunner([new PluginManifestsStep()]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      for (const legacy of ['GTM', 'Servers', 'Bare']) {
+        const manifest = JSON.parse(await fs.readFile(path.join(dir, `Plugins/${legacy}/plugin.json`), 'utf8'));
+        expect(manifest.name).toBe(legacy.toLowerCase());
+      }
+      expect(await exists(dir, 'Plugins/functional/plugin.json')).toBe(false);
+      expect(await exists(dir, 'Plugins/notes/plugin.json')).toBe(false);
+      expect(await fs.readFile(path.join(dir, 'Plugins/Modern/plugin.json'), 'utf8')).toBe('{"name":"modern"}');
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Add plugin manifests to 3 legacy plugin folders');
+    expect(log).toContain('Plugins/GTM: plugin.json written');
+
+    // Idempotent: nothing left to write on the next boot.
+    await makeRunner([new PluginManifestsStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one migration commit
   });
 });
 
@@ -337,10 +593,11 @@ describe('GroupsToPluginsStep', () => {
       expect(mcp.mcpServers.notion).toEqual({ type: 'streamable-http', url: 'https://mcp.notion.com/mcp' });
       const manifest = JSON.parse(await fs.readFile(path.join(dir, 'Plugins/GTM/plugin.json'), 'utf8'));
       expect(manifest.name).toBe('gtm');
-      // The rename's companion edit: the stale ignore rule now names Plugins/.
+      // The rename's companion edit: the stale ignore rule is retired — and
+      // not replaced, since the plugins root is drawn by the sidebar now.
       const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
-      expect(ignore).toContain('Plugins/');
       expect(ignore).not.toContain('Groups/');
+      expect(ignore.split('\n').map((l) => l.trim())).not.toContain('Plugins/');
     }
 
     const dir = await checkout(DEFAULT_BRANCH);
@@ -581,7 +838,7 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
   });
 
   describe('the .bevelignore root rule', () => {
-    it('follows the rename, preserving every other line', async () => {
+    it('retires the rule with the rename — nothing takes its place — preserving every other line', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
         '.bevelignore': '# mine\nGroups/\nMy-Own-Rule/\n',
@@ -589,48 +846,67 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
       const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
-      expect(ignore.split('\n')).toContain('Plugins/');
-      expect(ignore).not.toContain('Groups/');
-      expect(ignore).toContain('# mine');
-      expect(ignore).toContain('My-Own-Rule/');
+      expect(ignore).toBe('# mine\nMy-Own-Rule/\n');
     });
 
-    it('rewrites EVERY exact Groups/ line — the first becomes Plugins/, duplicates are dropped', async () => {
+    it('drops EVERY exact Groups/ line, keeping the lines between them', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
         '.bevelignore': 'Groups/\n# keep\nGroups/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n');
-      expect(lines.filter((l) => l.trim() === 'Plugins/')).toHaveLength(1);
-      expect(lines.filter((l) => l.trim() === 'Groups/')).toHaveLength(0);
-      expect(lines).toContain('# keep');
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# keep\n');
     });
 
-    it('is left alone when Plugins/ is already listed', async () => {
+    it('retires a Plugins/ line beside it too — both root rules are stale for the same reason', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
-        '.bevelignore': 'Groups/\nPlugins/\n',
+        '.bevelignore': '# mine\nGroups/\nPlugins/\n!Plugins/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      // The stale line is harmlessly dead; deleting it would be editing the
-      // operator's file beyond what the rename made stale.
-      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\nPlugins/\n');
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n!Plugins/\n');
     });
 
-    it('is not touched by a run that does not rename', async () => {
+    it('retires the rules on a run that does not rename — a branch migrated by an earlier release, a draft included', async () => {
+      // An earlier release renamed `Groups/` to `Plugins/` in the ignore file
+      // of every branch it migrated; the template step retires that line on
+      // the protected branches only, so this step does it wherever it goes.
       await seedUpstream({
         'Plugins/GTM/access.md': 'write:\n  - Admin\n',
         'Plugins/GTM/outreach/SKILL.md': '# Outreach\n',
-        '.bevelignore': 'Groups/\n',
+        '.bevelignore': 'AGENTS.md\nPlugins/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\n');
-      // The run still reorganised the folder — the rule alone was off-limits.
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
       expect(await exists(dir, 'Plugins/GTM/skills/outreach/SKILL.md')).toBe(true);
+      // Idempotent: a second run declares nothing.
+      await migrate();
+      expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
+    });
+
+    it("takes a platform comment above a stale rule with it, and the blank line that opened the block — the template step's own tidy-up, on a branch it never visits", async () => {
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore':
+          '# mine\n.git/\n\n# Added by the platform: the conventions doc is not node content.\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nGroups/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n.git/\n');
+    });
+
+    it('fails the run when the ignore file cannot be read — a hole is not "no file"', async () => {
+      // A directory where the file should be: readable as neither. Treating
+      // that as absence would leave a possible `Plugins/` rule in place and
+      // report the migration done.
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore/keep': '',
+      });
+      await expect(migrate()).rejects.toThrow(/EISDIR/);
     });
   });
 });

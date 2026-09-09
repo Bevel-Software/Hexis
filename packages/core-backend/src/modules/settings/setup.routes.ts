@@ -17,6 +17,18 @@ import '../auth/auth.middleware.js'; // Express Request augmentation
 const execFileAsync = promisify(execFile);
 
 /**
+ * The slice of a sync record the status endpoint publishes. Declared here
+ * rather than imported from `kb-sync` so this module stays free of that one;
+ * the composition root hands in something that satisfies it.
+ */
+export interface LastSyncStatus {
+  at: number;
+  by: string;
+  status: 'synced' | 'partial';
+  results: Array<{ branch: string; outcome: string; error?: string }>;
+}
+
+/**
  * First-run setup — the deployment's own configuration, for the things that
  * used to be environment-only.
  *
@@ -37,6 +49,17 @@ export function createSetupRoutes(
    * would race.
    */
   kbStartupRunner: { runAll(): Promise<void> },
+  /**
+   * The remote-sync facts the Deployment page shows beside the sync secret:
+   * the address a webhook or pipeline must call, and what the last call did.
+   * Optional so a minimal mount (tests, a distribution without the module)
+   * simply omits them from the status.
+   */
+  sync?: {
+    /** `<PUBLIC_BACKEND_URL>/api/sync` — the reader appends `/<branch>`. */
+    url: string;
+    lastSync(): LastSyncStatus | null;
+  },
 ): express.Router {
   const router = express.Router();
 
@@ -101,6 +124,7 @@ export function createSetupRoutes(
       isAdmin: true,
       settings: settings.describe(),
       ...(kbInitFailed ? { kbInitError } : {}),
+      ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
   });
 

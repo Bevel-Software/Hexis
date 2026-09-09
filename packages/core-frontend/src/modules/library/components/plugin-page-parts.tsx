@@ -7,6 +7,7 @@ import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
 import type { LibraryItem } from '../state/library-data';
 import { removeLibraryItem } from '../services/library.api';
+import { unlinkSkill } from '../services/plugins.api';
 import { LibraryCard } from './LibraryCard';
 
 /**
@@ -19,12 +20,12 @@ import { LibraryCard } from './LibraryCard';
  * promise drift the first time either is touched.
  */
 
-/** `All plugins › {name}` — the page's place in the Library, and the way back. */
+/** `Everything › {name}` — the page's place in the Library, and the way back. */
 export function PluginBreadcrumb({ name }: { name: string }) {
   return (
     <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
       <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-        All plugins
+        Everything
       </Link>
       <span aria-hidden="true">›</span>
       <span aria-current="page" className="truncate text-ink-muted">
@@ -111,6 +112,7 @@ export function CardGrid({
   items,
   onOpen,
   onRemove,
+  canRemove,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
@@ -121,6 +123,12 @@ export function CardGrid({
    * card is one <button>, and a button inside a button is not HTML.
    */
   onRemove?(item: LibraryItem): void;
+  /**
+   * Per item, whether the verb would succeed — a link into a plugin whose
+   * links live in an external format cannot be removed here. Absent: every
+   * item. A verb the server would refuse is not offered.
+   */
+  canRemove?(item: LibraryItem): boolean;
 }) {
   return (
     <div
@@ -156,6 +164,7 @@ export function CardGrid({
             owned={item.owned}
             status={item.status}
             version={item.version}
+            lifecycle={item.lifecycle}
             pending={
               item.pending && {
                 authorName: item.pending.authorName,
@@ -167,7 +176,7 @@ export function CardGrid({
         );
         // A pending proposal is not IN the place yet — there is nothing to
         // remove; declining it lives with the review.
-        if (!onRemove || item.pending) return card;
+        if (!onRemove || item.pending || (canRemove && !canRemove(item))) return card;
         return (
           // `grid`, not a plain block: the wrapper takes the card's place as
           // the grid item, and only a grid (or flex) container stretches its
@@ -199,16 +208,24 @@ export function CardGrid({
  * The "are you sure" a removal deserves: deleting a skill or tool from a
  * plugin takes it from EVERYONE in the plugin, not from a personal shelf, and
  * there is no undo shortcut — the content survives only in git history.
+ *
+ * A LINKED skill is the other case: it lives elsewhere and the plugin only
+ * points at it, so "remove" means unlink — the manifest entry and the
+ * plugin's grant go, the skill stays where it is. Sending a link through the
+ * delete path would delete a shared skill (or be refused by its own rules).
  */
 export function RemoveLibraryItemDialog({
   item,
   place,
+  linked = false,
   onClose,
   onRemoved,
 }: {
   item: LibraryItem;
   /** Where it is being removed from, for the copy: a plugin name, or "your space". */
   place: string;
+  /** The item is in `place` by LINK — remove the link, not the item. `place` is then the plugin. */
+  linked?: boolean;
   onClose(): void;
   /** Fired after the delete lands; the host page reloads and says so. */
   onRemoved(): void;
@@ -221,7 +238,8 @@ export function RemoveLibraryItemDialog({
     setBusy(true);
     setError(null);
     try {
-      await removeLibraryItem(item.path);
+      if (linked) await unlinkSkill(place, item.path);
+      else await removeLibraryItem(item.path);
       onRemoved();
       onClose();
     } catch (err) {
@@ -236,7 +254,7 @@ export function RemoveLibraryItemDialog({
     <Dialog
       open
       onClose={onClose}
-      title={`Remove ${item.name}?`}
+      title={linked ? `Unlink ${item.name}?` : `Remove ${item.name}?`}
       size="md"
       busy={busy}
       footer={
@@ -245,15 +263,17 @@ export function RemoveLibraryItemDialog({
             Cancel
           </Button>
           <Button variant="danger" onClick={() => void remove()} disabled={busy}>
-            {busy ? 'Removing…' : 'Remove'}
+            {busy ? (linked ? 'Unlinking…' : 'Removing…') : linked ? 'Unlink' : 'Remove'}
           </Button>
         </>
       }
     >
       <p className="text-ui text-ink-muted">
-        {item.kind === 'skill'
-          ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
-          : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
+        {linked
+          ? `This removes the link from ${place}. The skill itself stays where it lives; ${place}'s members stop seeing it here.`
+          : item.kind === 'skill'
+            ? `This deletes the skill and its files from ${place}. Everyone here loses it the next time their agent connects.`
+            : `This deletes the tool and its connection settings from ${place}. Skills here that need it will ask for setup again.`}
       </p>
       {error && (
         <Banner tone="danger" role="alert" className="mt-3">
@@ -276,6 +296,7 @@ export function PluginItemSections({
   toolItems,
   onOpen,
   onRemove,
+  canRemove,
   emptySkills,
   emptyTools = 'No tools yet.',
   hideEmpty = false,
@@ -287,6 +308,8 @@ export function PluginItemSections({
   onOpen(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
+  /** See {@link CardGrid}. */
+  canRemove?(item: LibraryItem): boolean;
   /**
    * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
    * standard paragraph; a node is trusted to bring its own — the nudge carries
@@ -329,7 +352,7 @@ export function PluginItemSections({
               emptySkills
             )
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} />
+            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
           )}
         </PluginSection>
       )}
@@ -339,7 +362,7 @@ export function PluginItemSections({
           {toolItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptyTools}</p>
           ) : (
-            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} />
+            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
           )}
         </PluginSection>
       )}

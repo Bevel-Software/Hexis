@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
 
@@ -88,12 +89,53 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
   await walk('');
 }
 
-/** Copy one template file (by repo-relative path) into `dest`, creating parents. */
+/**
+ * Copy one template file (by repo-relative path) into `dest`, creating
+ * parents. Text files are RENDERED — the managed guide and the ignore file
+ * name the three root folders, which a deployment may have renamed — and a
+ * file without placeholders comes out byte-identical to its source.
+ *
+ * "Text" is decided by the BYTES, not the name: strict UTF-8 with no NUL.
+ * A name-based rule mistook a hidden binary for text and re-encoded it;
+ * anything that does not decode is copied byte for byte. Either way the
+ * source's mode survives — a template script keeps its executable bit.
+ */
 async function copyTemplateFile(templateDir: string, relPath: string, dest: string): Promise<void> {
   const from = await templateSource(templateDir, relPath);
   const to = path.join(dest, relPath);
   await fs.mkdir(path.dirname(to), { recursive: true });
-  await fs.copyFile(from, to);
+  // A binary is spotted from its first bytes (a NUL turns up early in any
+  // real one) and streamed across without ever being read whole; only what
+  // may be text is read in full, and the full decode is still the judge.
+  const text = (await headHasNul(from)) ? null : asText(await fs.readFile(from));
+  if (text === null) {
+    await fs.copyFile(from, to);
+  } else {
+    await fs.writeFile(to, renderKbLayoutPlaceholders(text), 'utf8');
+  }
+  await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
+}
+
+/** Whether the first 8 KiB carry a NUL byte — the cheap half of "is this text". */
+async function headHasNul(file: string): Promise<boolean> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const buf = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    return buf.subarray(0, bytesRead).includes(0);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** The bytes as text when they ARE text — strict UTF-8, BOM kept, no NUL — else null. */
+function asText(bytes: Buffer): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
 }
 
 async function exists(p: string): Promise<boolean> {

@@ -1,6 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR } from '@bevel-software/platform-shared';
+import {
+  KNOWLEDGE_BASE_DIR,
+  PLUGINS_DIR,
+  SKILLS_DIR,
+  renderKbLayoutPlaceholders,
+  validateKbRootName,
+} from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -43,8 +49,8 @@ export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The two roots CORE gives a knowledge base: the ontologies, and the plugins
- * that hold skills and tools.
+ * The three roots CORE gives a knowledge base: the ontologies, the shared
+ * skills, and the plugins that hold tools and link the skills.
  *
  * `Data/`, `Agents/` and `Pipelines/` are deliberately absent. They scaffold
  * the agentic execution layer, which is not part of this platform — a core
@@ -54,8 +60,13 @@ export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
  * READMEs); the names stay reserved in `kb-layout.ts` either way, so a KB
  * that has them still renders them as roots rather than folding them into
  * Knowledge.
+ *
+ * A function: the three names are deployment-configurable live bindings, and
+ * a module-scope array would snapshot the defaults before configuration.
  */
-const CORE_REQUIRED_DIRS: readonly string[] = [KNOWLEDGE_BASE_DIR, PLUGINS_DIR];
+function coreRequiredDirs(): readonly string[] {
+  return [KNOWLEDGE_BASE_DIR, SKILLS_DIR, PLUGINS_DIR];
+}
 
 /**
  * A reserved root must be ONE path segment — `Data`, not `Data/x`, `../x` or
@@ -102,7 +113,7 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
       );
     }
   }
-  return [...CORE_REQUIRED_DIRS, ...extraRootDirs];
+  return [...coreRequiredDirs(), ...extraRootDirs];
 }
 
 /**
@@ -200,14 +211,21 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content: Uint8Array | string = await readTemplate(templateDir, rel);
+      let content = await readTemplate(templateDir, rel);
       // The on-disk merge below only runs against an EXISTING ignore file; a
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
       // hidden from the file tree from the first boot either way.
+      // …and a template still shipping the skills rule an earlier release
+      // had (a distribution's copy, a stale packaged one) must not declare
+      // it: the on-disk reconciliation below never sees a file that was
+      // absent, so the declared content is reconciled here instead.
       if (rel === IGNORE_FILENAME) {
-        content = withIgnorePattern(new TextDecoder().decode(content), 'AGENTS.md');
+        content = withoutIgnoreLine(
+          withoutPlatformIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`),
+          `${PLUGINS_DIR}/`,
+        );
       }
       branch.write(rel, content);
       added.push(rel);
@@ -224,7 +242,32 @@ export class TemplateFilesStep implements OnServerStart {
     // LINE PRESENCE, not effective outcome: a later `!AGENTS.md` negation is
     // the operator explicitly choosing to SHOW the file, and hiding it is a
     // default this step provides, not a mandate it re-imposes every boot.
-    added.push(...(await mergeIgnorePattern(repoDir, branch, 'AGENTS.md')));
+    //
+    // The shared-skills root goes the OTHER way. An earlier release hid it
+    // like `Plugins/`; the Skills & Tools sidebar now renders it as a file
+    // tree read from the workspace tree, which the ignore file filters — so a
+    // KB still carrying that rule would show an empty Skills section. The
+    // line that release wrote comes out, recognised by the PLATFORM'S OWN
+    // COMMENT above it — an operator who wrote the same rule by hand keeps
+    // it, for the same reason the negation above is kept: the file is
+    // theirs. The Knowledge explorer never rendered the root and still does
+    // not. Spelled with the CONFIGURED root name, since a deployment may
+    // have renamed it.
+    //
+    // The plugins root follows the skills root: the same sidebar now draws
+    // it as a file tree too, so the rule that hid it since the first seed
+    // comes out. That one has no comment to know it by — it was in the
+    // template body from the start — so every line spelling it goes,
+    // whoever wrote it (see `withoutIgnoreLine`). ONE read-modify-write for
+    // all the rules: separate passes would each read the on-disk file and
+    // a later declared write would lose an earlier one's.
+    added.push(
+      ...(await reconcileIgnoreRules(repoDir, branch, {
+        add: ['AGENTS.md'],
+        drop: [`${SKILLS_DIR}/`],
+        dropEvery: [`${PLUGINS_DIR}/`],
+      })),
+    );
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
@@ -293,59 +336,170 @@ export class TemplateFilesStep implements OnServerStart {
   }
 }
 
-/** The template's content for `relPath`, bytes as shipped. */
-async function readTemplate(templateDir: string, relPath: string): Promise<Uint8Array> {
-  return fs.readFile(await templateSource(templateDir, relPath));
+/**
+ * The template's content for `relPath`, RENDERED: the managed files name the
+ * three root folders, and a deployment may have renamed those, so the
+ * placeholders the template carries (`{{pluginsDir}}` …) are filled with the
+ * names in effect. Every required file is text; a template without
+ * placeholders passes through unchanged.
+ */
+async function readTemplate(templateDir: string, relPath: string): Promise<string> {
+  return renderKbLayoutPlaceholders(await fs.readFile(await templateSource(templateDir, relPath), 'utf8'));
 }
 
 /**
- * Whether the repo's copy of `relPath` differs from the template's, modulo
- * line endings — a CRLF checkout of identical content must read as "same",
- * or the managed-file refresh would commit churn on every boot forever.
+ * Whether the repo's copy of `relPath` differs from the RENDERED template's,
+ * modulo line endings — a CRLF checkout of identical content must read as
+ * "same", or the managed-file refresh would commit churn on every boot
+ * forever. Rendered, so a renamed root is compared against the guide that
+ * names it, not against the placeholders.
  */
 async function templateDiffers(templateDir: string, repoDir: string, relPath: string): Promise<boolean> {
   const norm = (text: string) => text.replace(/\r\n?/g, '\n');
   const [current, template] = await Promise.all([
     fs.readFile(path.join(repoDir, relPath), 'utf8'),
-    templateSource(templateDir, relPath).then((from) => fs.readFile(from, 'utf8')),
+    readTemplate(templateDir, relPath),
   ]);
   return norm(current) !== norm(template);
 }
 
 /**
- * Ensure `.bevelignore` carries `pattern`, declaring the appended content when
- * absent. Returns the paths changed, for the note.
+ * Reconcile the platform's OWN rules in `.bevelignore`: every `add` pattern
+ * guaranteed present as a line, every `drop` pattern taken out. Returns the
+ * paths changed, for the note.
  *
- * APPENDS — never rewrites. The file is the operator's, and every rule
- * already in it is theirs to keep; this adds one line under a comment saying
- * where it came from. Absent file, or a file that already lists the pattern,
- * is a no-op — an absent file means the template's copy (declared in the same
- * step) arrives with the pattern in it.
+ * Never rewrites the rest. The file is the operator's, and every rule already
+ * in it is theirs to keep: adding puts one line under a comment saying where
+ * it came from, and dropping removes exactly the line (and the comment) an
+ * earlier release put there — never a line the operator wrote. Absent file is
+ * a no-op — it means the template's copy (declared in the same step, and
+ * reconciled the same way at declaration) arrives with the right rules in it.
  *
  * Matched line-wise rather than by substring: a rule for `Plugins/AGENTS.md`
  * is not a rule for the root `AGENTS.md`, and treating it as one would leave
  * the mismatch this exists to close.
  */
-async function mergeIgnorePattern(repoDir: string, branch: KbBranch, pattern: string): Promise<string[]> {
+async function reconcileIgnoreRules(
+  repoDir: string,
+  branch: KbBranch,
+  rules: { add: string[]; drop: string[]; dropEvery?: string[] },
+): Promise<string[]> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
   } catch {
     // No ignore file — the copy declared from the template arrives with the
-    // pattern in it (guaranteed at declaration time, see the required-files
-    // loop above).
+    // right rules in it (guaranteed at declaration time, see the
+    // required-files loop above).
     return [];
   }
-  const merged = withIgnorePattern(current, pattern);
+  const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
+  const merged = (rules.dropEvery ?? []).reduce(
+    (text, pattern) => withoutIgnoreLine(text, pattern),
+    rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
+  );
   if (merged === current) return [];
   branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];
 }
 
 /**
+ * `text` without EVERY line that is exactly `pattern`, whoever wrote it, and
+ * without a platform comment sitting directly above one. The other drop keeps
+ * an operator's identical line; this one does not, and the difference is
+ * deliberate: the plugins-root rule was in the template from the first seed
+ * with no comment to know it by, so provenance cannot decide it — and the
+ * Skills & Tools sidebar now renders that root as a file tree read from the
+ * workspace tree, which the rule would empty. A `!pattern` negation is not
+ * the pattern and stays. A platform comment directly above a dropped line
+ * goes with it, and so does the blank line that opened an appended block —
+ * the same tidy-up `withoutPlatformIgnorePattern` does, so a file either
+ * step cleans reads the same afterwards.
+ *
+ * Exported for the Groups→Plugins step, which retires the same rules on the
+ * branches this step never visits (drafts).
+ */
+export function withoutIgnoreLine(text: string, pattern: string): string {
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (line.trim() !== pattern) {
+      kept.push(line);
+      continue;
+    }
+    const above = kept[kept.length - 1];
+    if (above === undefined || !isPlatformRuleComment(above)) continue;
+    kept.pop();
+    if (above.trim() === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
+  }
+  return kept.join('\n');
+}
+
+/** The comment `withIgnorePattern` writes above a line it appends. */
+const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
+
+/**
+ * The template line an earlier release shipped above the shared-skills rule,
+ * split around its one variable: the plugins root's name, which a deployment
+ * may have renamed since. Everything else is fixed.
+ */
+const LEGACY_SKILLS_RULE_COMMENT_OPENING = '# The shared-skills root is rendered by the Skills & Tools app, like ';
+const LEGACY_SKILLS_RULE_COMMENT_CLOSING = '/.';
+
+/**
+ * Whether a line is EXACTLY a comment the platform wrote above a rule it
+ * added. For the legacy template line that means the fixed opening, the
+ * fixed closing, and between them a name the platform could have rendered
+ * there — judged by the ONE rule that decides what a root may be called
+ * (`validateKbRootName`), not by a second grammar written here: a hand-made
+ * character class either admits names the validator refuses, or refuses
+ * names it admits (a space, say), and either way a line the platform did
+ * write would be left standing. A looser match (an opening, a substring)
+ * errs the other way and takes a line the operator wrote.
+ */
+function isPlatformRuleComment(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed === PLATFORM_RULE_COMMENT) return true;
+  if (
+    !trimmed.startsWith(LEGACY_SKILLS_RULE_COMMENT_OPENING) ||
+    !trimmed.endsWith(LEGACY_SKILLS_RULE_COMMENT_CLOSING)
+  ) {
+    return false;
+  }
+  const name = trimmed.slice(
+    LEGACY_SKILLS_RULE_COMMENT_OPENING.length,
+    trimmed.length - LEGACY_SKILLS_RULE_COMMENT_CLOSING.length,
+  );
+  return name === name.trim() && validateKbRootName(name) === null;
+}
+
+/**
+ * `text` without the `pattern` lines THE PLATFORM WROTE — the ones sitting
+ * directly under its own comment (the one `withIgnorePattern` writes, or the
+ * template line an earlier release shipped) — and without that comment, plus
+ * the blank line that opened an appended block. Provenance is the comment:
+ * an identical line with no platform comment above it is the operator's and
+ * stays, as does a `!pattern` negation. Nothing else moves.
+ */
+function withoutPlatformIgnorePattern(text: string, pattern: string): string {
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  for (const line of lines) {
+    const above = kept[kept.length - 1];
+    if (line.trim() !== pattern || above === undefined || !isPlatformRuleComment(above)) {
+      kept.push(line);
+      continue;
+    }
+    kept.pop();
+    if (above.trim() === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
+  }
+  return kept.join('\n');
+}
+
+/**
  * `text` with `pattern` guaranteed present as a LINE — appended under a
  * comment naming its origin when absent, returned unchanged when present.
- * Line-wise match, same rationale as {@link mergeIgnorePattern}.
+ * Line-wise match, same rationale as {@link mergeIgnorePatterns}.
  *
  * An explicit `!pattern` line also returns the text unchanged: that is the
  * operator choosing to SHOW the file, and ordered matching means a positive

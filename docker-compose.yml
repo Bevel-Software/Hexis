@@ -83,20 +83,11 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      # The commit this build came from, reported by `GET /api/health`.
-      # Coolify injects SOURCE_COMMIT for git-based deploys — but only into the
-      # environment it hands compose, so without a pass-through here it never
-      # reached the container and health reported 'unknown' on every hosted
-      # deploy. `version.ts` has named this fallback all along; this is what
-      # makes it true. Nothing to fill in: absent, health still says 'unknown'.
-      #
-      # LEAVE COOLIFY'S "Include Source Commit in Build" OFF. It controls
-      # BUILD-time availability, and turning it on defeats layer caching across
-      # commits — the setting says so itself, and adds that SOURCE_COMMIT "will
-      # still be available at runtime" either way. Runtime is all we need:
-      # `version.ts` reads it from the process environment when the server
-      # starts, not from anything baked into the image.
-      - SOURCE_COMMIT
+      # The deployed commit sha `GET /api/health` reports is BAKED into the
+      # published image by CI (the Dockerfile's GIT_SHA build arg) — nothing
+      # to pass at runtime. A runtime SOURCE_COMMIT pass-through used to sit
+      # here; Coolify materialized it as an EMPTY LITERAL that overrode the
+      # real value, which is exactly the failure baking at build time removes.
       # Git host credential. The KB can live on any git server (GitHub, GitLab,
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see

@@ -1,12 +1,11 @@
-import { describe, it, expect, vi, type Mock } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { PluginsSidebar, type PluginsSidebarProps } from '../components/PluginsSidebar';
 import type { LibraryFilter } from '../utils/status';
 
 /**
- * The sidebar as a pure view: given a filter and counts, which row is current,
- * what its count slot says, and which intent a click emits. It owns no state
- * and no navigation, so nothing here needs a router.
+ * The Library nav: two lenses, the caller's teams (their own space first),
+ * the two roots as trees. A pure view of the URL — `filter` in, intents out.
  */
 
 function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
@@ -15,23 +14,19 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   const props: PluginsSidebarProps = {
     filter: { kind: 'all' },
     onSelect,
-    plugins: [
-      { plugin: 'Engineering', count: 4, attention: 0 },
-      { plugin: 'GTM', count: 3, attention: 2 },
-      { plugin: 'Product', count: 0, attention: 0 },
-    ],
-    lockedPlugins: [],
     ownedCount: 2,
     ownedAttention: 0,
     personalPluginLabel: "Juan's Plugin",
     ungroupedCount: 1,
+    teams: [
+      { name: 'Engineering', count: 4, urgent: 0 },
+      { name: 'GTM', count: 3, urgent: 2 },
+      { name: 'Product', count: 0, urgent: 0 },
+    ],
     attentionCount: 2,
     onFinishSetup,
     onCreatePlugin: vi.fn(),
-    canCreatePlugin: true,
-    pluginsIndexActive: false,
-    onOpenPluginsIndex: vi.fn(),
-
+    canCreatePlugin: false,
     ...over,
   };
   render(<PluginsSidebar {...props} />);
@@ -39,92 +34,145 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
     onSelect,
     onFinishSetup,
     onCreatePlugin: props.onCreatePlugin as Mock,
-    onOpenPluginsIndex: props.onOpenPluginsIndex as Mock,
   };
 }
 
 const row = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('PluginsSidebar', () => {
-  it('leads with All plugins. The Library opens there, so the nav starts there', () => {
-    const { onOpenPluginsIndex } = renderSidebar();
-    const rows = screen.getAllByRole('button');
-    expect(rows[0]).toHaveAccessibleName('All plugins');
-    fireEvent.click(rows[0]);
-    expect(onOpenPluginsIndex).toHaveBeenCalledTimes(1);
-  });
+  // The remembered view is per-browser state; each test starts from a browser
+  // that remembers nothing.
+  beforeEach(() => window.localStorage.removeItem('bevel-library-sidebar-view'));
 
-  it('marks All plugins current on the index, and nothing else', () => {
-    renderSidebar({ filter: null, pluginsIndexActive: true });
-    expect(row(/^All plugins/)).toHaveAttribute('aria-current', 'true');
-    expect(row(/^Everything/)).toHaveAttribute('aria-current', 'false');
-    expect(row(/^Owned by me/)).toHaveAttribute('aria-current', 'false');
-  });
-
-  it('keeps Everything as a lens of its own, since the root is the index now', () => {
+  it('leads with Everything, the Library home, and marks it current on the root', () => {
     renderSidebar({ filter: { kind: 'all' } });
+    const rows = screen.getAllByRole('button');
+    expect(rows[0]).toHaveAccessibleName('Everything');
     expect(row(/^Everything/)).toHaveAttribute('aria-current', 'true');
-    expect(row(/^All plugins/)).toHaveAttribute('aria-current', 'false');
-  });
-
-  it('heads the plugin rows with what the list is: the set in your MCP', () => {
-    renderSidebar();
-    expect(screen.getByText('Included in your MCP')).toBeInTheDocument();
-  });
-
-  it("leads the plugins with the caller's own space", () => {
-    renderSidebar({ filter: { kind: 'ungrouped' } });
-    expect(row(/^Juan's Plugin/)).toHaveAttribute('aria-current', 'true');
     expect(row(/^Owned by me/)).toHaveAttribute('aria-current', 'false');
   });
 
-  it('offers a way to make a plugin', () => {
-    const { onCreatePlugin } = renderSidebar();
-    fireEvent.click(screen.getByRole('button', { name: 'New plugin' }));
-    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+  it('lights no row on a page with no filter — an item page, a plugin page', () => {
+    renderSidebar({ filter: null });
+    for (const button of screen.getAllByRole('button')) {
+      expect(button).not.toHaveAttribute('aria-current', 'true');
+    }
   });
 
-  it('spells out Create a plugin while the MCP list is empty — the `+` alone is hover-hidden', () => {
-    const { onCreatePlugin } = renderSidebar({ plugins: [] });
-    fireEvent.click(screen.getByRole('button', { name: 'Create a plugin' }));
-    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+  it('offers two views under the lenses — Teams by default — and lists no plugins of its own', () => {
+    renderSidebar();
+    const tabs = screen.getByRole('tablist', { name: 'Sidebar view' });
+    expect(within(tabs).getByRole('tab', { name: 'IdP Groups' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tabs).getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tabpanel', { name: 'IdP Groups' })).toBeInTheDocument();
+    expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
+    expect(screen.queryByText('All plugins')).not.toBeInTheDocument();
+    expect(screen.queryByText('Library')).not.toBeInTheDocument();
   });
 
-  it('stands the create CTA down once a real plugin exists', () => {
-    renderSidebar(); // default fixture has three plugins
-    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  it("leads the Teams view with the caller's own space, and lists it even when empty", () => {
+    renderSidebar({ filter: { kind: 'ungrouped' }, ungroupedCount: 0 });
+    const panel = screen.getByRole('tabpanel', { name: 'IdP Groups' });
+    const own = within(panel).getByRole('button', { name: /^Juan's Plugin/ });
+    const first = within(panel).getByRole('button', { name: /^Engineering/ });
+    expect(own.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(own).toHaveAttribute('aria-current', 'true');
+    expect(own).toHaveAccessibleName("Juan's Plugin");
   });
 
-  it('stands the create CTA down when only locked plugins exist — someone already created them', () => {
-    renderSidebar({ plugins: [], lockedPlugins: ['Ops'] });
-    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  it('switches to the Advanced view, which holds the two trees — Skills before Plugins — and no team rows', () => {
+    renderSidebar({
+      skillsTree: <div data-testid="skills-tree">skills</div>,
+      pluginsTree: <div data-testid="plugins-tree">plugins</div>,
+    });
+    // The other view stays MOUNTED and hidden — the trees keep their state
+    // across a switch, and every tab's `aria-controls` names a real panel.
+    expect(screen.getByTestId('skills-tree')).not.toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-controls', 'library-view-advanced');
+    expect(document.getElementById('library-view-advanced')).not.toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
+    const panel = screen.getByRole('tabpanel', { name: 'Advanced' });
+    const skills = within(panel).getByTestId('skills-tree');
+    const plugins = within(panel).getByTestId('plugins-tree');
+    expect(skills.compareDocumentPosition(plugins) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // No heading over the trees: the tab already names the view.
+    expect(within(panel).queryByText('Files on disk')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Engineering/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Juan's Plugin/ })).toBeNull();
+    // The lenses belong to neither view and stay put.
+    expect(row(/^Everything/)).toBeInTheDocument();
+    expect(row(/^Owned by me/)).toBeInTheDocument();
   });
 
-  it('stands the create CTA down for a non-admin, empty workspace or not', () => {
-    renderSidebar({ plugins: [], lockedPlugins: [], canCreatePlugin: false });
-    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  it('remembers the view in the browser, and defaults to Teams when the browser remembers nothing', () => {
+    renderSidebar();
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    expect(window.localStorage.getItem('bevel-library-sidebar-view')).toBe('advanced');
+    cleanup();
+    renderSidebar();
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
+    window.localStorage.removeItem('bevel-library-sidebar-view');
+    cleanup();
+    renderSidebar();
+    expect(screen.getByRole('tab', { name: 'IdP Groups' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('says nothing about creating when the prop is omitted — the nav a host app already had', () => {
-    // `canCreatePlugin` is optional so this public props type survives the
-    // upgrade. Omitted must mean OFF, which is the nav exactly as it shipped.
-    renderSidebar({ plugins: [], lockedPlugins: [], canCreatePlugin: undefined });
-    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+  it('is one tab stop: the arrows move between the views and choose as they go, Home and End go to the ends', () => {
+    renderSidebar();
+    const teams = screen.getByRole('tab', { name: 'IdP Groups' });
+    const advanced = screen.getByRole('tab', { name: 'Advanced' });
+    // Roving tabIndex: only the chosen tab is in the Tab order.
+    expect(teams).toHaveAttribute('tabindex', '0');
+    expect(advanced).toHaveAttribute('tabindex', '-1');
+
+    teams.focus();
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'ArrowRight' });
+    expect(advanced).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(advanced);
+    expect(advanced).toHaveAttribute('tabindex', '0');
+    expect(teams).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'ArrowRight' });
+    expect(teams).toHaveAttribute('aria-selected', 'true'); // wraps
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'End' });
+    expect(advanced).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'Home' });
+    expect(teams).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(teams);
   });
 
-  it('marks the selected plugin current and leaves the others alone', () => {
-    renderSidebar({ filter: { kind: 'group', plugin: 'GTM' } });
+  it('answers a right-click on the switch with nothing — it is a control, not empty nav space', () => {
+    const onContextMenu = vi.fn();
+    renderSidebar({ onContextMenu });
+    fireEvent.contextMenu(screen.getByRole('tab', { name: 'Advanced' }));
+    fireEvent.contextMenu(screen.getByRole('tablist', { name: 'Sidebar view' }));
+    expect(onContextMenu).not.toHaveBeenCalled();
+  });
+
+  it('marks the selected team current and leaves the others alone', () => {
+    renderSidebar({ filter: { kind: 'team', group: 'GTM' } });
     expect(row(/^GTM/)).toHaveAttribute('aria-current', 'true');
     expect(row(/^Engineering/)).toHaveAttribute('aria-current', 'false');
+    expect(row(/^Everything/)).toHaveAttribute('aria-current', 'false');
   });
 
-  it('shows the attention count instead of the item count when something needs setup', () => {
+  it("shows how much a team can use, in grey — and nothing at all for a team that can use nothing", () => {
     renderSidebar();
-    // GTM: 3 items but 2 integrations need setup — amber wins the slot.
-    expect(row(/^GTM/)).toHaveAccessibleName('GTM 2');
     expect(row(/^Engineering/)).toHaveAccessibleName('Engineering 4');
-    // Never a grey 0: an empty plugin shows no count at all.
+    expect(within(row(/^Engineering/)).getByText('4')).toHaveClass('text-ink-faint');
+    // Never a grey 0.
     expect(row(/^Product/)).toHaveAccessibleName('Product');
+  });
+
+  it("turns a team's count orange when its plugins lock its members out of a skill", () => {
+    renderSidebar();
+    // GTM can use 3 things, but 2 links are broken for its members: orange
+    // wins the slot — other people's problem outranks the inventory.
+    expect(row(/^GTM/)).toHaveAccessibleName('GTM 2');
+    const badge = within(row(/^GTM/)).getByText('2');
+    expect(badge).toHaveClass('text-urgent');
+    expect(badge).not.toHaveClass('text-wait');
   });
 
   it('emits the right LibraryFilter per row', () => {
@@ -132,8 +180,8 @@ describe('PluginsSidebar', () => {
     const expected: [RegExp, LibraryFilter][] = [
       [/^Everything/, { kind: 'all' }],
       [/^Owned by me/, { kind: 'owned' }],
-      [/^GTM/, { kind: 'group', plugin: 'GTM' }],
       [/^Juan's Plugin/, { kind: 'ungrouped' }],
+      [/^GTM/, { kind: 'team', group: 'GTM' }],
     ];
     for (const [name, filter] of expected) {
       onSelect.mockClear();
@@ -142,11 +190,28 @@ describe('PluginsSidebar', () => {
     }
   });
 
-  it("keeps the caller's own plugin listed even when it is empty", () => {
-    // It is a PLACE, not a filtered view: a plugin you are always in does not
-    // vanish because you have not put anything in it yet.
-    renderSidebar({ ungroupedCount: 0 });
-    expect(row(/^Juan's Plugin/)).toBeInTheDocument();
+  it('two teams may not share a name, but a team may share one with a lens — rows stay distinct', () => {
+    renderSidebar({ teams: [{ name: 'Everything', count: 1, urgent: 0 }] });
+    const rows = screen.getAllByRole('button', { name: /^Everything/ });
+    expect(rows).toHaveLength(2);
+  });
+
+  it('spells out Create a plugin in the Advanced view when told the workspace is untouched — the `+` alone is hover-hidden', () => {
+    const { onCreatePlugin } = renderSidebar({ canCreatePlugin: true });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create a plugin' }));
+    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+  });
+
+  it('says nothing about creating unless told to — the verdict is the layout\'s, and omitted means off', () => {
+    renderSidebar({ canCreatePlugin: false });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
+    cleanup();
+    window.localStorage.removeItem('bevel-library-sidebar-view');
+    renderSidebar({ canCreatePlugin: undefined });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
   });
 
   it('shows the owned count in grey, and amber only when something waits on you', () => {
@@ -156,6 +221,7 @@ describe('PluginsSidebar', () => {
     cleanup();
     renderSidebar({ ownedCount: 26, ownedAttention: 1 });
     expect(row(/^Owned by me/)).toHaveAccessibleName('Owned by me 1');
+    expect(within(row(/^Owned by me/)).getByText('1')).toHaveClass('text-wait');
   });
 
   it('sends the setup footer to Connect', () => {

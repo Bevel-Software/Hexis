@@ -14,13 +14,15 @@ import { cn } from '../../lib/utils';
  * tightened tracking so digits line up.
  */
 
-export type BadgeTone = 'neutral' | 'ok' | 'wait' | 'danger' | 'outline';
+export type BadgeTone = 'neutral' | 'ok' | 'wait' | 'urgent' | 'danger' | 'outline';
 export type BadgeSize = 'sm' | 'xs';
 
 const TONE: Record<BadgeTone, string> = {
   neutral: 'bg-sunken text-ink-muted',
   ok: 'bg-ok-soft text-ok',
   wait: 'bg-wait-soft text-wait font-semibold',
+  // Above wait, below danger: blocking other people, not just the reader.
+  urgent: 'bg-urgent-soft text-urgent font-semibold',
   danger: 'bg-danger-soft text-danger font-semibold',
   outline: 'border border-line bg-transparent text-ink-muted',
 };

@@ -121,8 +121,8 @@ importers:
         specifier: ^1.29.0
         version: 1.30.0(zod@3.25.76)
       '@utcp/cli':
-        specifier: ^1.1.1
-        version: 1.1.1
+        specifier: ^1.1.3
+        version: 1.1.3
       '@utcp/code-mode':
         specifier: ^1.2.13
         version: 1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
@@ -130,11 +130,11 @@ importers:
         specifier: ^1.1.1
         version: 1.1.1(@utcp/sdk@1.1.2)
       '@utcp/http':
-        specifier: ^1.1.7
-        version: 1.1.11
+        specifier: ^1.1.12
+        version: 1.1.12
       '@utcp/mcp':
-        specifier: ^1.1.6
-        version: 1.1.6(@types/json-schema@7.0.15)(zod@3.25.76)
+        specifier: ^1.1.7
+        version: 1.1.7(@types/json-schema@7.0.15)(zod@3.25.76)
       '@utcp/sdk':
         specifier: ^1.1.1
         version: 1.1.2
@@ -333,17 +333,17 @@ importers:
         specifier: ^1.29.0
         version: 1.30.0(zod@4.4.3)
       '@utcp/cli':
-        specifier: ^1.1.1
-        version: 1.1.1
+        specifier: ^1.1.3
+        version: 1.1.3
       '@utcp/code-mode':
         specifier: ^1.2.13
         version: 1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
       '@utcp/http':
-        specifier: ^1.1.11
-        version: 1.1.11
+        specifier: ^1.1.12
+        version: 1.1.12
       '@utcp/mcp':
-        specifier: ^1.1.6
-        version: 1.1.6(@types/json-schema@7.0.15)(zod@4.4.3)
+        specifier: ^1.1.7
+        version: 1.1.7(@types/json-schema@7.0.15)(zod@4.4.3)
       '@utcp/sdk':
         specifier: ^1.1.1
         version: 1.1.2
@@ -373,11 +373,11 @@ importers:
         specifier: ^1.2.13
         version: 1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
       '@utcp/http':
-        specifier: ^1.1.11
-        version: 1.1.11
+        specifier: ^1.1.12
+        version: 1.1.12
       '@utcp/mcp':
-        specifier: ^1.1.6
-        version: 1.1.6(@types/json-schema@7.0.15)(zod@4.4.3)
+        specifier: ^1.1.7
+        version: 1.1.7(@types/json-schema@7.0.15)(zod@4.4.3)
       '@utcp/sdk':
         specifier: ^1.1.1
         version: 1.1.2
@@ -1908,8 +1908,8 @@ packages:
   '@upsetjs/venn.js@2.0.0':
     resolution: {integrity: sha512-WbBhLrooyePuQ1VZxrJjtLvTc4NVfpOyKx0sKqioq9bX1C1m7Jgykkn8gLrtwumBioXIqam8DLxp88Adbue6Hw==}
 
-  '@utcp/cli@1.1.1':
-    resolution: {integrity: sha512-otaArdHr16WgsWcDEi1ftvPcm5Pdytp04XBANXsXYSTb7ZMLBQjKcqJibPcP+ncXU6Qgm6FSnqVao3Sw+GqvXg==}
+  '@utcp/cli@1.1.3':
+    resolution: {integrity: sha512-k/ORE+todB8rvgF23SbDQPCARWO+Isis0TiC0sWKqnlgc7V9Y3iiA36dc+D7rfaHO4UX/QITyv5XgYki3zq2FA==}
 
   '@utcp/code-mode@1.2.13':
     resolution: {integrity: sha512-HbDjHdOos/b5ZuU0hezvn8cJy6KUJ/NXxFlnb+iTRX6X30t9c2DxWJfJtz9EsSOVYBrN7Bh72e/S47MOPmK9bg==}
@@ -1923,11 +1923,11 @@ packages:
     peerDependencies:
       '@utcp/sdk': ^1.1.0
 
-  '@utcp/http@1.1.11':
-    resolution: {integrity: sha512-d8gE1l4hulWO8EMxlVsVPQJb6gfl4OhVfrleobmldNO2E3ONMgg1PMgka2UDa69wWJHMXJWAEfREPe9n+0zbQQ==}
+  '@utcp/http@1.1.12':
+    resolution: {integrity: sha512-A1rV/iDU5bCyxoJxFhPDEzEKT29y/mTDSYEGsFvjhP32kIjAXpde/l6+Kjwzy1WokDmyHWZqvhuJTnrnGionvg==}
 
-  '@utcp/mcp@1.1.6':
-    resolution: {integrity: sha512-MQ6Wq05cmRsVC2V9t8QRlqg+N4MHEijv6M9m8DjYuoIVDOdrTZTuMqWCx8ew5JRA37ZBlzfLbzWqUii6/AaZ5Q==}
+  '@utcp/mcp@1.1.7':
+    resolution: {integrity: sha512-JpfeH0jiXqLS06SPUixOlHlBBPZmO+ugUugi+hxhmDTdkSWmrvLeAusv6uFpkMINopOpX++DqQfZiWTOxRQsGw==}
 
   '@utcp/sdk@1.1.2':
     resolution: {integrity: sha512-YOBhcOK5kbD27d3emuXNAb8gBb8nH2kr7BuqjrvmSGyUi9379jzusYeTuZDsAxyy5da9VZPnfC/cNCpTVkEtUw==}
@@ -6125,7 +6125,7 @@ snapshots:
       d3-selection: 3.0.0
       d3-transition: 3.0.1(d3-selection@3.0.0)
 
-  '@utcp/cli@1.1.1':
+  '@utcp/cli@1.1.3':
     dependencies:
       '@utcp/sdk': 1.1.2
 
@@ -6138,7 +6138,7 @@ snapshots:
     dependencies:
       '@utcp/sdk': 1.1.2
 
-  '@utcp/http@1.1.11':
+  '@utcp/http@1.1.12':
     dependencies:
       '@utcp/sdk': 1.1.2
       axios: 1.19.0
@@ -6147,7 +6147,7 @@ snapshots:
       - debug
       - supports-color
 
-  '@utcp/mcp@1.1.6(@types/json-schema@7.0.15)(zod@3.25.76)':
+  '@utcp/mcp@1.1.7(@types/json-schema@7.0.15)(zod@3.25.76)':
     dependencies:
       '@apidevtools/json-schema-ref-parser': 15.5.1(@types/json-schema@7.0.15)
       '@modelcontextprotocol/sdk': 1.30.0(zod@3.25.76)
@@ -6160,7 +6160,7 @@ snapshots:
       - supports-color
       - zod
 
-  '@utcp/mcp@1.1.6(@types/json-schema@7.0.15)(zod@4.4.3)':
+  '@utcp/mcp@1.1.7(@types/json-schema@7.0.15)(zod@4.4.3)':
     dependencies:
       '@apidevtools/json-schema-ref-parser': 15.5.1(@types/json-schema@7.0.15)
       '@modelcontextprotocol/sdk': 1.30.0(zod@4.4.3)

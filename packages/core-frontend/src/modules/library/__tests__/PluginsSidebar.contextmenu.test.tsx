@@ -9,9 +9,8 @@ import { PluginsSidebar, type PluginsSidebarProps } from '../components/PluginsS
  *
  * The sidebar itself only REPORTS the click: it suppresses the browser menu,
  * reads the pointer and the row synchronously, and hands both up. Everything
- * about which verbs are true for a given row lives in `LibraryLayout`, because
- * that is where the plugin summaries are — so that is where those assertions
- * live too.
+ * about which verbs are true for a given row lives in `LibraryLayout`, so that
+ * is where those assertions live too.
  */
 
 function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
@@ -20,21 +19,18 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   const props: PluginsSidebarProps = {
     filter: { kind: 'all' },
     onSelect,
-    plugins: [
-      { plugin: 'Engineering', count: 4, attention: 0 },
-      { plugin: 'GTM', count: 3, attention: 2 },
-    ],
-    lockedPlugins: ['Finance'],
     ownedCount: 2,
     ownedAttention: 0,
     personalPluginLabel: "Juan's Plugin",
     ungroupedCount: 1,
+    teams: [
+      { name: 'Engineering', count: 4, urgent: 0 },
+      { name: 'GTM', count: 3, urgent: 2 },
+    ],
     attentionCount: 2,
     onFinishSetup: vi.fn(),
     onCreatePlugin: vi.fn(),
     canCreatePlugin: true,
-    pluginsIndexActive: false,
-    onOpenPluginsIndex: vi.fn(),
     onContextMenu,
     ...over,
   };
@@ -42,19 +38,19 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
   return { onContextMenu, onSelect };
 }
 
-const nav = () => screen.getByRole('navigation', { name: 'Library plugins' });
+const nav = () => screen.getByRole('navigation', { name: 'Library navigation' });
 const rightClick = (el: Element, at = { clientX: 120, clientY: 240 }) =>
   fireEvent.contextMenu(el, at);
 
 describe('PluginsSidebar: right-click', () => {
-  it('reports a plugin row with its filter, its name and the pointer', () => {
+  it('reports a team row with its filter, its name and the pointer', () => {
     const { onContextMenu } = renderSidebar();
     const gtm = screen.getByRole('button', { name: /^GTM/ });
     rightClick(gtm, { clientX: 88, clientY: 310 });
 
     expect(onContextMenu).toHaveBeenCalledTimes(1);
     expect(onContextMenu).toHaveBeenCalledWith({
-      filter: { kind: 'group', plugin: 'GTM' },
+      filter: { kind: 'team', group: 'GTM' },
       label: 'GTM',
       x: 88,
       y: 310,
@@ -76,37 +72,11 @@ describe('PluginsSidebar: right-click', () => {
       filter: { kind: 'ungrouped' },
       label: "Juan's Plugin",
     });
-  });
 
-  /**
-   * A locked row emits the same `{ kind: 'group' }` target a readable one does,
-   * for the same reason its CLICK does: a plugin you are not in is still a place.
-   * The label drops the "(locked)" suffix — that is the accessible name, not the
-   * plugin's name, and the menu titles itself with the latter.
-   */
-  it('reports a locked row exactly like a readable plugin', () => {
-    const { onContextMenu } = renderSidebar();
-    rightClick(screen.getByRole('button', { name: 'Finance (locked)' }));
-    expect(onContextMenu.mock.calls[0][0]).toMatchObject({
-      filter: { kind: 'group', plugin: 'Finance' },
-      label: 'Finance',
-    });
-  });
-
-  /**
-   * The home row has no `LibraryFilter` behind it — the index lists places, not
-   * a slice of the catalog — so it reports `null` and gets the nav's own menu:
-   * create a plugin, and none of the verbs that need a folder to point at.
-   */
-  it('reports the All plugins row with no filter, but with its own row and name', () => {
-    const { onContextMenu } = renderSidebar();
-    const home = screen.getByRole('button', { name: 'All plugins' });
-    rightClick(home);
-    expect(onContextMenu).toHaveBeenCalledTimes(1);
-    expect(onContextMenu.mock.calls[0][0]).toMatchObject({
-      filter: null,
-      label: 'All plugins',
-      row: home,
+    rightClick(screen.getByRole('button', { name: /^Everything/ }));
+    expect(onContextMenu.mock.calls[2][0]).toMatchObject({
+      filter: { kind: 'all' },
+      label: 'Everything',
     });
   });
 
@@ -124,14 +94,14 @@ describe('PluginsSidebar: right-click', () => {
 
   /**
    * The nav wraps every row, so without `stopPropagation` a right-click on a
-   * plugin would report the plugin AND then the empty space — and the layout
-   * would render the empty-space menu, since the last call wins.
+   * row would report the row AND then the empty space — and the layout would
+   * render the empty-space menu, since the last call wins.
    */
   it('does not also report the nav when the click landed on a row', () => {
     const { onContextMenu } = renderSidebar();
     rightClick(screen.getByRole('button', { name: /^Engineering/ }));
     expect(onContextMenu).toHaveBeenCalledTimes(1);
-    expect(onContextMenu.mock.calls[0][0].filter).toEqual({ kind: 'group', plugin: 'Engineering' });
+    expect(onContextMenu.mock.calls[0][0].filter).toEqual({ kind: 'team', group: 'Engineering' });
   });
 
   it('suppresses the browser menu when the click is being handled', () => {
@@ -157,12 +127,12 @@ describe('PluginsSidebar: right-click', () => {
   it('still navigates on a left click. The menu changes nothing about selection', () => {
     const { onSelect, onContextMenu } = renderSidebar();
     fireEvent.click(screen.getByRole('button', { name: /^GTM/ }));
-    expect(onSelect).toHaveBeenCalledWith({ kind: 'group', plugin: 'GTM' });
+    expect(onSelect).toHaveBeenCalledWith({ kind: 'team', group: 'GTM' });
     expect(onContextMenu).not.toHaveBeenCalled();
   });
 
   it('marks the current row from the target it navigates to', () => {
-    renderSidebar({ filter: { kind: 'group', plugin: 'GTM' } });
+    renderSidebar({ filter: { kind: 'team', group: 'GTM' } });
     expect(screen.getByRole('button', { name: /^GTM/ })).toHaveAttribute('aria-current', 'true');
     expect(screen.getByRole('button', { name: /^Engineering/ })).toHaveAttribute(
       'aria-current',

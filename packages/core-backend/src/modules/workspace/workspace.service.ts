@@ -7,7 +7,11 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import {
+  RemoteBranchGoneError,
+  WorkflowDomainError,
+  isMissingRemoteBranchFailure,
+} from '../../shared/domain-errors.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import {
   cloneCredentialArgs,
@@ -249,6 +253,73 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Every branch with a finished clone on disk, whether or not this process
+   * has touched it yet. The remote sync reads this: clones survive a restart,
+   * and a hook that fires before anyone opens a branch must still find its
+   * clone. Same disk scan as `findAnyWorkspaceId`.
+   *
+   * What is listed: directories holding a `<kbDirName>/.git`, whose name is
+   * the encoding of a branch git would accept, and whose bootstrap is not in
+   * flight right now. The in-flight exclusion matters because `git clone`
+   * creates `.git` long before the working tree is checked out — pulling a
+   * clone mid-bootstrap would run git against a half-written tree — and a
+   * clone that is being created this instant is current by definition. A
+   * clone left behind by a crash mid-checkout is NOT distinguished here: the
+   * rest of this service treats a directory with `.git` as a clone too, and
+   * the pull's own errors are how such a tree surfaces.
+   *
+   * A missing root means no clones (nothing has been bootstrapped yet); any
+   * other failure to read it is propagated, so a sync cannot report success
+   * over a root it could not see. One entry that cannot be probed (an ACL, a
+   * half-deleted directory) is returned with `unreadable` set rather than
+   * thrown, so it fails as one branch and not as the whole listing.
+   */
+  async listClonedWorkspaces(): Promise<Array<{ id: string; branch: string; unreadable?: string }>> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return [];
+      throw err;
+    }
+    const cloned: Array<{ id: string; branch: string; unreadable?: string }> = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const branch = branchForWorkspaceId(entry.name);
+      // Not one of ours unless the name is the encoding of a branch git
+      // accepts: `branchForWorkspaceId` returns a malformed name unchanged, so
+      // the round-trip catches those, and the validator catches a stray
+      // directory whose name merely round-trips.
+      if (workspaceIdForBranch(branch) !== entry.name) continue;
+      try {
+        assertValidBranchName(branch);
+      } catch {
+        continue;
+      }
+      try {
+        await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        cloned.push({
+          id: entry.name,
+          branch,
+          unreadable: `Could not read this branch's clone: ${redactError(err)}`,
+        });
+        continue;
+      }
+      // AFTER the probe, with no await in between: a bootstrap registers
+      // itself before it creates `.git`, so any clone whose `.git` was found
+      // while its bootstrap is running is in this map by now. Checking before
+      // the probe left a window where the clone started in between.
+      if (this.isBootstrapInFlight(branch)) continue;
+      cloned.push({ id: entry.name, branch });
+    }
+    return cloned;
+  }
+
+  /**
    * Run the clone. When a `referenceRepo` is supplied and the referenced
    * clone fails (e.g. the sibling's object store is corrupt or mid-write),
    * fall back once to a plain network clone so a bad sibling can never
@@ -406,6 +477,15 @@ export class WorkspaceService implements IWorkspaceService {
       this.branchDirs.delete(branch);
       throw err;
     }
+  }
+
+  /**
+   * Whether a clone of `branch` is being created at this moment. Read by the
+   * retirement of a clone the host deleted: a bootstrap in flight means the
+   * branch exists again, so there is nothing stale to remove.
+   */
+  isBootstrapInFlight(branch: string): boolean {
+    return this.inFlightBootstraps.has(branch);
   }
 
   /**
@@ -620,9 +700,18 @@ export class WorkspaceService implements IWorkspaceService {
       }
     } catch (err) {
       const redacted = redactError(err);
-      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+      // A branch origin does not have is a fact about the branch, not a
+      // failure of ours: the host deleted it (and the sync retired the
+      // clone), or the link was to a branch that never existed. Typed, so the
+      // routes answer 410 with the branch named and the browser can say "this
+      // branch no longer exists" instead of "something went wrong".
+      if (isMissingRemoteBranchFailure(redacted)) {
+        console.log(`[workspace] branch "${branch}" does not exist on origin — nothing to clone`);
+        throw new RemoteBranchGoneError(branch);
+      }
+      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
       throw new Error(`Failed to clone process map: ${redacted}`);
     }
   }
@@ -1433,23 +1522,25 @@ export class WorkspaceService implements IWorkspaceService {
       });
     }
 
-    // Read-permission filter: ONE batched check per directory. Drops files AND
-    // directories the caller can't read; a hidden directory's subtree is never
-    // walked (skip-and-don't-recurse). A readable directory left empty after
-    // filtering stays visible (the folder itself is readable). Fail-closed:
-    // anything not explicitly readable is dropped. No filter → identical to the
-    // pre-feature tree (regression-safe).
-    let visible = candidates;
-    if (readFilter && candidates.length > 0) {
-      const verdict = await readFilter(candidates.map((c) => c.rel));
-      visible = candidates.filter((c) => verdict.get(c.rel) === true);
-    }
+    // Read-permission filter: ONE batched check per directory. Drops files the
+    // caller can't read. A directory is kept when the caller can read it — a
+    // readable directory left empty after filtering stays visible, the folder
+    // itself is readable — OR when something readable survives beneath it: a
+    // grant below (a linked skill's folder opened to a plugin's readers, a
+    // sub-folder shared on its own) makes the folders above it the way there,
+    // shown as containers whose own contents stay filtered. So an unreadable
+    // directory is walked, not skipped, and dropped only when the walk finds
+    // nothing. Fail-closed: anything not explicitly readable is dropped. No
+    // filter → identical to the pre-feature tree (regression-safe).
+    const verdict = readFilter && candidates.length > 0 ? await readFilter(candidates.map((c) => c.rel)) : null;
+    const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
 
     const children: FileTreeEntry[] = [];
-    for (const { entry, entryPath, rel } of visible) {
+    for (const { entry, entryPath, rel } of candidates) {
       if (entry.isDirectory()) {
-        children.push(await this.buildFileTree(entryPath, workspaceRoot, ignoreStack, readFilter));
-      } else {
+        const sub = await this.buildFileTree(entryPath, workspaceRoot, ignoreStack, readFilter);
+        if (readable(rel) || (sub.children?.length ?? 0) > 0) children.push(sub);
+      } else if (readable(rel)) {
         children.push({ name: entry.name, relativePath: rel, type: 'file' });
       }
     }

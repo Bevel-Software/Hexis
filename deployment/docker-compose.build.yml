@@ -50,16 +50,24 @@ services:
       # is also what makes the root .env the one compose reads. So `.` IS the
       # repository root here, subfolder or not.
       context: .
-      # No `args:` block, same reasoning as the root file once carried: the
-      # Dockerfile accepts GIT_SHA (reported by `GET /api/health`), but naming
-      # it here makes deployment UIs prompt for a value nobody sets by hand.
-      # CI passes it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+      # No `args:` block, deliberately. The commit sha `GET /api/health`
+      # reports is baked into the image by the Dockerfile's `ARG SOURCE_COMMIT`,
+      # and the orchestrator passes it ON THE COMMAND LINE: Coolify appends
+      # `--build-arg SOURCE_COMMIT` to `docker compose build` (with "Include
+      # SOURCE_COMMIT in build" enabled on the resource), and a manual build
+      # does the same with `--build-arg SOURCE_COMMIT=$(git rev-parse HEAD)`.
+      # A `${SOURCE_COMMIT}` reference HERE is what must not exist: Coolify
+      # turns every `${VAR}` in a compose file into a resource variable of its
+      # own, and an existing SOURCE_COMMIT variable is exactly what stops it
+      # injecting the real commit — the reference creates an empty variable
+      # that then blanks the value it was meant to carry. (A map-form `args:`
+      # beside the list-form `environment` below also breaks Coolify's
+      # parser outright: it merges the two and keeps list indices as keys.)
     expose:
       - "3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - SOURCE_COMMIT
       - GIT_TOKEN
       - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}

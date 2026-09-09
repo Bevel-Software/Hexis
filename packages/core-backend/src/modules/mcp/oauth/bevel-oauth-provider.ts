@@ -167,6 +167,9 @@ export class BevelOAuthProvider implements OAuthServerProvider {
     userId: string,
     st: McpAuthRequestState,
   ): Promise<{ redirectTo: string }> {
+    // A state without a PKCE challenge is a Claude-link request, which the
+    // marketplace bridge finishes; it must never reach the SDK's code store.
+    if (!st.cc) throw new InvalidGrantError('Authorization request carries no PKCE challenge');
     const code = this.deps.tokenPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
     await this.deps.db.insert(oauthAuthCodes).values({
       codeHash: hashToken(code),

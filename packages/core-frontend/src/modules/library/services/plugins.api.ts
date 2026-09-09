@@ -27,8 +27,10 @@ export interface PluginReaders extends PluginPrincipals {
 }
 
 export interface PluginSummary {
-  /** Plugin folder name, e.g. `GTM`. */
+  /** The plugin's identity — its manifest name, e.g. `gtm`. Grants, URLs and the marketplace spell it. */
   name: string;
+  /** What people see it called, e.g. `GTM`. Absent from an older server: show `name`. */
+  displayName?: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
   /** Per-caller: can read the folder (membership). Locked === !canRead. */
@@ -41,9 +43,23 @@ export interface PluginSummary {
    * enforces this same verdict, so it also decides who sees the affordance.
    */
   isOwner: boolean;
+  /**
+   * Whether this platform writes the plugin's links (a native manifest).
+   * False for a plugin read from an external format — its links are edited
+   * in that repository, and the link endpoints refuse it. Absent from an
+   * older server, which knew only managed plugins.
+   */
+  linksAreManaged?: boolean;
   /** The plugin's TOTALS, not the caller's slice. */
   skillCount: number;
   toolCount: number;
+  /**
+   * How many of the plugin's linked skills its members cannot read, counted
+   * by the server from the unfiltered link index — so a manager the missing
+   * grant locks out of the skill still sees the count. Absent from an older
+   * server: fall back to what the caller's own catalog shows.
+   */
+  brokenLinks?: number;
   owners: PluginPrincipals;
   writers: PluginPrincipals;
   readers: PluginReaders;
@@ -67,7 +83,7 @@ export async function listPlugins(): Promise<PluginSummary[]> {
  * seeded `access.md` before answering, and refuses with its own words —
  * worth surfacing verbatim.
  */
-export async function createPlugin(name: string): Promise<{ folder: string }> {
+export async function createPlugin(name: string): Promise<{ folder: string; name: string }> {
   const res = await authFetch('/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -77,7 +93,28 @@ export async function createPlugin(name: string): Promise<{ folder: string }> {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Couldn't create that plugin.");
   }
-  return (await res.json()) as { folder: string };
+  return (await res.json()) as { folder: string; name: string };
+}
+
+/**
+ * Rename a plugin: its identifier (which rewrites every grant naming it),
+ * its display name, or both. The refusal's message names the reason — a
+ * taken name, a bad identifier, files the caller cannot edit.
+ */
+export async function renamePlugin(
+  name: string,
+  patch: { name?: string; displayName?: string },
+): Promise<{ name: string; displayName: string; rewritten: string[] }> {
+  const res = await authFetch(`/api/plugins/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't rename the plugin.");
+  }
+  return (await res.json()) as { name: string; displayName: string; rewritten: string[] };
 }
 
 /**
@@ -106,6 +143,60 @@ export async function ensurePersonalPlugin(): Promise<{ folder: string; created:
     throw new Error(body.error ?? "Couldn't prepare your personal folder.");
   }
   return (await res.json()) as { folder: string; created: boolean };
+}
+
+/**
+ * Thrown when linking is refused because the caller may edit the plugin but
+ * not the skill's access rules — the link would share nothing. The UI turns
+ * this into "request write access".
+ */
+export class NeedsSkillWriteError extends Error {
+  readonly root: string;
+  constructor(root: string) {
+    super("You can't change who may read this skill yet.");
+    this.name = 'NeedsSkillWriteError';
+    this.root = root;
+  }
+}
+
+async function linkCall(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  const res = await authFetch(url, init);
+  const body = (await res.json().catch(() => ({}))) as { error?: string; kind?: string; root?: string };
+  if (!res.ok) {
+    if (body.kind === 'needs-skill-write') throw new NeedsSkillWriteError(body.root ?? '');
+    throw new Error(body.error ?? "Couldn't update the plugin's links.");
+  }
+  return body;
+}
+
+/**
+ * Link a skill (or a folder of skills) into a plugin: the path goes into the
+ * plugin's manifest and the skill's rules grant the plugin's principals. Needs
+ * write on both sides — see `NeedsSkillWriteError`.
+ */
+export async function linkSkill(plugin: string, skillPath: string): Promise<{ root: string; skills: string[] }> {
+  return (await linkCall(`/api/plugins/${encodeURIComponent(plugin)}/links`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skillPath }),
+  })) as { root: string; skills: string[] };
+}
+
+/** Remove a link. `revoked` says whether the plugin's grant on the skill went with it. */
+export async function unlinkSkill(plugin: string, skillPath: string): Promise<{ root: string; revoked: boolean }> {
+  return (await linkCall(
+    `/api/plugins/${encodeURIComponent(plugin)}/links?skillPath=${encodeURIComponent(skillPath)}`,
+    { method: 'DELETE' },
+  )) as { root: string; revoked: boolean };
+}
+
+/** Re-grant the plugin's principals on a linked skill whose grant was hand-removed. */
+export async function repairSkillLink(plugin: string, skillPath: string): Promise<void> {
+  await linkCall(`/api/plugins/${encodeURIComponent(plugin)}/links/repair`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skillPath }),
+  });
 }
 
 /**

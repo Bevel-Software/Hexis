@@ -774,7 +774,9 @@ describe('FileExplorer rows: the prototype tree', () => {
     renderExplorer({ fileTree: TREE });
     const empty = screen.getByText('reports').closest('button')!;
     expect(empty.querySelectorAll('svg')).toHaveLength(0);
-    expect(empty).toHaveAttribute('aria-expanded');
+    // Nothing to open, so no claim about being open: `aria-expanded` is
+    // for a control that can expand.
+    expect(empty).not.toHaveAttribute('aria-expanded');
 
     const withKids = screen.getByText('docs').closest('button')!;
     expect(withKids.querySelectorAll('svg')).toHaveLength(1);

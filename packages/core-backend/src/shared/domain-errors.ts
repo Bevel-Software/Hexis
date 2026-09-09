@@ -167,6 +167,35 @@ export class PullRebaseConflictError extends WorkflowDomainError {
 }
 
 /**
+ * The clone's branch no longer exists on origin: the fetch that refreshes
+ * `refs/remotes/origin/<branch>` found no such ref. Distinct from an
+ * unreachable remote — the host answered, and the answer was "gone" — so a
+ * caller can treat the clone as stale rather than the sync as failed. 410.
+ */
+export class RemoteBranchGoneError extends WorkflowDomainError {
+  readonly kind = 'remote-branch-gone' as const;
+  constructor(readonly branch: string) {
+    super(`Branch "${branch}" no longer exists on the remote.`, 410, {
+      kind: 'remote-branch-gone',
+      branch,
+    });
+    this.name = 'RemoteBranchGoneError';
+  }
+}
+
+/**
+ * Whether a failed clone or fetch failed because origin has no such branch, as
+ * opposed to being unreachable or refusing the credential. Git's wording for
+ * the two shapes: `Remote branch <x> not found in upstream origin` (clone) and
+ * `couldn't find remote ref refs/heads/<x>` (fetch). The ONE classifier for
+ * this fact — the workspace bootstrap and the git layer both consult it, so
+ * a wording learned by one is learned by both.
+ */
+export function isMissingRemoteBranchFailure(message: string): boolean {
+  return /Remote branch .* not found in upstream|couldn't find remote ref/i.test(message);
+}
+
+/**
  * Generic 400 for workflow-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the

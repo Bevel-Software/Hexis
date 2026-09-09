@@ -165,7 +165,9 @@ export function ClientExtensionsSection({
  */
 function namespaceListings(tree: FileTreeEntry, folder: string): NamespaceListing[] {
   const kbRoot = findKbRoot(tree);
-  const pluginDir = kbRoot ? descend(kbRoot, [PLUGINS_DIR, folder]) : null;
+  // `folder` is the path below the plugins root — one segment for a top-level
+  // plugin, several for a nested one — and the tree is walked a segment at a time.
+  const pluginDir = kbRoot ? descend(kbRoot, [PLUGINS_DIR, ...folder.split('/')]) : null;
   if (!pluginDir?.children) return [];
   const out: NamespaceListing[] = [];
   for (const child of pluginDir.children) {

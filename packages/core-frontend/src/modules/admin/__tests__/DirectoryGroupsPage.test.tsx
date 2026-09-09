@@ -31,6 +31,13 @@ vi.mock('../services/groups.api', async (importOriginal) => {
     renameGroup: vi.fn(),
   };
 });
+// The add-member input suggests people from the access suggest endpoint —
+// stubbed here so these tests stay about the groups roster.
+vi.mock('../../access/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access/api')>();
+  return { ...actual, suggestPrincipals: vi.fn() };
+});
+import { suggestPrincipals } from '../../access/api';
 
 const MANUAL_ROSTER: GroupsRoster = {
   mode: 'manual',
@@ -68,6 +75,15 @@ const IDP_ROSTER: GroupsRoster = {
   groupsHealth: { ok: true },
 };
 
+/**
+ * The Add button of the row a member input belongs to — each group card has
+ * its own. The input sits inside its own wrapper (the suggestion list anchors
+ * to it), so the button is one level up from the input's closest div.
+ */
+function addButtonFor(input: HTMLElement) {
+  return within(input.closest('div')!.parentElement!).getByRole('button', { name: 'Add' });
+}
+
 function renderPage(opts: {
   isAdmin?: boolean;
   directoryPanel?: (props: GroupsDirectoryPanelProps) => React.ReactElement;
@@ -102,6 +118,9 @@ beforeEach(() => {
   vi.mocked(addGroupMember).mockReset().mockResolvedValue(MANUAL_ROSTER);
   vi.mocked(removeGroupMember).mockReset().mockResolvedValue(MANUAL_ROSTER);
   vi.mocked(renameGroup).mockReset().mockResolvedValue(MANUAL_ROSTER);
+  vi.mocked(suggestPrincipals)
+    .mockReset()
+    .mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
 });
 
 describe('DirectoryGroupsPage', () => {
@@ -147,7 +166,7 @@ describe('DirectoryGroupsPage', () => {
     const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
     await userEvent.type(input, 'dana@example.com');
     // Scope to the input's row — each group card has its own Add button.
-    await userEvent.click(within(input.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(input));
     await waitFor(() =>
       expect(addGroupMember).toHaveBeenCalledWith('design', 'dana@example.com'),
     );
@@ -170,14 +189,14 @@ describe('DirectoryGroupsPage', () => {
 
     const productInput = await screen.findByRole('textbox', { name: 'Add member to Product' });
     await userEvent.type(productInput, 'a@example.com');
-    await userEvent.click(within(productInput.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(productInput));
     await waitFor(() => expect(addGroupMember).toHaveBeenCalledTimes(1));
 
     // Second card: its own busy flag is free, so the click goes through — but
     // the request must queue behind the unresolved first one.
     const designInput = screen.getByRole('textbox', { name: 'Add member to Design' });
     await userEvent.type(designInput, 'b@example.com');
-    await userEvent.click(within(designInput.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(designInput));
     expect(addGroupMember).toHaveBeenCalledTimes(1);
 
     resolvers[0](MANUAL_ROSTER);
@@ -429,7 +448,7 @@ describe('DirectoryGroupsPage', () => {
     renderPage();
     const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
     await userEvent.type(input, 'group:engineering');
-    await userEvent.click(within(input.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(input));
     expect(
       await screen.findByText(/Group members are emails — 'group:' references aren't allowed/),
     ).toBeInTheDocument();

@@ -150,6 +150,63 @@ describe('DeploymentSettingsService — secrets', () => {
   });
 });
 
+describe('DeploymentSettingsService — KB layout', () => {
+  it('resolves the three roots to their defaults when nothing names them', () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    expect(settings.resolveKbLayout()).toEqual({
+      knowledgeBaseDir: 'KnowledgeBase',
+      skillsDir: 'Skills',
+      pluginsDir: 'Plugins',
+    });
+  });
+
+  it('takes a renamed root from the environment first, then the store', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await settings.save({ skillsDir: 'skills', pluginsDir: 'plugins' }, null);
+    expect(settings.resolveKbLayout()).toMatchObject({ skillsDir: 'skills', pluginsDir: 'plugins' });
+    process.env.KB_SKILLS_DIR = 'capabilities';
+    expect(settings.resolveKbLayout().skillsDir).toBe('capabilities');
+  });
+
+  /**
+   * The trio rule is judged on the layout the save WOULD produce: a plugins
+   * folder renamed to collide with the skills folder already in effect is a
+   * collision even though the batch names only one of them.
+   */
+  it('refuses two roots that share a name, case-insensitively', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    await expect(settings.save({ pluginsDir: 'skills' }, null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+    await expect(settings.save({ pluginsDir: 'SKILLS' }, null)).rejects.toBeInstanceOf(
+      SettingsValidationError,
+    );
+    await expect(
+      settings.save({ knowledgeBaseDir: 'Content', skillsDir: 'content' }, null),
+    ).rejects.toBeInstanceOf(SettingsValidationError);
+  });
+
+  it('refuses a root that is not a single plain folder name', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    for (const bad of ['a/b', '..', '.hidden', 'x\\y']) {
+      await expect(settings.save({ skillsDir: bad }, null)).rejects.toBeInstanceOf(
+        SettingsValidationError,
+      );
+    }
+  });
+
+  it('marks a layout change as restart-to-apply', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    const { restartRequired } = await settings.save({ pluginsDir: 'Bundles' }, null);
+    expect(restartRequired).toBe(true);
+  });
+});
+
 describe('DeploymentSettingsService — validation', () => {
   it('rejects the whole batch when one field is wrong', async () => {
     const { db, rows } = makeDb();

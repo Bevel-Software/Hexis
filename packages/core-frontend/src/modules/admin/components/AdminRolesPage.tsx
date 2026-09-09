@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Loader2, UsersRound, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { useAdmin } from '../state/admin.context';
 import {
   addMember,
@@ -13,28 +12,13 @@ import {
   unassignGroup,
   type RoleRosterEntry,
 } from '../services/roles.api';
-import { suggestPrincipals } from '../../access/api';
-import { EMAIL_RE, isGroupPrefixed } from '../../../lib/email';
+import { AddMemberInput } from './AddMemberInput';
+import { EMAIL_RE, initials, isGroupPrefixed } from '../../../lib/email';
 import { useExclusiveRunner, type ExclusiveRunner } from '../hooks/useExclusiveRunner';
-
-/** The default-branch workspace id — roles are managed there (admin status derives from it). */
-// A function, not a constant: the branch model arrives from `/api/config`
-// during boot, and a module-scope capture would freeze this at the empty
-// string that exists before it.
-const rolesWorkspaceId = () => encodeURIComponent(DEFAULT_BRANCH);
 
 function errMessage(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
   return fallback;
-}
-
-function initials(value: string): string {
-  const cleaned = value.trim();
-  if (!cleaned) return '?';
-  const [name] = cleaned.split('@');
-  const parts = name.split(/[.\s_-]+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
 }
 
 interface SelfRemoveTarget {
@@ -169,11 +153,10 @@ function RoleCard({
   const [busy, setBusy] = useState(false);
 
   // Add-member input + people autocomplete (same suggest source as Manage
-  // Access, scoped to people/emails — a role's members are emails).
+  // Access, scoped to people/emails — a role's members are emails). The
+  // suggestion mechanics live in AddMemberInput, shared with the Groups page;
+  // the submit rules below stay here.
   const [memberEmail, setMemberEmail] = useState('');
-  const [suggestions, setSuggestions] = useState<{ name: string; email: string }[]>([]);
-  const [showSuggest, setShowSuggest] = useState(false);
-  const suggestReq = useRef(0);
 
   // Optimistic member removal: lowercased emails hidden from the chip list
   // before the server confirms. Reconciled when the authoritative roster lands.
@@ -182,35 +165,6 @@ function RoleCard({
   // server confirms. Reconciled (dropped) once they appear in the authoritative
   // roster, or rolled back on error.
   const [pendingAdds, setPendingAdds] = useState<string[]>([]);
-
-  useEffect(() => {
-    const q = memberEmail.trim();
-    // Server withholds people until q ≥ 2 chars (harvesting guard); mirror that.
-    if (q.length < 2) {
-      // Invalidate any in-flight request so a late 2+ char response can't
-      // repopulate the dropdown after the user backspaced below the threshold.
-      suggestReq.current++;
-      setSuggestions([]);
-      return;
-    }
-    const myReq = ++suggestReq.current;
-    const t = setTimeout(() => {
-      suggestPrincipals(rolesWorkspaceId(), q)
-        .then((res) => {
-          if (myReq !== suggestReq.current) return;
-          // People only; drop anyone already a member (server or optimistic).
-          const existing = new Set([
-            ...role.members.map((m) => m.toLowerCase()),
-            ...pendingAdds.map((e) => e.toLowerCase()),
-          ]);
-          setSuggestions((res.people ?? []).filter((p) => !existing.has(p.email.toLowerCase())));
-        })
-        .catch(() => {
-          if (myReq === suggestReq.current) setSuggestions([]);
-        });
-    }, 200);
-    return () => clearTimeout(t);
-  }, [memberEmail, role.members, pendingAdds]);
 
   // Dialogs.
   const [selfRemove, setSelfRemove] = useState<SelfRemoveTarget | null>(null);
@@ -265,8 +219,10 @@ function RoleCard({
     [onApply, runExclusive],
   );
 
-  const submitAddMember = async (override?: string) => {
-    const email = (override ?? memberEmail).trim();
+  // `value` is whatever the input handed over: the typed text, or the email of
+  // a chosen suggestion. The two are deliberately indistinguishable here.
+  const submitAddMember = async (value: string) => {
+    const email = value.trim();
     // Mirror the backend's refusal of `group:`-prefixed member values with an
     // inline hint (a `group:lee@x.io` would pass the email regex server-side
     // check order matters — see roles-edit.addMember).
@@ -286,9 +242,9 @@ function RoleCard({
       role.members.some((m) => m.toLowerCase() === lower) ||
       pendingAdds.some((e) => e.toLowerCase() === lower)
     ) {
+      // Clearing the input is what empties the suggestion list — it falls back
+      // below the two-character threshold.
       setMemberEmail('');
-      setShowSuggest(false);
-      setSuggestions([]);
       return;
     }
     // Optimistic: show the chip and clear the input immediately. The add commit
@@ -298,8 +254,6 @@ function RoleCard({
     setError(null);
     setPendingAdds((prev) => [...prev, email]);
     setMemberEmail('');
-    setShowSuggest(false);
-    setSuggestions([]);
     try {
       const rows = await runExclusive(() => addMember(role.canonical, email));
       onApply(rows);
@@ -463,66 +417,18 @@ function RoleCard({
         )}
       </div>
 
-      {/* Add member — with people autocomplete (Manage Access suggest source). */}
-      {/* The input is capped rather than fixed-width, and its wrapper may shrink,
-          so the row fits the card on a narrow viewport instead of pushing the
-          Add button past the card border. */}
-      <div className="mt-3 flex items-center gap-1.5">
-        <div className="relative flex-1 min-w-0 max-w-[16rem]">
-          <input
-            type="email"
-            value={memberEmail}
-            onChange={(e) => {
-              setMemberEmail(e.target.value);
-              setShowSuggest(true);
-            }}
-            onFocus={() => setShowSuggest(true)}
-            // Delay so a click on a suggestion lands before the list unmounts.
-            onBlur={() => setTimeout(() => setShowSuggest(false), 150)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submitAddMember();
-              if (e.key === 'Escape') setShowSuggest(false);
-            }}
-            placeholder="Add member by email"
-            disabled={busy}
-            className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent w-full min-w-0"
-            aria-label="Member email"
-            autoComplete="off"
-          />
-          {showSuggest && suggestions.length > 0 && (
-            <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1">
-              {suggestions.map((p) => (
-                <li key={p.email}>
-                  <button
-                    type="button"
-                    // onMouseDown (not onClick) so it fires before the input's blur.
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      submitAddMember(p.email);
-                    }}
-                    className="w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2"
-                  >
-                    <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
-                      {initials(p.email)}
-                    </span>
-                    <span className="flex-1 truncate text-xs text-ink">{p.name || p.email}</span>
-                    <span className="text-[10px] text-ink-faint truncate">{p.email}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => submitAddMember()}
-          disabled={busy}
-          className="shrink-0 px-3 py-1 text-xs rounded-sm border border-line hover:bg-hover disabled:opacity-50 flex items-center gap-1"
-        >
-          {busy && <Loader2 size={12} className="animate-spin" />}
-          Add
-        </button>
-      </div>
+      {/* Add member — with people autocomplete (Manage Access suggest source).
+          Members already on the role, optimistic ones included, are excluded
+          from the suggestions: offering them would be offering a no-op. */}
+      <AddMemberInput
+        value={memberEmail}
+        onValueChange={setMemberEmail}
+        onSubmit={submitAddMember}
+        exclude={[...role.members, ...pendingAdds]}
+        inputLabel="Member email"
+        busy={busy}
+        className="mt-3"
+      />
 
       {/* Group assignments — everyone in an assigned group holds the role.
           The section shows whenever there is something to see: assignments the

@@ -4,6 +4,7 @@ import { Banner, Button } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
 import { fetchSetupStatus, type SetupStatus } from '../../setup/services/setup.api';
 import { SetupScreen } from '../../setup/components/SetupScreen';
+import { ClaudeConnectionCard } from './ClaudeConnectionCard';
 
 /**
  * Deployment settings, routed at `/deployment` — the first-run setup screen
@@ -82,7 +83,20 @@ export function DeploymentPage() {
 
       {loaded && status?.settings && (
         <div className="mt-6">
-          <SetupScreen settings={status.settings} onSaved={refresh} variant="settings" />
+          <SetupScreen
+            settings={status.settings}
+            sync={status.sync}
+            onSaved={refresh}
+            variant="settings"
+          />
+        </div>
+      )}
+
+      {/* Below the settings form, not inside it: these are generated, not
+          typed — a copy source for Claude's admin settings, with one verb. */}
+      {loaded && status?.settings && (
+        <div className="mt-10">
+          <ClaudeConnectionCard />
         </div>
       )}
     </PageShell>

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { AccessResponse } from '../api';
@@ -126,6 +126,116 @@ describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () =
     await waitFor(() =>
       expect(screen.getByRole('heading', { name: /remove from parent folder\?/i })).toBeInTheDocument(),
     );
+  });
+});
+
+/**
+ * A public node. The "Anyone can read" band is a STATEMENT — it says the node
+ * is public and why — and never a control: every reason it names is a grant
+ * with a row below (the Everyone row for a literal line, the plugin's row for
+ * a public plugin principal), and the row is the one place any grant is
+ * removed, through the same flow as every other principal.
+ */
+describe('ManageAccessDialog: a public node', () => {
+  const PUBLIC_VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: true,
+    eligible: { roles: [], users: [] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+  };
+  const readers = (publicVia: string[], withPlugin: boolean) => ({
+    restricted: false,
+    principals: [
+      { name: 'everyone', kind: 'role' as const },
+      ...(withPlugin ? [{ name: 'plugin/open/read', kind: 'plugin' as const }] : []),
+    ],
+    roles: ['everyone', ...(withPlugin ? ['plugin/open/read'] : [])],
+    users: [],
+    publicVia,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+  });
+
+  it('a literal grant here: the band says so, and the Everyone row removes it like any other row', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      readers: readers([], false),
+      sources: { 'r:everyone': { read: [{ kind: 'direct' }] } },
+    } as AccessResponse);
+    api.revokeAccess.mockResolvedValue({ ...PUBLIC_VIEW, readers: { restricted: true, roles: [], users: [] }, sources: {} });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    const band = (await screen.findByText('Anyone can read')).closest('div.flex.items-center') as HTMLElement;
+    expect(screen.getByText(/granted here/)).toBeInTheDocument();
+    // The band itself has nothing to click.
+    expect(within(band).queryByRole('button')).toBeNull();
+
+    // The row: opens to exactly the verb Everyone can hold, and Remove access.
+    expect(screen.getByText('Everyone')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^can read$/i }));
+    const removeItem = screen.getByRole('button', { name: /remove access/i });
+    const menu = removeItem.parentElement as HTMLElement;
+    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Can read', 'Remove access']);
+    await user.click(removeItem);
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'role', role: 'everyone' } }),
+    );
+  });
+
+  it('public through a plugin only: the band names the plugin, whose row is the grant — no Everyone row', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      readers: readers(['plugin/open/read'], true),
+      sources: { 'r:everyone': {}, 'p:plugin/open/read': { read: [{ kind: 'direct' }] } },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    const band = (await screen.findByText('Anyone can read')).closest('div.flex.items-center') as HTMLElement;
+    expect(screen.getByText(/through open · readers/)).toBeInTheDocument();
+    expect(screen.getByText('open · readers')).toBeInTheDocument();
+    // A derived everyone has no line of its own — no row to remove nothing by,
+    // not even a collapsed "through a role" one.
+    expect(screen.queryByText('Everyone')).toBeNull();
+    expect(screen.queryByRole('button', { name: /People with access through a role/ })).toBeNull();
+    expect(within(band).queryByRole('button')).toBeNull();
+  });
+
+  it('both a literal line and a public plugin: the band lists both reasons, and both rows are there', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      readers: readers(['plugin/open/read'], true),
+      sources: {
+        'r:everyone': { read: [{ kind: 'direct' }] },
+        'p:plugin/open/read': { read: [{ kind: 'direct' }] },
+      },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Anyone can read');
+    expect(screen.getByText(/granted here, through open · readers/)).toBeInTheDocument();
+    expect(screen.getByText('Everyone')).toBeInTheDocument();
+    expect(screen.getByText('open · readers')).toBeInTheDocument();
+  });
+
+  it('a literal line in a parent: the band says where, and the Everyone row is inherited from there', async () => {
+    api.fetchFileAccess.mockResolvedValue({
+      ...PUBLIC_VIEW,
+      readers: readers([], false),
+      sources: { 'r:everyone': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }] } },
+    } as AccessResponse);
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Anyone can read');
+    expect(screen.getByText(/inherited from Sales/)).toBeInTheDocument();
+    // The row files under the folder that grants it, like every inherited grant.
+    fireEvent.click(screen.getByRole('button', { name: /People invited to Sales/ }));
+    expect(screen.getByText('Everyone')).toBeInTheDocument();
+    expect(screen.getByText(/via Sales/)).toBeInTheDocument();
   });
 });
 

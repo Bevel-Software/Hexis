@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
@@ -28,6 +28,8 @@ const pluginsMock = vi.hoisted(() => ({
   listJoinRequests: vi.fn(),
   reconcileJoinRequest: vi.fn(),
   requestPluginAccess: vi.fn(),
+  unlinkSkill: vi.fn(),
+  renamePlugin: vi.fn(),
 }));
 const libApiMock = vi.hoisted(() => ({ removeLibraryItem: vi.fn() }));
 vi.mock('../services/library.api', async (importOriginal) => ({
@@ -35,11 +37,14 @@ vi.mock('../services/library.api', async (importOriginal) => ({
   removeLibraryItem: libApiMock.removeLibraryItem,
 }));
 
+vi.mock('../services/teams.api', () => ({ listTeams: vi.fn().mockResolvedValue([]) }));
 vi.mock('../services/plugins.api', () => ({
   listPlugins: pluginsMock.listPlugins,
   listJoinRequests: pluginsMock.listJoinRequests,
   reconcileJoinRequest: pluginsMock.reconcileJoinRequest,
   requestPluginAccess: pluginsMock.requestPluginAccess,
+  unlinkSkill: pluginsMock.unlinkSkill,
+  renamePlugin: pluginsMock.renamePlugin,
   AlreadyReadableError: class AlreadyReadableError extends Error {},
 }));
 
@@ -193,6 +198,7 @@ describe('PluginPage', () => {
     pluginsMock.listJoinRequests.mockResolvedValue([]);
     pluginsMock.reconcileJoinRequest.mockResolvedValue(false);
     pluginsMock.requestPluginAccess.mockResolvedValue(undefined);
+    pluginsMock.renamePlugin.mockReset();
   });
 
   it('lets a plugin MANAGER remove a skill, behind a confirm that says who loses it', async () => {
@@ -212,6 +218,54 @@ describe('PluginPage', () => {
     expect(await screen.findByText(/Removed outreach from GTM/)).toBeInTheDocument();
   });
 
+  it('removing a LINKED skill unlinks it — the skill stays where it lives', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'deploy',
+          description: 'Ships it.',
+          path: 'Skills/Eng/deploy',
+          plugins: [{ name: 'GTM', linked: true, granted: true }],
+        },
+      ],
+    });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    pluginsMock.unlinkSkill.mockResolvedValue({ root: 'Skills/Eng/deploy', revoked: true });
+    libApiMock.removeLibraryItem.mockClear();
+    renderPlugin('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove deploy' }));
+    expect(await screen.findByText(/removes the link from GTM/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink' }));
+
+    await waitFor(() => expect(pluginsMock.unlinkSkill).toHaveBeenCalledWith('GTM', 'Skills/Eng/deploy'));
+    // Never the delete path: the shared skill is not this plugin's to delete.
+    expect(libApiMock.removeLibraryItem).not.toHaveBeenCalled();
+    expect(await screen.findByText(/Unlinked deploy from GTM/)).toBeInTheDocument();
+  });
+
+  it('offers no remove for a LINK into a plugin whose links live in an external format', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'deploy',
+          description: 'Ships it.',
+          path: 'Skills/Eng/deploy',
+          plugins: [{ name: 'GTM', linked: true, granted: true }],
+        },
+      ],
+    });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, linksAreManaged: false })]);
+    renderPlugin('GTM');
+    // The inline skill can still be removed; the link cannot be undone here.
+    await screen.findByRole('button', { name: 'Remove outreach' });
+    expect(screen.queryByRole('button', { name: 'Remove deploy' })).toBeNull();
+  });
+
   it('offers no remove affordance to a non-manager', async () => {
     renderPlugin('GTM'); // gtm() defaults to canWrite: false
     await screen.findByText('outreach');
@@ -227,6 +281,109 @@ describe('PluginPage', () => {
     expect(screen.queryByTestId('library-card-skill-roadmap')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Skills' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools' })).toBeInTheDocument();
+  });
+
+  it('is titled by the display name with the folder beneath it, and found by its identity', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'Go To Market' })]);
+    renderPlugin('gtm');
+    expect(await screen.findByRole('heading', { name: 'Go To Market', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText('Plugins/GTM')).toBeInTheDocument();
+    // The folder's skill files under the identity, not under the folder name.
+    expect(screen.getByTestId('library-card-skill-outreach')).toBeInTheDocument();
+  });
+
+  it('offers Rename plugin to a MANAGER, and moves to the new identity once the rename lands', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    pluginsMock.renamePlugin.mockResolvedValue({ name: 'go-to-market', displayName: 'GTM', rewritten: [] });
+    renderPlugin('gtm');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: 'go-to-market' } });
+    // Changing the identifier is a rename of a principal — the dialog says so before the click.
+    expect(within(dialog).getByText(/Every grant of/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename' }));
+
+    await waitFor(() =>
+      expect(pluginsMock.renamePlugin).toHaveBeenCalledWith('gtm', { name: 'go-to-market', displayName: 'GTM' }),
+    );
+    // The identity is the URL: the page moves to the plugin's new address.
+    await waitFor(() => expect(href()).toBe('/skills-and-tools/plugins/go-to-market'));
+  });
+
+  it('refuses an identifier that is not kebab-case before asking the server', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: 'Go To Market' } });
+    expect(within(dialog).getByText(/Lowercase letters, digits and single hyphens/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
+    expect(pluginsMock.renamePlugin).not.toHaveBeenCalled();
+  });
+
+  it('refuses the reserved personal prefix before asking the server', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: 'personal-gtm' } });
+    expect(within(dialog).getByText(/reserved for personal folders/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
+  });
+
+  it('refuses an identifier longer than the slug the marketplace keys on, before asking the server', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename GTM' });
+    fireEvent.change(within(dialog).getByLabelText('Identifier'), { target: { value: `${'a'.repeat(60)}-${'b'.repeat(10)}` } });
+    expect(within(dialog).getByText(/at most 64 characters/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled();
+    expect(pluginsMock.renamePlugin).not.toHaveBeenCalled();
+  });
+
+  it('lets a plugin whose identifier already wears the reserved prefix change its display name', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'personal-legacy', displayName: 'Legacy', canWrite: true })]);
+    pluginsMock.renamePlugin.mockResolvedValue({ name: 'personal-legacy', displayName: 'Legacy Team', rewritten: [] });
+    renderPlugin('personal-legacy');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename plugin' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Rename Legacy' });
+    fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: 'Legacy Team' } });
+    expect(within(dialog).queryByText(/reserved for personal folders/)).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename' }));
+    await waitFor(() =>
+      expect(pluginsMock.renamePlugin).toHaveBeenCalledWith('personal-legacy', { displayName: 'Legacy Team' }),
+    );
+  });
+
+  it('offers no Rename plugin for a plugin read from an external format — its repository owns the name', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'gtm', canWrite: true, linksAreManaged: false })]);
+    renderPlugin('gtm');
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    await screen.findByRole('menu');
+    expect(screen.queryByRole('menuitem', { name: 'Rename plugin' })).toBeNull();
+  });
+
+  it('opens the manifest at the plugin FOLDER, which is not its identity', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ name: 'go-to-market', displayName: 'GTM', canWrite: true })]);
+    renderPlugin('go-to-market');
+    fireEvent.click(await screen.findByRole('button', { name: 'Manifest' }));
+    await waitFor(() =>
+      expect(href()).toBe(`/workspace/${DEFAULT_BRANCH}/knowledge-base/Plugins/GTM/plugin.json`),
+    );
+  });
+
+  it('shows no Rename plugin to a non-manager', async () => {
+    renderPlugin('GTM'); // gtm() defaults to canWrite: false
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
+    await screen.findByRole('menu');
+    expect(screen.queryByRole('menuitem', { name: 'Rename plugin' })).toBeNull();
   });
 
   it('opens an mcp-declared tool card at its `?server=` URL, not the bare file URL', async () => {
@@ -311,6 +468,44 @@ describe('PluginPage', () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Finish setup' }));
     await waitFor(() => expect(href()).toBe('/connect'));
+  });
+
+  it('names a linked skill the members cannot read, above the integrations banner', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...CATALOG,
+      tools: [connectedTool(), unsetTool()],
+      skills: [
+        ...CATALOG.skills,
+        {
+          name: 'deploy',
+          description: 'Ships it.',
+          path: 'Skills/Eng/deploy',
+          plugins: [{ name: 'GTM', linked: true, granted: false }],
+        },
+      ],
+    });
+    renderPlugin('GTM');
+    const urgent = await screen.findByText(
+      /1 linked skill can't be read by GTM's members: its access rules no longer name them\. Repair the link from the skill page\./,
+    );
+    expect(urgent.closest('[role="status"]')).toHaveClass('bg-urgent-soft');
+    // The tools banner still counts only the tools: the broken link is not
+    // an integration to connect.
+    const tools = screen.getByText("1 integration needs setup: connect it to unblock this plugin's skills.");
+    expect(urgent.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("warns about a broken link even when the caller cannot read that skill — the server's count wins", async () => {
+    // The manager the missing grant locks out: the skill is NOT in their
+    // catalog, so nothing in `items` could say a link is broken. The summary
+    // carries the index's own count.
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true, brokenLinks: 2 })]);
+    renderPlugin('GTM');
+    expect(
+      await screen.findByText(/2 linked skills can't be read by GTM's members: their access rules no longer name them\. Repair the links from the skill pages\./),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/integrations? needs? setup/)).not.toBeInTheDocument();
   });
 
   it('pluralises the attention banner', async () => {
@@ -467,7 +662,7 @@ describe('PluginPage', () => {
   it('says so when the plugin does not exist', async () => {
     renderPlugin('Nope');
     expect(await screen.findByText("This plugin doesn't exist yet.")).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'All plugins' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Everything' })).toHaveAttribute(
       'href',
       '/skills-and-tools',
     );

@@ -12,6 +12,7 @@
  */
 
 import { parse as parseFullYaml } from 'yaml';
+import { pluginManifestName } from '@bevel-software/platform-shared';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,73 @@ export const GROUP_REF_PREFIX = 'group:';
  * registered in the principal index under its `role/<canonical>` alias.
  */
 export const ROLE_TOKEN_PREFIX = 'role/';
+
+/**
+ * PLUGIN-principal token prefix in access.md entries: `plugin/<Name>/<verb>`
+ * names everyone who holds `<verb>` on the plugin folder `Plugins/<Name>` —
+ * `plugin/GTM/read` is the GTM plugin's members, `plugin/GTM/write` its
+ * managers. Membership is DERIVED at model-load time from the plugin's own
+ * `access.md` (see `plugin-principals.ts`), so a grant naming one follows the
+ * plugin's roster with no copying. This is how a shared skill under `Skills/`
+ * is made visible to a plugin: `read: plugin/GTM/read` on the skill folder.
+ *
+ * The name half is canonicalised with the plugin's MANIFEST slug, so
+ * `plugin/Sales Team/read` and `plugin/sales-team/read` are one principal —
+ * the same identity a conformant client keys the plugin on. Reserved in the
+ * group name-safety rules like `role/`.
+ */
+export const PLUGIN_TOKEN_PREFIX = 'plugin/';
+
+/** The verbs a plugin token may name — each is a distinct principal. */
+export const PLUGIN_TOKEN_VERBS = ['read', 'write', 'owner'] as const;
+export type PluginTokenVerb = (typeof PLUGIN_TOKEN_VERBS)[number];
+
+/** The canonical key of a plugin principal, from the plugin's manifest slug. */
+export function pluginPrincipalKey(slug: string, verb: PluginTokenVerb): string {
+  return `${PLUGIN_TOKEN_PREFIX}${slug}/${verb}`;
+}
+
+/**
+ * The parts of a CANONICAL plugin key, or null when the text is not one:
+ * exactly one separator after the prefix, a slug that is its own manifest
+ * slug, one of the three verbs. A generated key never carries a nested
+ * name, so `plugin/a/b/read` is a typo, not a principal.
+ */
+export function parsePluginPrincipalKey(
+  canonical: string,
+): { slug: string; verb: PluginTokenVerb } | null {
+  if (!canonical.startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = canonical.slice(PLUGIN_TOKEN_PREFIX.length);
+  const cut = rest.indexOf('/');
+  if (cut <= 0 || rest.indexOf('/', cut + 1) !== -1) return null;
+  const slug = rest.slice(0, cut);
+  if (pluginManifestName(slug) !== slug) return null;
+  const verb = rest.slice(cut + 1);
+  if (!(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  return { slug, verb: verb as PluginTokenVerb };
+}
+
+/**
+ * The canonical key for ANY spelling of a plugin token — `plugin/Sales Team/read`,
+ * `Plugin/sales-team/READ` — or null when the text is not one: a name must be
+ * present and hold no further `/`, the verb must be one of the three. The ONE
+ * place a plugin's spelling folds to its slug: the access-file parser, the
+ * role canonicaliser (which grant and revoke compare through) and the link
+ * service all go through it, so a grant written one way is found again
+ * however it was spelled.
+ */
+export function canonicalPluginToken(token: string): string | null {
+  const body = token.trim();
+  if (!body.toLowerCase().startsWith(PLUGIN_TOKEN_PREFIX)) return null;
+  const rest = body.slice(PLUGIN_TOKEN_PREFIX.length).trim();
+  const cut = rest.lastIndexOf('/');
+  const name = cut > 0 ? rest.slice(0, cut).trim() : '';
+  const verb = cut > 0 ? rest.slice(cut + 1).trim().toLowerCase() : '';
+  if (!name || name.includes('/') || !(PLUGIN_TOKEN_VERBS as readonly string[]).includes(verb)) return null;
+  const slug = pluginManifestName(name);
+  if (!slug) return null;
+  return pluginPrincipalKey(slug, verb as PluginTokenVerb);
+}
 
 export const USER_REF_REGEX = /^(.+?)\s+<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/;
 export const EMAIL_REGEX = /^[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+$/;
@@ -224,9 +292,33 @@ export function hasAccessFrontmatterExtension(p: string): boolean {
 export interface RolesIndex {
   byCanonical: Map<
     string,
-    { displayName: string; emails: Set<string>; groupRefs?: Set<string>; kind?: 'role' | 'group' }
+    {
+      displayName: string;
+      emails: Set<string>;
+      groupRefs?: Set<string>;
+      kind?: 'role' | 'group' | 'plugin';
+      /** For `kind: 'plugin'`: the plugin's identity (its manifest name) the principal derives from. */
+      pluginName?: string;
+      /** For `kind: 'plugin'`: the repo-relative plugin directory, e.g. `Plugins/GTM`. */
+      pluginDir?: string;
+      /**
+       * For `kind: 'plugin'`: the role and group keys whose members the
+       * principal was expanded FROM — the non-user entries of the plugin's
+       * own rules, as `byCanonical` keys. `emails` is the flattened roster;
+       * this is its provenance, kept so a question asked of a PRINCIPAL
+       * rather than a person ("what can this team read?") can follow the
+       * team into the plugins that admit it, the way a member's key set does.
+       */
+      sourceKeys?: Set<string>;
+    }
   >;
   byEmail: Map<string, Set<string>>;
+  /**
+   * Principal keys EVERY caller holds, known or not — a plugin whose own
+   * rules grant `everyone` yields a plugin principal no email list can
+   * enumerate. The resolver unions these into every caller's key set.
+   */
+  publicKeys?: Set<string>;
 }
 // ---------------------------------------------------------------------------
 // Tiny YAML subset parser — handles only block mappings + block sequences
@@ -429,7 +521,9 @@ export function bodyAfterFrontmatter(text: string): string {
 // ---------------------------------------------------------------------------
 
 export function canonicalRoleName(name: string): string {
-  return name.trim().toLowerCase().replace(/\s+/g, ' ');
+  // A plugin token canonicalises to its KEY (slugged name), not to its
+  // lowercased spelling — see `canonicalPluginToken`.
+  return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 export function canonicalEmail(email: string): string {
@@ -482,6 +576,23 @@ export function parseAccessEntry(
     const suffix = canonicalRoleName(role.slice(ROLE_TOKEN_PREFIX.length));
     if (!suffix) return { ok: false, error: `entry '${body}' names no role after '${ROLE_TOKEN_PREFIX}'` };
     role = `${ROLE_TOKEN_PREFIX}${suffix}`;
+  } else if (role.startsWith(PLUGIN_TOKEN_PREFIX)) {
+    // `plugin/<Name>/<verb>`: the name is canonicalised to the plugin's
+    // manifest slug, the verb must be one of the three. Anything else is a
+    // parse error naming the valid shapes — a token that silently resolved to
+    // nothing would be a grant nobody gets and nobody is told about.
+    const key = canonicalPluginToken(body);
+    // Exactly one separator: `plugin/GTM/foo/read` is a typo, not a grant to
+    // some plugin whose slug happens to fold `GTM/foo` into `gtm-foo`.
+    if (key === null) {
+      return {
+        ok: false,
+        error:
+          `entry '${body}' is not a plugin principal — write it as ` +
+          `${PLUGIN_TOKEN_PREFIX}<plugin>/read, ${PLUGIN_TOKEN_PREFIX}<plugin>/write or ${PLUGIN_TOKEN_PREFIX}<plugin>/owner`,
+      };
+    }
+    role = key;
   }
   return { ok: true, entry: { kind: 'role', role, displayRole: body, deny } };
 }
@@ -526,6 +637,16 @@ export function parseRolesYaml(
     if (canonical.startsWith(ROLE_TOKEN_PREFIX)) {
       errors.push(
         `roles.yaml: role '${displayName}' starts with the reserved '${ROLE_TOKEN_PREFIX}' prefix — that spelling is the explicit role token in access entries`,
+      );
+      continue;
+    }
+    // A role spelled `plugin/…` would be overwritten by the synthesised plugin
+    // principal of the same key while its members kept the token — plugin
+    // access for people who are not plugin members. Refused at parse time,
+    // like the group name-safety rule.
+    if (canonical.startsWith(PLUGIN_TOKEN_PREFIX)) {
+      errors.push(
+        `roles.yaml: role '${displayName}' starts with the reserved '${PLUGIN_TOKEN_PREFIX}' prefix — that spelling is the plugin-principal token in access entries`,
       );
       continue;
     }

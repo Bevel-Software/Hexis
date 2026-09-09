@@ -38,8 +38,14 @@ describe('WorkspaceService.listFiles — read filter', () => {
     await mkFile(workspaceDir, 'Open/a.md');
     await mkFile(workspaceDir, 'Open/b.md');
     await mkFile(workspaceDir, 'Secret/s1.md');
+    await mkFile(workspaceDir, 'Secret/Vault/v1.md');
     await mkFile(workspaceDir, 'Mixed/hidden.md');
     await mkFile(workspaceDir, 'top.md');
+    // A denied folder with a grant below it: Scopes/ itself is closed, but
+    // Scopes/Deploy/ is shared (a linked skill's folder opened to a plugin's
+    // readers, say), and its files are readable.
+    await mkFile(workspaceDir, 'Scopes/Deploy/SKILL.md');
+    await mkFile(workspaceDir, 'Scopes/other.md');
     svc = new WorkspaceService(root, 'https://example.invalid/repo.git', KB);
     await svc.getWorkspacePath(workspaceId);
   });
@@ -64,27 +70,51 @@ describe('WorkspaceService.listFiles — read filter', () => {
     expect(filtered).toEqual(unfiltered);
   });
 
-  it('drops denied files and denied directories (subtree skipped)', async () => {
-    const asked: string[] = [];
-    const filter: ReadTreeFilter = async (ps) => {
-      asked.push(...ps);
-      return new Map(ps.map((p) => [p, !(p.includes('Secret') || p.endsWith('hidden.md'))]));
-    };
-    const tree = await svc.listFiles(workspaceId, filter);
-    const all = paths(tree);
+  it('drops denied files, and a denied directory with nothing readable beneath it', async () => {
+    const filter: ReadTreeFilter = async (ps) =>
+      new Map(ps.map((p) => [p, !(p.includes('Secret') || p.includes('Scopes') || p.endsWith('hidden.md'))]));
+    const all = paths(await svc.listFiles(workspaceId, filter));
 
     // Readable files survive.
     expect(all).toContain('Open/a.md');
     expect(all).toContain('Open/b.md');
     expect(all).toContain('top.md');
-    // Denied directory and its whole subtree are gone.
+    // A denied directory whose whole subtree is denied is gone, with the
+    // subtree — including a nested folder the walk did look into.
     expect(all).not.toContain('Secret');
     expect(all).not.toContain('Secret/s1.md');
+    expect(all).not.toContain('Secret/Vault');
+    expect(all).not.toContain('Scopes');
     // Denied file is gone.
     expect(all).not.toContain('Mixed/hidden.md');
-    // The denied directory's subtree is never walked — the filter is never
-    // asked about a path inside Secret/.
-    expect(asked.some((p) => p.startsWith('Secret/'))).toBe(false);
+  });
+
+  it('keeps a denied directory as the way to what is readable beneath it', async () => {
+    // Scopes/ is closed; Scopes/Deploy/ and its file are shared. The closed
+    // folder shows as a container — the reader can reach the skill through
+    // the tree — with its own contents still filtered (other.md is gone).
+    const filter: ReadTreeFilter = async (ps) =>
+      new Map(ps.map((p) => [p, p.startsWith('Scopes/Deploy') || (!p.includes('Secret') && !p.includes('Scopes') && !p.endsWith('hidden.md'))]));
+    const all = paths(await svc.listFiles(workspaceId, filter));
+    expect(all).toContain('Scopes');
+    expect(all).toContain('Scopes/Deploy');
+    expect(all).toContain('Scopes/Deploy/SKILL.md');
+    expect(all).not.toContain('Scopes/other.md');
+    // Unchanged for a subtree with nothing readable in it.
+    expect(all).not.toContain('Secret');
+  });
+
+  it('keeps a closed folder whose only readable content is an EMPTY sub-folder', async () => {
+    // A readable folder is kept on its own verdict, children or not — so the
+    // closed folder above it has a child, and stays as the way there.
+    await fs.mkdir(path.join(workspaceDir, 'Scopes', 'Empty'), { recursive: true });
+    const filter: ReadTreeFilter = async (ps) =>
+      new Map(ps.map((p) => [p, p === 'Scopes/Empty' || (!p.includes('Secret') && !p.includes('Scopes') && !p.endsWith('hidden.md'))]));
+    const all = paths(await svc.listFiles(workspaceId, filter));
+    expect(all).toContain('Scopes');
+    expect(all).toContain('Scopes/Empty');
+    expect(all).not.toContain('Scopes/Deploy');
+    expect(all).not.toContain('Scopes/other.md');
   });
 
   it('keeps a readable directory left empty after filtering (D4)', async () => {
