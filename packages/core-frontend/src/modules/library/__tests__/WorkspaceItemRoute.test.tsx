@@ -172,11 +172,21 @@ describe('WorkspaceItemRoute', () => {
     expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
-  it("a Plugins path that is no item lands on its plugin's page", async () => {
+  it("a plugin's own file — its access.md — opens as the plain file it is, not the plugin page", async () => {
+    // The page keys on the plugin's IDENTITY, which the folder name need not
+    // be (a personal space, a folder spelled unlike its manifest), so the old
+    // bounce landed on "doesn't exist" for a file plainly there. Same URL —
+    // the raw view is router state, never a different address.
     renderAt(itemUrl('Plugins/Sales/access.md'));
-    await waitFor(() =>
-      expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/plugins/Sales'),
-    );
+    await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Sales/access.md'));
+    expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+  });
+
+  it("a personal space's access.md opens the same way — it has no listed plugin page at all", async () => {
+    renderAt(itemUrl('Plugins/personal-u1/access.md'));
+    await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/personal-u1/access.md'));
   });
 
   /**
@@ -261,15 +271,13 @@ describe('WorkspaceItemRoute', () => {
       expect(await screen.findByLabelText('tool-page')).toHaveTextContent('internal_deploy');
     });
 
-    it("sends a category folder's own access.md to the plugin page", async () => {
+    it("opens a category folder's own access.md as a plain file", async () => {
       // The same answer a stray file at the plugin's top level gets. Before, it
       // fell through to a SkillPage named after the category.
       renderAt(itemUrl('Plugins/Engineering/coding/access.md'));
-      await waitFor(() =>
-        expect(screen.getByLabelText('pathname')).toHaveTextContent(
-          '/skills-and-tools/plugins/Engineering',
-        ),
-      );
+      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Engineering/coding/access.md'));
+      expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
     });
 
     it('waits for the catalog rather than guessing a category is the skill', async () => {
