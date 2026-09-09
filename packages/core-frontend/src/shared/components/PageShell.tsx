@@ -9,7 +9,7 @@ export type PageShellWidth = keyof typeof WIDTH_CLASS;
 
 /**
  * Minimal shared chrome for the shell's standalone routed pages (Secrets,
- * External agent access, Roles & Members): a full-height scrolling canvas
+ * External agent access, App roles): a full-height scrolling canvas
  * with a centered max-width column, a page-title row and a white content
  * card. Deliberately tiny — it mirrors the Tailwind idioms the tools
  * explorer page already uses; it is not a design system.

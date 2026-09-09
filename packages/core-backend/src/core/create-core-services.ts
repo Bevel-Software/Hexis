@@ -351,7 +351,7 @@ export async function createCoreServices(
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
   // gate cannot disagree about who the owner is. They did: the owner could
-  // open Roles & Members and then be refused the save, with the UI showing
+  // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
   const accessControl = new AccessControlService(workspaceService, kbDirName, [
     config.adminEmail,

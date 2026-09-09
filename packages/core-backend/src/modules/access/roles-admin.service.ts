@@ -1,6 +1,6 @@
 /**
- * Admin Roles & Members service — MEMBERSHIP editing on the default-branch
- * `roles.yaml`.
+ * Admin App roles service (the page formerly labelled "Roles & Members") —
+ * MEMBERSHIP editing on the default-branch `roles.yaml`.
  *
  * Roles are APP-DEFINED capabilities (see `capability-registry.ts`): the
  * product decides which roles exist; users can never create, rename, or
@@ -77,7 +77,7 @@ export class RolesAdminError extends WorkflowDomainError {
   }
 }
 
-/** One role as the Roles & Members page renders it. */
+/** One role as the App roles page renders it. */
 export interface RoleRosterEntry {
   canonical: string;
   displayName: string;

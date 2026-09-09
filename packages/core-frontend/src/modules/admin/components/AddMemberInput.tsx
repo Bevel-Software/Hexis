@@ -54,7 +54,7 @@ export interface AddMemberInputProps {
 }
 
 /**
- * The add-member input shared by Roles & Members and the Groups page: an
+ * The add-member input shared by App roles and the Groups & Members page: an
  * email field that suggests people from the deployment as you type, plus its
  * Add button.
  *
