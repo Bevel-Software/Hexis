@@ -75,13 +75,21 @@ describe('PluginProvisionService.createPlugin', () => {
     const result = await h.svc.createPlugin(USER, 'GTM');
     // The folder is where it lives; the name is what it IS (the identity the
     // page navigates to and the grants spell).
-    expect(result).toEqual({ folder: 'GTM', name: 'gtm', created: true });
+    expect(result).toEqual({ folder: 'GTM', path: 'Plugins/GTM', skillsDir: 'Plugins/GTM/skills', name: 'gtm', created: true });
 
     const accessMd = await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/access.md'), 'utf-8');
     // Discoverable FILE (frontmatter read: everyone), creator-run FOLDER
-    // (body names the creator under all three verbs).
-    expect(accessMd.startsWith('---\nread:\n  - everyone\n---\n')).toBe(true);
-    const body = accessMd.slice(accessMd.indexOf('---\n', 4) + 4);
+    // (body names the creator under all three verbs) — each block saying,
+    // in its own comments, what it governs and how to admit people.
+    expect(accessMd.startsWith('---\n')).toBe(true);
+    const close = accessMd.indexOf('\n---\n', 4);
+    const frontmatter = accessMd.slice(4, close);
+    const body = accessMd.slice(close + 5);
+    expect(frontmatter).toMatch(/read:\n\s+- everyone/);
+    expect(frontmatter).not.toContain('Ali Vega');
+    expect(frontmatter).toMatch(/governs this access\.md FILE only/);
+    expect(body).toMatch(/governs the PLUGIN FOLDER/);
+    expect(body).toMatch(/To admit people/);
     for (const verb of ['read', 'write', 'owner']) {
       expect(body).toMatch(new RegExp(`${verb}:[\\s\\S]*Ali Vega <ali@example.com>`));
     }
@@ -101,6 +109,44 @@ describe('PluginProvisionService.createPlugin', () => {
       { systemAuthorized: true },
     );
     expect(h.accessControl.invalidate).toHaveBeenCalledWith('ws-main');
+  });
+
+  it('makes a plugin INSIDE a grouping folder when one is named — the folder path is where it lives, the leaf is what it is', async () => {
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/Teams/EU'), { recursive: true });
+    const result = await h.svc.createPlugin(USER, 'Sales', 'Teams/EU');
+    expect(result).toEqual({
+      folder: 'Teams/EU/Sales',
+      path: 'Plugins/Teams/EU/Sales',
+      skillsDir: 'Plugins/Teams/EU/Sales/skills',
+      name: 'sales',
+      created: true,
+    });
+    const manifest = JSON.parse(await fs.readFile(path.join(h.dir, KB, 'Plugins/Teams/EU/Sales/plugin.json'), 'utf-8'));
+    expect(manifest.name).toBe('sales');
+    expect(await fs.readFile(path.join(h.dir, KB, 'Plugins/Teams/EU/Sales/access.md'), 'utf-8')).toContain('Ali Vega');
+    // One folder-scoped commit, at the nested path.
+    expect(h.commits.runPendingCommit).toHaveBeenCalledWith('ws-main', DEFAULT_BRANCH, `${KB}/Plugins/Teams/EU/Sales`, USER, {
+      systemAuthorized: true,
+    });
+    // Taken is judged IN that folder: the same name at the root is free.
+    await expect(h.svc.createPlugin(USER, 'sales', 'Teams/EU')).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('refuses a parent that is not there (404), not a folder name (422), a personal space, or a plugin — a plugin cannot hold another', async () => {
+    await expect(h.svc.createPlugin(USER, 'X', 'Nope')).rejects.toMatchObject({ status: 404 });
+    await expect(h.svc.createPlugin(USER, 'X', 'a/../b')).rejects.toMatchObject({ status: 422 });
+    await expect(h.svc.createPlugin(USER, 'X', '.hidden')).rejects.toMatchObject({ status: 422 });
+    await expect(h.svc.createPlugin(USER, 'X', personalPluginFolderName(USER.id))).rejects.toMatchObject({ status: 422 });
+    // Discovery says GTM is a plugin: nothing may be made inside it, at any depth.
+    await h.svc.createPlugin(USER, 'GTM');
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/GTM/skills'), { recursive: true });
+    await expect(h.svc.createPlugin(USER, 'X', 'GTM')).rejects.toMatchObject({ status: 422 });
+    await expect(h.svc.createPlugin(USER, 'X', 'GTM/skills')).rejects.toMatchObject({ status: 422 });
+    // A padded spelling names no folder: refused, never trimmed into one.
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/Teams'), { recursive: true });
+    await expect(h.svc.createPlugin(USER, 'X', 'Teams ')).rejects.toMatchObject({ status: 422 });
+    // The root, spelled as absence or as the empty string, is still the root.
+    expect((await h.svc.createPlugin(USER, 'Root', '')).folder).toBe('Root');
   });
 
   it('writes a conformant plugin.json: the identifier in slug form, the typed name as the display name', async () => {
@@ -133,7 +179,7 @@ describe('PluginProvisionService.createPlugin', () => {
     // Only the first folder landed.
     expect(await fs.readdir(path.join(h.dir, KB, 'Plugins'))).toEqual(['Sales Team']);
     // A genuinely distinct slug still goes through.
-    await expect(h.svc.createPlugin(USER, 'Sales Ops')).resolves.toEqual({
+    await expect(h.svc.createPlugin(USER, 'Sales Ops')).resolves.toMatchObject({
       folder: 'Sales Ops',
       name: 'sales-ops',
       created: true,
@@ -161,7 +207,7 @@ describe('PluginProvisionService.createPlugin', () => {
     // plugin FOLDER publishes a manifest identity.
     await fs.mkdir(path.join(h.dir, KB, 'Plugins'), { recursive: true });
     await fs.writeFile(path.join(h.dir, KB, 'Plugins', 'slack.tool'), 'id: slack\n', 'utf-8');
-    await expect(h.svc.createPlugin(USER, 'Slack Tool')).resolves.toEqual({
+    await expect(h.svc.createPlugin(USER, 'Slack Tool')).resolves.toMatchObject({
       folder: 'Slack Tool',
       name: 'slack-tool',
       created: true,
@@ -199,7 +245,7 @@ describe('PluginProvisionService.createPlugin', () => {
     await expect(h.svc.createPlugin(USER, 'GTM')).rejects.toThrow('push refused');
     // The folder is gone again — the next attempt starts clean.
     await expect(fs.stat(path.join(h.dir, KB, 'Plugins/GTM'))).rejects.toThrow();
-    await expect(h.svc.createPlugin(USER, 'GTM')).resolves.toEqual({ folder: 'GTM', name: 'gtm', created: true });
+    await expect(h.svc.createPlugin(USER, 'GTM')).resolves.toMatchObject({ folder: 'GTM', name: 'gtm', created: true });
   });
 });
 
@@ -460,20 +506,32 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     const folder = personalPluginFolderName(USER.id);
 
     const first = await h.svc.ensurePersonalPlugin(USER);
-    expect(first).toEqual({ folder, name: folder, created: true });
+    expect(first).toEqual({
+      folder,
+      path: `Plugins/${folder}`,
+      skillsDir: `Plugins/${folder}/skills`,
+      name: folder,
+      created: true,
+    });
     const accessMd = await fs.readFile(
       path.join(h.dir, KB, 'Plugins', folder, 'access.md'),
       'utf-8',
     );
-    // PRIVATE: no `everyone` self-grant anywhere — the file follows the
-    // folder chain, and the rules close that chain to the owner alone.
-    expect(accessMd).not.toContain('everyone');
+    // PRIVATE: the frontmatter grants nobody (the space is listed for no one
+    // else), and the body denies `everyone` — so a root-level `read: everyone`
+    // an admin adds later cannot open it — naming the owner and Admin.
+    const close = accessMd.indexOf('\n---\n', 4);
+    const frontmatter = accessMd.slice(4, close);
+    const body = accessMd.slice(close + 5);
+    expect(frontmatter).not.toContain('everyone');
+    expect(frontmatter).not.toContain('Ali Vega');
+    expect(body).toMatch(/read:\n(?:\s+#.*\n)*\s+- deny everyone\n\s+- Admin/);
     for (const verb of ['read', 'write', 'owner']) {
-      expect(accessMd).toMatch(new RegExp(`${verb}:[\\s\\S]*Ali Vega <ali@example.com>`));
+      expect(body).toMatch(new RegExp(`${verb}:[\\s\\S]*Ali Vega <ali@example.com>`));
     }
 
     const second = await h.svc.ensurePersonalPlugin(USER);
-    expect(second).toEqual({ folder, name: folder, created: false });
+    expect(second).toMatchObject({ folder, path: `Plugins/${folder}`, created: false });
     // Idempotent for real: one provision (access.md + plugin.json), one commit.
     expect(h.writeFile).toHaveBeenCalledTimes(2);
     expect(h.commits.runPendingCommit).toHaveBeenCalledTimes(1);
@@ -500,13 +558,19 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
 });
 
 describe('access.md templates', () => {
-  it('plugin template is discoverable, personal template is not — same creator grants in both', () => {
+  it('plugin template is discoverable, personal template denies everyone — same creator grants in both bodies', () => {
     const plugin = pluginAccessMd(USER);
     const personal = personalAccessMd(USER);
-    expect(plugin).toContain('everyone');
-    expect(personal).not.toContain('everyone');
+    const split = (text: string) => {
+      const close = text.indexOf('\n---\n', 4);
+      return { frontmatter: text.slice(4, close), body: text.slice(close + 5) };
+    };
+    expect(split(plugin).frontmatter).toMatch(/read:\n\s+- everyone/);
+    expect(split(personal).frontmatter).not.toContain('everyone');
+    expect(split(personal).body).toMatch(/- deny everyone\n\s+- Admin/);
     for (const text of [plugin, personal]) {
-      expect(text).toContain('Ali Vega <ali@example.com>');
+      expect(split(text).body).toContain('Ali Vega <ali@example.com>');
+      expect(split(text).frontmatter).not.toContain('Ali Vega');
     }
   });
 });

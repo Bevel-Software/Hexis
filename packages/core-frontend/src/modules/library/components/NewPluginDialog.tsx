@@ -8,6 +8,12 @@ import { useLibraryToast } from '../state/toast.context';
 export interface NewPluginDialogProps {
   /** Names already taken — readable plugins AND locked ones. */
   existing: string[];
+  /**
+   * The grouping folder below the plugins root to make the plugin in
+   * (`Teams`, `Teams/EU`) — where a person right-clicked in the Plugins tree.
+   * Empty or absent: the root. The dialog says where the plugin will go.
+   */
+  parent?: string;
   onClose(): void;
   /** The catalog and the plugin index both have to hear about a new folder. */
   onCreated(): void;
@@ -24,13 +30,15 @@ export interface NewPluginDialogProps {
  * answering. So there is no access step in this dialog: by the time the
  * response arrives, the plugin exists and it is yours.
  */
-export function NewPluginDialog({ existing, onClose, onCreated }: NewPluginDialogProps) {
+export function NewPluginDialog({ existing, parent = '', onClose, onCreated }: NewPluginDialogProps) {
   const navigate = useNavigate();
   const toast = useLibraryToast();
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
 
   const trimmed = name.trim();
+  // The index's names are identities across the whole tree, so a clash with
+  // one is a clash anywhere; the server is still the judge of the folder.
   const taken = existing.some((g) => g.toLowerCase() === trimmed.toLowerCase());
   /**
    * A plugin name becomes a folder name, so the characters a path cannot carry
@@ -52,7 +60,7 @@ export function NewPluginDialog({ existing, onClose, onCreated }: NewPluginDialo
     try {
       // Navigate with the SERVER's identity, not the typed name — the
       // endpoint owns the identifier of what it created.
-      const { name } = await createPlugin(trimmed);
+      const { name } = await createPlugin(trimmed, parent);
       onCreated();
       onClose();
       navigate(pathForPlugin(name));
@@ -85,6 +93,12 @@ export function NewPluginDialog({ existing, onClose, onCreated }: NewPluginDialo
     >
       <p className="text-ui text-ink-muted">
         A plugin carries skills and tools for the people in it. You run the ones you create.
+        {parent && (
+          <>
+            {' '}
+            This one goes in <span className="font-mono text-detail text-ink">{parent}/</span>.
+          </>
+        )}
       </p>
 
       <TextField

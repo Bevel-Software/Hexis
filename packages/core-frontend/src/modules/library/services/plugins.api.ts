@@ -83,11 +83,16 @@ export async function listPlugins(): Promise<PluginSummary[]> {
  * seeded `access.md` before answering, and refuses with its own words —
  * worth surfacing verbatim.
  */
-export async function createPlugin(name: string): Promise<{ folder: string; name: string }> {
+/**
+ * Make a plugin. `parent` is a grouping folder below the plugins root to
+ * make it in (`Teams`, `Teams/EU`); omitted or empty, it goes at the root.
+ * The server owns every rule about where a plugin may go.
+ */
+export async function createPlugin(name: string, parent = ''): Promise<{ folder: string; name: string }> {
   const res = await authFetch('/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(parent ? { name, parent } : { name }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };

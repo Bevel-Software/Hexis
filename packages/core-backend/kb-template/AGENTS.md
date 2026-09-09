@@ -1,3 +1,11 @@
+---
+# This file's own access rule: readable by every signed-in person and their
+# agents, whatever the root access.md says. Agents are told to read this file
+# before their first action, and the root rules grant read to nobody by
+# default — without this line a non-admin's agent would fail on step one.
+read:
+  - everyone
+---
 # Knowledge base
 
 This is a git-backed knowledge base. You are the primary agent responsible for
@@ -124,20 +132,27 @@ answer to that — and `mcp.json` carries only where a server is, never a
 under `extensions["software.bevel.hexis"].mcpServers[<name>]`, which is ours
 to interpret and which other clients ignore by design.
 
-**Plugin folders are made through the app, not by writing files.** A folder
-is a plugin exactly when it carries a `plugin.json` (the platform writes one
-into every legacy plugin folder at startup), and it is LISTED only when it
-also carries an `access.md` — a bare directory under `{{pluginsDir}}/` is neither.
-Plugins may sit at any depth under `{{pluginsDir}}/`; a folder that holds plugins
-deeper down is a grouping folder, not a plugin. A new plugin needs an
+**Plugin folders are made through the platform, not by writing files.** A
+folder is a plugin exactly when it carries a `plugin.json` (the platform
+writes one into every legacy plugin folder at startup), and it is LISTED only
+when it also carries an `access.md` — a bare directory under `{{pluginsDir}}/` is
+neither. Plugins may sit at any depth under `{{pluginsDir}}/`; a folder that holds
+plugins deeper down is a grouping folder, not a plugin. A new plugin needs an
 `access.md` naming who runs it, and the write gate refuses a plain write
 into an unused name there — so do not try to create a plugin by writing a
-skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Send the user to the app's **New plugin** button (or its
-`POST /api/plugins` endpoint), then write into the folder it made. Names
-starting with `personal-` are reserved: one such folder exists per person,
-created automatically with their first personal skill, readable only by its
-owner and never listed as a plugin — a signed-in user's own skills belong
-there, and move into a plugin by moving the skill's folder.
+skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Use the two tools
+instead:
+
+- `my_plugin` — your user's own private space, created on first use:
+  `{{pluginsDir}}/personal-<id>/`. Readable only by its owner (and admins),
+  never listed as a plugin. Their personal skills go under its `skills/`,
+  each in its own folder with a `SKILL.md`; write there with the file tools.
+- `create_plugin` — a shared plugin, named, optionally inside a grouping
+  folder under `{{pluginsDir}}/` (`parent`). The caller runs it; others join
+  through the app or are granted in its `access.md`.
+
+The app's **New plugin** button and `POST /api/plugins` do the same. A skill
+moves from a personal space into a plugin by moving its folder.
 
 Everything under `{{knowledgeBaseDir}}/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about

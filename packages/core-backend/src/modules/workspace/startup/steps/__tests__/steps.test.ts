@@ -8,6 +8,7 @@ import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
 import { PluginManifestsStep } from '../plugin-manifests.step.js';
+import { PersonalSpacesStep } from '../personal-spaces.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
@@ -552,6 +553,55 @@ describe('PluginManifestsStep', () => {
     await makeRunner([new PluginManifestsStep()]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one migration commit
+  });
+});
+
+describe('PersonalSpacesStep', () => {
+  // A personal folder as the previous template seeded it: the owner's grants
+  // and nothing else — private only while nothing above grants read.
+  const LEGACY_PERSONAL =
+    '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\nread: []\n';
+
+  it("adds `deny everyone` and Admin to every personal space's read rules on every branch, keeping the rest, once", async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      'Plugins/personal-u1/plugin.json': '{"name":"personal-u1"}',
+      'Plugins/personal-u1/access.md': LEGACY_PERSONAL,
+      // A space someone already closed, and a shared plugin: untouched.
+      'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+      'Plugins/GTM/plugin.json': '{"name":"gtm"}',
+      'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
+    });
+
+    await makeRunner([new PersonalSpacesStep()]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      const closed = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u1/access.md'), 'utf8'));
+      // The old seed's frontmatter grants stay as written; the body — which
+      // governs the folder — now denies everyone, names Admin, and carries the
+      // owner's grants so they can still read, write and own their space.
+      expect(closed).toBe(
+        '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\n' +
+          'read:\n  - Ali Vega <ali@x.io>\n  - deny everyone\n  - Admin\n\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>',
+      );
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u2/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+      );
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
+        '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
+      );
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Keep a personal space private');
+    expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone; Admin named');
+
+    // Idempotent: the next boot finds every space already closed.
+    await makeRunner([new PersonalSpacesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
   });
 });
 

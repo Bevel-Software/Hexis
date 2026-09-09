@@ -42,10 +42,12 @@ import {
   DEFAULT_BRANCH,
   PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
+  PLUGIN_SKILLS_DIR,
   pluginManifestName,
   renderPluginManifest,
   PERSONAL_PLUGIN_PREFIX,
   isPersonalPluginDir,
+  isPersonalPluginFolder,
   personalPluginFolderName,
   validateFilename,
   type AuthUser,
@@ -97,8 +99,12 @@ function incompleteDiscovery(unreadable: string[]): PluginProvisionError {
 }
 
 export interface ProvisionedPlugin {
-  /** The folder name under `Plugins/` (not the full path). */
+  /** The folder's path below `Plugins/` — `GTM`, or `Teams/GTM` for one made inside a grouping folder. */
   folder: string;
+  /** The same folder, repo-relative — `Plugins/Teams/GTM` — as the file tools address it. */
+  path: string;
+  /** Where its skills go: `<path>/skills`, each skill a subfolder holding a `SKILL.md`. */
+  skillsDir: string;
   /** The plugin's identity — the manifest name written for it. */
   name: string;
   /** False when an ensure found the folder already there. */
@@ -114,6 +120,12 @@ export class PluginProvisionError extends Error {
     super(message);
     this.name = 'PluginProvisionError';
   }
+}
+
+/** The one shape every provisioning answer has: the folder in both spellings, and where its skills go. */
+function provisioned(folder: string, name: string, created: boolean): ProvisionedPlugin {
+  const path = `${PLUGINS_DIR}/${folder}`;
+  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, created };
 }
 
 export class PluginProvisionService {
@@ -138,14 +150,22 @@ export class PluginProvisionService {
   ) {}
 
   /**
-   * Create `Plugins/<name>/` for `user`. Throws `PluginProvisionError` 422 on a
-   * name the filesystem or the model cannot carry, 409 when the name is taken
-   * (case-insensitively — the workspaces live on case-insensitive
-   * filesystems too, where `GTM` and `gtm` are one folder).
+   * Create `Plugins/<name>/` — or `Plugins/<parent>/<name>/` — for `user`.
+   * Throws `PluginProvisionError` 422 on a name the filesystem or the model
+   * cannot carry, 409 when the name is taken (case-insensitively — the
+   * workspaces live on case-insensitive filesystems too, where `GTM` and
+   * `gtm` are one folder), 404 when `parent` names no folder.
+   *
+   * `parent` is a GROUPING folder below the plugins root (`Teams`,
+   * `Teams/EU`): it must exist, and it must not be a plugin or sit inside
+   * one — discovery claims a plugin's whole subtree, so a plugin made there
+   * would be invisible to every catalog. The identity checks are the same at
+   * any depth: a nested plugin claims its slug as fully as a top-level one.
    */
-  async createPlugin(user: AuthUser, rawName: string): Promise<ProvisionedPlugin> {
+  async createPlugin(user: AuthUser, rawName: string, rawParent?: string): Promise<ProvisionedPlugin> {
     const name = rawName.trim();
     if (!name) throw new PluginProvisionError('A plugin needs a name.', 422);
+    const parent = await this.resolveParent(rawParent);
     // NUL and control chars are exactly what a filesystem path cannot carry;
     // refusing them here keeps the refusal a 422 instead of the fs layer's 500.
     // eslint-disable-next-line no-control-regex
@@ -176,7 +196,7 @@ export class PluginProvisionService {
     // key subsumes the old lowercase one — and deletion (below) derives its
     // key the same way, keeping delete/re-create of one name serialized.
     return this.creations.run(`plugin:${pluginManifestName(name)}`, async () => {
-      const existing = await this.existingFolder(name);
+      const existing = await this.existingFolder(name, parent);
       if (existing !== null) {
         throw new PluginProvisionError(`A plugin named "${existing}" already exists.`, 409);
       }
@@ -193,9 +213,47 @@ export class PluginProvisionService {
           409,
         );
       }
-      await this.provision(user, name, pluginAccessMd(user));
-      return { folder: name, name: pluginManifestName(name), created: true };
+      const folder = parent ? `${parent}/${name}` : name;
+      await this.provision(user, folder, name, pluginAccessMd(user));
+      return provisioned(folder, pluginManifestName(name), true);
     });
+  }
+
+  /**
+   * The grouping folder a creation goes into, as its path below the plugins
+   * root — `''` for the root itself. Validated AS GIVEN, segment by segment,
+   * with the one rule every path here obeys (`validateFilename`, no
+   * dot-prefix); it must exist with every component spelled as on disk; and
+   * it must be a GROUPING folder — not a personal space, not a plugin, not
+   * inside one, since discovery claims a plugin's subtree and a plugin made
+   * there would be listed nowhere. A hole in discovery refuses, as for every
+   * other provisioning write.
+   */
+  private async resolveParent(rawParent: string | undefined): Promise<string> {
+    if (rawParent === undefined || rawParent === '') return '';
+    const segments = rawParent.split('/');
+    if (segments.some((s) => validateFilename(s) !== null || s.startsWith('.'))) {
+      throw new PluginProvisionError(`"${rawParent}" is not a folder name the knowledge base can carry.`, 422);
+    }
+    const rel = `${PLUGINS_DIR}/${rawParent}`;
+    if (isPersonalPluginDir(rel) || isPersonalPluginFolder(segments[0]!)) {
+      throw new PluginProvisionError('A plugin cannot be made inside a personal space.', 422);
+    }
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    if (!(await this.exactFolderExists(path.join(wsDir, this.kbDirName, PLUGINS_DIR), segments))) {
+      throw new PluginProvisionError(`There is no folder "${rawParent}" under ${PLUGINS_DIR}/.`, 404);
+    }
+    const { plugins, unreadable } = await this.discovered();
+    if (unreadable.length > 0) throw incompleteDiscovery(unreadable);
+    const inside = plugins.find((p) => rel === p.folder || rel.startsWith(`${p.folder}/`));
+    if (inside) {
+      throw new PluginProvisionError(
+        `"${rawParent}" is inside the plugin at ${inside.folder} — a plugin cannot hold another plugin.`,
+        422,
+      );
+    }
+    return rawParent;
   }
 
   /**
@@ -206,20 +264,20 @@ export class PluginProvisionService {
     const folder = personalPluginFolderName(user.id);
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       if ((await this.existingFolder(folder)) !== null) {
-        return { folder, name: pluginManifestName(folder), created: false };
+        return provisioned(folder, pluginManifestName(folder), false);
       }
       try {
-        await this.provision(user, folder, personalAccessMd(user));
+        await this.provision(user, folder, folder, personalAccessMd(user));
       } catch (err) {
         // ENSURE semantics even under a race the lock cannot see (another
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
         if (err instanceof PluginProvisionError && err.status === 409) {
-          return { folder, name: pluginManifestName(folder), created: false };
+          return provisioned(folder, pluginManifestName(folder), false);
         }
         throw err;
       }
-      return { folder, name: pluginManifestName(folder), created: true };
+      return provisioned(folder, pluginManifestName(folder), true);
     });
   }
 
@@ -351,12 +409,16 @@ export class PluginProvisionService {
     return true;
   }
 
-  /** The taken name (in its on-disk casing) colliding with `name`, or null. */
-  private async existingFolder(name: string): Promise<string | null> {
+  /**
+   * The taken name (in its on-disk casing) colliding with `name` in `parent`
+   * (`''` = the plugins root), or null.
+   */
+  private async existingFolder(name: string, parent = ''): Promise<string | null> {
     const wsId = await this.readyWorkspaceId();
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const rel = parent ? `${PLUGINS_DIR}/${parent}` : PLUGINS_DIR;
     // No Plugins/ root yet — nothing can collide.
-    const children = await listDirOrIncomplete(path.join(wsDir, this.kbDirName, PLUGINS_DIR), PLUGINS_DIR);
+    const children = await listDirOrIncomplete(path.join(wsDir, this.kbDirName, rel), rel);
     if (!children) return null;
     const lower = name.toLowerCase();
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
@@ -408,7 +470,11 @@ export class PluginProvisionService {
     return plugins.find((p) => pluginManifestName(p.name) === slug)?.folder ?? null;
   }
 
-  private async provision(user: AuthUser, folder: string, accessMd: string): Promise<void> {
+  /**
+   * Seed `Plugins/<folder>/` — `folder` being the path below the root, `leaf`
+   * its last segment, which names the manifest — and commit it.
+   */
+  private async provision(user: AuthUser, folder: string, leaf: string, accessMd: string): Promise<void> {
     const wsId = await this.readyWorkspaceId();
     const folderPath = `${this.kbDirName}/${PLUGINS_DIR}/${folder}`;
     const wsRelPath = `${folderPath}/access.md`;
@@ -432,7 +498,7 @@ export class PluginProvisionService {
       await this.workspaceService.writeFile(
         wsId,
         `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
-        renderPluginManifest(folder),
+        renderPluginManifest(leaf),
       );
       // Inline, not enqueued: the gate reads rules at HEAD, so the folder is
       // only real once this commit lands. `runPendingCommit` is the same
@@ -480,18 +546,70 @@ export class PluginProvisionService {
  * (body read/write/owner name the creator). The `read: []` placeholder makes
  * the body parse as rules from the first byte, so every later splice targets
  * the body rather than the frontmatter.
+ *
+ * The comments are part of the template on purpose. The file is what an
+ * administrator opens to widen a plugin, and the two blocks look alike: a
+ * person who finds `everyone` already under the top `read:` and adds nothing
+ * concludes that "everyone" does nothing. Each block says what it governs,
+ * and the body says how to admit people, right where they would type it.
+ * `spliceGrant` preserves comments, so every later edit keeps them.
  */
 export function pluginAccessMd(creator: { name: string; email: string }): string {
-  return withCreatorGrants('---\nread:\n  - everyone\n---\nread: []\n', creator);
+  return withCreatorGrants(
+    [
+      '---',
+      '# THIS BLOCK (the frontmatter) governs this access.md FILE only: who may',
+      '# see it and who may change it. `read: everyone` here means every signed-in',
+      '# person can see that the plugin exists and ask to join. It admits nobody.',
+      'read:',
+      '  - everyone',
+      '---',
+      '# THIS BLOCK (the body) governs the PLUGIN FOLDER — its skills, tools and',
+      '# manifest. To admit people, add them under `read:` (use it) or `write:`',
+      '# (change it): a role from roles.yaml, a group from groups.yaml, or a person',
+      '# as `Name <email>`. `everyone` under `read:` HERE opens the plugin to all',
+      '# signed-in users. Keep this block pure YAML; explanations go in `#` lines.',
+      'read: []',
+      '',
+    ].join('\n'),
+    creator,
+  );
 }
 
 /**
- * A personal folder's access.md: PRIVATE — no frontmatter grant, so the
- * folder is invisible to everyone but its owner; the body names the owner
- * under read, write and owner.
+ * A personal folder's access.md: PRIVATE. The frontmatter grants nobody, so
+ * the file — and with it the folder's listing — is invisible to everyone but
+ * those the folder admits; the body DENIES `everyone` read outright, so a
+ * `read: everyone` an administrator later adds at the repo root (the usual
+ * way to open the knowledge base up) cannot open every person's private
+ * space with it. The owner is named directly, which outranks the denial;
+ * Admin is named too, as the one role that reads everything else.
+ *
+ * The frontmatter is there even though it grants nothing: it is what marks
+ * the file as body-governed. Without it the splicer (and the resolver) read
+ * the older single-block format, where the frontmatter IS the folder's
+ * rules — and the creator's grant would land beside nothing, leaving the
+ * body's denial to lock the owner out of their own space.
  */
 export function personalAccessMd(creator: { name: string; email: string }): string {
-  return withCreatorGrants('read: []\n', creator);
+  return withCreatorGrants(
+    [
+      '---',
+      '# THIS BLOCK (the frontmatter) governs this access.md FILE only. Nobody is',
+      '# granted here on purpose: a personal space is not listed for anyone else.',
+      'read: []',
+      '---',
+      '# THIS BLOCK (the body) governs the FOLDER — one person\'s private space.',
+      '# `deny everyone` keeps it closed even when the repository root grants',
+      '# `read: everyone`; the owner and Admin are named. To share it, add a',
+      '# person as `Name <email>` or a role under `read:`.',
+      'read:',
+      '  - deny everyone',
+      '  - Admin',
+      '',
+    ].join('\n'),
+    creator,
+  );
 }
 
 function withCreatorGrants(base: string, creator: { name: string; email: string }): string {

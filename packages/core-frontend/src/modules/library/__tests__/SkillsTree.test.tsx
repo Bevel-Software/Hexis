@@ -225,13 +225,14 @@ describe('PluginsTree', () => {
   function renderPlugins(
     url: string,
     over: Partial<WorkspaceContextValue> = {},
-    onCreatePlugin?: () => void,
+    onCreatePlugin?: (parent: string) => void,
+    isGroupingFolder?: (rel: string) => boolean,
   ) {
     const workspace = makeWorkspaceFixture({ fileTree: PLUGINS, kbDirName: KB, ...over });
     return render(
       <MemoryRouter initialEntries={[url]}>
         <WorkspaceContext.Provider value={workspace}>
-          <PluginsTree onCreatePlugin={onCreatePlugin} />
+          <PluginsTree onCreatePlugin={onCreatePlugin} isGroupingFolder={isGroupingFolder} />
           <LocationProbe />
         </WorkspaceContext.Provider>
       </MemoryRouter>,
@@ -273,16 +274,34 @@ describe('PluginsTree', () => {
     const labels = within(rootMenu).getAllByRole('menuitem').map((i) => i.textContent);
     expect(labels.indexOf('New plugin')).toBeGreaterThan(labels.indexOf('New folder'));
     fireEvent.click(within(rootMenu).getByRole('menuitem', { name: 'New plugin' }));
-    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+    // The root: the plugin goes at the top of Plugins/.
+    expect(onCreatePlugin).toHaveBeenLastCalledWith('');
     expect(screen.queryByRole('menu')).toBeNull();
 
+    // A folder below it: the plugin goes INSIDE, named by its path below the root.
     fireEvent.contextMenu(row('GTM'));
-    expect(within(screen.getByRole('menu', { name: 'Actions for GTM' })).getByRole('menuitem', { name: 'New plugin' })).toBeInTheDocument();
-    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.click(within(screen.getByRole('menu', { name: 'Actions for GTM' })).getByRole('menuitem', { name: 'New plugin' }));
+    expect(onCreatePlugin).toHaveBeenLastCalledWith('GTM');
 
     fireEvent.click(row('GTM'));
     fireEvent.contextMenu(row('plugin.json'));
     expect(within(screen.getByRole('menu', { name: 'Actions for plugin.json' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+
+  it('offers New plugin only where a plugin may be made — the root and grouping folders, never a plugin or what is inside one', () => {
+    const onCreatePlugin = vi.fn();
+    // The layout's answer: GTM is a plugin (so is everything beneath it).
+    const isGroupingFolder = (rel: string) => !(rel === `Plugins/GTM` || rel.startsWith('Plugins/GTM/'));
+    renderPlugins('/skills-and-tools', {}, onCreatePlugin, isGroupingFolder);
+    fireEvent.contextMenu(row('Plugins'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Plugins' })).getByRole('menuitem', { name: 'New plugin' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(row('GTM'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for GTM' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.click(row('GTM'));
+    fireEvent.contextMenu(row('skills'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for skills' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
   });
 
   it('offers no New plugin when nothing is wired — the tree grows no verb of its own', () => {

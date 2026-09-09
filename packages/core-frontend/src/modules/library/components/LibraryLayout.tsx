@@ -44,7 +44,12 @@ export function LibraryLayout() {
   const { user } = useAuth();
   const { isAdmin } = useAdmin();
   const toast = useLibraryToast();
-  const [newPluginOpen, setNewPluginOpen] = useState(false);
+  /**
+   * The New plugin dialog, with WHERE the plugin goes: `''` is the plugins
+   * root (the nav's own verbs), a path below it is the grouping folder a
+   * person right-clicked in the Plugins tree.
+   */
+  const [newPlugin, setNewPlugin] = useState<{ parent: string } | null>(null);
   const [menu, setMenu] = useState<SidebarContextTarget | null>(null);
   const menuRow = useRef<HTMLElement | null>(null);
   const { collapsed } = useSidebar();
@@ -127,11 +132,20 @@ export function LibraryLayout() {
           teams={teamRows}
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
-          onCreatePlugin={() => setNewPluginOpen(true)}
+          onCreatePlugin={() => setNewPlugin({ parent: '' })}
           canCreatePlugin={isAdmin && workspaceHasNoPlugins(lib)}
           onContextMenu={openContextMenu}
           skillsTree={<SkillsTree />}
-          pluginsTree={<PluginsTree onCreatePlugin={() => setNewPluginOpen(true)} />}
+          pluginsTree={
+            <PluginsTree
+              onCreatePlugin={(parent) => setNewPlugin({ parent })}
+              // A plugin cannot hold another: the verb is offered on grouping
+              // folders only — the root and folders no listed plugin owns.
+              isGroupingFolder={(rel) =>
+                !pluginSummaries.some((s) => s.folders.some((f) => rel === f || rel.startsWith(`${f}/`)))
+              }
+            />
+          }
         />
       </SidebarFrame>
       {/* The nav's right-click menu — Knowledge's file tree has had one since it
@@ -144,15 +158,16 @@ export function LibraryLayout() {
           y={menu.y}
           label={menu.label}
           onClose={() => setMenu(null)}
-          onCreatePlugin={() => setNewPluginOpen(true)}
+          onCreatePlugin={() => setNewPlugin({ parent: '' })}
           onCopyLink={menu.filter ? () => void copyLink(menu.filter!) : undefined}
           returnFocusTo={menuRow}
         />
       )}
-      {newPluginOpen && (
+      {newPlugin && (
         <NewPluginDialog
           existing={existingPlugins}
-          onClose={() => setNewPluginOpen(false)}
+          parent={newPlugin.parent}
+          onClose={() => setNewPlugin(null)}
           onCreated={() => {
             reload();
             reloadPlugins();

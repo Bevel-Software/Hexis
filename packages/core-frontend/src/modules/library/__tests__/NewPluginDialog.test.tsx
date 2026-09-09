@@ -26,7 +26,7 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
-function renderDialog(existing: string[] = ['GTM', 'Finance']) {
+function renderDialog(existing: string[] = ['GTM', 'Finance'], parent?: string) {
   const onCreated = vi.fn();
   const onClose = vi.fn();
   render(
@@ -36,7 +36,7 @@ function renderDialog(existing: string[] = ['GTM', 'Finance']) {
           <Route
             path="*"
             element={
-              <NewPluginDialog existing={existing} onClose={onClose} onCreated={onCreated} />
+              <NewPluginDialog existing={existing} parent={parent} onClose={onClose} onCreated={onCreated} />
             }
           />
         </Routes>
@@ -74,11 +74,20 @@ describe('NewPluginDialog', () => {
     fireEvent.change(field(), { target: { value: '  Design  ' } });
     fireEvent.click(submit());
 
-    // Trimmed — the endpoint owns everything after the name.
-    await waitFor(() => expect(pluginsMock.createPlugin).toHaveBeenCalledWith('Design'));
+    // Trimmed — the endpoint owns everything after the name. No parent: the root.
+    await waitFor(() => expect(pluginsMock.createPlugin).toHaveBeenCalledWith('Design', ''));
     // The route is built from the SERVER's identity — not the typed name, not the folder.
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools/plugins/design-id'));
     expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/This one goes in/)).toBeNull();
+  });
+
+  it('makes the plugin inside the folder it was opened from, and says so', async () => {
+    const { field, submit } = renderDialog(['GTM'], 'Teams/EU');
+    expect(screen.getByText(/This one goes in/)).toHaveTextContent('Teams/EU/');
+    fireEvent.change(field(), { target: { value: 'Design' } });
+    fireEvent.click(submit());
+    await waitFor(() => expect(pluginsMock.createPlugin).toHaveBeenCalledWith('Design', 'Teams/EU'));
   });
 
   it('refuses a name that is already taken, whoever can see it', () => {
