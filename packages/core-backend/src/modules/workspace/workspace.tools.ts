@@ -277,20 +277,33 @@ async function grepOneFile(
  * What a grep's `path` actually names. The walk starts with `readdir`, which
  * fails on a file and on a path with nothing at it alike — both would end as a
  * silent empty result — so the search root is resolved FIRST and each of the
- * three cases gets its own honest answer.
+ * four cases gets its own honest answer.
+ *
+ * A failed stat is NOT resolved here into an error to throw: the caller owes
+ * the path's read gate its verdict first (see the handler), so an unreadable
+ * root reports the gate's answer rather than whatever the filesystem said.
+ * `unknown` carries that failure back for the caller to rethrow if the gate
+ * lets the path through.
  */
 async function searchRootKind(
   fs: LocalFilesystem,
   path: string,
-): Promise<'directory' | 'file' | 'missing'> {
+): Promise<
+  | { kind: 'directory' | 'file' | 'missing' }
+  | { kind: 'unknown'; err: unknown }
+> {
   try {
-    return (await fs.stat(path)).type === 'directory' ? 'directory' : 'file';
+    return { kind: (await fs.stat(path)).type === 'directory' ? 'directory' : 'file' };
   } catch (err) {
-    // Only "nothing there" is missing (Mastra's FileNotFoundError carries code
-    // 'ENOENT', as do raw Node errors). Anything else — permissions, I/O — is a
-    // real failure and must not be reported as an absent path.
-    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return 'missing';
-    throw err;
+    // "Nothing there" is absence: plain ENOENT, and ENOTDIR for a path whose
+    // parent is an existing FILE (`notes.md/deeper`) — nothing can live there
+    // either, so it earns the same honest 404 rather than a raw failure.
+    // (Mastra's FileNotFoundError carries these codes, as do raw Node errors.)
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' };
+    // Anything else — permissions, I/O, symlink loops — is a real failure and
+    // must not be reported as an absent path.
+    return { kind: 'unknown', err };
   }
 }
 
@@ -653,7 +666,11 @@ export function registerWorkspaceTools(
       const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       // The empty root is the workspace itself — always a directory, and never
       // worth a stat.
-      const kind = searchRoot === '' ? 'directory' : await searchRootKind(fs, searchRoot);
+      const root =
+        searchRoot === ''
+          ? ({ kind: 'directory' } as const)
+          : await searchRootKind(fs, searchRoot);
+      const kind = root.kind;
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
       if (kind === 'directory') {
@@ -669,11 +686,16 @@ export function registerWorkspaceTools(
           docs,
         );
       } else {
-        // Not a directory: the permission verdict comes BEFORE the existence
+        // Not a directory: the permission verdict comes BEFORE every other
         // one, and it is `read_file`'s own gate on the same path — so grep
         // answers a path the caller may not read exactly as read_file does,
         // and can never confirm the existence of one read_file would hide.
+        // That ordering holds even when the stat itself failed: a denied path
+        // gets the 403, never the filesystem's complaint about it.
         await assertCanRead(gate, searchRoot);
+        // Readable, but the filesystem would not say what is there. Nothing
+        // honest is left to answer — surface the real failure.
+        if (root.kind === 'unknown') throw root.err;
         if (kind === 'missing') {
           throw new ToolError(
             `Nothing to search: there is no file or directory at "${displayPath(searchRoot)}" in this workspace. ` +

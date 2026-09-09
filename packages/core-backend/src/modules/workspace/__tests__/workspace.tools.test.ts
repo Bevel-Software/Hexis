@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -565,6 +565,38 @@ describe('grep with a path that names a file', () => {
       expect(grepRes.status, path).toBe(readRes.status);
       expect(await grepRes.json(), path).toEqual(await readRes.json());
     }
+  });
+
+  it('a path UNDER an existing file is nothing-there too — the same 404, not a raw failure', async () => {
+    const base = await start();
+    await fs.writeFile('notes/deep.md', 'alpha\n');
+    // `notes/deep.md` is a FILE, so the filesystem answers ENOTDIR rather than
+    // ENOENT. Nothing can live at this path either, so it earns the same
+    // honest 404 as a plainly absent one.
+    const res = await post(`${base}/api/agent/tools/grep`, {
+      pattern: 'needle',
+      path: 'notes/deep.md/deeper.md',
+    });
+    expect(res.status).toBe(404);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain('notes/deep.md/deeper.md');
+  });
+
+  it("a denied path the filesystem cannot even stat still answers with read_file's 403", async () => {
+    const loop = `${KB_DIR}/Knowledge/Loop.md`;
+    const base = await start('write', denyReads(new Set(['Knowledge/Loop.md'])));
+    await mkdir(join(tempDir, KB_DIR, 'Knowledge'), { recursive: true });
+    // A symlink pointing at ITSELF: stat fails with ELOOP — neither absence
+    // nor a readable file. The permission verdict must still come FIRST, or
+    // grep would leak a filesystem complaint where read_file says only 403.
+    await symlink('Loop.md', join(tempDir, loop));
+    const [readRes, grepRes] = await Promise.all([
+      post(`${base}/api/agent/tools/read_file`, { path: loop }),
+      post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: loop }),
+    ]);
+    expect(grepRes.status).toBe(403);
+    expect(grepRes.status).toBe(readRes.status);
+    expect(await grepRes.json()).toEqual(await readRes.json());
   });
 
   it('a DIRECTORY path still walks the whole subtree (unchanged)', async () => {
