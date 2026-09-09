@@ -85,9 +85,10 @@ services:
       - PORT=3001
       # The deployed commit sha `GET /api/health` reports is BAKED into the
       # published image by CI (the Dockerfile's SOURCE_COMMIT build arg, baked
-      # in as GIT_SHA) — nothing to pass at runtime. A runtime SOURCE_COMMIT pass-through used to sit
-      # here; Coolify materialized it as an EMPTY LITERAL that overrode the
-      # real value, which is exactly the failure baking at build time removes.
+      # in as GIT_SHA) — nothing to pass at runtime. A runtime SOURCE_COMMIT
+      # pass-through used to sit here; Coolify materialized it as an EMPTY
+      # LITERAL that overrode the real value, which is exactly the failure
+      # baking at build time removes.
       # Git host credential. The KB can live on any git server (GitHub, GitLab,
       # Bitbucket, Azure DevOps, self-hosted): GIT_TOKEN is the Basic-auth
       # password and GIT_USERNAME the Basic username (host-specific — see
