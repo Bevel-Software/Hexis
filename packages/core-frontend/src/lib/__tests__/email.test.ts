@@ -23,6 +23,8 @@ describe('initials', () => {
     expect(initials('Ali <ali.vega@x.io>')).toBe('AL');
     // A label that is only an address falls back to it.
     expect(initials('<ali.vega@x.io>')).toBe('AV');
+    // A display name is taken whole — an `@` inside it is not an address.
+    expect(initials('Ops @ Night <ops@x.io>')).toBe('O@');
   });
 
   it('answers ? for nothing', () => {

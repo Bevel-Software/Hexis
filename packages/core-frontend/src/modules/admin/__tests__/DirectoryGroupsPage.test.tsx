@@ -270,7 +270,7 @@ describe('DirectoryGroupsPage', () => {
     ).toBeInTheDocument();
     // No manual CRUD anywhere: no create form, no add-member inputs, no deletes.
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Delete / })).not.toBeInTheDocument();
   });
 
@@ -303,7 +303,7 @@ describe('DirectoryGroupsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'simulate-connect' }));
     // No create form, no member editing — the IdP owns groups now.
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(
       await screen.findByText(/Groups appear here after its first provisioning push/),
     ).toBeInTheDocument();
@@ -412,7 +412,7 @@ describe('DirectoryGroupsPage', () => {
     // Stale rows + CRUD controls are gone.
     await waitFor(() => expect(screen.queryByText('Product')).not.toBeInTheDocument());
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Delete / })).not.toBeInTheDocument();
     // The pending delete confirm was dismissed — no dialog left to act on the
     // unparseable file.

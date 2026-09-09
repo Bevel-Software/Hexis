@@ -173,7 +173,7 @@ describe('DirectoryGroupsPage: add-member people suggestions', () => {
     renderPage();
     expect(await screen.findByText('Product')).toBeInTheDocument();
     // Membership is managed in the directory — nothing to suggest into.
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(suggestPrincipals).not.toHaveBeenCalled();
   });
 });

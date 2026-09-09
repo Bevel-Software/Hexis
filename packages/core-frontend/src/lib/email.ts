@@ -37,9 +37,12 @@ export function initials(value: string): string {
   // `Name <email>`: the name is the person, the address only stands in when
   // the label carries nothing else — never a second word beside a one-word name.
   const angled = label.match(/^(.*?)\s*<([^<>]*)>$/);
-  const cleaned = angled ? angled[1].trim() || angled[2].trim() : label;
+  const displayName = angled?.[1].trim() ?? '';
+  const cleaned = angled ? displayName || angled[2].trim() : label;
   if (!cleaned) return '?';
-  const [name] = cleaned.split('@');
+  // Only an ADDRESS is cut at `@`: a display name is taken whole, whatever
+  // characters it carries.
+  const name = displayName ? cleaned : cleaned.split('@')[0];
   const parts = name.split(/[.\s_-]+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return name.slice(0, 2).toUpperCase();
