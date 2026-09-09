@@ -43,7 +43,9 @@ they can add the marketplace.
 2. Copy the marketplace URL from **External agent access → Marketplaces**.
    It is the same URL Claude Code clones.
 3. In Cowork (or claude.ai), open **Plugins → Add marketplace** and paste it.
-4. Install the plugins you want. **Update** in Claude pulls what changed.
+4. Install **hexis-all** for everything you may read in one plugin (every
+   skill, and the knowledge base as an MCP server), or single plugins for a
+   subset. **Update** in Claude pulls what changed.
 
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
