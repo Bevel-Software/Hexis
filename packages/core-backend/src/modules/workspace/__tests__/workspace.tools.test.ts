@@ -599,6 +599,22 @@ describe('grep with a path that names a file', () => {
     expect(await grepRes.json()).toEqual(await readRes.json());
   });
 
+  it('a READABLE path the filesystem cannot resolve fails exactly as read_file fails', async () => {
+    const loop = `${KB_DIR}/Knowledge/Tangle.md`;
+    const base = await start();
+    await mkdir(join(tempDir, KB_DIR, 'Knowledge'), { recursive: true });
+    await symlink('Tangle.md', join(tempDir, loop));
+    const [readRes, grepRes] = await Promise.all([
+      post(`${base}/api/agent/tools/read_file`, { path: loop }),
+      post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: loop }),
+    ]);
+    // The gate allows it, so the READ is what answers — and it is the same
+    // `fs.readFile` read_file calls. grep must not dress that up as absence
+    // (a false 404), nor invent a failure of its own: one path, one story.
+    expect(grepRes.status).toBe(readRes.status);
+    expect(await grepRes.json()).toEqual(await readRes.json());
+  });
+
   it('a DIRECTORY path still walks the whole subtree (unchanged)', async () => {
     const base = await start();
     await fs.writeFile('notes/one.md', 'needle here\n');

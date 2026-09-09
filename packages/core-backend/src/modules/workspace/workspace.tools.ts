@@ -276,34 +276,34 @@ async function grepOneFile(
 /**
  * What a grep's `path` actually names. The walk starts with `readdir`, which
  * fails on a file and on a path with nothing at it alike — both would end as a
- * silent empty result — so the search root is resolved FIRST and each of the
- * four cases gets its own honest answer.
+ * silent empty result — so the search root is resolved FIRST and each case
+ * gets its own honest answer.
  *
- * A failed stat is NOT resolved here into an error to throw: the caller owes
- * the path's read gate its verdict first (see the handler), so an unreadable
- * root reports the gate's answer rather than whatever the filesystem said.
- * `unknown` carries that failure back for the caller to rethrow if the gate
- * lets the path through.
+ * This helper never raises an error of its own. Only a DIRECTORY answer earns
+ * the walk; everything else takes the single-file route, where the read gate
+ * speaks first and the answer is then produced by the very `fs.readFile` that
+ * `read_file` calls. That is what makes grep tell read_file's story for an odd
+ * path by CONSTRUCTION rather than by coincidence.
  */
 async function searchRootKind(
   fs: LocalFilesystem,
   path: string,
-): Promise<
-  | { kind: 'directory' | 'file' | 'missing' }
-  | { kind: 'unknown'; err: unknown }
-> {
+): Promise<'directory' | 'file' | 'missing'> {
   try {
-    return { kind: (await fs.stat(path)).type === 'directory' ? 'directory' : 'file' };
+    return (await fs.stat(path)).type === 'directory' ? 'directory' : 'file';
   } catch (err) {
     // "Nothing there" is absence: plain ENOENT, and ENOTDIR for a path whose
     // parent is an existing FILE (`notes.md/deeper`) — nothing can live there
     // either, so it earns the same honest 404 rather than a raw failure.
     // (Mastra's FileNotFoundError carries these codes, as do raw Node errors.)
     const code = (err as { code?: unknown } | null)?.code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' };
-    // Anything else — permissions, I/O, symlink loops — is a real failure and
-    // must not be reported as an absent path.
-    return { kind: 'unknown', err };
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+    // Any OTHER stat failure — permissions, I/O, a symlink loop — is not
+    // absence and is not this helper's to report. Calling it a file sends the
+    // path down the ordinary single-file route: the gate answers 403 if the
+    // caller may not read it, and otherwise the read itself fails exactly as
+    // `read_file`'s does. Nothing is invented, and nothing extra is disclosed.
+    return 'file';
   }
 }
 
@@ -666,11 +666,7 @@ export function registerWorkspaceTools(
       const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       // The empty root is the workspace itself — always a directory, and never
       // worth a stat.
-      const root =
-        searchRoot === ''
-          ? ({ kind: 'directory' } as const)
-          : await searchRootKind(fs, searchRoot);
-      const kind = root.kind;
+      const kind = searchRoot === '' ? 'directory' : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
       if (kind === 'directory') {
@@ -693,9 +689,6 @@ export function registerWorkspaceTools(
         // That ordering holds even when the stat itself failed: a denied path
         // gets the 403, never the filesystem's complaint about it.
         await assertCanRead(gate, searchRoot);
-        // Readable, but the filesystem would not say what is there. Nothing
-        // honest is left to answer — surface the real failure.
-        if (root.kind === 'unknown') throw root.err;
         if (kind === 'missing') {
           throw new ToolError(
             `Nothing to search: there is no file or directory at "${displayPath(searchRoot)}" in this workspace. ` +
