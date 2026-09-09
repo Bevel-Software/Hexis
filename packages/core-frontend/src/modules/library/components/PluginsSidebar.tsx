@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactNode } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
 import { ChalkArrow } from './plugin-page-parts';
@@ -20,6 +20,12 @@ export interface SidebarContextTarget {
   /** The row itself, so Escape can hand focus back to it. `null` for empty space. */
   row: HTMLElement | null;
 }
+
+/**
+ * The two views of what sits below the lenses: by TEAM (who can use what),
+ * or the ADVANCED view — the two roots as they are on disk.
+ */
+export type SidebarView = 'teams' | 'advanced';
 
 export interface PluginsSidebarProps {
   /** What the URL has selected, or null on a page with no gallery filter. */
@@ -73,12 +79,12 @@ export interface PluginsSidebarProps {
    */
   onContextMenu?(target: SidebarContextTarget): void;
   /**
-   * The two roots as file trees, under the "Full file trees" heading — the
-   * shared `Skills/` root and the `Plugins/` root, exactly as they are on
-   * disk. SLOTS rather than components this nav names: each tree reads the
-   * workspace and navigates on its own, and the sidebar stays what it is, a
-   * pure view of names and counts. Omitted, the nav has no trees, which
-   * keeps a host rendering the shipped nav source-compatible.
+   * The two roots as file trees, in the Advanced view — the shared `Skills/`
+   * root and the `Plugins/` root, exactly as they are on disk. SLOTS rather
+   * than components this nav names: each tree reads the workspace and
+   * navigates on its own, and the sidebar stays what it is, a pure view of
+   * names and counts. Omitted, the view has no trees, which keeps a host
+   * rendering the shipped nav source-compatible.
    */
   skillsTree?: ReactNode;
   pluginsTree?: ReactNode;
@@ -87,23 +93,26 @@ export interface PluginsSidebarProps {
 /**
  * The library's nav spine — the prototype's `.side` + `.nav` (lines 55-95).
  *
- * Three sections, top to bottom:
+ * The two LENSES on the whole catalog first — Everything (the Library's
+ * home) and Owned by me — then ONE switch between the two views of what is
+ * below them:
  *
- *  - the two LENSES on the whole catalog — Everything (the Library's home)
- *    and Owned by me;
- *  - YOUR TEAMS — the caller's own space first (the one team they are always
+ *  - TEAMS — the caller's own space first (the one team they are always
  *    in), then every group from the access rules: a team's page is what
  *    being in that group lets a person use;
- *  - the FULL FILE TREES — `Skills/` and `Plugins/` as they are on disk.
+ *  - ADVANCED — `Skills/` and `Plugins/` as they are on disk.
  *
- * Plugins have no rows of their own here any more. They are reached through
- * the pages that list them — Everything, a team — and through their folders
- * in the Plugins tree; a nav that listed every plugin beside every team said
+ * Plugins have no rows of their own here. They are reached through the
+ * pages that list them — Everything, a team — and through their folders in
+ * the Plugins tree; a nav that listed every plugin beside every team said
  * the same thing twice and grew with the workspace.
  *
- * It is a pure view of the URL: `filter` comes down, clicks go up as intents,
- * and the layout navigates. Nothing here is state, so the back button, a deep
- * link and the highlighted row can never drift apart.
+ * The switch is the one piece of state the nav holds, and it is VIEW state,
+ * not selection: which rows are on screen, not which one is current. The
+ * URL still owns selection, so the back button, a deep link and the
+ * highlighted row can never drift apart — whichever view is showing. The
+ * choice is remembered in the browser so a reload lands on the view the
+ * person left; the Teams view is the default.
  *
  * This is the CONTENTS only. Being a sidebar — the width, the background, the
  * collapse animation, the drag handle — belongs to `SidebarFrame`, which
@@ -126,6 +135,12 @@ export function PluginsSidebar({
   skillsTree,
   pluginsTree,
 }: PluginsSidebarProps) {
+  const [view, setView] = useState<SidebarView>(readStoredView);
+  const switchView = (next: SidebarView) => {
+    setView(next);
+    storeView(next);
+  };
+
   const rowClass = (selected: boolean) =>
     cn(
       'flex items-center justify-between gap-2 rounded-sm px-2.5 py-1.5 text-ui transition-colors',
@@ -201,6 +216,24 @@ export function PluginsSidebar({
     </button>
   );
 
+  const tab = (id: SidebarView, label: string) => (
+    <button
+      key={id}
+      type="button"
+      role="tab"
+      id={`library-view-tab-${id}`}
+      aria-selected={view === id}
+      aria-controls={`library-view-${id}`}
+      className={cn(
+        'flex-1 rounded-sm px-2 py-1 text-center text-meta font-semibold transition-[background-color,color,box-shadow]',
+        view === id ? 'bg-surface text-ink shadow-card' : 'text-ink-muted hover:text-ink',
+      )}
+      onClick={() => switchView(id)}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <>
       <nav
@@ -228,41 +261,74 @@ export function PluginsSidebar({
           ownedAttention > 0 ? 'pending' : 'count',
         )}
 
-        <SectionLabel spaced>Your teams</SectionLabel>
-        {/* Your own space leads the teams: it is the one you are always in. */}
-        {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
-        {teams.map(({ name, count, urgent }) =>
-          // Orange wins the count slot: members locked out of a skill outrank
-          // how much the team can use, which is not the news.
-          row(name, { kind: 'team', group: name }, urgent > 0 ? urgent : count, urgent > 0 ? 'urgent' : 'count'),
-        )}
+        {/* The switch — a segmented control as quiet as the rows, on the
+            nav's own hover tint, the chosen half lifted onto the surface. */}
+        <div
+          role="tablist"
+          aria-label="Sidebar view"
+          className="mt-4 mb-2 flex gap-0.5 rounded-md bg-hover p-0.5"
+        >
+          {tab('teams', 'Teams')}
+          {tab('advanced', 'Advanced')}
+        </div>
 
-        <TreesLabel onCreate={onCreatePlugin} />
-        {/* The heading's `+` is hover-revealed, and a person with no plugins
-            yet is exactly the person who has not learned to hover it. While
-            the workspace holds no plugins AT ALL, the way to the first one is
-            said in words, as a row where the trees sit — with a chalk arrow
-            from the empty space beneath, the same margin-note voice as the
-            empty plugin page. Administrators only: on an untouched workspace
-            the first plugin is theirs to make, and telling everyone else to
-            make it points them at a decision that is not theirs. */}
-        {canCreatePlugin && (
-          <div className="relative">
-            <button
-              type="button"
-              onClick={onCreatePlugin}
-              className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
-            >
-              <span aria-hidden="true">+</span>
-              <span className="truncate">Create a plugin</span>
-            </button>
-            {/* Mirrored, so the tip points up-left at the row's words from
-                the room beneath it. */}
-            <ChalkArrow className="pointer-events-none absolute left-[22px] top-[30px] h-[52px] w-[64px] -scale-x-100 text-ink-faint" />
+        {view === 'teams' ? (
+          <div
+            role="tabpanel"
+            id="library-view-teams"
+            aria-labelledby="library-view-tab-teams"
+            className="flex flex-col gap-px"
+          >
+            {/* Your own space leads the teams: it is the one you are always in. */}
+            {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
+            {teams.map(({ name, count, urgent }) =>
+              // Orange wins the count slot: members locked out of a skill outrank
+              // how much the team can use, which is not the news.
+              row(
+                name,
+                { kind: 'team', group: name },
+                urgent > 0 ? urgent : count,
+                urgent > 0 ? 'urgent' : 'count',
+              ),
+            )}
+          </div>
+        ) : (
+          <div
+            role="tabpanel"
+            id="library-view-advanced"
+            aria-labelledby="library-view-tab-advanced"
+            className="flex flex-col gap-px"
+          >
+            <TreesLabel onCreate={onCreatePlugin} />
+            {/* The heading's `+` is hover-revealed, and a person with no
+                plugins yet is exactly the person who has not learned to hover
+                it. While the workspace holds no plugins AT ALL, the way to the
+                first one is said in words, as a row where the trees sit — with
+                a chalk arrow from the empty space beneath, the same
+                margin-note voice as the empty plugin page. Administrators
+                only: on an untouched workspace the first plugin is theirs to
+                make, and telling everyone else to make it points them at a
+                decision that is not theirs. (Everything says the same in its
+                plugin band, for whoever never opens this view.) */}
+            {canCreatePlugin && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={onCreatePlugin}
+                  className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+                >
+                  <span aria-hidden="true">+</span>
+                  <span className="truncate">Create a plugin</span>
+                </button>
+                {/* Mirrored, so the tip points up-left at the row's words from
+                    the room beneath it. */}
+                <ChalkArrow className="pointer-events-none absolute left-[22px] top-[30px] h-[52px] w-[64px] -scale-x-100 text-ink-faint" />
+              </div>
+            )}
+            {skillsTree}
+            {pluginsTree}
           </div>
         )}
-        {skillsTree}
-        {pluginsTree}
       </nav>
 
       {attentionCount > 0 && (
@@ -276,6 +342,29 @@ export function PluginsSidebar({
       )}
     </>
   );
+}
+
+/**
+ * The remembered view. Browser storage is a per-viewer convenience: it can
+ * be absent, refused or cleared, and the nav must render either way — so
+ * every read and write is guarded and the default is the Teams view.
+ */
+const VIEW_STORAGE_KEY = 'bevel-library-sidebar-view';
+
+function readStoredView(): SidebarView {
+  try {
+    return window.localStorage.getItem(VIEW_STORAGE_KEY) === 'advanced' ? 'advanced' : 'teams';
+  } catch {
+    return 'teams';
+  }
+}
+
+function storeView(view: SidebarView): void {
+  try {
+    window.localStorage.setItem(VIEW_STORAGE_KEY, view);
+  } catch {
+    // A browser that refuses storage still gets the view for this session.
+  }
 }
 
 /**
@@ -311,14 +400,13 @@ export function SectionLabel({
 }
 
 /**
- * The `FULL FILE TREES` heading, and the one way to make a new plugin from
+ * The Advanced view's heading, and the one way to make a new plugin from
  * the nav — the prototype's `.lbladd` (line 78). It heads the trees because
  * a new plugin is a new folder under the second of them.
  */
 function TreesLabel({ onCreate }: { onCreate(): void }) {
   return (
     <SectionLabel
-      spaced
       actions={
         <button
           type="button"
@@ -331,7 +419,7 @@ function TreesLabel({ onCreate }: { onCreate(): void }) {
         </button>
       }
     >
-      Full file trees
+      Files on disk
     </SectionLabel>
   );
 }

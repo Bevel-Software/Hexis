@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { PluginsSidebar, type PluginsSidebarProps } from '../components/PluginsSidebar';
 import type { LibraryFilter } from '../utils/status';
@@ -40,6 +40,10 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
 const row = (name: RegExp | string) => screen.getByRole('button', { name });
 
 describe('PluginsSidebar', () => {
+  // The remembered view is per-browser state; each test starts from a browser
+  // that remembers nothing.
+  beforeEach(() => window.localStorage.removeItem('bevel-library-sidebar-view'));
+
   it('leads with Everything, the Library home, and marks it current on the root', () => {
     renderSidebar({ filter: { kind: 'all' } });
     const rows = screen.getAllByRole('button');
@@ -55,36 +59,60 @@ describe('PluginsSidebar', () => {
     }
   });
 
-  it('heads the teams and the trees, and lists no plugins of its own', () => {
+  it('offers two views under the lenses — Teams by default — and lists no plugins of its own', () => {
     renderSidebar();
-    expect(screen.getByText('Your teams')).toBeInTheDocument();
-    expect(screen.getByText('Full file trees')).toBeInTheDocument();
+    const tabs = screen.getByRole('tablist', { name: 'Sidebar view' });
+    expect(within(tabs).getByRole('tab', { name: 'Teams' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(tabs).getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tabpanel', { name: 'Teams' })).toBeInTheDocument();
     expect(screen.queryByText('Plugins')).not.toBeInTheDocument();
     expect(screen.queryByText('All plugins')).not.toBeInTheDocument();
     expect(screen.queryByText('Library')).not.toBeInTheDocument();
   });
 
-  it("leads the teams with the caller's own space, and lists it even when empty", () => {
+  it("leads the Teams view with the caller's own space, and lists it even when empty", () => {
     renderSidebar({ filter: { kind: 'ungrouped' }, ungroupedCount: 0 });
-    const heading = screen.getByText('Your teams');
-    const own = row(/^Juan's Plugin/);
-    const first = row(/^Engineering/);
-    expect(heading.compareDocumentPosition(own) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const panel = screen.getByRole('tabpanel', { name: 'Teams' });
+    const own = within(panel).getByRole('button', { name: /^Juan's Plugin/ });
+    const first = within(panel).getByRole('button', { name: /^Engineering/ });
     expect(own.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(own).toHaveAttribute('aria-current', 'true');
     expect(own).toHaveAccessibleName("Juan's Plugin");
   });
 
-  it('renders the two trees it is handed under the trees heading, Skills before Plugins', () => {
+  it('switches to the Advanced view, which holds the two trees — Skills before Plugins — and no team rows', () => {
     renderSidebar({
       skillsTree: <div data-testid="skills-tree">skills</div>,
       pluginsTree: <div data-testid="plugins-tree">plugins</div>,
     });
-    const heading = screen.getByText('Full file trees');
-    const skills = screen.getByTestId('skills-tree');
-    const plugins = screen.getByTestId('plugins-tree');
+    // The trees are not merely hidden: the other view is not rendered at all.
+    expect(screen.queryByTestId('skills-tree')).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
+    const panel = screen.getByRole('tabpanel', { name: 'Advanced' });
+    const heading = within(panel).getByText('Files on disk');
+    const skills = within(panel).getByTestId('skills-tree');
+    const plugins = within(panel).getByTestId('plugins-tree');
     expect(heading.compareDocumentPosition(skills) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(skills.compareDocumentPosition(plugins) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Engineering/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Juan's Plugin/ })).toBeNull();
+    // The lenses belong to neither view and stay put.
+    expect(row(/^Everything/)).toBeInTheDocument();
+    expect(row(/^Owned by me/)).toBeInTheDocument();
+  });
+
+  it('remembers the view in the browser, and defaults to Teams when the browser remembers nothing', () => {
+    renderSidebar();
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
+    expect(window.localStorage.getItem('bevel-library-sidebar-view')).toBe('advanced');
+    cleanup();
+    renderSidebar();
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
+    window.localStorage.removeItem('bevel-library-sidebar-view');
+    cleanup();
+    renderSidebar();
+    expect(screen.getByRole('tab', { name: 'Teams' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('marks the selected team current and leaves the others alone', () => {
@@ -133,23 +161,29 @@ describe('PluginsSidebar', () => {
     expect(rows).toHaveLength(2);
   });
 
-  it('offers a way to make a plugin from the trees heading', () => {
+  it("offers a way to make a plugin from the Advanced view's heading", () => {
     const { onCreatePlugin } = renderSidebar();
+    expect(screen.queryByRole('button', { name: 'New plugin' })).toBeNull();
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     fireEvent.click(screen.getByRole('button', { name: 'New plugin' }));
     expect(onCreatePlugin).toHaveBeenCalledTimes(1);
   });
 
-  it('spells out Create a plugin when told the workspace is untouched — the `+` alone is hover-hidden', () => {
+  it('spells out Create a plugin in the Advanced view when told the workspace is untouched — the `+` alone is hover-hidden', () => {
     const { onCreatePlugin } = renderSidebar({ canCreatePlugin: true });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     fireEvent.click(screen.getByRole('button', { name: 'Create a plugin' }));
     expect(onCreatePlugin).toHaveBeenCalledTimes(1);
   });
 
   it('says nothing about creating unless told to — the verdict is the layout\'s, and omitted means off', () => {
     renderSidebar({ canCreatePlugin: false });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
     cleanup();
+    window.localStorage.removeItem('bevel-library-sidebar-view');
     renderSidebar({ canCreatePlugin: undefined });
+    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     expect(screen.queryByRole('button', { name: 'Create a plugin' })).not.toBeInTheDocument();
   });
 
