@@ -149,9 +149,8 @@ export function AddMemberInput({
         ref={widget}
         className="relative flex-1 min-w-0 max-w-[16rem]"
         // React's onBlur bubbles (it is focusout underneath), so this one
-        // handler covers the input and every suggestion row. The list closes
-        // only when focus lands outside the widget entirely — which is what
-        // lets a keyboard user Tab from the input into the list at all.
+        // handler covers the input and the list. The list closes when focus
+        // lands outside the widget — Tab out of the field, a click elsewhere.
         onBlur={(e) => {
           if (!widget.current?.contains(e.relatedTarget as Node | null)) {
             setShowSuggest(false);
@@ -222,6 +221,10 @@ export function AddMemberInput({
                   id={optionId(i)}
                   role="option"
                   aria-selected={i === activeIdx}
+                  // Out of the Tab order: focus stays in the field and the
+                  // arrows walk the rows (the active-descendant model); Tab
+                  // leaves the widget. A pointer still clicks a row.
+                  tabIndex={-1}
                   // preventDefault on mousedown keeps focus in the input, so a
                   // mouse click never blurs the widget out from under itself.
                   // The submit hangs off onClick, which a pointer AND a

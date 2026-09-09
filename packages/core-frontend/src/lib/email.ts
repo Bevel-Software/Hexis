@@ -42,8 +42,20 @@ export function initials(value: string): string {
   if (!cleaned) return '?';
   // Only an ADDRESS is cut at `@`: a display name is taken whole, whatever
   // characters it carries.
-  const name = displayName ? cleaned : cleaned.split('@')[0];
-  const parts = name.split(/[.\s_-]+/).filter(Boolean);
+  return labelInitials(displayName ? cleaned : cleaned.split('@')[0]);
+}
+
+/**
+ * Avatar letters for a LABEL that is not a person — a group, a role, a
+ * plugin: two initials from its first two words (split on whitespace,
+ * dots, dashes, underscores), else its first two characters. No address
+ * parsing: an `@` in a group name is just a character. `initials` ends
+ * here too, once it has decided which part of a person's label is the name.
+ */
+export function labelInitials(label: string): string {
+  const cleaned = label.trim();
+  if (!cleaned) return '?';
+  const parts = cleaned.split(/[.\s_-]+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
+  return cleaned.slice(0, 2).toUpperCase();
 }

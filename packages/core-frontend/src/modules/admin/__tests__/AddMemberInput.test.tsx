@@ -183,7 +183,7 @@ describe('AddMemberInput', () => {
     expect(input).not.toHaveAttribute('aria-activedescendant');
   });
 
-  it('a keyboard alone can reach a suggestion and choose it', async () => {
+  it('Tab leaves the widget and closes the list — the rows are not tab stops, the arrows are the way through them', async () => {
     const onSubmit = vi.fn();
     render(<Harness onSubmit={onSubmit} />);
 
@@ -191,13 +191,10 @@ describe('AddMemberInput', () => {
     await userEvent.type(input, 'ali');
     await screen.findByText('Alice Green');
 
-    // Tab moves focus from the input INTO the list — the list has to survive
-    // that, or the row it lands on is gone before Enter reaches it.
     await userEvent.tab();
-    const row = screen.getByRole('option', { name: /Alice Green/ });
-    expect(row).toHaveFocus();
-    await userEvent.keyboard('{Enter}');
-    expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
+    expect(screen.getByRole('button', { name: 'Add' })).toHaveFocus();
+    expect(screen.queryByRole('option', { name: /Alice Green/ })).not.toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('offers no suggestion rows while a mutation is in flight', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { initials } from '../email';
+import { initials, labelInitials } from '../email';
 
 /**
  * One monogram rule for every people surface: the same person gets the same
@@ -30,5 +30,15 @@ describe('initials', () => {
   it('answers ? for nothing', () => {
     expect(initials('')).toBe('?');
     expect(initials('   ')).toBe('?');
+  });
+});
+
+describe('labelInitials', () => {
+  it('reads a collective label as words — an @ in a group name is just a character', () => {
+    expect(labelInitials('Product Team')).toBe('PT');
+    expect(labelInitials('Engineering')).toBe('EN');
+    expect(labelInitials('ops@night')).toBe('OP');
+    expect(labelInitials('gtm-readers')).toBe('GR');
+    expect(labelInitials('')).toBe('?');
   });
 });

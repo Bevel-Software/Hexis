@@ -40,7 +40,7 @@ import {
   type Principal,
   type SuggestResponse,
 } from '../api';
-import { EMAIL_RE, initials } from '../../../lib/email';
+import { EMAIL_RE, initials, labelInitials } from '../../../lib/email';
 
 interface Props {
   entry: FileTreeEntry;
@@ -1067,7 +1067,7 @@ export function ManageAccessDialog({
       <div key={p.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
         {p.kind !== 'user' ? (
           <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-detail font-bold text-ink-muted">
-            {initials(p.label)}
+            {labelInitials(p.label)}
           </span>
         ) : (
           <span
@@ -1270,7 +1270,7 @@ export function ManageAccessDialog({
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                          {initials(g)}
+                          {labelInitials(g)}
                         </span>
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
@@ -1284,7 +1284,7 @@ export function ManageAccessDialog({
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                          {initials(g)}
+                          {labelInitials(g)}
                         </span>
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
@@ -1301,7 +1301,7 @@ export function ManageAccessDialog({
                           }
                         >
                           <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                            {initials(name)}
+                            {labelInitials(name)}
                           </span>
                           <span className="min-w-0 flex-1 truncate">{pluginPrincipalLabel(name, verb)}</span>
                         </MenuItem>
