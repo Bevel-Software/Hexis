@@ -33,7 +33,11 @@ export function isGroupPrefixed(value: string): boolean {
  * surface keeps a local copy.
  */
 export function initials(value: string): string {
-  const cleaned = value.replace(/[<>]/g, '').trim();
+  const label = value.trim();
+  // `Name <email>`: the name is the person, the address only stands in when
+  // the label carries nothing else — never a second word beside a one-word name.
+  const angled = label.match(/^(.*?)\s*<([^<>]*)>$/);
+  const cleaned = angled ? angled[1].trim() || angled[2].trim() : label;
   if (!cleaned) return '?';
   const [name] = cleaned.split('@');
   const parts = name.split(/[.\s_-]+/).filter(Boolean);

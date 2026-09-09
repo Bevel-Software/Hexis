@@ -128,6 +128,14 @@ export function AddMemberInput({
   }, [value, excludeKey]);
 
   const open = !busy && showSuggest && suggestions.length > 0;
+  // The combobox keyboard model: focus STAYS in the input and the arrow keys
+  // move an active option, which the input names by id — so a screen reader
+  // hears each suggestion as it is reached and Enter takes the active one.
+  // Clamped at render rather than reset in an effect: a shorter list simply
+  // has no active row until the arrows are pressed again.
+  const [active, setActive] = useState(-1);
+  const activeIdx = open && active < suggestions.length ? active : -1;
+  const optionId = (index: number) => `${listId}-option-${index}`;
 
   return (
     <div className={`flex items-center gap-1.5 ${className}`}>
@@ -153,11 +161,32 @@ export function AddMemberInput({
           onChange={(e) => {
             onValueChange(e.target.value);
             setShowSuggest(true);
+            setActive(-1);
           }}
           onFocus={() => setShowSuggest(true)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') onSubmit(value);
-            if (e.key === 'Escape') setShowSuggest(false);
+            const n = suggestions.length;
+            if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n > 0 && !busy) {
+              e.preventDefault();
+              setShowSuggest(true);
+              setActive(e.key === 'ArrowDown' ? (activeIdx + 1) % n : (activeIdx - 1 + n) % n);
+              return;
+            }
+            // Home/End move the caret until a row is active; then they move the row.
+            if ((e.key === 'Home' || e.key === 'End') && activeIdx >= 0) {
+              e.preventDefault();
+              setActive(e.key === 'Home' ? 0 : n - 1);
+              return;
+            }
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              onSubmit(activeIdx >= 0 ? suggestions[activeIdx]!.email : value);
+              return;
+            }
+            if (e.key === 'Escape') {
+              setShowSuggest(false);
+              setActive(-1);
+            }
           }}
           placeholder={placeholder}
           disabled={busy}
@@ -171,6 +200,7 @@ export function AddMemberInput({
           aria-autocomplete="list"
           aria-expanded={open}
           aria-controls={open ? listId : undefined}
+          aria-activedescendant={activeIdx >= 0 ? optionId(activeIdx) : undefined}
         />
         {open && (
           <ul
@@ -179,12 +209,13 @@ export function AddMemberInput({
             aria-label="Suggestions"
             className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1"
           >
-            {suggestions.map((p) => (
+            {suggestions.map((p, i) => (
               <li key={p.email}>
                 <button
                   type="button"
+                  id={optionId(i)}
                   role="option"
-                  aria-selected={false}
+                  aria-selected={i === activeIdx}
                   // preventDefault on mousedown keeps focus in the input, so a
                   // mouse click never blurs the widget out from under itself.
                   // The submit hangs off onClick, which a pointer AND a
@@ -192,7 +223,7 @@ export function AddMemberInput({
                   // onMouseDown alone was unreachable without a mouse.
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => onSubmit(p.email)}
-                  className="w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2"
+                  className={`w-full text-left px-2 py-1.5 hover:bg-hover flex items-center gap-2 ${i === activeIdx ? 'bg-hover' : ''}`}
                 >
                   <span className="w-5 h-5 rounded-full bg-ink-muted text-white text-[9px] font-semibold flex items-center justify-center shrink-0">
                     {initials(p.email)}

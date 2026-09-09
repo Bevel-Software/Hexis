@@ -111,6 +111,38 @@ describe('AddMemberInput', () => {
     expect(onSubmit).toHaveBeenCalledWith('newcomer@example.com');
   });
 
+  it('the arrow keys walk the suggestions while focus stays in the field, and Enter takes the active one', async () => {
+    vi.mocked(suggestPrincipals).mockResolvedValue(people(ALICE, PAT));
+    const onSubmit = vi.fn();
+    render(<Harness onSubmit={onSubmit} />);
+
+    const input = screen.getByRole('combobox', { name: 'Member email' });
+    await userEvent.type(input, 'al');
+    await screen.findByText('Alice Green');
+    expect(input).not.toHaveAttribute('aria-activedescendant');
+
+    await userEvent.keyboard('{ArrowDown}');
+    const alice = screen.getByRole('option', { name: /Alice Green/ });
+    const pat = screen.getByRole('option', { name: /Pat Kim/ });
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute('aria-activedescendant', alice.id);
+    expect(alice).toHaveAttribute('aria-selected', 'true');
+    expect(pat).toHaveAttribute('aria-selected', 'false');
+
+    await userEvent.keyboard('{ArrowDown}');
+    expect(input).toHaveAttribute('aria-activedescendant', pat.id);
+    // Past the end wraps to the top; ArrowUp from the top wraps to the end.
+    await userEvent.keyboard('{ArrowDown}');
+    expect(input).toHaveAttribute('aria-activedescendant', alice.id);
+    await userEvent.keyboard('{ArrowUp}');
+    expect(input).toHaveAttribute('aria-activedescendant', pat.id);
+    await userEvent.keyboard('{Home}');
+    expect(input).toHaveAttribute('aria-activedescendant', alice.id);
+
+    await userEvent.keyboard('{Enter}');
+    expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
+  });
+
   it('a keyboard alone can reach a suggestion and choose it', async () => {
     const onSubmit = vi.fn();
     render(<Harness onSubmit={onSubmit} />);
