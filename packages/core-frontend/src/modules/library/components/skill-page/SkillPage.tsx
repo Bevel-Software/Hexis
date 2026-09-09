@@ -312,12 +312,15 @@ export function SkillPage({
    * lands on the bar's. Only for a swap the USER made; the log closing
    * because git stopped answering names no target and moves nothing.
    *
-   * The bar's clock is not guaranteed to come back: the file pane renders no
-   * actions at all while the detail request is in flight, so a refresh that
-   * lands while the log is open leaves the close with nothing to focus. The
-   * page's own title is named last for that — it is on screen in every state
-   * and names the skill the user just came back to. Knowledge does the same
-   * with its document title (`FileViewer.backToDocument`).
+   * The bar's clock is not guaranteed to come back: `historyAvailable`
+   * withdraws it, and a failed status poll can land in the same commit as the
+   * click. The page's own title is named last for that, since it is on screen
+   * in every state and names the skill the user came back to.
+   *
+   * Knowledge states the same rule with its document title, where the case is
+   * routine rather than a race: a comparison outlives `historyAvailable` on
+   * purpose, so leaving one while git is silent finds no clock at all. See
+   * `FileViewer.backToDocument` and the test beside it.
    */
   const paneClockRef = useRef<HTMLButtonElement>(null);
   const pressedClockRef = useRef<HTMLButtonElement>(null);
