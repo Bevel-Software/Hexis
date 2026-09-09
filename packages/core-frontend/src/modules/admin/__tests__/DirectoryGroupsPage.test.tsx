@@ -136,7 +136,7 @@ describe('DirectoryGroupsPage', () => {
     expect(screen.getByText('pat@example.com')).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'New group name' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete Product' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Add member to Product' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Add member to Product' })).toBeInTheDocument();
   });
 
   it('manual mode: creating a group calls the api and applies the returned roster', async () => {
@@ -163,7 +163,7 @@ describe('DirectoryGroupsPage', () => {
 
   it('manual mode: adding and removing members hit the api', async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'dana@example.com');
     // Scope to the input's row — each group card has its own Add button.
     await userEvent.click(addButtonFor(input));
@@ -187,14 +187,14 @@ describe('DirectoryGroupsPage', () => {
     );
     renderPage();
 
-    const productInput = await screen.findByRole('textbox', { name: 'Add member to Product' });
+    const productInput = await screen.findByRole('combobox', { name: 'Add member to Product' });
     await userEvent.type(productInput, 'a@example.com');
     await userEvent.click(addButtonFor(productInput));
     await waitFor(() => expect(addGroupMember).toHaveBeenCalledTimes(1));
 
     // Second card: its own busy flag is free, so the click goes through — but
     // the request must queue behind the unresolved first one.
-    const designInput = screen.getByRole('textbox', { name: 'Add member to Design' });
+    const designInput = screen.getByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(designInput, 'b@example.com');
     await userEvent.click(addButtonFor(designInput));
     expect(addGroupMember).toHaveBeenCalledTimes(1);
@@ -206,7 +206,7 @@ describe('DirectoryGroupsPage', () => {
     resolvers[1](MANUAL_ROSTER);
     // Both cards settle back to idle.
     await waitFor(() =>
-      expect(screen.getByRole('textbox', { name: 'Add member to Design' })).not.toBeDisabled(),
+      expect(screen.getByRole('combobox', { name: 'Add member to Design' })).not.toBeDisabled(),
     );
   });
 
@@ -446,7 +446,7 @@ describe('DirectoryGroupsPage', () => {
 
   it("a 'group:'-prefixed member value gets the inline hint and no request", async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'group:engineering');
     await userEvent.click(addButtonFor(input));
     expect(

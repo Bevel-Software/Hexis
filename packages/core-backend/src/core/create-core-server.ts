@@ -467,6 +467,28 @@ export async function createCoreServer(
   // doc on ServerExtensions.postTools).
   ext.postTools?.(app, core);
 
+  // The plugin creation doors — `POST /api/plugins`, `POST /api/plugins/personal`
+  // — take an agent's connection key as well as a session, because the
+  // `create_plugin` and `my_plugin` tools describe these very endpoints.
+  // Mounted HERE, before the first `app.use('/api', authMiddleware, …)`
+  // below: every one of those runs the JWT check for EVERY `/api` request
+  // that reaches it, whether or not its router matches, so a connection key
+  // sent to these paths would be refused before the gate saw it.
+  app.use(
+    '/api',
+    keyOrSessionAuth({
+      sessionAuth: core.authMiddleware,
+      toolAuth: core.toolAuthMiddleware,
+      isToolCredential: (token) =>
+        core.internalTokenService.looksLikeInternalToken(token) ||
+        core.externalApiKeyService.looksLikeExternalApiKey(token),
+    }),
+    createPluginCreationRoutes(
+      core.pluginProvisionService,
+      async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    ),
+  );
+
   // Protected routes
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
@@ -536,25 +558,9 @@ export async function createCoreServer(
   // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: plugins the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
-  // absent from the list. A join request is a plain change request.
-  // The creation doors — `POST /api/plugins`, `POST /api/plugins/personal` —
-  // take an agent's connection key as well as a session, because the
-  // `create_plugin` and `my_plugin` tools describe these very endpoints.
-  // Mounted BEFORE the session-only plugin routes so they answer first.
-  app.use(
-    '/api',
-    keyOrSessionAuth({
-      sessionAuth: core.authMiddleware,
-      toolAuth: core.toolAuthMiddleware,
-      isToolCredential: (token) =>
-        core.internalTokenService.looksLikeInternalToken(token) ||
-        core.externalApiKeyService.looksLikeExternalApiKey(token),
-    }),
-    createPluginCreationRoutes(
-      core.pluginProvisionService,
-      async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
-    ),
-  );
+  // absent from the list. A join request is a plain change request. (The
+  // creation doors are mounted above, before the first JWT-only `/api`
+  // mount — see there.)
   app.use('/api', core.authMiddleware, createPluginsRoutes(
     core.pluginIndexService,
     core.accessControl,

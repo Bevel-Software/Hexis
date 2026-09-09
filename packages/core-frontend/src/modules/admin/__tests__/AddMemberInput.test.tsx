@@ -54,7 +54,7 @@ beforeEach(() => {
 describe('AddMemberInput', () => {
   it('makes no suggest request below two characters, and one at two', async () => {
     render(<Harness />);
-    const input = screen.getByRole('textbox', { name: 'Member email' });
+    const input = screen.getByRole('combobox', { name: 'Member email' });
 
     await userEvent.type(input, 'a');
     await new Promise((resolve) => setTimeout(resolve, PAST_DEBOUNCE_MS));
@@ -74,7 +74,7 @@ describe('AddMemberInput', () => {
     // Mixed case on purpose: membership is case-insensitive.
     render(<Harness exclude={['PAT@example.com']} />);
 
-    await userEvent.type(screen.getByRole('textbox', { name: 'Member email' }), 'ex');
+    await userEvent.type(screen.getByRole('combobox', { name: 'Member email' }), 'ex');
     expect(await screen.findByText('Alice Green')).toBeInTheDocument();
     expect(screen.queryByText('Pat Kim')).not.toBeInTheDocument();
   });
@@ -83,7 +83,7 @@ describe('AddMemberInput', () => {
     const onSubmit = vi.fn();
     render(<Harness onSubmit={onSubmit} />);
 
-    const input = screen.getByRole('textbox', { name: 'Member email' });
+    const input = screen.getByRole('combobox', { name: 'Member email' });
     await userEvent.type(input, 'ali');
     await userEvent.click(await screen.findByText('Alice Green'));
     expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
@@ -100,7 +100,7 @@ describe('AddMemberInput', () => {
     const onSubmit = vi.fn();
     render(<Harness onSubmit={onSubmit} />);
 
-    const input = screen.getByRole('textbox', { name: 'Member email' });
+    const input = screen.getByRole('combobox', { name: 'Member email' });
     await userEvent.type(input, 'newcomer@example.com');
     await waitFor(() => expect(suggestPrincipals).toHaveBeenCalled());
 
@@ -115,14 +115,14 @@ describe('AddMemberInput', () => {
     const onSubmit = vi.fn();
     render(<Harness onSubmit={onSubmit} />);
 
-    const input = screen.getByRole('textbox', { name: 'Member email' });
+    const input = screen.getByRole('combobox', { name: 'Member email' });
     await userEvent.type(input, 'ali');
     await screen.findByText('Alice Green');
 
     // Tab moves focus from the input INTO the list — the list has to survive
     // that, or the row it lands on is gone before Enter reaches it.
     await userEvent.tab();
-    const row = screen.getByRole('button', { name: /Alice Green/ });
+    const row = screen.getByRole('option', { name: /Alice Green/ });
     expect(row).toHaveFocus();
     await userEvent.keyboard('{Enter}');
     expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
@@ -132,7 +132,7 @@ describe('AddMemberInput', () => {
     const onSubmit = vi.fn();
     const { rerender } = render(<Harness onSubmit={onSubmit} />);
 
-    await userEvent.type(screen.getByRole('textbox', { name: 'Member email' }), 'ali');
+    await userEvent.type(screen.getByRole('combobox', { name: 'Member email' }), 'ali');
     expect(await screen.findByText('Alice Green')).toBeInTheDocument();
 
     // The input and Add button already go inert while the add runs; a live row
@@ -154,7 +154,7 @@ describe('AddMemberInput', () => {
           }),
     );
     render(<Harness />);
-    const input = screen.getByRole('textbox', { name: 'Member email' });
+    const input = screen.getByRole('combobox', { name: 'Member email' });
 
     await userEvent.type(input, 'al');
     expect(await screen.findByText('Alice Green')).toBeInTheDocument();
@@ -185,7 +185,7 @@ describe('AddMemberInput', () => {
       () => new Promise<SuggestResponse>((resolve) => resolvers.push(resolve)),
     );
     render(<Harness />);
-    const input = screen.getByRole('textbox', { name: 'Member email' });
+    const input = screen.getByRole('combobox', { name: 'Member email' });
 
     await userEvent.type(input, 'pa');
     await waitFor(() => expect(resolvers).toHaveLength(1));

@@ -72,6 +72,9 @@ describe('SidebarFrame: slots', () => {
     const dock = screen.getByText('dock');
     expect(aside).toContainElement(pill);
     expect(aside).toContainElement(dock);
+    // One column: the three slots are siblings, not each in a wrapper of its own.
+    expect(pill.parentElement).toBe(row.parentElement);
+    expect(row.parentElement).toBe(dock.parentElement);
     expect(pill.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(row.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });

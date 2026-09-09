@@ -40,7 +40,7 @@ import {
   type Principal,
   type SuggestResponse,
 } from '../api';
-import { EMAIL_RE } from '../../../lib/email';
+import { EMAIL_RE, initials } from '../../../lib/email';
 
 interface Props {
   entry: FileTreeEntry;
@@ -218,13 +218,6 @@ const AVATAR_TONES = [
   { bg: '#e7f2f4', fg: '#3d7783' },
   { bg: '#faf0e2', fg: '#8a6a2f' },
 ];
-
-function initials(label: string): string {
-  const parts = label.replace(/[<>]/g, '').trim().split(/[\s@.]+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
 
 function avatarTone(seed: string): { bg: string; fg: string } {
   let h = 0;

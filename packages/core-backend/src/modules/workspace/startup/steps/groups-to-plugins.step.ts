@@ -219,22 +219,43 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
     );
   }
 
+  // Detail notes are held back until we know ops were declared: the subject
+  // line must describe a commit that will actually exist.
+  const details: string[] = [];
+  // On EVERY run and every branch, whatever roots it has: the two root
+  // rules are stale for one reason (the plugins root is drawn by the sidebar
+  // now), and a draft migrated by an earlier release carries the `Plugins/`
+  // line that release wrote — the template step, which retires it on the
+  // protected branches, never visits a draft. BEFORE the early returns: a
+  // branch with both roots (refused below) or neither (nothing to migrate)
+  // is no less stale. Idempotent: nothing to drop, nothing declared.
+  let changed = await retireIgnoreRootRules(repoDir, branch, details);
+  const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ ignore rules`;
+
   if (hasLegacy && hasPlugins) {
     // Both present: somebody is mid-migration by hand, or two branches merged
     // badly. Merging them here would guess at which copy of a same-named
     // plugin wins, so we refuse and say so — loudly, because the KB is in a
-    // state a human needs to look at. The branch contributes no ops, only a
-    // note (which surfaces in a commit only if a later step dirties it).
+    // state a human needs to look at. The branch contributes no migration
+    // ops, only a note (which surfaces in a commit only if the ignore
+    // retirement above, or a later step, dirties it).
     console.warn(
       `[groups-to-plugins] ${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
         `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
     );
+    if (changed) branch.note(retiredSubject);
     branch.note(
       `${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ both exist — merge by hand; nothing was migrated automatically`,
     );
+    for (const line of details) branch.note(line);
     return;
   }
-  if (!hasLegacy && !hasPlugins) return;
+  if (!hasLegacy && !hasPlugins) {
+    if (!changed) return;
+    branch.note(retiredSubject);
+    for (const line of details) branch.note(line);
+    return;
+  }
 
   // Every read below goes against the PRE-STEP tree: when the root rename is
   // declared this run it is NOT yet on disk, so the plugin folders are still
@@ -242,10 +263,6 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // `Plugins/…` paths — the root move is declared FIRST, so by the time the
   // per-folder ops apply, the tree is already under `Plugins/`.
   const rootOnDisk = hasLegacy ? legacyDir : pluginsDir;
-  // Detail notes are held back until we know ops were declared: the subject
-  // line must describe a commit that will actually exist.
-  const details: string[] = [];
-  let changed = false;
 
   if (hasLegacy) {
     // The Groups→Plugins root rename is ONE declared op, directory and all.
@@ -253,13 +270,6 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
     details.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
     changed = true;
   }
-  // On EVERY run and every branch, rename or not: the two root rules are
-  // stale for one reason (the plugins root is drawn by the sidebar now), and
-  // a draft migrated by an earlier release carries the `Plugins/` line that
-  // release wrote — the template step, which retires it on the protected
-  // branches, never visits a draft. Idempotent: nothing to drop, nothing
-  // declared.
-  changed = (await retireIgnoreRootRules(repoDir, branch, details)) || changed;
 
   // Runs whether or not the rename just happened, so a KB already on
   // `Plugins/` still gets missing manifests and any half-done reorganisation

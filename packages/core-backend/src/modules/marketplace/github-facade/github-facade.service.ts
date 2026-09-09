@@ -231,7 +231,7 @@ export class GitHubFacade {
       kind: GITHUB_LINK_KEY_KIND,
     });
     console.info(
-      `[github-facade] ${consumer?.name ?? 'a consumer'} connected user ${spent.userId}: link key ${minted.summary.id} minted`,
+      `[github-facade] ${printable(consumer?.name ?? 'a consumer')} connected user ${printable(spent.userId)}: link key ${printable(minted.summary.id)} minted`,
     );
     return { access_token: minted.plaintext, token_type: 'bearer', scope: '' };
   }

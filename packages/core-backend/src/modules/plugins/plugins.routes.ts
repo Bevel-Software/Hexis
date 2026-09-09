@@ -122,6 +122,12 @@ export function createPluginCreationRoutes(
     try {
       res.json(await provision.ensurePersonalPlugin(user));
     } catch (err) {
+      // The service's own refusals keep their status — a 503 for incomplete
+      // discovery tells the caller to try again, which a 500 would not.
+      if (err instanceof PluginProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
       console.error('[plugins] personal-folder ensure failed:', err);
       res.status(500).json({ error: 'Failed to prepare your personal folder' });
     }

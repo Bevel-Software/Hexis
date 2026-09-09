@@ -18,7 +18,11 @@
  * `README.md`): this package is published, so every deployment shows them.
  */
 
-/** A click target, as a fraction of the image's width and height. */
+/**
+ * A click target, as PERCENTAGES (0–100) of the image's width and height —
+ * `ScreenshotStep` writes them straight into `left: x%`, so `0.881` would be
+ * a box a hundredth of the size meant.
+ */
 export interface ShotHighlight {
   x: number;
   y: number;

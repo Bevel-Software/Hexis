@@ -94,8 +94,9 @@ export function ClaudeConnectionCard() {
           Hexis answers as one. Register it once (Owner role, Team or Enterprise plan): in Claude's
           admin settings, under Claude Code, GitHub Enterprise Server, choose <b>Add manually</b>{' '}
           and paste the fields below. That connects the deployment to the organization, not to
-          anyone: each person then connects their own account from the same section or from the
-          repository picker on claude.ai/code, and signs in here.
+          anyone: each person then connects their own account under Claude's admin settings,
+          GitHub, with <b>Connect</b> (or from the repository picker on claude.ai/code), and signs
+          in here.
         </p>
       </div>
 

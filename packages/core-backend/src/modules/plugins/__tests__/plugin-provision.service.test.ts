@@ -148,6 +148,12 @@ describe('PluginProvisionService.createPlugin', () => {
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/GTM/skills'), { recursive: true });
     await expect(h.svc.createPlugin(USER, 'X', 'GTM')).rejects.toMatchObject({ status: 422 });
     await expect(h.svc.createPlugin(USER, 'X', 'GTM/skills')).rejects.toMatchObject({ status: 422 });
+    // A TWIN of GTM — same slug, so discovery lists it under no catalog —
+    // still claims its subtree: a plugin made inside it would be invisible.
+    await fs.mkdir(path.join(h.dir, KB, 'Plugins/Teams/GTM/sub'), { recursive: true });
+    await fs.writeFile(path.join(h.dir, KB, 'Plugins/Teams/GTM/plugin.json'), '{"name":"gtm"}');
+    await expect(h.svc.createPlugin(USER, 'X', 'Teams/GTM')).rejects.toMatchObject({ status: 422 });
+    await expect(h.svc.createPlugin(USER, 'X', 'Teams/GTM/sub')).rejects.toMatchObject({ status: 422 });
     // A padded spelling names no folder: refused, never trimmed into one.
     await fs.mkdir(path.join(h.dir, KB, 'Plugins/Teams'), { recursive: true });
     await expect(h.svc.createPlugin(USER, 'X', 'Teams ')).rejects.toMatchObject({ status: 422 });

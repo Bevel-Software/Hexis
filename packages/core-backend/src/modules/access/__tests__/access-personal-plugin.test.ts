@@ -66,6 +66,7 @@ describe('the seeded access templates, resolved', () => {
     'Plugins/personal-ali/skills/weekly/SKILL.md': '# Weekly\n',
     'Plugins/GTM/plugin.json': '{"name":"gtm"}',
     'Plugins/GTM/access.md': pluginAccessMd(OWNER),
+    'Plugins/GTM/skills/x/SKILL.md': '# X\n',
   };
   const PATHS = [
     'Plugins/personal-ali/skills/weekly/SKILL.md',

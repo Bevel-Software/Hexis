@@ -87,7 +87,7 @@ beforeEach(() => {
 describe('DirectoryGroupsPage: add-member people suggestions', () => {
   it('suggests people by name and email, from the same source the roles page uses', async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'al');
 
     expect(await screen.findByText('Alice Green')).toBeInTheDocument();
@@ -101,7 +101,7 @@ describe('DirectoryGroupsPage: add-member people suggestions', () => {
     vi.mocked(suggestPrincipals).mockResolvedValue(people(PAT, ALICE));
     renderPage();
     // Product already has pat@example.com — suggesting him would offer a no-op.
-    const input = await screen.findByRole('textbox', { name: 'Add member to Product' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Product' });
     await userEvent.type(input, 'ex');
 
     expect(await screen.findByText('Alice Green')).toBeInTheDocument();
@@ -110,7 +110,7 @@ describe('DirectoryGroupsPage: add-member people suggestions', () => {
 
   it('choosing a suggestion adds the person exactly as typing the email would', async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'ali');
     await userEvent.click(await screen.findByText('Alice Green'));
 
@@ -132,7 +132,7 @@ describe('DirectoryGroupsPage: add-member people suggestions', () => {
     // Suggestions only ever know people the deployment has seen; a colleague
     // who has never signed in must still be addable.
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'newcomer@example.com');
     await userEvent.click(addButtonFor(input));
 
@@ -144,7 +144,7 @@ describe('DirectoryGroupsPage: add-member people suggestions', () => {
   it('a failed suggest request never blocks adding a valid email', async () => {
     vi.mocked(suggestPrincipals).mockRejectedValue(new Error('suggest is down'));
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'dana@example.com');
     await waitFor(() => expect(suggestPrincipals).toHaveBeenCalled());
 
@@ -157,7 +157,7 @@ describe('DirectoryGroupsPage: add-member people suggestions', () => {
 
   it('makes no suggestion request below two characters', async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'a');
     await new Promise((resolve) => setTimeout(resolve, PAST_DEBOUNCE_MS));
 

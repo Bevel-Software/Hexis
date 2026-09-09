@@ -50,7 +50,9 @@ export const MY_PLUGIN: UtcpTool = toolDef({
   path: '/api/plugins/personal',
   inputs: { type: 'object', properties: {}, additionalProperties: false },
   outputs: PROVISIONED_OUTPUT,
-  tags: ['plugins', 'skills'],
+  // `write`: both make folders and commit — a read-scoped caller's manual
+  // must not advertise them (see `isWriteTool` in the manual routes).
+  tags: ['plugins', 'skills', 'write'],
 });
 
 export const CREATE_PLUGIN: UtcpTool = toolDef({
@@ -78,5 +80,7 @@ export const CREATE_PLUGIN: UtcpTool = toolDef({
     additionalProperties: false,
   },
   outputs: PROVISIONED_OUTPUT,
-  tags: ['plugins', 'skills'],
+  // `write`: both make folders and commit — a read-scoped caller's manual
+  // must not advertise them (see `isWriteTool` in the manual routes).
+  tags: ['plugins', 'skills', 'write'],
 });

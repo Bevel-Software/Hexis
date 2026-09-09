@@ -153,6 +153,9 @@ describe('ExternalApiKeyService', () => {
       expect(result.plaintext).toMatch(/^gho_[A-Za-z0-9]{40}$/);
       expect(service.looksLikeExternalApiKey(result.plaintext)).toBe(true);
       expect(calls.values[0][0].tokenHash).toBe(sha256Hex(result.plaintext));
+      // The kind is STORED, not inferred back from the prefix: it is what
+      // classifies the key everywhere else.
+      expect(calls.values[0][0].kind).toBe('github-link');
     });
 
     it('trims the label before persisting', async () => {

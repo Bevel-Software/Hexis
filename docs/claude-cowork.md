@@ -36,11 +36,11 @@ they can add the marketplace.
 ## Add the marketplace (every person)
 
 1. Connect your account. Claude does not prompt for this, and its
-   **Connect to GitHub** button signs in to github.com, which is not it. Use
-   the connect option for the registered instance in the repository picker on
-   **claude.ai/code**; an Owner also has it in the GitHub Enterprise Server
-   section of the admin settings. You land on the platform's sign-in: approve,
-   and you are back in Claude.
+   **Connect to GitHub** button signs in to github.com, which is not it. Open
+   Claude's **Admin settings → GitHub**, choose **Connect**, and under GitHub
+   instance pick the registered platform instead of github.com; the
+   repository picker on **claude.ai/code** offers the same connect option.
+   You land on the platform's sign-in: approve, and you are back in Claude.
 2. Copy the marketplace URL from **External agent access → Marketplaces**.
    It is the same URL Claude Code clones.
 3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
@@ -53,7 +53,10 @@ they can add the marketplace.
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
 from Claude resumes them. "Repository not found" or "GitHub access is
-required" on the marketplace means step 1 has not happened for your account.
+required" on the marketplace means Claude has no usable connection for your
+account: step 1 has not happened, or the connection it made was since
+disconnected here. Connect again from step 1; if that does not take, the
+server log says why (below).
 
 The same steps, with a screenshot of every screen, are on the **External agent
 access** page in the app. The registration half is shown to admins only.

@@ -564,7 +564,7 @@ describe('PersonalSpacesStep', () => {
 
   it("adds `deny everyone` to every personal space's read rules on every branch, keeping the rest, once", async () => {
     const scaffold = await fullScaffold();
-    await seedUpstream({
+    const seed = await seedUpstream({
       ...scaffold,
       'Plugins/personal-u1/plugin.json': '{"name":"personal-u1"}',
       'Plugins/personal-u1/access.md': LEGACY_PERSONAL,
@@ -577,13 +577,21 @@ describe('PersonalSpacesStep', () => {
       // download grant — leave the space open to an inherited `read:
       // everyone`, so it is closed like any other.
       'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\ndownload:\n  - everyone\nowner:\n  - Di <di@x.io>\n',
+      // The old seed's frontmatter grants are carried into the body ONLY where
+      // the body has no word on that person: a denial someone wrote there
+      // stands, and is not overridden by the older grant.
+      'Plugins/personal-u5/access.md': '---\nread:\n  - Ed <ed@x.io>\nowner:\n  - Ed <ed@x.io>\n---\nread:\n  - deny Ed <ed@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
+    // A draft carrying a personal space too: the step visits every branch,
+    // not only the protected ones.
+    await git(seed, ['checkout', '-b', 'ali/draft']);
+    await git(seed, ['push', 'origin', 'ali/draft']);
 
     await makeRunner([new PersonalSpacesStep()]).runAll();
 
-    for (const branch of PROTECTED) {
+    for (const branch of [...PROTECTED, 'ali/draft']) {
       const dir = await checkout(branch);
       const closed = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u1/access.md'), 'utf8'));
       // The old seed's frontmatter grants stay as written; the body — which
@@ -605,15 +613,22 @@ describe('PersonalSpacesStep', () => {
       expect(u4).toContain('write:\n  - deny everyone');
       expect(u4).toContain('download:\n  - everyone');
       expect(u4).toContain('owner:\n  - Di <di@x.io>');
+      const u5 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u5/access.md'), 'utf8'));
+      const u5Body = u5.slice(u5.indexOf('\n---\n', 4) + 5);
+      // Ed's read denial stands — the frontmatter's read grant is NOT carried
+      // beside it — while the owner grant, which the body said nothing about, is.
+      expect(u5Body.match(/read:\n((?:  - [^\n]*\n)*)/)![1]).toBe('  - deny Ed <ed@x.io>\n  - deny everyone\n');
+      expect(u5Body).toMatch(/owner:\n  - Ed <ed@x.io>/);
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
       );
     }
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
-    expect(log).toContain('Keep 2 personal spaces private');
+    expect(log).toContain('Keep 3 personal spaces private');
     expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone');
     expect(log).toContain('Plugins/personal-u4/access.md: read denies everyone');
+    expect(log).toContain('Plugins/personal-u5/access.md: read denies everyone');
 
     // Idempotent: the next boot finds every space already closed.
     await makeRunner([new PersonalSpacesStep()]).runAll();
@@ -934,6 +949,18 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
       expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n!Plugins/\n');
+    });
+
+    it('retires the rules on a branch with neither root — nothing to migrate there, and the rules are as stale', async () => {
+      await seedUpstream({
+        'marker.txt': 'seeded',
+        '.bevelignore': 'Plugins/\nGroups/\nkeep/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('keep/\n');
+      const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+      expect(log).toContain('.bevelignore: Groups/, Plugins/ dropped');
     });
 
     it('retires the rules on a run that does not rename — a branch migrated by an earlier release, a draft included', async () => {

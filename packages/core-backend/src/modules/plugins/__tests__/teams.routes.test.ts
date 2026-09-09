@@ -180,12 +180,20 @@ describe('GET /api/teams', () => {
     expect(h.accessControl.canReadAsGroupBatch).toHaveBeenCalledTimes(2);
     const [, , probes] = vi.mocked(h.accessControl.canReadBatch).mock.calls[0]!;
     // Personal folders are not probed at all — not as plugins, not for what
-    // they hold; everything else is, once.
-    expect(probes).toEqual(expect.arrayContaining(['Plugins/GTM', 'Plugins/GTM/access.md', 'Plugins/Finance/books.tool']));
-    expect(probes).not.toContain('Plugins/personal-ali');
-    expect(probes).not.toContain('Plugins/personal-ali/skills/weekly/SKILL.md');
-    expect(probes).not.toContain('Plugins/personal-ali/mcp.json');
-    expect(new Set(probes).size).toBe(probes.length);
+    // they hold; everything else is, once: every plugin folder and its
+    // access.md, every skill's SKILL.md, every tool's file.
+    expect([...probes].sort()).toEqual(
+      [
+        'Plugins/GTM',
+        'Plugins/GTM/access.md',
+        'Plugins/GTM/mcp.json',
+        'Plugins/Finance',
+        'Plugins/Finance/access.md',
+        'Plugins/Finance/books.tool',
+        'Skills/Sales/outreach/SKILL.md',
+        'Skills/Finance/ledger/SKILL.md',
+      ].sort(),
+    );
   });
 
   it('is 401 without a caller', async () => {

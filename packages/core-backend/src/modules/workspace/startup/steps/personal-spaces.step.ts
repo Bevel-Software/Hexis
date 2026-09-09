@@ -131,7 +131,10 @@ function strandedFrontmatterGrants(
   for (const verb of KNOWN_VERBS) {
     for (const entry of own[verb]) {
       if (entry.kind !== 'user' || entry.deny) continue;
-      const held = folder[verb].some((e) => e.kind === 'user' && e.email === entry.email && !e.deny);
+      // Any entry for that person under that verb — a grant OR a denial — is
+      // the folder's own word on them; a denial someone wrote there on
+      // purpose must not be overridden by the frontmatter's older grant.
+      const held = folder[verb].some((e) => e.kind === 'user' && e.email === entry.email);
       if (!held) out.push({ verb, entry });
     }
   }

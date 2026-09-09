@@ -109,6 +109,6 @@ function pluginListener(
         unreadable.push(rel);
       },
     },
-    result: () => ({ plugins, warnings, unreadable }),
+    result: () => ({ plugins, warnings, unreadable, claimed }),
   };
 }

@@ -203,7 +203,9 @@ function bearerOf(req: express.Request): string | null {
 
 /** GitHub's 401 — and a log line saying why, since the consumer's backend will not. */
 function unauthorized(req: express.Request, res: express.Response, why: string): void {
-  console.warn(`[github-facade] ${req.method} ${printable(req.originalUrl)} refused: ${why} — from ${userAgentOf(req)}`);
+  // The PATH, never the full URL: a query string is the caller's to fill,
+  // and a credential put there would otherwise land in the log.
+  console.warn(`[github-facade] ${req.method} ${printable(req.path)} refused: ${why} — from ${userAgentOf(req)}`);
   res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-marketplace"');
   res.status(401).json({ message: 'Bad credentials' });
 }

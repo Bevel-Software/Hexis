@@ -97,8 +97,10 @@ describe('pluginEntriesFor', () => {
     const entries = pluginEntriesFor(items, [summary({ skillCount: 9, toolCount: 9 })], { kind: 'team', group: 'Sales' }, teams, '', 'Yours');
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ name: 'gtm', skillCount: 1, toolCount: 0 });
-    // An unknown team, or one that names no plugin, lists nothing.
+    // An unknown team lists nothing — and so does a known one that names no plugin.
     expect(pluginEntriesFor(items, [summary({})], { kind: 'team', group: 'Nobody' }, teams, '', 'Yours')).toEqual([]);
+    const empty = [{ name: 'Sales', plugins: [], skills: ['a'], tools: [] }];
+    expect(pluginEntriesFor(items, [summary({})], { kind: 'team', group: 'Sales' }, empty, '', 'Yours')).toEqual([]);
   });
 
   it('a search narrows the rows by label, own space included', () => {

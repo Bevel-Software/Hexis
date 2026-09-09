@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from 'react';
+import { useLayoutEffect, useRef, type RefObject } from 'react';
 
 /**
  * Mirror a fresh-every-render value into a stable ref.
@@ -11,13 +11,17 @@ import { useEffect, useRef, type RefObject } from 'react';
  * this ref instead gives the effect a dependency-free view of the latest
  * callback, so it subscribes once for the life of the overlay.
  *
- * The write happens in a passive effect, after paint — the same timing every
- * hand-rolled copy used. Do not read the ref during render; it is for event
- * handlers and effects.
+ * The write happens in a LAYOUT effect — before the browser paints, and so
+ * before any document listener can fire for the next event. A passive
+ * effect (what the hand-rolled copies used) leaves a window after commit in
+ * which a keydown or click still reads the previous render's value: a
+ * dialog that had just become `busy` could close, a menu could call a
+ * callback the parent had already replaced. Do not read the ref during
+ * render; it is for event handlers and effects.
  */
 export function useLatestRef<T>(value: T): RefObject<T> {
   const ref = useRef<T>(value);
-  useEffect(() => {
+  useLayoutEffect(() => {
     ref.current = value;
   }, [value]);
   return ref;

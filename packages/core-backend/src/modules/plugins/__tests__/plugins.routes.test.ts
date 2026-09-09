@@ -267,8 +267,18 @@ describe('/api/plugins routes', () => {
       expect((await fetch(`${anon.baseUrl}/api/plugins/personal`, { method: 'POST' })).status).toBe(401);
       expect(anon.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
     } finally {
-      anon.server.close();
+      await close(anon.server);
     }
+  });
+
+  it("POST /plugins/personal keeps the service's own status — a 503 for incomplete discovery is retryable, not a 500", async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const { PluginProvisionError } = await import('../plugin-provision.service.js');
+    h.provision.ensurePersonalPlugin.mockRejectedValueOnce(new PluginProvisionError('Plugin discovery is incomplete', 503));
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Plugin discovery is incomplete' });
   });
 
   it('lists member plugins sorted, counting by pluginOfPath', async () => {

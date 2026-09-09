@@ -75,6 +75,15 @@ export interface Discovery {
    * may take an identity it could not see.
    */
   unreadable: string[];
+  /**
+   * Every folder a plugin CLAIMS, repo-relative — in `plugins` or not: a
+   * twin skipped for sharing a slug, a manifest that could not be read.
+   * Nothing beneath a claimed folder is a plugin to discovery, so nothing
+   * may be CREATED beneath one either: a plugin made inside a skipped twin
+   * would be listed by no catalog. `plugins` answers "what is there";
+   * this answers "where may nothing new go".
+   */
+  claimed: string[];
 }
 
 /** What one walk yields when discovery shares it: the plugins, and every hole the walk met anywhere. */

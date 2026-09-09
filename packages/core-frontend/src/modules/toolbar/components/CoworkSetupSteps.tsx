@@ -202,7 +202,8 @@ export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened
               <ScreenshotStep shot={addManuallyShot} />
               <Prose>
                 Fill it from the fields below, which this deployment generated for exactly this
-                form. Any display name will do, port 443 is right, and read replicas stay empty.
+                form. Any display name will do, the port is {deploymentPort()}, and read replicas
+                stay empty.
                 Choose <b>Add configuration</b>. The webhook URL Claude shows afterwards can be
                 ignored: nothing here sends webhooks yet, and the private key is required by the
                 form but unused by this flow.
@@ -255,5 +256,20 @@ function deploymentHost(): string {
     return new URL(marketplaceGitUrl()).host;
   } catch {
     return 'this deployment';
+  }
+}
+
+/**
+ * The port Claude must register for it — the one this deployment is
+ * actually reached on. The scheme's default when the address names none;
+ * a deployment exposed on another port must be registered on that port,
+ * or Claude's calls never arrive.
+ */
+function deploymentPort(): string {
+  try {
+    const url = new URL(marketplaceGitUrl());
+    return url.port || (url.protocol === 'http:' ? '80' : '443');
+  } catch {
+    return '443';
   }
 }

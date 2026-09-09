@@ -25,13 +25,15 @@ export function isGroupPrefixed(value: string): boolean {
 }
 
 /**
- * Avatar letters for a person, from their email or display name: two initials
- * when the local part looks like `first.last`, otherwise the first two
- * characters. Lives beside the email rule because every caller is an
- * email-keyed people surface.
+ * Avatar letters for a person, from their email, display name or a
+ * `Name <email>` label: two initials when the name (or the email's local
+ * part) has two words, otherwise its first two characters. THE one
+ * monogram rule — the same person must get the same letters on every
+ * people surface (App roles, Groups & Members, Manage access), so no
+ * surface keeps a local copy.
  */
 export function initials(value: string): string {
-  const cleaned = value.trim();
+  const cleaned = value.replace(/[<>]/g, '').trim();
   if (!cleaned) return '?';
   const [name] = cleaned.split('@');
   const parts = name.split(/[.\s_-]+/).filter(Boolean);

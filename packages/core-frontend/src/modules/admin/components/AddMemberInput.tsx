@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { suggestPrincipals } from '../../access/api';
@@ -83,6 +83,10 @@ export function AddMemberInput({
   // The input and its list together. Focus moving between them is movement
   // WITHIN the widget, not away from it — see the wrapper's onBlur.
   const widget = useRef<HTMLDivElement>(null);
+  // The list's id, so the input can name it: a combobox whose popup a screen
+  // reader can find, and announce as it opens, rather than a text field that
+  // silently grows a list of buttons beneath it.
+  const listId = useId();
 
   // A newline-joined key rather than the array itself: callers build `exclude`
   // inline (`[...members, ...pending]`), so a reference dependency would
@@ -123,6 +127,8 @@ export function AddMemberInput({
     return () => clearTimeout(t);
   }, [value, excludeKey]);
 
+  const open = !busy && showSuggest && suggestions.length > 0;
+
   return (
     <div className={`flex items-center gap-1.5 ${className}`}>
       {/* The input is capped rather than fixed-width, and its wrapper may shrink,
@@ -158,13 +164,27 @@ export function AddMemberInput({
           className="text-xs px-2 py-1 border border-line rounded-sm focus:outline-none focus:border-accent w-full min-w-0"
           aria-label={inputLabel}
           autoComplete="off"
+          // The combobox pattern: the field names its popup and says when it
+          // is open, so assistive technology announces the suggestions the
+          // moment they appear and can move between them.
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={open}
+          aria-controls={open ? listId : undefined}
         />
-        {!busy && showSuggest && suggestions.length > 0 && (
-          <ul className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1">
+        {open && (
+          <ul
+            id={listId}
+            role="listbox"
+            aria-label="Suggestions"
+            className="absolute z-10 mt-1 w-full sm:w-72 max-w-full max-h-56 overflow-auto bg-white border border-line rounded-lg shadow-lg py-1"
+          >
             {suggestions.map((p) => (
               <li key={p.email}>
                 <button
                   type="button"
+                  role="option"
+                  aria-selected={false}
                   // preventDefault on mousedown keeps focus in the input, so a
                   // mouse click never blurs the widget out from under itself.
                   // The submit hangs off onClick, which a pointer AND a

@@ -251,12 +251,15 @@ export class PluginProvisionService {
     if (!(await this.exactFolderExists(path.join(wsDir, this.kbDirName, PLUGINS_DIR), segments))) {
       throw new PluginProvisionError(`There is no folder "${rawParent}" under ${PLUGINS_DIR}/.`, 404);
     }
-    const { plugins, unreadable } = await this.discovered();
+    // Judged against every folder discovery CLAIMS, not only the plugins it
+    // lists: a twin skipped for its slug still owns its subtree, and a
+    // plugin made in there would be listed by no catalog.
+    const { claimed, unreadable } = await this.discovered();
     if (unreadable.length > 0) throw incompleteDiscovery(unreadable);
-    const inside = plugins.find((p) => rel === p.folder || rel.startsWith(`${p.folder}/`));
+    const inside = claimed.find((c) => rel === c || rel.startsWith(`${c}/`));
     if (inside) {
       throw new PluginProvisionError(
-        `"${rawParent}" is inside the plugin at ${inside.folder} — a plugin cannot hold another plugin.`,
+        `"${rawParent}" is inside the plugin at ${inside} — a plugin cannot hold another plugin.`,
         422,
       );
     }
