@@ -166,7 +166,9 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       .catch((err: unknown) => {
         if (cancelled) return;
         setTeams([]);
-        setTeamsError(err instanceof Error ? err.message : "Couldn't load teams.");
+        // A blank message is no message: the page tells the error state
+        // apart from "no teams" by this being non-empty.
+        setTeamsError((err instanceof Error && err.message) || "Couldn't load teams.");
       })
       .finally(() => {
         if (!cancelled) setTeamsLoading(false);

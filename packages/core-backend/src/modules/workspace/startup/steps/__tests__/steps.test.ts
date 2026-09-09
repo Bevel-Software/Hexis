@@ -886,5 +886,27 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       await migrate();
       expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
     });
+
+    it("takes a platform comment above a stale rule with it, and the blank line that opened the block — the template step's own tidy-up, on a branch it never visits", async () => {
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore':
+          '# mine\n.git/\n\n# Added by the platform: the conventions doc is not node content.\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nGroups/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n.git/\n');
+    });
+
+    it('fails the run when the ignore file cannot be read — a hole is not "no file"', async () => {
+      // A directory where the file should be: readable as neither. Treating
+      // that as absence would leave a possible `Plugins/` rule in place and
+      // report the migration done.
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore/keep': '',
+      });
+      await expect(migrate()).rejects.toThrow(/EISDIR/);
+    });
   });
 });

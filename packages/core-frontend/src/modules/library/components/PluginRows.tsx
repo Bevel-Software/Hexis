@@ -45,8 +45,9 @@ export function PluginRows({
   const offerCreate = showCreate && isAdmin && workspaceHasNoPlugins(lib);
   // Loading is the plugin REQUEST's state, never the rows': the caller's own
   // space is a row before any request answers, and on a first load the list
-  // beneath it is not yet known. A reload with summaries already in hand
-  // keeps showing them.
+  // beneath it is not yet known — so the rows already in hand stay on
+  // screen and the note sits under them. A reload with summaries already in
+  // hand keeps showing them.
   const loading = pluginsLoading && pluginSummaries.length === 0;
   if (!offerCreate && !pluginsError && !loading && entries.length === 0) return null;
 
@@ -78,9 +79,8 @@ export function PluginRows({
         </p>
       )}
 
-      {loading ? (
-        <p className="text-ui text-ink-faint">Loading plugins…</p>
-      ) : (
+      {loading && <p className="mb-2 text-ui text-ink-faint">Loading plugins…</p>}
+      {entries.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {entries.map((entry) => (
             <PluginIndexRow

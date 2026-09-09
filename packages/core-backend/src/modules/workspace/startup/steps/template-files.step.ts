@@ -411,9 +411,15 @@ async function reconcileIgnoreRules(
  * with no comment to know it by, so provenance cannot decide it — and the
  * Skills & Tools sidebar now renders that root as a file tree read from the
  * workspace tree, which the rule would empty. A `!pattern` negation is not
- * the pattern and stays.
+ * the pattern and stays. A platform comment directly above a dropped line
+ * goes with it, and so does the blank line that opened an appended block —
+ * the same tidy-up `withoutPlatformIgnorePattern` does, so a file either
+ * step cleans reads the same afterwards.
+ *
+ * Exported for the Groups→Plugins step, which retires the same rules on the
+ * branches this step never visits (drafts).
  */
-function withoutIgnoreLine(text: string, pattern: string): string {
+export function withoutIgnoreLine(text: string, pattern: string): string {
   const lines = text.split('\n');
   const kept: string[] = [];
   for (const line of lines) {
@@ -422,7 +428,9 @@ function withoutIgnoreLine(text: string, pattern: string): string {
       continue;
     }
     const above = kept[kept.length - 1];
-    if (above !== undefined && isPlatformRuleComment(above)) kept.pop();
+    if (above === undefined || !isPlatformRuleComment(above)) continue;
+    kept.pop();
+    if (above.trim() === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
   }
   return kept.join('\n');
 }

@@ -457,6 +457,22 @@ describe('LibraryRoutes', () => {
     expect(await screen.findByTestId('library-card-skill-outreach')).toBeInTheDocument();
   });
 
+  it('keeps the own-space row on screen while the plugin index is still loading', async () => {
+    pluginsMock.listPlugins.mockReturnValue(new Promise<PluginSummary[]>(() => {}));
+    renderAt('/skills-and-tools');
+    expect(await screen.findByText('Loading plugins…')).toBeInTheDocument();
+    expect(within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
+    // And what the catalog proves is there is a row already: the index is not the only witness.
+    expect(within(main()).getByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+  });
+
+  it('reports a teams failure that carries no message with the fallback, not as an empty team', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error(''));
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/can't use anything/)).toBeNull();
+  });
+
   it("a team row's counts are the team's slice, not the plugin's totals", async () => {
     // GTM holds 1 skill + 1 tool by its summary; the team may use the skill only.
     teamsMock.listTeams.mockResolvedValue([{ name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: [] }]);

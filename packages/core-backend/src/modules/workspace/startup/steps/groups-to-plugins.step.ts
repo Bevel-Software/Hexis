@@ -15,8 +15,10 @@ import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.co
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
+import { isAbsence } from '../../../../shared/fs-errors.js';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { withoutIgnoreLine } from './template-files.step.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -306,15 +308,22 @@ async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details:
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf-8');
-  } catch {
-    return false; // no ignore file — nothing went stale
+  } catch (err) {
+    // No ignore file — nothing went stale. Anything else (a directory in
+    // its place, a permission hole) is NOT "no file": a rule that may still
+    // be there would hide the tree while the run reports success, so the
+    // hole surfaces as the step's failure instead.
+    if (isAbsence(err)) return false;
+    throw err;
   }
-  const stale = new Set([`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`]);
-  const lines = current.split('\n');
-  const dropped = [...new Set(lines.map((l) => l.trim()).filter((l) => stale.has(l)))];
-  if (dropped.length === 0) return false;
-  branch.write(IGNORE_FILENAME, lines.filter((l) => !stale.has(l.trim())).join('\n'));
-  details.push(`${IGNORE_FILENAME}: ${dropped.join(', ')} dropped`);
+  const stale = [`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`];
+  const present = stale.filter((rule) => current.split('\n').some((l) => l.trim() === rule));
+  if (present.length === 0) return false;
+  // The same drop the template step makes, so a platform comment above a
+  // rule, and the blank line that opened an appended block, go with it.
+  const merged = present.reduce((text, rule) => withoutIgnoreLine(text, rule), current);
+  branch.write(IGNORE_FILENAME, merged);
+  details.push(`${IGNORE_FILENAME}: ${present.join(', ')} dropped`);
   return true;
 }
 
