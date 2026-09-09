@@ -122,12 +122,17 @@ ENV PORT=3001
 
 # Bake the deployed commit sha into the image so `GET /api/health` can report
 # it. `.git` is in .dockerignore, so the sha can't be read inside the build —
-# pass it in explicitly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`, which is
-# what CI does. `docker-compose.yml` deliberately does NOT declare it as a build
-# arg — naming it there made every deployment UI reading that file ask for a
-# value nobody sets by hand. Unset, health reports 'unknown'.
+# it must arrive as a build arg, under either of two names: CI passes GIT_SHA
+# (`--build-arg GIT_SHA=$(git rev-parse HEAD)`), and a from-source compose
+# deploy maps the orchestrator's SOURCE_COMMIT through as a build arg
+# (deployment/docker-compose.build.yml). Baked at BUILD time on purpose: the
+# runtime SOURCE_COMMIT pass-through tried first was materialized by a hosted
+# deployment UI as an EMPTY LITERAL that overrode the real value — a sha the
+# image itself owns leaves no runtime variable to blank. Neither arg set,
+# health reports 'unknown'.
 ARG GIT_SHA
-ENV GIT_SHA=${GIT_SHA}
+ARG SOURCE_COMMIT
+ENV GIT_SHA=${GIT_SHA:-$SOURCE_COMMIT}
 
 EXPOSE 3001
 
