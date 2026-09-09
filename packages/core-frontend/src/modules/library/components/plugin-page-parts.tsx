@@ -20,12 +20,12 @@ import { LibraryCard } from './LibraryCard';
  * promise drift the first time either is touched.
  */
 
-/** `All plugins › {name}` — the page's place in the Library, and the way back. */
+/** `Everything › {name}` — the page's place in the Library, and the way back. */
 export function PluginBreadcrumb({ name }: { name: string }) {
   return (
     <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
       <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-        All plugins
+        Everything
       </Link>
       <span aria-hidden="true">›</span>
       <span aria-current="page" className="truncate text-ink-muted">

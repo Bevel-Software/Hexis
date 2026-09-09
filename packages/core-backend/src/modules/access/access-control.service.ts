@@ -463,6 +463,69 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
   return new Set([...(own ?? []), ...pub]);
 }
 
+/**
+ * Every principal key that being in `group` confers — the group's OWN key,
+ * the roles that list the group (`group:<Name>` in roles.yaml), the plugin
+ * principals whose roster admits the group directly or through one of those
+ * roles, and the public keys every caller holds. This is the group-shaped
+ * twin of `principalKeysOf`: a member's key set minus everything they hold
+ * for reasons of their own. `null` when no group of that name exists.
+ *
+ * Groups are keyed by their bare canonical name (`mergeGroupsIntoRoles`);
+ * roles by `role/<name>`. A bare key whose record is a ROLE is not a group,
+ * however it was spelled.
+ */
+function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | null {
+  const canonical = canonicalRoleName(group);
+  const record = model.roles.byCanonical.get(canonical);
+  if (!record || record.kind !== 'group') return null;
+  const keys = new Set<string>([canonical]);
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind === 'role' && principal.groupRefs?.has(canonical)) keys.add(key);
+  }
+  // Plugin principals were expanded from role/group entries; a plugin that
+  // admits the group, or a role the group is folded into, admits the group.
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (keys.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
+/**
+ * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
+ * of principal KEYS with no person behind them — no direct-email tier, no
+ * admin rescue, no machine-owned rule. Closest scope first; within a scope a
+ * grant to any key wins over a denial to another, exactly as for a person.
+ */
+function hasPermissionForKeys(
+  model: AccessModel,
+  verb: Verb,
+  keys: ReadonlySet<string>,
+  relativePath: string,
+  fileOwn?: OwnEntries | null,
+): boolean {
+  for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
+    let grant = false;
+    let deny = false;
+    for (const key of keys) {
+      const state = scope.byRole.get(key);
+      if (state === 'denied') deny = true;
+      else if (state === 'grant') grant = true;
+    }
+    if (grant) return true;
+    if (deny) return false;
+    if (scope.everyone) return scope.everyone === 'grant';
+  }
+  return false;
+}
+
 function isAdminEmail(model: AccessModel, email: string): boolean {
   if (model.deploymentOwners.has(email)) return true;
   const roles = model.roles.byEmail.get(email);
@@ -1076,6 +1139,25 @@ export class AccessControlService implements IAccessControl {
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, canReadResolved(model, userEmail, p, owns[i]));
+    });
+    return result;
+  }
+
+  async canReadAsGroupBatch(
+    workspaceId: string,
+    group: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null> {
+    const model = await this.loadModel(workspaceId);
+    const keys = principalKeysOfGroup(model, group);
+    if (keys === null) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // The same per-path own-entries `canReadBatch` folds in: a file's own
+    // frontmatter rules are part of the walk for a group as for a person.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionForKeys(model, 'read', keys, p, owns[i]));
     });
     return result;
   }

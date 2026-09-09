@@ -218,8 +218,25 @@ export type LibraryFilter =
   | { kind: 'all' }
   | { kind: 'owned' }
   | { kind: 'group'; plugin: string }
+  /**
+   * A team from the active group source: what being in it lets a person
+   * use. The slice is the server's (`TeamAccess`), not a property of the
+   * items — see `filterLibraryItems`'s `teams` argument.
+   */
+  | { kind: 'team'; group: string }
   /** Owned by someone, in no plugin — the prototype calls these "yours alone". */
   | { kind: 'ungrouped' };
+
+/**
+ * What one team can use, by id — `GET /api/teams`, one entry per group.
+ * Ids only: the names are the catalog's, and the slice is applied to it.
+ */
+export interface TeamAccess {
+  name: string;
+  plugins: string[];
+  skills: string[];
+  tools: string[];
+}
 
 /**
  * What an empty view says.
@@ -236,11 +253,18 @@ export type LibraryFilter =
 export function emptyMessageFor(filter: LibraryFilter, query: string): string {
   if (query.trim()) return 'Nothing here matches yet.';
   if (filter.kind === 'owned') return "You're not responsible for changes in any skills yet.";
+  if (filter.kind === 'team') return `${filter.group} can't use anything you can see yet.`;
   return 'Nothing here matches yet.';
 }
 
 export interface LibraryFilterable {
   kind: 'skill' | 'integration';
+  /**
+   * The catalog id a team slice names — a skill's name, a tool's slug. The
+   * team lens fails closed without it: an item that cannot be named cannot
+   * be in a team's slice.
+   */
+  id?: string;
   name: string;
   description: string;
   owned: boolean;
@@ -309,13 +333,32 @@ export function pluginsOfItem(item: Pick<LibraryFilterable, 'plugin' | 'plugins'
   return [...names];
 }
 
-/** Sidebar selection narrows; the query matches name/description within it. */
+/**
+ * Whether `item` is in `team`'s slice — by the id the server named. A skill
+ * is named among the team's skills, a tool among its tools; an item without
+ * an id, or a team the server did not list, is a no.
+ */
+export function isInTeam(
+  item: Pick<LibraryFilterable, 'kind' | 'id'>,
+  team: Pick<TeamAccess, 'skills' | 'tools'> | undefined,
+): boolean {
+  if (!team || item.id === undefined) return false;
+  return (item.kind === 'skill' ? team.skills : team.tools).includes(item.id);
+}
+
+/**
+ * Sidebar selection narrows; the query matches name/description within it.
+ * `teams` is what the team lens slices by — the server's per-group access
+ * (`GET /api/teams`); without it the team lens is empty, never everything.
+ */
 export function filterLibraryItems<T extends LibraryFilterable>(
   items: T[],
   filter: LibraryFilter,
   query: string,
+  teams: readonly TeamAccess[] = [],
 ): T[] {
   const q = query.trim().toLowerCase();
+  const team = filter.kind === 'team' ? teams.find((t) => t.name === filter.group) : undefined;
   return items.filter((item) => {
     if (q && !item.name.toLowerCase().includes(q) && !item.description.toLowerCase().includes(q)) {
       return false;
@@ -327,6 +370,8 @@ export function filterLibraryItems<T extends LibraryFilterable>(
         return item.owned;
       case 'group':
         return isInPlugin(item, filter.plugin);
+      case 'team':
+        return isInTeam(item, team);
       case 'ungrouped':
         return isUngrouped(item);
     }

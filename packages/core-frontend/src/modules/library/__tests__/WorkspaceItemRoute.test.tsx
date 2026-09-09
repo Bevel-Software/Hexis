@@ -21,6 +21,7 @@ import type { LibraryData } from '../hooks/useLibraryData';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 
+vi.mock('../services/teams.api', () => ({ listTeams: vi.fn().mockResolvedValue([]) }));
 vi.mock('../services/plugins.api', () => ({
   listPlugins: vi.fn().mockResolvedValue([]),
   listJoinRequests: vi.fn().mockResolvedValue([]),
@@ -137,7 +138,7 @@ describe('WorkspaceItemRoute', () => {
       'create-sales-deck::reference/LESSONS.md',
     );
     // The ONE library sidebar is on screen with it — same surface, not a copy.
-    expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
   });
 
   it('a bare skill-folder URL opens SKILL.md', async () => {
@@ -162,7 +163,7 @@ describe('WorkspaceItemRoute', () => {
       'brand-new-skill::SKILL.md',
     );
     // …inside the library surface, never the Knowledge view.
-    expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
   });
 
   it("a `.tool` URL falls back to the filename slug when the catalog hasn't loaded", async () => {
@@ -277,7 +278,7 @@ describe('WorkspaceItemRoute', () => {
       // the catalog is what settles it, so hold the slot until it lands.
       dataMock.useLibraryData.mockReturnValue({ ...NESTED, loading: true, skills: [], tools: [] });
       renderAt(itemUrl('Plugins/Engineering/coding/create-ticket'));
-      expect(await screen.findByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: /^Everything/ })).toBeInTheDocument();
       expect(screen.queryByLabelText('skill-page')).toBeNull();
     });
 
@@ -410,7 +411,7 @@ describe('WorkspaceItemRoute', () => {
     it('waits for the catalog on a bare mcp.json URL rather than guessing', async () => {
       dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
       renderAt(itemUrl('Plugins/LocalLab/mcp.json'));
-      expect(await screen.findByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: /^Everything/ })).toBeInTheDocument();
       expect(screen.queryByLabelText('tool-page')).toBeNull();
       // …and it has not been bounced away either: the URL is still the file's.
       expect(screen.getByLabelText('pathname')).toHaveTextContent('/Plugins/LocalLab/mcp.json');
@@ -508,7 +509,7 @@ describe('WorkspaceItemRoute', () => {
     it("renders a shared skill file on that file's tab, inside the library nav", async () => {
       renderAt(itemUrl('Skills/Sales/discovery-call/checklist.md'));
       expect(await screen.findByLabelText('skill-page')).toHaveTextContent('discovery-call::checklist.md');
-      expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
     });
 
     it('opens a bare shared skill folder on SKILL.md', async () => {
@@ -581,7 +582,7 @@ describe('WorkspaceItemRoute', () => {
     it('waits for the catalog rather than guessing a scope is a skill', async () => {
       dataMock.useLibraryData.mockReturnValue({ ...CATALOG, loading: true, skills: [], tools: [] });
       renderAt(itemUrl('Skills/Sales'));
-      await waitFor(() => expect(screen.getByRole('button', { name: /^All plugins/ })).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument());
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
       expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales'));
     });

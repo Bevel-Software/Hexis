@@ -10,6 +10,7 @@ import type { LibraryData } from '../hooks/useLibraryData';
 const dataMock = vi.hoisted(() => ({ useLibraryData: vi.fn() }));
 vi.mock('../hooks/useLibraryData', () => ({ useLibraryData: dataMock.useLibraryData }));
 vi.mock('../services/plugins.api', () => ({ listPlugins: vi.fn().mockResolvedValue([]) }));
+vi.mock('../services/teams.api', () => ({ listTeams: vi.fn().mockResolvedValue([]) }));
 
 import { LibraryProvider, useLibrary } from '../state/library-data';
 import { PR_STALE_EVENT } from '../../../core/events';

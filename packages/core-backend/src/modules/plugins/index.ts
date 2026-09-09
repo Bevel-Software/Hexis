@@ -17,6 +17,7 @@ export { KbPluginSource } from './discovery/kb-plugin-source.js';
 export { DEFAULT_REGISTRY_PATH } from './discovery/bundle-dialect/bundle.source.js';
 export { pendingProposals, type JoinProposal } from './join-proposals.js';
 export { createPluginsRoutes } from './plugins.routes.js';
+export { createTeamsRoutes, type TeamAccess } from './teams.routes.js';
 export type {
   IPluginIndexService,
   PluginCatalogEntry,

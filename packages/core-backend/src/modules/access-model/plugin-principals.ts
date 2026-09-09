@@ -72,7 +72,7 @@ export function synthesizePluginPrincipals(
     const file = accessFiles.get(dir);
     if (!file) continue; // a plugin without rules has no roster
     for (const verb of PLUGIN_TOKEN_VERBS) {
-      const { emails, everyone } = holdersOf(index, file, verb);
+      const { emails, everyone, sourceKeys } = holdersOf(index, file, verb);
       const key = pluginPrincipalKey(slug, verb);
       index.byCanonical.set(key, {
         displayName: key,
@@ -80,6 +80,7 @@ export function synthesizePluginPrincipals(
         kind: 'plugin',
         pluginName: slug,
         pluginDir: dir,
+        sourceKeys,
       });
       for (const email of emails) {
         let set = index.byEmail.get(email);
@@ -113,8 +114,9 @@ function holdersOf(
   index: RolesIndex,
   file: AccessFile,
   verb: PluginTokenVerb,
-): { emails: Set<string>; everyone: boolean } {
+): { emails: Set<string>; everyone: boolean; sourceKeys: Set<string> } {
   const emails = new Set<string>();
+  const sourceKeys = new Set<string>();
   let everyone = false;
   for (const source of sourceVerbsFor(verb)) {
     for (const entry of file.entries[source]) {
@@ -130,8 +132,9 @@ function holdersOf(
       if (entry.role.startsWith(PLUGIN_TOKEN_PREFIX)) continue; // no recursion
       const record = index.byCanonical.get(entry.role);
       if (!record) continue; // an unknown role contributes nothing (loadModel warns separately)
+      sourceKeys.add(entry.role);
       for (const email of record.emails) emails.add(email);
     }
   }
-  return { emails, everyone };
+  return { emails, everyone, sourceKeys };
 }

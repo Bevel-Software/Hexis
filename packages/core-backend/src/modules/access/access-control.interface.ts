@@ -110,6 +110,25 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean>>;
 
   /**
+   * Batched read for a GROUP rather than a person: what being in `group`
+   * (a `groups.yaml` display name, or the active group source's) confers on
+   * each path, through the same closeness-first walk `canReadBatch` runs —
+   * the group's own key, every role that lists the group, every plugin
+   * principal whose roster the group is part of, and the public keys every
+   * caller holds. No person is involved, so nothing a member holds for a
+   * reason of their own (a direct `Name <email>` grant, another role,
+   * deployment ownership) counts, and no admin rescue applies.
+   *
+   * `null` when no such group exists — distinct from a map of `false`s,
+   * which is a real group that can read none of the paths.
+   */
+  canReadAsGroupBatch(
+    workspaceId: string,
+    group: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null>;
+
+  /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
    * by the input paths, with `true` / `false` for each. Reuses one config
    * load per call.
