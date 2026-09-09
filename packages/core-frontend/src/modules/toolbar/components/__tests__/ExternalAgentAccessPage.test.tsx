@@ -22,13 +22,23 @@ import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared
  * regression cases below name all six.
  */
 
-const { listMock, createMock } = vi.hoisted(() => ({
+const { listMock, createMock, facadeMock, adminState } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
+  facadeMock: vi.fn(),
+  // Mutable so one file can mount the page as both roles: the Cowork drawer
+  // shows two different sets of steps depending on this.
+  adminState: { isAdmin: false },
 }));
 
 vi.mock('../../../admin/state/admin.context', () => ({
-  useAdmin: () => ({ isAdmin: false }),
+  useAdmin: () => ({ isAdmin: adminState.isAdmin }),
+}));
+
+// The registration credentials the admin branch shows inline. Mocked, or the
+// component reaches for the real admin endpoint over the network.
+vi.mock('../../../settings/services/github-facade.api', () => ({
+  fetchGitHubFacade: facadeMock,
 }));
 
 vi.mock('../../services/external-api-keys.api', () => ({
@@ -45,7 +55,23 @@ const LOCALHOST_URL = 'http://localhost:3001/api/mcp';
 
 const KEY = 'bvl_live_s3cret';
 
+const FACADE = {
+  host: 'kb.acme.com',
+  appId: '12345',
+  clientId: 'Iv1.abcdef',
+  clientSecret: 'ghs_secret',
+  webhookSecret: 'whsec_0123456789012345678',
+  privateKeyPem: '-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----',
+  marketplaceUrl: 'https://kb.acme.com/git/marketplace.git',
+  createdAt: Date.now(),
+  rotatedAt: null,
+};
+
 beforeEach(() => {
+  adminState.isAdmin = false;
+  // Cleared, not just re-stubbed: the count is an assertion of its own below.
+  facadeMock.mockClear();
+  facadeMock.mockResolvedValue(FACADE);
   listMock.mockResolvedValue([]);
   createMock.mockResolvedValue({
     plaintext: KEY,
@@ -322,6 +348,88 @@ describe('the Marketplaces tab', () => {
     const commands = snippets().filter((v) => v.includes('key:'));
     expect(commands.length).toBeGreaterThan(0);
     for (const v of commands) expect(v).toContain(new URL(PUBLIC_URL).host);
+  });
+
+  /**
+   * The registration steps live on pages inside Claude's ADMIN settings. A
+   * non-admin cannot open those, so showing them four screenshots of a door
+   * they have no key to is worse than showing them nothing: the two admin
+   * steps and their four shots are gated, and the three steps they can act
+   * on are not.
+   */
+  it('gives a non-admin only the steps they can act on, and none of the admin screenshots', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    expect(within(cowork).queryByText('Register this deployment with your Claude organization')).toBeNull();
+    expect(within(cowork).getByText('Connect your Claude account to this deployment')).toBeTruthy();
+    expect(within(cowork).getByText('Add the marketplace')).toBeTruthy();
+    expect(within(cowork).getByText('Install the plugins you want')).toBeTruthy();
+
+    // The four Cowork shots, and not one of the four from Claude's admin settings.
+    const alts = within(cowork).getAllByRole('img').map((el) => el.getAttribute('alt') ?? '');
+    expect(alts).toHaveLength(4);
+    expect(alts.some((a) => a.includes('admin settings'))).toBe(false);
+  });
+
+  it('gives an admin the registration steps as well, screenshots and all', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    expect(within(cowork).getByText('Register this deployment with your Claude organization')).toBeTruthy();
+    expect(within(cowork).getByText('Connect your own Claude account to it')).toBeTruthy();
+    expect(within(cowork).getAllByRole('img')).toHaveLength(8);
+  });
+
+  /**
+   * Step 1 asks the reader to paste six values into Claude's form, so the six
+   * values are IN step 1. Sending them to the Deployment page to fetch them
+   * and back again was friction with nothing on the other end of it.
+   */
+  it('puts the registration credentials in the step that asks for them', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    await within(cowork).findByDisplayValue(FACADE.clientSecret);
+    for (const value of [FACADE.host, FACADE.appId, FACADE.clientId, FACADE.webhookSecret]) {
+      expect(within(cowork).getByDisplayValue(value)).toBeTruthy();
+    }
+    // The key is multi-line, which the display-value matcher normalises away.
+    expect(snippets().some((v) => v === FACADE.privateKeyPem)).toBe(true);
+  });
+
+  it('never asks the admin endpoint for credentials a non-admin cannot have', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    expect(facadeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Every box is decoration: `aria-hidden`, and the control it frames is
+   * named in the image's own alt text. A screen reader that never sees a red
+   * rectangle still gets the instruction.
+   */
+  it('names the highlighted control in alt text rather than only boxing it', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    for (const img of within(cowork).getAllByRole('img')) {
+      expect((img.getAttribute('alt') ?? '').length).toBeGreaterThan(40);
+    }
+    // The deployment's own host, never a hard-coded example.
+    expect(cowork).toHaveTextContent(new URL(PUBLIC_URL).host);
   });
 
   it('tells Claude connections from keys by their stored kind — never by the label', async () => {

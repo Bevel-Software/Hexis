@@ -18,6 +18,7 @@ import {
   workspaceBaseUrl,
 } from '../../../shared/mcp';
 import { GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
 import {
   type ExternalApiKeySummary,
@@ -336,33 +337,7 @@ export function ExternalAgentAccessPage() {
                 Cowork and claude.ai
               </summary>
               <div className="px-3 pb-3 space-y-3">
-                <p className="text-meta text-ink-muted leading-snug">
-                  Cowork and claude.ai take marketplaces only from GitHub, or from a GitHub
-                  Enterprise Server your Claude organization registered. This deployment answers as
-                  one: an Owner of your Claude organization registers it once
-                  {isAdmin ? (
-                    <>
-                      {' '}
-                      (the fields are on the{' '}
-                      <Link to="/deployment" className="underline text-ink-muted hover:text-ink">
-                        Deployment
-                      </Link>{' '}
-                      page)
-                    </>
-                  ) : (
-                    <> (an admin here has the fields)</>
-                  )}
-                  , then every person connects their own account:
-                </p>
-                <ol className="text-meta text-ink-muted leading-snug list-decimal pl-4 space-y-0.5">
-                  <li>In Cowork (or claude.ai), open Plugins → Add marketplace and paste the URL below.</li>
-                  <li>
-                    When it asks you to connect your GitHub Enterprise account, you land on this
-                    deployment's sign-in: approve, and you are back in Claude.
-                  </li>
-                  <li>Install the plugins you want. Update in Claude pulls what changed.</li>
-                </ol>
-                <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
+                <CoworkSetupSteps isAdmin={isAdmin} />
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-ink">Your Claude connections</div>
                   {loadError && (
