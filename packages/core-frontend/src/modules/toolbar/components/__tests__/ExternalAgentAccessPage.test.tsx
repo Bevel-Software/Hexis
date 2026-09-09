@@ -426,7 +426,6 @@ describe('the Marketplaces tab', () => {
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const drawer = () => screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
-    const secretShown = () => within(drawer()).queryByDisplayValue(FACADE.clientSecret) !== null;
 
     await user.click(within(drawer()).getByText('Cowork and claude.ai'));
     await within(drawer()).findByDisplayValue(FACADE.clientSecret);
@@ -435,7 +434,13 @@ describe('the Marketplaces tab', () => {
     await user.click(screen.getByRole('tab', { name: 'Your agent' }));
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
 
-    expect(secretShown()).toBe(drawer().open);
+    // The remount refetches, so settle on the credentials before reading the
+    // drawer: asserting both facts in the same tick would pass or fail on
+    // microtask timing rather than on the invariant. Once they are on screen,
+    // the drawer showing them must be open — that is the whole claim, and it
+    // fails when the element and the state can drift apart.
+    await within(drawer()).findByDisplayValue(FACADE.clientSecret);
+    expect(drawer().open).toBe(true);
   });
 
   it('never asks the admin endpoint for credentials a non-admin cannot have', async () => {
