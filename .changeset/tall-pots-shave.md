@@ -5,12 +5,14 @@
 
 Walk people through Cowork and claude.ai with a screenshot of every screen.
 
-The Marketplaces tab used to describe the route in three sentences, in the
-wrong order: it had people paste the marketplace URL first and wait for Claude
-to ask them to connect, which Claude never does. The drawer now runs the four
-screens in the order they happen, each with the control to click boxed in the
-shot, and the connect step comes first.
+The Marketplaces tab described the route in prose. It now runs the screens in
+the order they happen, each with the control to click boxed in a screenshot of
+it: register the deployment, connect your account, add the marketplace, install
+the plugins.
 
 The two registration steps happen inside Claude's admin settings, so they and
-their screenshots show only to admins here; everyone else gets the three steps
-they can act on.
+their four screenshots show only to admins here; everyone else gets the three
+steps they can act on. Step 1 carries the registration credentials themselves
+rather than a link to the Deployment page, so an Owner filling in Claude's form
+never leaves the page. Those six fields now have one definition, shared with the
+Deployment card.
