@@ -50,25 +50,19 @@ services:
       # is also what makes the root .env the one compose reads. So `.` IS the
       # repository root here, subfolder or not.
       context: .
-      # The commit sha `GET /api/health` reports, baked into the image at
-      # build time. `${SOURCE_COMMIT:-}` interpolates from the orchestrator's
-      # .env — Coolify writes the checked-out commit there on every deploy —
-      # and an operator building by hand can leave it unset (health then says
-      # 'unknown'). Build-time on purpose: the runtime pass-through this
-      # replaces was materialized by Coolify as an EMPTY LITERAL that
-      # overrode the real value; a sha baked into the image leaves no runtime
-      # variable to blank.
-      #
-      # LIST form, deliberately, to match `environment` below. Coolify's
-      # parser merges a service's `build.args` INTO its `environment` before
-      # reading either; a map here beside a list there makes the union
-      # associative, and every bare pass-through in the list (`- GIT_TOKEN`)
-      # then keeps its list index as its key — which docker compose rejects
-      # as "non-string key in services.app.environment: <n>", a different n
-      # each run. Two lists merge into one list, and the parser reads it as
-      # it always did.
-      args:
-        - SOURCE_COMMIT=${SOURCE_COMMIT:-}
+      # No `args:` block, deliberately. The commit sha `GET /api/health`
+      # reports is baked into the image by the Dockerfile's `ARG SOURCE_COMMIT`,
+      # and the orchestrator passes it ON THE COMMAND LINE: Coolify appends
+      # `--build-arg SOURCE_COMMIT` to `docker compose build` (with "Include
+      # SOURCE_COMMIT in build" enabled on the resource), and a manual build
+      # does the same with `--build-arg SOURCE_COMMIT=$(git rev-parse HEAD)`.
+      # A `${SOURCE_COMMIT}` reference HERE is what must not exist: Coolify
+      # turns every `${VAR}` in a compose file into a resource variable of its
+      # own, and an existing SOURCE_COMMIT variable is exactly what stops it
+      # injecting the real commit — the reference creates an empty variable
+      # that then blanks the value it was meant to carry. (A map-form `args:`
+      # beside the list-form `environment` below also breaks Coolify's
+      # parser outright: it merges the two and keeps list indices as keys.)
     expose:
       - "3001"
     environment:

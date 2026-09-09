@@ -122,17 +122,19 @@ ENV PORT=3001
 
 # Bake the deployed commit sha into the image so `GET /api/health` can report
 # it. `.git` is in .dockerignore, so the sha can't be read inside the build —
-# it must arrive as a build arg, under either of two names: CI passes GIT_SHA
-# (`--build-arg GIT_SHA=$(git rev-parse HEAD)`), and a from-source compose
-# deploy maps the orchestrator's SOURCE_COMMIT through as a build arg
-# (deployment/docker-compose.build.yml). Baked at BUILD time on purpose: the
-# runtime SOURCE_COMMIT pass-through tried first was materialized by a hosted
-# deployment UI as an EMPTY LITERAL that overrode the real value — a sha the
-# image itself owns leaves no runtime variable to blank. Neither arg set,
-# health reports 'unknown'.
-ARG GIT_SHA
+# it arrives as ONE build arg, SOURCE_COMMIT, the name Coolify gives the
+# checked-out commit: CI passes `--build-arg SOURCE_COMMIT=<sha>`, Coolify
+# appends `--build-arg SOURCE_COMMIT` to its compose build (with "Include
+# SOURCE_COMMIT in build" enabled), and a manual build passes
+# `$(git rev-parse HEAD)`. Unset, health reports 'unknown'.
+#
+# Baked under a DIFFERENT name on purpose. A runtime environment variable
+# overrides an image ENV of the same name, and SOURCE_COMMIT is exactly the
+# name a hosted deployment UI writes at runtime — the pass-through tried
+# first was materialized as an EMPTY LITERAL that blanked the real value.
+# GIT_SHA is a name nothing at runtime sets, so what the image owns stands.
 ARG SOURCE_COMMIT
-ENV GIT_SHA=${GIT_SHA:-$SOURCE_COMMIT}
+ENV GIT_SHA=$SOURCE_COMMIT
 
 EXPOSE 3001
 
