@@ -43,6 +43,19 @@ export interface MintedExternalApiKey {
   summary: ExternalApiKeySummary;
 }
 
+/**
+ * One row of the admin "Connection keys" overview: a key summary plus the
+ * account it belongs to. Deployment-wide, so unlike {@link ExternalApiKeySummary}
+ * the owner is not implied by the caller.
+ */
+export interface AdminExternalApiKeySummary extends ExternalApiKeySummary {
+  user: {
+    id: string;
+    email: string;
+    name: string;
+  };
+}
+
 /** The kind of a key a person creates by hand. */
 export const DEFAULT_KEY_KIND = 'key';
 
@@ -121,6 +134,21 @@ export interface IExternalApiKeyService {
    * TokenNotFoundError if the token doesn't belong to the user.
    */
   revoke(id: string, userId: string): Promise<void>;
+
+  /**
+   * Every token on the deployment, active and revoked, with its owner —
+   * the admin overview. Ordered by owner email, then newest-first, so the
+   * caller can group per account without re-sorting.
+   */
+  listForDeployment(): Promise<AdminExternalApiKeySummary[]>;
+
+  /**
+   * Admin revoke: mark a token revoked WITHOUT scoping by owner. Same
+   * idempotency as {@link revoke}; throws TokenNotFoundError when no such
+   * token exists. Only reachable through an admin-gated route — the
+   * per-user route must keep using {@link revoke}.
+   */
+  revokeAny(id: string): Promise<void>;
 
   /**
    * Permanently delete a token row, dropping its audit trail. Only permitted

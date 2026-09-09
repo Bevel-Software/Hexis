@@ -295,6 +295,74 @@ describe('ExternalApiKeyService', () => {
     });
   });
 
+  describe('listForDeployment', () => {
+    it('joins the owner onto every key and keeps the row order the DB returned', async () => {
+      const aliceKey = makeRow({ id: 'a', userId: 'u-alice', lastUsedAt: new Date('2026-03-02T00:00:00Z') });
+      const bobKey = makeRow({ id: 'b', userId: 'u-bob', revokedAt: new Date('2026-02-15T00:00:00Z') });
+      const rows = [
+        { key: aliceKey, userId: 'u-alice', email: 'alice@example.com', name: 'Alice' },
+        { key: bobKey, userId: 'u-bob', email: 'bob@example.com', name: 'Bob' },
+      ];
+      const { db, calls } = makeFakeDb([rows]);
+      const service = new ExternalApiKeyService(db, 'bevel_');
+
+      const summaries = await service.listForDeployment();
+
+      expect(summaries).toEqual([
+        {
+          id: 'a',
+          label: aliceKey.label,
+          kind: aliceKey.kind,
+          createdAt: aliceKey.createdAt.getTime(),
+          lastUsedAt: aliceKey.lastUsedAt!.getTime(),
+          revokedAt: null,
+          user: { id: 'u-alice', email: 'alice@example.com', name: 'Alice' },
+        },
+        {
+          id: 'b',
+          label: bobKey.label,
+          kind: bobKey.kind,
+          createdAt: bobKey.createdAt.getTime(),
+          lastUsedAt: null,
+          revokedAt: bobKey.revokedAt!.getTime(),
+          user: { id: 'u-bob', email: 'bob@example.com', name: 'Bob' },
+        },
+      ]);
+      // One join to users, one ordering clause — the grouping order is the
+      // DB's job, not a re-sort here.
+      expect(calls.innerJoin).toHaveLength(1);
+      expect(calls.orderBy).toHaveLength(1);
+      // The hash never leaves the service, even for admins.
+      expect(JSON.stringify(summaries)).not.toContain('hash-1');
+    });
+  });
+
+  describe('revokeAny', () => {
+    it('revokes without an owner scope when the token was active', async () => {
+      const { db, calls } = makeFakeDb([[{ id: 'tok-1' }]]);
+      const service = new ExternalApiKeyService(db, 'bevel_');
+
+      await service.revokeAny('tok-1');
+
+      expect(calls.set[0][0].revokedAt).toBeInstanceOf(Date);
+      expect((db as any).select).not.toHaveBeenCalled();
+    });
+
+    it('is idempotent on an already-revoked token', async () => {
+      const { db } = makeFakeDb([[], [{ id: 'tok-1' }]]);
+      const service = new ExternalApiKeyService(db, 'bevel_');
+
+      await expect(service.revokeAny('tok-1')).resolves.toBeUndefined();
+    });
+
+    it('throws TokenNotFoundError when no such token exists on the deployment', async () => {
+      const { db } = makeFakeDb([[], []]);
+      const service = new ExternalApiKeyService(db, 'bevel_');
+
+      await expect(service.revokeAny('tok-x')).rejects.toBeInstanceOf(TokenNotFoundError);
+    });
+  });
+
   describe('revoke', () => {
     it('updates the row and returns silently when the token belongs to the user and was active', async () => {
       // First op: UPDATE returns 1 row.

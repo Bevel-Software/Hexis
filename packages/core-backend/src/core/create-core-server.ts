@@ -32,6 +32,7 @@ import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js
 import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
+import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import {
   createKbSyncRoutes,
@@ -572,6 +573,13 @@ export async function createCoreServer(
     core.adminAccess,
     core.accountErasureService,
   ));
+  // Connection keys across the deployment (list per account, revoke any) —
+  // admin-gated inside. The per-user key surface stays on /api/mcp/…
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createConnectionKeysAdminRoutes(core.externalApiKeyService, core.adminAccess),
+  );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists. The startup runner rides along for

@@ -95,6 +95,14 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     label: 'User accounts',
     path: '/user-accounts',
   },
+  {
+    id: 'connection-keys',
+    section: 'admin',
+    order: 25,
+    icon: <KeyRound size={15} />,
+    label: 'Connection keys',
+    path: '/connection-keys',
+  },
 ];
 
 /**
