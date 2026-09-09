@@ -26,7 +26,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import type { FileReaderRegistry } from './file-readers/file-reader.js';
+import { displayPath, type FileReaderRegistry } from './file-readers/file-reader.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
@@ -211,6 +211,89 @@ async function assertNotBinaryOverwrite(
   return existing;
 }
 
+/**
+ * What searching ONE file amounted to. The walk ignores this (a file with
+ * nothing searchable is just a file with no matches), but a grep whose path
+ * NAMES that one file has nothing else to report: without this it could only
+ * answer an empty match list, which reads as "your pattern is not in there"
+ * when the truth is "there was never any text to look at".
+ */
+type FileGrepOutcome =
+  /** Its text was searched; any matches are in `out`. */
+  | 'searched'
+  /** No searchable text at all: an image, binary content, a corrupt document. */
+  | 'no-text'
+  /** A cold document the per-call extraction budget could not afford (counted in `docs`). */
+  | 'budget-skipped';
+
+/**
+ * Search ONE file and append its matches to `out`. Shared by the directory
+ * walk and by a grep whose `path` names a file, so both produce the same match
+ * shape (that path, 1-based line numbers, 300-char text) under the same cap.
+ *
+ * What is searched is the file's reader's business: text content for the text
+ * reader (null on NUL bytes / invalid UTF-8 — binary is not searchable), the
+ * EXTRACTION for a document reader (marker line included, so the
+ * `[slide N]`/`[sheet: …]`/`[page N]` lines are themselves searchable and line
+ * numbers match what read_file returns), nothing for images.
+ *
+ * Throws whatever reading the file throws — the caller decides whether that is
+ * a file to skip (the walk) or an error to surface (a single-file grep).
+ */
+async function grepOneFile(
+  fs: LocalFilesystem,
+  path: string,
+  re: RegExp,
+  out: { path: string; line: number; text: string }[],
+  max: number,
+  docs: DocGrepState,
+): Promise<FileGrepOutcome> {
+  const reader = docs.readers.readerFor(path);
+  const bytes = asBytes(await fs.readFile(path));
+  let content = reader.greppableText ? await reader.greppableText(bytes, path) : null;
+  if (content === null && reader instanceof DocumentReader) {
+    // Cold document (extraction not yet cached): cached ones above are free,
+    // extracting draws on the per-walk budget (see UNCACHED_DOCS_PER_GREP) —
+    // beyond it the search skips the document and counts it.
+    if (docs.uncachedBudget <= 0) {
+      docs.skippedUncached++;
+      return 'budget-skipped';
+    }
+    docs.uncachedBudget--;
+    const res = await reader.read(bytes, path);
+    // A non-text outcome is a corrupt document — nothing searchable.
+    content = res.kind === 'text' ? res.text : null;
+  }
+  if (content === null) return 'no-text';
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length && out.length < max; i++) {
+    re.lastIndex = 0;
+    if (re.test(lines[i])) out.push({ path, line: i + 1, text: lines[i].slice(0, 300) });
+  }
+  return 'searched';
+}
+
+/**
+ * What a grep's `path` actually names. The walk starts with `readdir`, which
+ * fails on a file and on a path with nothing at it alike — both would end as a
+ * silent empty result — so the search root is resolved FIRST and each of the
+ * three cases gets its own honest answer.
+ */
+async function searchRootKind(
+  fs: LocalFilesystem,
+  path: string,
+): Promise<'directory' | 'file' | 'missing'> {
+  try {
+    return (await fs.stat(path)).type === 'directory' ? 'directory' : 'file';
+  } catch (err) {
+    // Only "nothing there" is missing (Mastra's FileNotFoundError carries code
+    // 'ENOENT', as do raw Node errors). Anything else — permissions, I/O — is a
+    // real failure and must not be reported as an absent path.
+    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return 'missing';
+    throw err;
+  }
+}
+
 /** JS grep over the workspace tree (read methods only) — bounded by match + depth caps. */
 async function grepWalk(
   fs: LocalFilesystem,
@@ -244,37 +327,12 @@ async function grepWalk(
       // for a root-level grep that resolves to a neutral root. Record it so a
       // cross-ontology grep poisons later writes (closes the read-leak).
       await recordOntologyRead(p);
-      // What grep searches is the file's reader's business: text content for
-      // the text reader (null on NUL bytes — binary is not searchable), the
-      // EXTRACTION for a document reader (marker line included, so the
-      // [slide N]/[sheet: …]/[page N] lines are themselves searchable and
-      // line numbers match what read_file returns), nothing for images.
-      const reader = docs.readers.readerFor(p);
-      let content: string | null;
+      // A file the walk cannot read is silently skipped: one unreadable entry
+      // must not fail a search over the whole tree.
       try {
-        const bytes = asBytes(await fs.readFile(p));
-        content = reader.greppableText ? await reader.greppableText(bytes, p) : null;
-        if (content === null && reader instanceof DocumentReader) {
-          // Cold document (extraction not yet cached): cached ones above are
-          // free, extracting draws on the per-walk budget (see
-          // UNCACHED_DOCS_PER_GREP) — beyond it the walk skips and counts.
-          if (docs.uncachedBudget <= 0) {
-            docs.skippedUncached++;
-            continue;
-          }
-          docs.uncachedBudget--;
-          const res = await reader.read(bytes, p);
-          // A non-text outcome is a corrupt document — nothing searchable.
-          content = res.kind === 'text' ? res.text : null;
-        }
+        await grepOneFile(fs, p, re, out, max, docs);
       } catch {
         continue;
-      }
-      if (content === null) continue;
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length && out.length < max; i++) {
-        re.lastIndex = 0;
-        if (re.test(lines[i])) out.push({ path: p, line: i + 1, text: lines[i].slice(0, 300) });
       }
     }
   }
@@ -542,14 +600,14 @@ export function registerWorkspaceTools(
   mount({
     name: 'grep',
     description:
-      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).' +
+      'Regex content search across the workspace. Returns `{ matches: [{ path, line, text }] }` (capped). Use to find where something is defined/referenced. `path` may name a DIRECTORY (searches the subtree) or a single FILE (searches just that file); a path with nothing at it is an error, never an empty result. Searches INSIDE Office and OpenDocument files (.docx/.pptx/.xlsx, .odt/.odp/.ods), PDFs and email files (.eml/.msg) via their extracted text — matches there carry the extraction\'s line numbers, and the `[slide N]`/`[sheet: Name]`/`[page N]`/`[from]`/`[subject]` marker lines locate them; a bounded number of not-yet-extracted documents is extracted per call, and the result notes how many were skipped (re-run to cover them).' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         pattern: str('JavaScript regular expression.'),
-        path: str('Subtree to search (default: whole workspace).'),
+        path: str('Subtree to search, or a single file to search on its own (default: whole workspace).'),
         ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
         max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
         sessionId: SESSION_ID_INPUT,
@@ -570,7 +628,7 @@ export function registerWorkspaceTools(
           },
         },
         truncated: { type: 'boolean', description: 'True if the match cap was hit and results may be incomplete.' },
-        note: str('Present when some documents (office/PDF/email files) were not searched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover them.'),
+        note: str('Present when the empty/partial result needs explaining: a `path` naming a file with no searchable text (image, binary, corrupt document), or documents (office/PDF/email files) left unsearched because their text was not yet extracted and the per-call extraction budget ran out — re-run grep to cover those.'),
       },
       required: ['matches', 'truncated'],
     },
@@ -588,31 +646,63 @@ export function registerWorkspaceTools(
       // recorded per-file below, so a root-level grep that reaches into multiple
       // ontologies still records each one (and can poison later writes).
       await recordOntologyRead(sessionOntologyGate, ctx, searchRoot);
+      const fs = await ctx.getFilesystem(a.branch as string);
+      const gate = readGateFor(a.branch as string, ctx);
       const out: { path: string; line: number; text: string }[] = [];
       const max = typeof a.max_results === 'number' ? Math.min(a.max_results, 1000) : 200;
       const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
-      await grepWalk(
-        await ctx.getFilesystem(a.branch as string),
-        searchRoot,
-        re,
-        out,
-        max,
-        0,
-        readGateFor(a.branch as string, ctx),
-        (p) => recordOntologyRead(sessionOntologyGate, ctx, p),
-        docs,
-      );
+      // The empty root is the workspace itself — always a directory, and never
+      // worth a stat.
+      const kind = searchRoot === '' ? 'directory' : await searchRootKind(fs, searchRoot);
+      /** Why a single-file search found nothing, when "no matches" would be a lie. */
+      let fileNote: string | undefined;
+      if (kind === 'directory') {
+        await grepWalk(
+          fs,
+          searchRoot,
+          re,
+          out,
+          max,
+          0,
+          gate,
+          (p) => recordOntologyRead(sessionOntologyGate, ctx, p),
+          docs,
+        );
+      } else {
+        // Not a directory: the permission verdict comes BEFORE the existence
+        // one, and it is `read_file`'s own gate on the same path — so grep
+        // answers a path the caller may not read exactly as read_file does,
+        // and can never confirm the existence of one read_file would hide.
+        await assertCanRead(gate, searchRoot);
+        if (kind === 'missing') {
+          throw new ToolError(
+            `Nothing to search: there is no file or directory at "${displayPath(searchRoot)}" in this workspace. ` +
+              `Paths are workspace-relative and content lives under \`${kbDirName}/\` — use list_files to find the right one.`,
+            404,
+          );
+        }
+        // A named FILE is searched directly: routing it through the walk would
+        // fail its readdir and answer an empty match list, which the caller
+        // cannot tell from "the pattern is not in this file".
+        const outcome = await grepOneFile(fs, searchRoot, re, out, max, docs);
+        if (outcome === 'no-text') {
+          fileNote =
+            `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
+            'whose text could not be extracted. There were no matches because there was nothing to search, not ' +
+            'because the pattern is absent.';
+        }
+      }
+      const note =
+        fileNote ??
+        (docs.skippedUncached > 0
+          ? `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
+            `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
+            'same grep to extract and search the next batch.'
+          : undefined);
       return {
         matches: out,
         truncated: out.length >= max,
-        ...(docs.skippedUncached > 0
-          ? {
-              note:
-                `${docs.skippedUncached} document(s) (office/PDF/email files) were not searched: their text was not yet ` +
-                `extracted and this call's extraction budget (${UNCACHED_DOCS_PER_GREP}) ran out. Re-run the ` +
-                'same grep to extract and search the next batch.',
-            }
-          : {}),
+        ...(note !== undefined ? { note } : {}),
       };
     },
   });
