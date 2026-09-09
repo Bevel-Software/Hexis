@@ -11,6 +11,12 @@ type View = 'doc' | 'log' | 'diff';
  * — the shape the Knowledge viewer and the skill page both have. The column
  * also carries a control that swaps the view WITHOUT naming a destination
  * for focus, standing in for a git poll or a file switch.
+ *
+ * The `key` on each branch is what makes this a test. Without it React sees
+ * a `<button>` replacing a `<button>` in the same slot and UPDATES the same
+ * DOM node instead of unmounting it: focus never falls to `document`, and
+ * every assertion below passes with the hook's `.focus()` deleted. Keys force
+ * the real unmount/remount the hook exists for, so the tests can fail.
  */
 function Column({ initial = 'doc' }: { initial?: View }) {
   const [view, setView] = useState<View>(initial);
@@ -22,6 +28,7 @@ function Column({ initial = 'doc' }: { initial?: View }) {
       <button onClick={() => setView((v) => (v === 'doc' ? 'log' : 'doc'))}>Swap unasked</button>
       {view === 'doc' ? (
         <button
+          key="doc"
           ref={openRef}
           onClick={() => {
             handoff('log', closeRef);
@@ -32,6 +39,7 @@ function Column({ initial = 'doc' }: { initial?: View }) {
         </button>
       ) : view === 'log' ? (
         <button
+          key="log"
           ref={closeRef}
           onClick={() => {
             handoff('doc', openRef);
@@ -42,6 +50,7 @@ function Column({ initial = 'doc' }: { initial?: View }) {
         </button>
       ) : (
         <button
+          key="diff"
           onClick={() => {
             // The first named control is not part of the document view;
             // the second is.
@@ -156,6 +165,7 @@ describe('useFocusHandoff', () => {
         <>
           {view === 'doc' ? (
             <button
+              key="doc"
               onClick={() => {
                 handoff('log', closeRef);
                 setView('log');
@@ -164,7 +174,9 @@ describe('useFocusHandoff', () => {
               Open the log
             </button>
           ) : (
-            <button ref={closeRef}>Back to the document</button>
+            <button key="log" ref={closeRef}>
+              Back to the document
+            </button>
           )}
           <Reporter />
         </>

@@ -751,6 +751,35 @@ describe('FileViewer', () => {
     expect(screen.getByText('Compare versions')).toBeInTheDocument();
   });
 
+  /**
+   * The comparison outliving `historyAvailable` is the case where the focus
+   * handoff has no clock to hand back to: both are withdrawn while git is
+   * silent. Leaving the comparison then would drop focus on `document`, the
+   * one outcome the handoff exists to prevent, so the document's own title is
+   * named last. Found by cubic on #135.
+   */
+  it('lands focus on the document title when leaving a comparison git cannot back with a clock', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    const back = await screen.findByRole('button', { name: /Back to the document/ });
+    // Neither clock is on screen to catch the focus.
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(back);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    const title = screen.getByRole('heading', { level: 1, name: 'Foo' });
+    expect(document.activeElement).toBe(title);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   // With the log open the column goes full-bleed and the header carries the
   // clock, pressed. Clicking it again is the other way back.
   /**
