@@ -65,6 +65,8 @@ vi.mock('../../access/api', async (importOriginal) => {
 
 const teamsMock = vi.hoisted(() => ({ listTeams: vi.fn() }));
 vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
+// The sidebar's change-request dock pulls in git wiring these routes do not exercise.
+vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';

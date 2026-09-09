@@ -24,10 +24,14 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  * itself. Waiting on the catalog here raced every reload and lost (the
  * just-created skill bounced to its plugin's page).
  *
- * The two roots differ only in where a path that is NO skill goes: a
- * container folder or a loose file belongs to its plugin page under
- * `Plugins/`; under `Skills/` a scope folder has no page (home) and a loose
- * file opens as the plain file it is.
+ * The two roots differ only in where a FOLDER that is no skill goes: a
+ * container belongs to its plugin page under `Plugins/`; under `Skills/` a
+ * scope folder has no page (home). A loose FILE — a folder's `access.md`,
+ * a plugin's `plugin.json`, a stray upload — opens as the plain file it is
+ * under either root: the person clicked a file, and the plugin page was
+ * never the file (it also keys on the plugin's identity, which a folder name
+ * need not be — a personal space, a folder spelled unlike its manifest — so
+ * that bounce landed on "doesn't exist" for a file plainly there).
  *
  * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
  * declare an explicit id different from its filename); the filename is the
@@ -66,6 +70,26 @@ export function WorkspaceItemRoute() {
     <SkillPage key={name} name={name} activeFile={activeFile} provisional={provisional} />
   );
 
+  /**
+   * A loose file (a folder's access.md, a plugin's manifest, a stray note)
+   * opens as the plain file it is, in the pane workspace. Router STATE, not
+   * a different URL: the shell reads `rawFile` to step past the shape rule,
+   * and a shared link can never carry state — so nobody lands on the raw
+   * view by accident. Once asked, hold still: the shell is swapping surfaces
+   * on that state, and asking again from here would be a navigation loop.
+   */
+  const rawFileView = () => {
+    const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
+    if (rawRequested) return null;
+    return (
+      <Navigate
+        to={`${location.pathname}${location.search}${location.hash}`}
+        state={{ rawFile: true }}
+        replace
+      />
+    );
+  };
+
   if (kbRoot === SKILLS_DIR) {
     const rest = segments.slice(2);
     const resolved = resolveSkillPath(data, `${SKILLS_DIR}/${rest.join('/')}`, rest, null, witness);
@@ -77,24 +101,8 @@ export function WorkspaceItemRoute() {
       case 'container':
         // A scope has no page of its own — the sidebar's tree is where it is browsed.
         return <Navigate to={LIBRARY_ROOT} replace />;
-      case 'loose-file': {
-        // A file filed directly in a scope (its access.md, a stray note)
-        // opens as the plain file it is, in the pane workspace. Router STATE,
-        // not a different URL: the shell reads `rawFile` to step past the
-        // shape rule, and a shared link can never carry state — so nobody
-        // lands on the raw view by accident. Once asked, hold still: the
-        // shell is swapping surfaces on that state, and asking again from
-        // here would be a navigation loop.
-        const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-        if (rawRequested) return null;
-        return (
-          <Navigate
-            to={`${location.pathname}${location.search}${location.hash}`}
-            state={{ rawFile: true }}
-            replace
-          />
-        );
-      }
+      case 'loose-file':
+        return rawFileView();
     }
   }
 
@@ -150,11 +158,12 @@ export function WorkspaceItemRoute() {
     case 'wait':
       return null;
     case 'container':
-    case 'loose-file':
-      // A category has no page of its own; its plugin does. A file that can
-      // be no skill's — `access.md` at either level, a stray upload — is the
-      // plugin's business too.
+      // A category has no page of its own; its plugin does.
       return <Navigate to={pathForPlugin(plugin)} replace />;
+    case 'loose-file':
+      // A file that can be no skill's — `access.md` at either level, the
+      // manifest, a stray upload — is shown as the file it is.
+      return rawFileView();
   }
 }
 

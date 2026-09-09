@@ -114,24 +114,50 @@ export function SkillsTree() {
 }
 
 /**
- * The `Plugins/` root — every plugin folder as it is on disk. Every FOLDER
- * row's menu offers "New plugin" when the caller wires it — the one verb
- * this root has that Knowledge's folders do not, injected rather than built
- * into the tree. An intent: the layout owns the dialog and where the plugin
- * lands.
+ * The `Plugins/` root — every plugin folder as it is on disk. A GROUPING
+ * folder's row (the root, or a folder no plugin owns) offers "New plugin"
+ * when the caller wires it, and the plugin is made THERE: the verb carries
+ * the folder's path below the plugins root. The one verb this root has that
+ * Knowledge's folders do not, injected rather than built into the tree. An
+ * intent: the layout owns the dialog.
  */
-export function PluginsTree({ onCreatePlugin }: { onCreatePlugin?: () => void } = {}) {
-  const menuItems = useMemo(
-    () =>
-      onCreatePlugin
-        ? (entry: FileTreeEntry): TreeMenuItem[] =>
-            entry.type === 'directory'
-              ? [{ id: 'new-plugin', label: 'New plugin', icon: <Puzzle size={14} />, onSelect: onCreatePlugin }]
-              : []
-        : undefined,
-    [onCreatePlugin],
-  );
+export function PluginsTree({
+  onCreatePlugin,
+  isGroupingFolder = () => true,
+}: {
+  /** Make a plugin in `parent` — a path below the plugins root, `''` for the root. */
+  onCreatePlugin?: (parent: string) => void;
+  /**
+   * Whether a repo-relative folder may HOLD a plugin: the root and folders no
+   * plugin owns. A plugin's own folder, or anything beneath one, cannot — a
+   * plugin claims its subtree, and a plugin made inside it would be listed
+   * nowhere. The layout answers from the plugin index.
+   */
+  isGroupingFolder?: (repoRelFolder: string) => boolean;
+} = {}) {
+  const { kbDirName } = useWorkspace();
+  const menuItems = useMemo(() => {
+    if (!onCreatePlugin) return undefined;
+    return (entry: FileTreeEntry): TreeMenuItem[] => {
+      if (entry.type !== 'directory') return [];
+      const rel = repoRelative(entry.relativePath, kbDirName);
+      if (rel === null || !isGroupingFolder(rel)) return [];
+      const parent = rel === PLUGINS_DIR ? '' : rel.slice(PLUGINS_DIR.length + 1);
+      return [{ id: 'new-plugin', label: 'New plugin', icon: <Puzzle size={14} />, onSelect: () => onCreatePlugin(parent) }];
+    };
+  }, [onCreatePlugin, isGroupingFolder, kbDirName]);
   return <RootFolderTree dir={PLUGINS_DIR} testId="plugins-tree" menuItems={menuItems} />;
+}
+
+/**
+ * A tree entry's path relative to the REPOSITORY (`Plugins/Teams`), from its
+ * workspace-relative one (`<kbDir>/Plugins/Teams`); null when it does not
+ * sit under the knowledge base at all.
+ */
+function repoRelative(workspacePath: string, kbDirName: string | null): string | null {
+  if (kbDirName === null) return null;
+  const prefix = `${kbDirName}/`;
+  return workspacePath.startsWith(prefix) ? workspacePath.slice(prefix.length) : null;
 }
 
 /**

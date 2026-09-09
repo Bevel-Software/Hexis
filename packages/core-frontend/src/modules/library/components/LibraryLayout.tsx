@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
@@ -14,6 +15,7 @@ import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
 import { SidebarFrame } from '../../layout/components/SidebarFrame';
 import { ConnectAgentPill } from '../../onboarding/components/ConnectAgentPill';
+import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { PluginsSidebar, type SidebarContextTarget } from './PluginsSidebar';
 import { PluginsTree, SkillsTree } from './SkillsTree';
 import { PluginsSidebarMenu } from './PluginsSidebarMenu';
@@ -44,7 +46,12 @@ export function LibraryLayout() {
   const { user } = useAuth();
   const { isAdmin } = useAdmin();
   const toast = useLibraryToast();
-  const [newPluginOpen, setNewPluginOpen] = useState(false);
+  /**
+   * The New plugin dialog, with WHERE the plugin goes: `''` is the plugins
+   * root (the nav's own verbs), a path below it is the grouping folder a
+   * person right-clicked in the Plugins tree.
+   */
+  const [newPlugin, setNewPlugin] = useState<{ parent: string } | null>(null);
   const [menu, setMenu] = useState<SidebarContextTarget | null>(null);
   const menuRow = useRef<HTMLElement | null>(null);
   const { collapsed } = useSidebar();
@@ -115,8 +122,10 @@ export function LibraryLayout() {
           `ResizableThreePaneLayout`, which is what keeps it one pill in one
           place — a person who skipped the welcome page and stayed in
           Knowledge still sees it. It renders nothing once onboarding is
-          done. */}
-      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />}>
+          done. The change-request dock below the nav is the same one
+          Knowledge pins under its tree — the requests waiting on you are
+          the same whichever app you are in. */}
+      <SidebarFrame label="Library navigation" header={<ConnectAgentPill />} footer={<PullRequestsForMe />}>
         <PluginsSidebar
           filter={filter}
           onSelect={(next) => navigate(pathForLibraryFilter(next))}
@@ -127,11 +136,28 @@ export function LibraryLayout() {
           teams={teamRows}
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}
-          onCreatePlugin={() => setNewPluginOpen(true)}
+          onCreatePlugin={() => setNewPlugin({ parent: '' })}
           canCreatePlugin={isAdmin && workspaceHasNoPlugins(lib)}
           onContextMenu={openContextMenu}
           skillsTree={<SkillsTree />}
-          pluginsTree={<PluginsTree onCreatePlugin={() => setNewPluginOpen(true)} />}
+          pluginsTree={
+            <PluginsTree
+              onCreatePlugin={(parent) => setNewPlugin({ parent })}
+              // A plugin cannot hold another: the verb is offered on grouping
+              // folders only — the root and folders no listed plugin owns.
+              // Closed until the plugin list has loaded: an unknown list is
+              // not an empty one. Personal spaces are named by the same rule
+              // the endpoint refuses them by — the first segment below the
+              // root carries the personal prefix — so the tree never offers a
+              // parent the endpoint will not take.
+              isGroupingFolder={(rel) => {
+                if (lib.pluginsLoading || lib.pluginsError) return false;
+                const below = rel.split('/');
+                if (below.length >= 2 && isPersonalPluginFolder(below[1]!)) return false;
+                return !pluginSummaries.some((s) => s.folders.some((f) => rel === f || rel.startsWith(`${f}/`)));
+              }}
+            />
+          }
         />
       </SidebarFrame>
       {/* The nav's right-click menu — Knowledge's file tree has had one since it
@@ -144,15 +170,16 @@ export function LibraryLayout() {
           y={menu.y}
           label={menu.label}
           onClose={() => setMenu(null)}
-          onCreatePlugin={() => setNewPluginOpen(true)}
+          onCreatePlugin={() => setNewPlugin({ parent: '' })}
           onCopyLink={menu.filter ? () => void copyLink(menu.filter!) : undefined}
           returnFocusTo={menuRow}
         />
       )}
-      {newPluginOpen && (
+      {newPlugin && (
         <NewPluginDialog
           existing={existingPlugins}
-          onClose={() => setNewPluginOpen(false)}
+          parent={newPlugin.parent}
+          onClose={() => setNewPlugin(null)}
           onCreated={() => {
             reload();
             reloadPlugins();

@@ -59,6 +59,24 @@ beforeEach(() => {
   setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
 });
 
+describe('SidebarFrame: slots', () => {
+  it('pins the header above and the footer below whatever the surface holds, inside the one nav column', () => {
+    const { container } = render(
+      <SidebarFrame label="Library plugins" header={<div>pill</div>} footer={<div>dock</div>}>
+        <button type="button">Engineering</button>
+      </SidebarFrame>,
+    );
+    const aside = container.querySelector('aside') as HTMLElement;
+    const pill = screen.getByText('pill');
+    const row = screen.getByRole('button', { name: 'Engineering' });
+    const dock = screen.getByText('dock');
+    expect(aside).toContainElement(pill);
+    expect(aside).toContainElement(dock);
+    expect(pill.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(row.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
 describe('SidebarFrame: narrow viewport', () => {
   it('starts collapsed and genuinely removes the sidebar from interaction', () => {
     setViewportWidth(375);

@@ -18,6 +18,8 @@ interface MobileChatLayoutProps {
   onController?: (controller: LayoutController | null) => void;
   /** Pinned above the explorer contents inside the shared sidebar frame. */
   sidebarHeader?: ReactNode;
+  /** Pinned below them — see `SidebarFrame`'s `footer`. */
+  sidebarFooter?: ReactNode;
   /**
    * Registry-driven pane list (preferred). This layout is chat-first, so it
    * picks the well-known 'explorer' / 'viewer' / 'chat' panes out of the
@@ -44,6 +46,7 @@ export function MobileChatLayout({
   panes,
   onController,
   sidebarHeader,
+  sidebarFooter,
   explorer: explorerSlot,
   viewer: viewerSlot,
   chat: chatSlot,
@@ -114,7 +117,7 @@ export function MobileChatLayout({
         </div>
       </div>
 
-      <SidebarFrame label="File explorer" header={sidebarHeader}>
+      <SidebarFrame label="File explorer" header={sidebarHeader} footer={sidebarFooter}>
         {explorer}
       </SidebarFrame>
 

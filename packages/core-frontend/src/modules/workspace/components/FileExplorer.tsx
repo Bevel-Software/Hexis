@@ -47,7 +47,6 @@ import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useAppRegistry } from '../../../core/registry';
 
@@ -1379,7 +1378,6 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
       </div>
-      <PullRequestsForMe />
     </div>
     </TreeChrome>
   );
