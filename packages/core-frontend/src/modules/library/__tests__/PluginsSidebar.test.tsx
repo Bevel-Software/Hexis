@@ -85,8 +85,11 @@ describe('PluginsSidebar', () => {
       skillsTree: <div data-testid="skills-tree">skills</div>,
       pluginsTree: <div data-testid="plugins-tree">plugins</div>,
     });
-    // The trees are not merely hidden: the other view is not rendered at all.
-    expect(screen.queryByTestId('skills-tree')).toBeNull();
+    // The other view stays MOUNTED and hidden — the trees keep their state
+    // across a switch, and every tab's `aria-controls` names a real panel.
+    expect(screen.getByTestId('skills-tree')).not.toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-controls', 'library-view-advanced');
+    expect(document.getElementById('library-view-advanced')).not.toBeNull();
     fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }));
     expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
     const panel = screen.getByRole('tabpanel', { name: 'Advanced' });
@@ -113,6 +116,38 @@ describe('PluginsSidebar', () => {
     cleanup();
     renderSidebar();
     expect(screen.getByRole('tab', { name: 'Teams' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('is one tab stop: the arrows move between the views and choose as they go, Home and End go to the ends', () => {
+    renderSidebar();
+    const teams = screen.getByRole('tab', { name: 'Teams' });
+    const advanced = screen.getByRole('tab', { name: 'Advanced' });
+    // Roving tabIndex: only the chosen tab is in the Tab order.
+    expect(teams).toHaveAttribute('tabindex', '0');
+    expect(advanced).toHaveAttribute('tabindex', '-1');
+
+    teams.focus();
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'ArrowRight' });
+    expect(advanced).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(advanced);
+    expect(advanced).toHaveAttribute('tabindex', '0');
+    expect(teams).toHaveAttribute('tabindex', '-1');
+
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'ArrowRight' });
+    expect(teams).toHaveAttribute('aria-selected', 'true'); // wraps
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'End' });
+    expect(advanced).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(screen.getByRole('tablist', { name: 'Sidebar view' }), { key: 'Home' });
+    expect(teams).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(teams);
+  });
+
+  it('answers a right-click on the switch with nothing — it is a control, not empty nav space', () => {
+    const onContextMenu = vi.fn();
+    renderSidebar({ onContextMenu });
+    fireEvent.contextMenu(screen.getByRole('tab', { name: 'Advanced' }));
+    fireEvent.contextMenu(screen.getByRole('tablist', { name: 'Sidebar view' }));
+    expect(onContextMenu).not.toHaveBeenCalled();
   });
 
   it('marks the selected team current and leaves the others alone', () => {

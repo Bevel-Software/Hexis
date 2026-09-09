@@ -216,6 +216,27 @@ export function PluginsSidebar({
     </button>
   );
 
+  /**
+   * A tablist is ONE tab stop: the chosen tab takes focus, the arrows move
+   * between the tabs and choose as they go (Home/End to the ends), so a
+   * keyboard user is not made to Tab through both views to reach the rows.
+   * Roving `tabIndex` is what makes the unchosen tab reachable by arrow and
+   * not by Tab.
+   */
+  const onTablistKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const order: SidebarView[] = ['teams', 'advanced'];
+    const at = order.indexOf(view);
+    let next: SidebarView | null = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = order[(at + 1) % order.length]!;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = order[(at - 1 + order.length) % order.length]!;
+    else if (e.key === 'Home') next = order[0]!;
+    else if (e.key === 'End') next = order[order.length - 1]!;
+    if (next === null) return;
+    e.preventDefault();
+    switchView(next);
+    e.currentTarget.querySelector<HTMLElement>(`#library-view-tab-${next}`)?.focus();
+  };
+
   const tab = (id: SidebarView, label: string) => (
     <button
       key={id}
@@ -224,6 +245,7 @@ export function PluginsSidebar({
       id={`library-view-tab-${id}`}
       aria-selected={view === id}
       aria-controls={`library-view-${id}`}
+      tabIndex={view === id ? 0 : -1}
       className={cn(
         'flex-1 rounded-sm px-2 py-1 text-center text-meta font-semibold transition-[background-color,color,box-shadow]',
         view === id ? 'bg-surface text-ink shadow-card' : 'text-ink-muted hover:text-ink',
@@ -267,38 +289,46 @@ export function PluginsSidebar({
           role="tablist"
           aria-label="Sidebar view"
           className="mt-4 mb-2 flex gap-0.5 rounded-md bg-hover p-0.5"
+          onKeyDown={onTablistKeyDown}
+          // The switch is a control, not empty nav space: a right-click on it
+          // is nobody's to answer, so it must not reach the nav behind it.
+          onContextMenu={(e) => e.stopPropagation()}
         >
           {tab('teams', 'Teams')}
           {tab('advanced', 'Advanced')}
         </div>
 
-        {view === 'teams' ? (
-          <div
-            role="tabpanel"
-            id="library-view-teams"
-            aria-labelledby="library-view-tab-teams"
-            className="flex flex-col gap-px"
-          >
-            {/* Your own space leads the teams: it is the one you are always in. */}
-            {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
-            {teams.map(({ name, count, urgent }) =>
-              // Orange wins the count slot: members locked out of a skill outrank
-              // how much the team can use, which is not the news.
-              row(
-                name,
-                { kind: 'team', group: name },
-                urgent > 0 ? urgent : count,
-                urgent > 0 ? 'urgent' : 'count',
-              ),
-            )}
-          </div>
-        ) : (
-          <div
-            role="tabpanel"
-            id="library-view-advanced"
-            aria-labelledby="library-view-tab-advanced"
-            className="flex flex-col gap-px"
-          >
+        {/* Both panels stay MOUNTED and the inactive one is hidden, not
+            dropped: a tab's `aria-controls` always names a panel that exists,
+            and the trees keep what a person opened in them (expanded folders,
+            a rename in progress) across a switch and back. */}
+        <div
+          role="tabpanel"
+          id="library-view-teams"
+          aria-labelledby="library-view-tab-teams"
+          hidden={view !== 'teams'}
+          className="flex flex-col gap-px"
+        >
+          {/* Your own space leads the teams: it is the one you are always in. */}
+          {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
+          {teams.map(({ name, count, urgent }) =>
+            // Orange wins the count slot: members locked out of a skill outrank
+            // how much the team can use, which is not the news.
+            row(
+              name,
+              { kind: 'team', group: name },
+              urgent > 0 ? urgent : count,
+              urgent > 0 ? 'urgent' : 'count',
+            ),
+          )}
+        </div>
+        <div
+          role="tabpanel"
+          id="library-view-advanced"
+          aria-labelledby="library-view-tab-advanced"
+          hidden={view !== 'advanced'}
+          className="flex flex-col gap-px"
+        >
             <TreesLabel onCreate={onCreatePlugin} />
             {/* The heading's `+` is hover-revealed, and a person with no
                 plugins yet is exactly the person who has not learned to hover
@@ -327,8 +357,7 @@ export function PluginsSidebar({
             )}
             {skillsTree}
             {pluginsTree}
-          </div>
-        )}
+        </div>
       </nav>
 
       {attentionCount > 0 && (
