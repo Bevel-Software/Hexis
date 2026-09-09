@@ -329,11 +329,12 @@ export function PluginsSidebar({
           hidden={view !== 'advanced'}
           className="flex flex-col gap-px"
         >
-            {/* The heading's `+` is hover-revealed, and a person with no
-                plugins yet is exactly the person who has not learned to hover
-                it. While the workspace holds no plugins AT ALL, the way to the
-                first one is said in words, as a row where the trees sit — with
-                a chalk arrow from the empty space beneath, the same
+            {/* The usual ways to a new plugin are a right-click — on the nav's
+                empty space, or on a folder in the Plugins tree — and a person
+                with no plugins yet is exactly the person who has not learned
+                either. While the workspace holds no plugins AT ALL, the way to
+                the first one is said in words, as a row above the trees —
+                with a chalk arrow from the empty space beneath, the same
                 margin-note voice as the empty plugin page. Administrators
                 only: on an untouched workspace the first plugin is theirs to
                 make, and telling everyone else to make it points them at a

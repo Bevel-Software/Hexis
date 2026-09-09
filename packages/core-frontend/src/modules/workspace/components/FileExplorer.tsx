@@ -167,6 +167,23 @@ export interface TreeNav {
   /** The workspace-relative path the surface is showing — lights its row, reveals its folders. */
   activePath: string | null;
   open(path: string): void;
+  /**
+   * Extra items for a row's context menu, decided by the SURFACE for the
+   * entry at hand — injected, so the one tree serves every nav without
+   * growing a verb per caller. Rendered after the tree's own create items,
+   * in the order given; absent or empty, the menu is the tree's alone.
+   * (The Library's Plugins tree adds "New plugin" on folders this way.)
+   */
+  menuItems?(entry: FileTreeEntry): TreeMenuItem[];
+}
+
+/** One injected context-menu item — see `TreeNav.menuItems`. */
+export interface TreeMenuItem {
+  /** Stable within one menu; keys the rendered item. */
+  id: string;
+  label: string;
+  icon?: ReactNode;
+  onSelect(): void;
 }
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
 const useTreeNav = () => useContext(TreeNavContext);
@@ -196,6 +213,7 @@ function ContextMenu({
   onDownload,
   returnFocusTo,
   deletable = true,
+  extraItems = [],
 }: {
   x: number;
   y: number;
@@ -208,6 +226,8 @@ function ContextMenu({
   onCreateFolder?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
+  /** The surface's own items for this entry — see `TreeNav.menuItems`. */
+  extraItems?: TreeMenuItem[];
   /** The row this menu was opened from — Escape hands focus back to it. */
   returnFocusTo?: React.RefObject<HTMLElement | null>;
 }) {
@@ -309,6 +329,13 @@ function ContextMenu({
           <span className="flex items-center gap-2"><FolderPlus size={14} />New folder</span>
         </MenuItem>
       )}
+      {/* The surface's own verbs for this entry, after the tree's create
+          items — a "make a thing here" reads with the other two. */}
+      {extraItems.map((item) => (
+        <MenuItem key={item.id} role="menuitem" onClick={() => { item.onSelect(); onClose(); }}>
+          <span className="flex items-center gap-2">{item.icon}{item.label}</span>
+        </MenuItem>
+      ))}
       {isZip && (
         <MenuItem role="menuitem" onClick={handleUnzip} disabled={unzipping}>
           <span className="flex items-center gap-2">
@@ -879,6 +906,7 @@ export function FileTreeNode({
             onRename={reserved ? undefined : () => setRenaming(true)}
             deletable={!reserved}
             onDownload={absent ? undefined : handleDownload}
+            extraItems={nav.menuItems?.(entry)}
             returnFocusTo={rowRef}
           />
         )}
@@ -992,6 +1020,7 @@ export function FileTreeNode({
           onClose={() => setContextMenu(null)}
           onRename={() => setRenaming(true)}
           onDownload={handleDownload}
+          extraItems={nav.menuItems?.(entry)}
           returnFocusTo={rowRef}
         />
       )}

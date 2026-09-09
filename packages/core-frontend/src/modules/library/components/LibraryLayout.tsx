@@ -131,7 +131,7 @@ export function LibraryLayout() {
           canCreatePlugin={isAdmin && workspaceHasNoPlugins(lib)}
           onContextMenu={openContextMenu}
           skillsTree={<SkillsTree />}
-          pluginsTree={<PluginsTree />}
+          pluginsTree={<PluginsTree onCreatePlugin={() => setNewPluginOpen(true)} />}
         />
       </SidebarFrame>
       {/* The nav's right-click menu — Knowledge's file tree has had one since it

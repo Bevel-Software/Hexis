@@ -5,10 +5,12 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { findKbRoot } from '../../workspace/utils/fileTree';
 import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/kb-routes';
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
+import { Puzzle } from 'lucide-react';
 import {
   FileTreeNode,
   TreeChrome,
   UploadNotices,
+  type TreeMenuItem,
   type TreeNav,
 } from '../../workspace/components/FileExplorer';
 
@@ -45,7 +47,20 @@ import {
  * reserved root is forced visible by the tree filter even to a reader who
  * may open nothing beneath it, so the row is present for everyone.
  */
-export function RootFolderTree({ dir, testId }: { dir: string; testId: string }) {
+export function RootFolderTree({
+  dir,
+  testId,
+  menuItems,
+}: {
+  dir: string;
+  testId: string;
+  /**
+   * The surface's own context-menu items for an entry, injected into the
+   * tree's menu after its create verbs — see `TreeNav.menuItems`. The tree
+   * itself grows no verb per caller.
+   */
+  menuItems?: (entry: FileTreeEntry) => TreeMenuItem[];
+}) {
   const { kbDirName } = useWorkspace();
   const { tree, suggestionOnlyPaths } = useMergedWorkspaceTree();
   const location = useLocation();
@@ -72,8 +87,9 @@ export function RootFolderTree({ dir, testId }: { dir: string; testId: string })
     () => ({
       activePath: activeWorkspacePath(location.pathname, kbDirName),
       open: (path) => navigate(kbFileUrl(DEFAULT_BRANCH, path)),
+      menuItems,
     }),
-    [location.pathname, kbDirName, navigate],
+    [location.pathname, kbDirName, navigate, menuItems],
   );
 
   if (!root) return null;
@@ -97,9 +113,25 @@ export function SkillsTree() {
   return <RootFolderTree dir={SKILLS_DIR} testId="skills-tree" />;
 }
 
-/** The `Plugins/` root — every plugin folder as it is on disk. */
-export function PluginsTree() {
-  return <RootFolderTree dir={PLUGINS_DIR} testId="plugins-tree" />;
+/**
+ * The `Plugins/` root — every plugin folder as it is on disk. Every FOLDER
+ * row's menu offers "New plugin" when the caller wires it — the one verb
+ * this root has that Knowledge's folders do not, injected rather than built
+ * into the tree. An intent: the layout owns the dialog and where the plugin
+ * lands.
+ */
+export function PluginsTree({ onCreatePlugin }: { onCreatePlugin?: () => void } = {}) {
+  const menuItems = useMemo(
+    () =>
+      onCreatePlugin
+        ? (entry: FileTreeEntry): TreeMenuItem[] =>
+            entry.type === 'directory'
+              ? [{ id: 'new-plugin', label: 'New plugin', icon: <Puzzle size={14} />, onSelect: onCreatePlugin }]
+              : []
+        : undefined,
+    [onCreatePlugin],
+  );
+  return <RootFolderTree dir={PLUGINS_DIR} testId="plugins-tree" menuItems={menuItems} />;
 }
 
 /**

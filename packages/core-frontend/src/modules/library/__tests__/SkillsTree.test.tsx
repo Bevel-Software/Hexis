@@ -222,12 +222,16 @@ describe('PluginsTree', () => {
     ]),
   ]);
 
-  function renderPlugins(url: string, over: Partial<WorkspaceContextValue> = {}) {
+  function renderPlugins(
+    url: string,
+    over: Partial<WorkspaceContextValue> = {},
+    onCreatePlugin?: () => void,
+  ) {
     const workspace = makeWorkspaceFixture({ fileTree: PLUGINS, kbDirName: KB, ...over });
     return render(
       <MemoryRouter initialEntries={[url]}>
         <WorkspaceContext.Provider value={workspace}>
-          <PluginsTree />
+          <PluginsTree onCreatePlugin={onCreatePlugin} />
           <LocationProbe />
         </WorkspaceContext.Provider>
       </MemoryRouter>,
@@ -258,5 +262,40 @@ describe('PluginsTree', () => {
     renderPlugins('/skills-and-tools', { fileTree: none });
     expect(row('Plugins')).toBeInTheDocument();
     expect(row('Plugins')).not.toHaveAttribute('aria-expanded');
+  });
+
+  it("offers New plugin on every folder's menu when wired — after the tree's own create items — and on no file's", () => {
+    const onCreatePlugin = vi.fn();
+    renderPlugins('/skills-and-tools', {}, onCreatePlugin);
+
+    fireEvent.contextMenu(row('Plugins'));
+    const rootMenu = screen.getByRole('menu', { name: 'Actions for Plugins' });
+    const labels = within(rootMenu).getAllByRole('menuitem').map((i) => i.textContent);
+    expect(labels.indexOf('New plugin')).toBeGreaterThan(labels.indexOf('New folder'));
+    fireEvent.click(within(rootMenu).getByRole('menuitem', { name: 'New plugin' }));
+    expect(onCreatePlugin).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    fireEvent.contextMenu(row('GTM'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for GTM' })).getByRole('menuitem', { name: 'New plugin' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    fireEvent.click(row('GTM'));
+    fireEvent.contextMenu(row('plugin.json'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for plugin.json' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+
+  it('offers no New plugin when nothing is wired — the tree grows no verb of its own', () => {
+    renderPlugins('/skills-and-tools');
+    fireEvent.contextMenu(row('Plugins'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Plugins' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+});
+
+describe('SkillsTree: menu', () => {
+  it('is the folder menu alone — New plugin is the Plugins tree\'s injection, not the tree\'s', () => {
+    renderTree('/skills-and-tools');
+    fireEvent.contextMenu(row('Engineering'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Engineering' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
   });
 });
