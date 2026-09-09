@@ -235,7 +235,8 @@ its owners, never distributed to agents).
 the app's external-agent page that holds a plugin marketplace compiled from
 exactly the skills they may read — one plugin per plugin here, a
 `skills-and-knowledge` plugin for the rest plus this knowledge base's MCP
-server, and a `hexis-all` bundle that installs everything.
+server, and `hexis-all`, one plugin holding every skill they may read and
+the MCP server, for a single install.
 
 ## Tool Manuals (`{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/*.tool`)
 

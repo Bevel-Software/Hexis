@@ -362,7 +362,11 @@ export function ExternalAgentAccessPage() {
                     sign-in: approve, and you are back in Claude.
                   </li>
                   <li>In Cowork (or claude.ai), open Plugins → Add marketplace and paste the URL below.</li>
-                  <li>Install the plugins you want. Update in Claude pulls what changed.</li>
+                  <li>
+                    Install <b>hexis-all</b> for everything you may read in one plugin (every skill,
+                    and the knowledge base as an MCP server), or single plugins for a subset. Update
+                    in Claude pulls what changed.
+                  </li>
                 </ol>
                 <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
                 <div className="space-y-1">
