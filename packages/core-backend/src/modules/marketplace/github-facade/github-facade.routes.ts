@@ -52,10 +52,21 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
   const origin = new URL(deps.publicUrl).origin;
   const fullName = `${owner}/${repoName}`;
 
+  // Every refusal on the connect flow is logged with its reason: the
+  // consumer's backend swallows our answer, so a person who "connected and
+  // came back to Claude" with nothing to show for it has only this log to
+  // say which hop failed. Reasons name a check, never a secret or a code.
+  const refused = (req: express.Request, hop: string, err: GitHubFacadeRequestError) => {
+    console.warn(
+      `[github-facade] ${hop} refused (${err.status} ${err.code}): ${err.detail} — from ${req.headers['user-agent'] ?? 'no user-agent'}`,
+    );
+  };
+
   router.get('/login/oauth/authorize', async (req, res) => {
     try {
       res.redirect(302, await facade.authorizeRedirect(req.query as Record<string, unknown>));
     } catch (err) {
+      if (err instanceof GitHubFacadeRequestError) refused(req, 'authorize', err);
       answerError(res, err);
     }
   });
@@ -72,6 +83,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
         negotiated(req, res, 200, await facade.exchangeCode((req.body ?? {}) as Record<string, unknown>));
       } catch (err) {
         if (err instanceof GitHubFacadeRequestError) {
+          refused(req, 'token exchange', err);
           negotiated(req, res, err.status, { error: err.code, error_description: err.message });
           return;
         }
@@ -87,7 +99,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
   api.use(async (req, res, next) => {
     const token = bearerOf(req);
     if (!token || !keys.looksLikeExternalApiKey(token)) {
-      unauthorized(res);
+      unauthorized(req, res, token ? 'bearer is not a connection key' : 'no bearer');
       return;
     }
     let resolved: { tokenId: string; user: AuthUser } | null;
@@ -99,7 +111,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
       return;
     }
     if (!resolved) {
-      unauthorized(res);
+      unauthorized(req, res, 'connection key unknown or revoked');
       return;
     }
     req.userId = resolved.user.id;
@@ -188,7 +200,9 @@ function bearerOf(req: express.Request): string | null {
   return rest.join(' ').trim() || null;
 }
 
-function unauthorized(res: express.Response): void {
+/** GitHub's 401 — and a log line saying why, since the consumer's backend will not. */
+function unauthorized(req: express.Request, res: express.Response, why: string): void {
+  console.warn(`[github-facade] ${req.method} ${req.originalUrl} refused: ${why} — from ${req.headers['user-agent'] ?? 'no user-agent'}`);
   res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-marketplace"');
   res.status(401).json({ message: 'Bad credentials' });
 }

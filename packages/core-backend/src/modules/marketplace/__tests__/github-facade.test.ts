@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -234,6 +234,38 @@ describe('the GitHub facade', () => {
     expect(minted.user.id).toBe('user-alice');
     expect(minted.kind).toBe(GITHUB_LINK_KEY_KIND);
     expect(minted.label).toBe(CLAUDE_CONSUMER.keyLabel);
+  });
+
+  it('logs every refused hop of the connect flow with the check that failed, never the secret or the code', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const creds = await a.credentials.ensure();
+      const code = await approve(a.base, 'alice');
+
+      const wrongSecret = await exchange(b.base, { client_id: creds.clientId, client_secret: 'not-it', code });
+      expect(wrongSecret.status).toBe(401);
+      const staleCode = await exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code: 'never-issued' });
+      expect(staleCode.status).toBe(400);
+      const badClient = await fetch(
+        `${a.base}/login/oauth/authorize?client_id=Iv1.0000&redirect_uri=${encodeURIComponent(CALLBACK)}`,
+        { redirect: 'manual' },
+      );
+      expect(badClient.status).toBe(400);
+
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(3);
+      expect(lines[0]).toMatch(/token exchange refused \(401 incorrect_client_credentials\): client_secret is not the registered one/);
+      expect(lines[1]).toMatch(/token exchange refused \(400 bad_verification_code\): no live code/);
+      expect(lines[2]).toMatch(/authorize refused \(400 unknown_client\): client_id is not the registered one/);
+      for (const line of lines) {
+        expect(line).not.toContain(creds.clientSecret);
+        expect(line).not.toContain('not-it');
+        expect(line).not.toContain(code);
+        expect(line).not.toContain('never-issued');
+      }
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('serves the repository, the head commit and the zipball of that person’s own tree — from the origin, never the configured userinfo', async () => {

@@ -355,11 +355,13 @@ export function ExternalAgentAccessPage() {
                   , then every person connects their own account:
                 </p>
                 <ol className="text-meta text-ink-muted leading-snug list-decimal pl-4 space-y-0.5">
-                  <li>In Cowork (or claude.ai), open Plugins → Add marketplace and paste the URL below.</li>
                   <li>
-                    When it asks you to connect your GitHub Enterprise account, you land on this
-                    deployment's sign-in: approve, and you are back in Claude.
+                    Connect your account first; Claude does not prompt for it. In the repository
+                    picker on claude.ai/code, use the connect option for the registered instance
+                    (Owners also have it in the admin settings). You land on this deployment's
+                    sign-in: approve, and you are back in Claude.
                   </li>
+                  <li>In Cowork (or claude.ai), open Plugins → Add marketplace and paste the URL below.</li>
                   <li>Install the plugins you want. Update in Claude pulls what changed.</li>
                 </ol>
                 <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
