@@ -165,7 +165,6 @@ export class PluginProvisionService {
   async createPlugin(user: AuthUser, rawName: string, rawParent?: string): Promise<ProvisionedPlugin> {
     const name = rawName.trim();
     if (!name) throw new PluginProvisionError('A plugin needs a name.', 422);
-    const parent = await this.resolveParent(rawParent);
     // NUL and control chars are exactly what a filesystem path cannot carry;
     // refusing them here keeps the refusal a 422 instead of the fs layer's 500.
     // eslint-disable-next-line no-control-regex
@@ -189,6 +188,9 @@ export class PluginProvisionService {
         422,
       );
     }
+    // The name is judged before the parent: a name that can never be created
+    // is refused as such, not as "no such folder" or "discovery incomplete".
+    const parent = await this.resolveParent(rawParent);
     // Locked on the manifest SLUG, not the lowercased folder: the slug is the
     // identity the twin check below defends, and two spellings that collide
     // on it ("Sales Team" / "Sales-Team") must take the SAME lock or both
@@ -236,7 +238,12 @@ export class PluginProvisionService {
       throw new PluginProvisionError(`"${rawParent}" is not a folder name the knowledge base can carry.`, 422);
     }
     const rel = `${PLUGINS_DIR}/${rawParent}`;
-    if (isPersonalPluginDir(rel) || isPersonalPluginFolder(segments[0]!)) {
+    // The personal namespace is the FIRST segment below the root — the same
+    // structural rule as `isPersonalPluginDir`, applied to the parent and
+    // everything under it. A `personal-*` folder there is a personal space
+    // whether it was provisioned yet or not: the prefix is reserved at that
+    // depth (creation refuses the slug, rename refuses the name).
+    if (isPersonalPluginFolder(segments[0]!)) {
       throw new PluginProvisionError('A plugin cannot be made inside a personal space.', 422);
     }
     const wsId = await this.readyWorkspaceId();
@@ -582,8 +589,11 @@ export function pluginAccessMd(creator: { name: string; email: string }): string
  * those the folder admits; the body DENIES `everyone` read outright, so a
  * `read: everyone` an administrator later adds at the repo root (the usual
  * way to open the knowledge base up) cannot open every person's private
- * space with it. The owner is named directly, which outranks the denial;
- * Admin is named too, as the one role that reads everything else.
+ * space with it. The owner is named directly, which outranks the denial.
+ * Nobody else is — not even Admin: a private space is private from the
+ * people who run the deployment too. (An administrator can still write this
+ * file, through the resolver's access.md rescue, and so grant themselves in;
+ * that is a visible act in the history, not a default.)
  *
  * The frontmatter is there even though it grants nothing: it is what marks
  * the file as body-governed. Without it the splicer (and the resolver) read
@@ -601,11 +611,10 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
       '---',
       '# THIS BLOCK (the body) governs the FOLDER — one person\'s private space.',
       '# `deny everyone` keeps it closed even when the repository root grants',
-      '# `read: everyone`; the owner and Admin are named. To share it, add a',
-      '# person as `Name <email>` or a role under `read:`.',
+      '# `read: everyone`; only the owner is named — not even Admin reads it.',
+      '# To share it, add a person as `Name <email>` or a role under `read:`.',
       'read:',
       '  - deny everyone',
-      '  - Admin',
       '',
     ].join('\n'),
     creator,

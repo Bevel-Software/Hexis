@@ -35,8 +35,10 @@ export function keyOrSessionAuth(deps: {
         return;
       }
       // The tool gate names the caller on `req.toolAuth`; the endpoint reads
-      // `req.userId`, as it does for a session.
-      if (req.toolAuth && !req.userId) req.userId = req.toolAuth.userId;
+      // `req.userId`, as it does for a session. Assigned unconditionally: the
+      // credential this gate accepted is who the caller is, whatever an
+      // earlier middleware may have written there.
+      if (req.toolAuth) req.userId = req.toolAuth.userId;
       next();
     });
   };

@@ -562,14 +562,17 @@ describe('PersonalSpacesStep', () => {
   const LEGACY_PERSONAL =
     '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\nread: []\n';
 
-  it("adds `deny everyone` and Admin to every personal space's read rules on every branch, keeping the rest, once", async () => {
+  it("adds `deny everyone` to every personal space's read rules on every branch, keeping the rest, once", async () => {
     const scaffold = await fullScaffold();
     await seedUpstream({
       ...scaffold,
       'Plugins/personal-u1/plugin.json': '{"name":"personal-u1"}',
       'Plugins/personal-u1/access.md': LEGACY_PERSONAL,
-      // A space someone already closed, and a shared plugin: untouched.
+      // A space someone already closed, one its owner opened on purpose (a
+      // denial beside that grant would be overruled and read as a
+      // contradiction), and a shared plugin: all untouched.
       'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+      'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
@@ -580,14 +583,18 @@ describe('PersonalSpacesStep', () => {
       const dir = await checkout(branch);
       const closed = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u1/access.md'), 'utf8'));
       // The old seed's frontmatter grants stay as written; the body — which
-      // governs the folder — now denies everyone, names Admin, and carries the
-      // owner's grants so they can still read, write and own their space.
+      // governs the folder — now denies everyone (Admin included: nobody is
+      // named) and carries the owner's grants so they can still read, write
+      // and own their space.
       expect(closed).toBe(
         '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\n' +
-          'read:\n  - Ali Vega <ali@x.io>\n  - deny everyone\n  - Admin\n\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>',
+          'read:\n  - Ali Vega <ali@x.io>\n  - deny everyone\n\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>',
       );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u2/access.md'), 'utf8'))).toBe(
         '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+      );
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u3/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
       );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
@@ -596,7 +603,7 @@ describe('PersonalSpacesStep', () => {
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
     expect(log).toContain('Keep a personal space private');
-    expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone; Admin named');
+    expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone');
 
     // Idempotent: the next boot finds every space already closed.
     await makeRunner([new PersonalSpacesStep()]).runAll();

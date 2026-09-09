@@ -15,7 +15,8 @@ import { closePersonalSpaceRules } from '../../workspace/startup/steps/personal-
  *
  *  - a personal space must stay private even after an administrator opens
  *    the repository root with `read: everyone` (the usual way to let a new
- *    joiner read anything), while its owner and Admin keep reading it;
+ *    joiner read anything), while its owner keeps reading it — and Admin,
+ *    who reads everything else, does not;
  *  - the managed AGENTS.md must be readable by every signed-in person even
  *    when the root grants read to nobody, because agents are told to read
  *    it before their first action.
@@ -73,7 +74,7 @@ describe('the seeded access templates, resolved', () => {
     'Plugins/GTM/skills/x/SKILL.md',
   ];
 
-  it('a personal space stays closed to everyone else when the root says read: everyone — the owner and Admin still read it', async () => {
+  it('a personal space stays closed to everyone else when the root says read: everyone — the owner still reads it, Admin does not', async () => {
     const svc = await makeService({
       ...PERSONAL,
       'access.md': '---\nowner:\n  - Admin\n---\nread:\n  - everyone\nwrite:\n  - Admin\n',
@@ -92,8 +93,15 @@ describe('the seeded access templates, resolved', () => {
     const owner = await svc.canReadBatch(workspaceId, OWNER.email, PATHS);
     expect(owner.get('Plugins/personal-ali/skills/weekly/SKILL.md')).toBe(true);
     expect(owner.get('Plugins/personal-ali/access.md')).toBe(true);
+    // Admin reads everything else in the repository; a private space is the
+    // one place the role is not named, so the denial reaches them too. (They
+    // can still WRITE the access.md, through the resolver's rescue, and grant
+    // themselves in — a visible act, not a default.)
     const admin = await svc.canReadBatch(workspaceId, 'admin@x.io', PATHS);
-    expect(admin.get('Plugins/personal-ali/skills/weekly/SKILL.md')).toBe(true);
+    expect(admin.get('Plugins/personal-ali/skills/weekly/SKILL.md')).toBe(false);
+    expect(admin.get('Plugins/personal-ali/access.md')).toBe(false);
+    expect(admin.get('Plugins/GTM/skills/x/SKILL.md')).toBe(true);
+    expect(await svc.canWrite(workspaceId, 'admin@x.io', 'Plugins/personal-ali/access.md')).toBe(true);
   });
 
   it("the owner reads, writes and owns their space; nobody else writes it", async () => {
@@ -124,7 +132,7 @@ describe('the seeded access templates, resolved', () => {
     expect(await svc.canRead(workspaceId, 'bob@x.io', skill)).toBe(false);
     expect(await svc.canRead(workspaceId, OWNER.email, skill)).toBe(true);
     expect(await svc.canWrite(workspaceId, OWNER.email, skill)).toBe(true);
-    expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(true);
+    expect(await svc.canRead(workspaceId, 'admin@x.io', skill)).toBe(false);
   });
 
   it('the packaged AGENTS.md is readable by a non-admin even when the root grants read to nobody', async () => {

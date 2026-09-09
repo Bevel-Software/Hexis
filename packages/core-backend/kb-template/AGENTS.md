@@ -144,8 +144,8 @@ skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Use the two tools
 instead:
 
 - `my_plugin` — your user's own private space, created on first use:
-  `{{pluginsDir}}/personal-<id>/`. Readable only by its owner (and admins),
-  never listed as a plugin. Their personal skills go under its `skills/`,
+  `{{pluginsDir}}/personal-<id>/`. Readable only by its owner — not even
+  admins — and never listed as a plugin. Their personal skills go under its `skills/`,
   each in its own folder with a `SKILL.md`; write there with the file tools.
 - `create_plugin` — a shared plugin, named, optionally inside a grouping
   folder under `{{pluginsDir}}/` (`parent`). The caller runs it; others join

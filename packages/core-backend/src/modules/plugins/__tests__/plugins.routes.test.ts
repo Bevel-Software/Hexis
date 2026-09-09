@@ -160,6 +160,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // here only need to prove what they hand it and when they refuse to.
   const provision = {
     createPlugin: vi.fn(async () => ({ folder: 'GTM', created: true })),
+    ensurePersonalPlugin: vi.fn(async () => ({ folder: 'personal-u-1', created: false })),
     deletePlugin: vi.fn(async () => undefined),
   };
 
@@ -251,6 +252,23 @@ describe('/api/plugins routes', () => {
     // A parent that is not a string is a bad request, not a service error.
     expect((await post({ name: 'Sales', parent: 7 })).status).toBe(400);
     expect(h.provision.createPlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST /plugins/personal ensures the caller’s own space and returns it; no caller, no space', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ folder: 'personal-u-1', created: false });
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+
+    const anon = await makeHarness({ email: null });
+    try {
+      expect((await fetch(`${anon.baseUrl}/api/plugins/personal`, { method: 'POST' })).status).toBe(401);
+      expect(anon.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+    } finally {
+      anon.server.close();
+    }
   });
 
   it('lists member plugins sorted, counting by pluginOfPath', async () => {

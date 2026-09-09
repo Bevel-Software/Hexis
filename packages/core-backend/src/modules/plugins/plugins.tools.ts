@@ -45,8 +45,8 @@ export const MY_PLUGIN: UtcpTool = toolDef({
   description:
     "The caller's own private plugin — their personal space in the knowledge base, created on first use. " +
     'Returns its folder and where skills go inside it (`skillsDir`); write a skill there as ' +
-    '`<skillsDir>/<skill-name>/SKILL.md` with the file tools. Readable only by its owner (and admins), never ' +
-    'listed as a shared plugin. Idempotent: calling it again returns the same folder.',
+    '`<skillsDir>/<skill-name>/SKILL.md` with the file tools. Readable only by its owner — not even admins — and ' +
+    'never listed as a shared plugin. Idempotent: calling it again returns the same folder.',
   path: '/api/plugins/personal',
   inputs: { type: 'object', properties: {}, additionalProperties: false },
   outputs: PROVISIONED_OUTPUT,
@@ -59,9 +59,11 @@ export const CREATE_PLUGIN: UtcpTool = toolDef({
     "Create a shared plugin under the plugins root, exactly as the app's New plugin button does: the caller " +
     'runs it (read, write and owner), and it is discoverable by everyone so people can ask to join. Pass ' +
     '`parent` to make it inside an existing grouping folder under the plugins root (e.g. `Teams`); a plugin ' +
-    'cannot be made inside another plugin. Returns the folder and where its skills go. A refusal is a 4xx ' +
-    'with `error` in words: 409 when a plugin of that name (or its identifier) exists, 422 for a name the ' +
-    'knowledge base cannot carry or a parent that may not hold a plugin, 404 when the parent folder is not there.',
+    'cannot be made inside another plugin. Returns the folder and where its skills go. A refusal carries ' +
+    '`error` in words. 4xx means the input will not do: 409 when a plugin of that name (or its identifier) ' +
+    'exists, 422 for a name the knowledge base cannot carry or a parent that may not hold a plugin, 404 when ' +
+    'the parent folder is not there. 503 means the plugin list could not be read completely just now — ' +
+    'nothing is wrong with the input; try again shortly.',
   path: '/api/plugins',
   inputs: {
     type: 'object',

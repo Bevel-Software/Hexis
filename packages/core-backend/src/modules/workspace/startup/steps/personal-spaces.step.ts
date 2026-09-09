@@ -15,7 +15,8 @@ import { isAbsence } from '../../../../shared/fs-errors.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
- * Keep every personal space closed to everyone but its owner and Admin.
+ * Keep every personal space closed to everyone but its owner — Admin
+ * included.
  *
  * A personal folder's access.md used to be seeded with the owner's grants
  * alone. That is private only while nothing above it grants read — and the
@@ -25,8 +26,8 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
  * step gives the ones seeded before the same rule, on every branch, on the
  * next start.
  *
- * A SPLICE, not a rewrite: the two entries are added to the folder's read
- * rules (and, for the old seed's shape, the owner's grants are carried into
+ * A SPLICE, not a rewrite: the denial is added to the folder's read rules
+ * (and, for the old seed's shape, the owner's grants are carried into
  * the folder's rules — see {@link closePersonalSpaceRules}); every other
  * byte — anyone the owner added, comments — stays. Idempotent: a folder
  * whose rules already deny `everyone` is left alone, so a person who removed
@@ -72,14 +73,14 @@ async function closePersonalSpaces(branch: KbBranch): Promise<void> {
   }
   if (closed.length === 0) return;
   branch.note(`Keep ${closed.length === 1 ? 'a personal space' : `${closed.length} personal spaces`} private`);
-  for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone; Admin named`);
+  for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone`);
 }
 
 /**
- * The access.md text with `deny everyone` and `Admin` under the folder's
- * `read:` — or null when the rules already deny `everyone` or cannot be
- * parsed. Exported so a resolver test can prove what the reconciled file
- * means, not only what it says.
+ * The access.md text with `deny everyone` under the folder's `read:` — or
+ * null when the rules already deny `everyone` or cannot be parsed. Exported
+ * so a resolver test can prove what the reconciled file means, not only what
+ * it says.
  *
  * The previous template put the owner's grants in the frontmatter over a
  * body of `read: []`. A body that declares a verb governs the folder, so
@@ -92,16 +93,20 @@ async function closePersonalSpaces(branch: KbBranch): Promise<void> {
 export function closePersonalSpaceRules(text: string, relativePath: string): string | null {
   const parsed = parseAccessFile(text, relativePath);
   if (!parsed.ok) return null;
-  const denies = parsed.file.entries.read.some(
-    (e) => e.kind === 'role' && e.role === EVERYONE_CANONICAL && e.deny,
+  // A file whose folder rules already name `everyone` — under any verb — is
+  // left as it is. A denial means the space is closed; a GRANT means someone
+  // opened it on purpose, and a denial written beside it would change
+  // nothing (a same-scope grant wins, and write/owner grants fold into
+  // read) while making the file read as a contradiction.
+  const namesEveryone = KNOWN_VERBS.some((verb) =>
+    parsed.file.entries[verb].some((e) => e.kind === 'role' && e.role === EVERYONE_CANONICAL),
   );
-  if (denies) return null;
+  if (namesEveryone) return null;
   let next = text;
   for (const { verb, entry } of strandedFrontmatterGrants(text, parsed.file.entries)) {
     next = spliceGrant(next, verb, { kind: 'user', email: entry.email, displayName: entry.displayName }, { target: 'folder' }).text;
   }
-  next = spliceGrant(next, 'read', { kind: 'role', role: 'everyone' }, { deny: true, target: 'folder' }).text;
-  return spliceGrant(next, 'read', { kind: 'role', role: 'Admin' }, { target: 'folder' }).text;
+  return spliceGrant(next, 'read', { kind: 'role', role: 'everyone' }, { deny: true, target: 'folder' }).text;
 }
 
 /**

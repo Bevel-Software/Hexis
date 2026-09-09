@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
 import { useAuth } from '../../auth/state/auth.context';
@@ -141,9 +142,17 @@ export function LibraryLayout() {
               onCreatePlugin={(parent) => setNewPlugin({ parent })}
               // A plugin cannot hold another: the verb is offered on grouping
               // folders only — the root and folders no listed plugin owns.
-              isGroupingFolder={(rel) =>
-                !pluginSummaries.some((s) => s.folders.some((f) => rel === f || rel.startsWith(`${f}/`)))
-              }
+              // Closed until the plugin list has loaded: an unknown list is
+              // not an empty one. Personal spaces are named by the same rule
+              // the endpoint refuses them by — the first segment below the
+              // root carries the personal prefix — so the tree never offers a
+              // parent the endpoint will not take.
+              isGroupingFolder={(rel) => {
+                if (lib.pluginsLoading || lib.pluginsError) return false;
+                const below = rel.split('/');
+                if (below.length >= 2 && isPersonalPluginFolder(below[1]!)) return false;
+                return !pluginSummaries.some((s) => s.folders.some((f) => rel === f || rel.startsWith(`${f}/`)));
+              }}
             />
           }
         />

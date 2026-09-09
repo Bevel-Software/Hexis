@@ -128,12 +128,18 @@ describe('PluginProvisionService.createPlugin', () => {
     expect(h.commits.runPendingCommit).toHaveBeenCalledWith('ws-main', DEFAULT_BRANCH, `${KB}/Plugins/Teams/EU/Sales`, USER, {
       systemAuthorized: true,
     });
-    // Taken is judged IN that folder: the same name at the root is free.
+    // Taken is judged by IDENTITY, which is global: the slug a nested plugin
+    // publishes is the one a client keys it by, so the same name is taken in
+    // that folder and at the root alike.
     await expect(h.svc.createPlugin(USER, 'sales', 'Teams/EU')).rejects.toMatchObject({ status: 409 });
+    await expect(h.svc.createPlugin(USER, 'sales')).rejects.toMatchObject({ status: 409 });
   });
 
   it('refuses a parent that is not there (404), not a folder name (422), a personal space, or a plugin — a plugin cannot hold another', async () => {
     await expect(h.svc.createPlugin(USER, 'X', 'Nope')).rejects.toMatchObject({ status: 404 });
+    // The NAME is judged first: a name that can never be created is refused
+    // as such, whatever the parent — not as a missing folder.
+    await expect(h.svc.createPlugin(USER, 'a/b', 'Nope')).rejects.toMatchObject({ status: 422 });
     await expect(h.svc.createPlugin(USER, 'X', 'a/../b')).rejects.toMatchObject({ status: 422 });
     await expect(h.svc.createPlugin(USER, 'X', '.hidden')).rejects.toMatchObject({ status: 422 });
     await expect(h.svc.createPlugin(USER, 'X', personalPluginFolderName(USER.id))).rejects.toMatchObject({ status: 422 });
@@ -519,15 +525,17 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
     );
     // PRIVATE: the frontmatter grants nobody (the space is listed for no one
     // else), and the body denies `everyone` — so a root-level `read: everyone`
-    // an admin adds later cannot open it — naming the owner and Admin.
+    // an admin adds later cannot open it — naming the owner and nobody else,
+    // Admin included.
     const close = accessMd.indexOf('\n---\n', 4);
     const frontmatter = accessMd.slice(4, close);
     const body = accessMd.slice(close + 5);
     expect(frontmatter).not.toContain('everyone');
     expect(frontmatter).not.toContain('Ali Vega');
-    expect(body).toMatch(/read:\n(?:\s+#.*\n)*\s+- deny everyone\n\s+- Admin/);
-    for (const verb of ['read', 'write', 'owner']) {
-      expect(body).toMatch(new RegExp(`${verb}:[\\s\\S]*Ali Vega <ali@example.com>`));
+    expect(body).toMatch(/read:\n(?:\s+#.*\n)*\s+- deny everyone\n/);
+    expect(body).not.toMatch(/^\s+- Admin/m);
+    for (const verb of ['read', 'write', 'owner'] as const) {
+      expect(verbBlock(body, verb)).toContain('Ali Vega <ali@example.com>');
     }
 
     const second = await h.svc.ensurePersonalPlugin(USER);
@@ -557,6 +565,17 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
   });
 });
 
+/**
+ * One verb's block of an access.md region — from `<verb>:` up to the next
+ * verb key or the end — so an assertion about a grant under `write:` cannot
+ * be satisfied by the same line under `owner:`.
+ */
+function verbBlock(region: string, verb: 'read' | 'write' | 'owner'): string {
+  const match = region.match(new RegExp(`(?:^|\\n)${verb}:[\\s\\S]*?(?=\\n(?:read|write|download|owner):|$)`));
+  if (!match) throw new Error(`no ${verb}: block in\n${region}`);
+  return match[0];
+}
+
 describe('access.md templates', () => {
   it('plugin template is discoverable, personal template denies everyone — same creator grants in both bodies', () => {
     const plugin = pluginAccessMd(USER);
@@ -567,9 +586,12 @@ describe('access.md templates', () => {
     };
     expect(split(plugin).frontmatter).toMatch(/read:\n\s+- everyone/);
     expect(split(personal).frontmatter).not.toContain('everyone');
-    expect(split(personal).body).toMatch(/- deny everyone\n\s+- Admin/);
+    expect(split(personal).body).toMatch(/- deny everyone\n/);
+    expect(split(personal).body).not.toMatch(/^\s+- Admin/m);
     for (const text of [plugin, personal]) {
-      expect(split(text).body).toContain('Ali Vega <ali@example.com>');
+      for (const verb of ['read', 'write', 'owner'] as const) {
+        expect(verbBlock(split(text).body, verb)).toContain('Ali Vega <ali@example.com>');
+      }
       expect(split(text).frontmatter).not.toContain('Ali Vega');
     }
   });

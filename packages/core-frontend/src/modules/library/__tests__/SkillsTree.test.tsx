@@ -290,15 +290,19 @@ describe('PluginsTree', () => {
 
   it('offers New plugin only where a plugin may be made — the root and grouping folders, never a plugin or what is inside one', () => {
     const onCreatePlugin = vi.fn();
-    // The layout's answer: GTM is a plugin (so is everything beneath it).
-    const isGroupingFolder = (rel: string) => !(rel === `Plugins/GTM` || rel.startsWith('Plugins/GTM/'));
+    // The layout's answer, from membership: the fixture's two plugin folders
+    // (the shared GTM and the personal space) own everything beneath them.
+    const pluginFolders = ['Plugins/GTM', 'Plugins/personal-u1'];
+    const isGroupingFolder = (rel: string) => !pluginFolders.some((f) => rel === f || rel.startsWith(`${f}/`));
     renderPlugins('/skills-and-tools', {}, onCreatePlugin, isGroupingFolder);
     fireEvent.contextMenu(row('Plugins'));
     expect(within(screen.getByRole('menu', { name: 'Actions for Plugins' })).getByRole('menuitem', { name: 'New plugin' })).toBeInTheDocument();
     fireEvent.keyDown(document, { key: 'Escape' });
-    fireEvent.contextMenu(row('GTM'));
-    expect(within(screen.getByRole('menu', { name: 'Actions for GTM' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
-    fireEvent.keyDown(document, { key: 'Escape' });
+    for (const folder of ['GTM', 'personal-u1']) {
+      fireEvent.contextMenu(row(folder));
+      expect(within(screen.getByRole('menu', { name: `Actions for ${folder}` })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+      fireEvent.keyDown(document, { key: 'Escape' });
+    }
     fireEvent.click(row('GTM'));
     fireEvent.contextMenu(row('skills'));
     expect(within(screen.getByRole('menu', { name: 'Actions for skills' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
