@@ -1,23 +1,34 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
+import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { urlForLibraryItem } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
+import { pluginEntriesFor } from '../utils/plugin-entries';
+import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
 import { PluginItemSections } from './plugin-page-parts';
+import { PluginRows } from './PluginRows';
+import { ManagedPluginRequests } from './ManagedPluginRequests';
 import { PendingSkillReview } from './PendingSkillReview';
 
 /**
- * The Library gallery — the card grid at `/skills-and-tools/everything` and its
- * filtered views (`/owned`, and a plugin's cards).
+ * The Library gallery — Everything (the root), Owned by me, and a team's
+ * page: plugins as rows, then skills and tools as cards, under one search.
  *
  * This is CONTENT only: the sidebar, the flex shell and the data live in
  * `LibraryLayout` + `LibraryProvider` above it. The filter arrives as a prop
  * because the URL owns selection now — there is no `useState<LibraryFilter>`
  * anywhere, so a deep link, the back button and the sidebar can never disagree
  * about what is selected.
+ *
+ * Plugins head the page because they are where things live and who they are
+ * for; the all-plugins index that used to be the root is this band. A team's
+ * page is the same page sliced by the server's answer for that team — what
+ * being in the group lets a person use — and never by anything the items
+ * themselves claim.
  *
  * Two things it does not have, and won't:
  *
@@ -38,6 +49,8 @@ function headingFor(filter: LibraryFilter): string {
       return 'Owned by me';
     case 'ungrouped':
       return 'Yours alone';
+    case 'team':
+      return filter.group;
     case 'group':
       return filter.plugin;
   }
@@ -47,14 +60,28 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
+  const { user } = useAuth();
   const [query, setQuery] = useState('');
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
 
   const visible = useMemo(
-    () => filterLibraryItems(data.items, filter, query),
-    [data.items, filter, query],
+    () => filterLibraryItems(data.items, filter, query, data.teams),
+    [data.items, filter, query, data.teams],
   );
+  const personalLabel = personalPluginName(user?.name);
+  const plugins = useMemo(
+    () => pluginEntriesFor(data.items, data.pluginSummaries, filter, data.teams, query, personalLabel),
+    [data.items, data.pluginSummaries, filter, data.teams, query, personalLabel],
+  );
+  const count = plugins.length + visible.length;
+  // A team the server LISTED NOTHING LIKE is not a team — a stale link, a
+  // renamed group — and the page says so instead of showing an empty slice
+  // as fact. Only once the list has arrived, and only when it arrived: a
+  // pending request has no list yet, and a failed one is "we could not
+  // ask", which is not "there is no such team".
+  const teamsSettled = filter.kind === 'team' && !data.teamsLoading && data.teamsError === null;
+  const unknownTeam = teamsSettled && !data.teams.some((t) => t.name === filter.group);
 
   /**
    * Both kinds open a PAGE now — the skill page landed alongside the tool one.
@@ -76,17 +103,26 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         <div>
           <h1 className="text-display font-semibold">{headingFor(filter)}</h1>
           <p className="mt-0.5 text-ui text-ink-muted">
-            {data.loading ? '…' : `${visible.length} ${visible.length === 1 ? 'item' : 'items'}`}
+            {data.loading ? '…' : `${count} ${count === 1 ? 'item' : 'items'}`}
           </p>
         </div>
         <TextField
           className="ml-auto w-64"
-          placeholder="Search the library…"
-          aria-label="Search the library"
+          placeholder="Search"
+          aria-label="Search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
+
+      {/* Somebody asking to join one of the plugins is the news on the page
+          the Library opens on — the one place the ask is certain to be seen.
+          Renders nothing when nothing pends. */}
+      {filter.kind === 'all' && (
+        <div className="mt-5 empty:mt-0">
+          <ManagedPluginRequests />
+        </div>
+      )}
 
       <div className="mt-5" />
 
@@ -99,24 +135,40 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         </Banner>
       ) : data.loading ? (
         <div className="py-16 text-center text-ui text-ink-faint">Loading the library…</div>
-      ) : visible.length === 0 ? (
+      ) : filter.kind === 'team' && data.teamsLoading ? (
+        <div className="py-16 text-center text-ui text-ink-faint">Loading teams…</div>
+      ) : filter.kind === 'team' && data.teamsError ? (
+        <Banner role="alert" tone="danger">
+          {data.teamsError}
+          <button type="button" className="ml-3 font-semibold underline" onClick={data.reloadPlugins}>
+            Try again
+          </button>
+        </Banner>
+      ) : unknownTeam ? (
         <div className="py-16 text-center text-ui text-ink-faint">
-          {emptyMessageFor(filter, query)}
+          {`There's no team called ${filter.kind === 'team' ? filter.group : ''}.`}
         </div>
       ) : (
-        // Skills and tools, split — the same two bands a plugin page has.
-        // One undifferentiated grid made you read every card's body to learn
-        // what kind of thing it was; the heading does that now, once, for a
-        // whole band. A band with nothing in it is dropped rather than shown
-        // empty: this is a search result, not an inventory of what could be.
         <div className="pb-14">
-          <PluginItemSections
-            skillItems={visible.filter((i) => i.kind === 'skill')}
-            toolItems={visible.filter((i) => i.kind === 'integration')}
-            onOpen={openItem}
-            hideEmpty
-            emptySkills=""
-          />
+          <PluginRows entries={plugins} showCreate={filter.kind === 'all'} />
+          {visible.length === 0 && plugins.length === 0 ? (
+            <div className="py-16 text-center text-ui text-ink-faint">
+              {emptyMessageFor(filter, query)}
+            </div>
+          ) : (
+            // Skills and tools, split — the same two bands a plugin page has.
+            // One undifferentiated grid made you read every card's body to learn
+            // what kind of thing it was; the heading does that now, once, for a
+            // whole band. A band with nothing in it is dropped rather than shown
+            // empty: this is a search result, not an inventory of what could be.
+            <PluginItemSections
+              skillItems={visible.filter((i) => i.kind === 'skill')}
+              toolItems={visible.filter((i) => i.kind === 'integration')}
+              onOpen={openItem}
+              hideEmpty
+              emptySkills=""
+            />
+          )}
         </div>
       )}
 

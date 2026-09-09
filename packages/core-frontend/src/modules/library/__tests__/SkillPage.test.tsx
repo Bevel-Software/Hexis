@@ -643,7 +643,7 @@ describe('SkillPage', () => {
     expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
     expect(screen.getByText('Loading…')).toBeInTheDocument();
     expect(panel).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByRole('button', { name: /All skills & tools/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Everything/ })).toBeInTheDocument();
 
     await act(async () => {
       resolveSkill(skillDetail);

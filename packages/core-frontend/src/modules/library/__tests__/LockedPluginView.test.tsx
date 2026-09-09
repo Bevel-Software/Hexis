@@ -74,7 +74,7 @@ describe('LockedPluginView', () => {
     expect(screen.getByText('Locked')).toBeInTheDocument();
     expect(screen.getByText('Run by Olga Ivanova.')).toBeInTheDocument();
     expect(screen.getByText('2 skills · 1 tool. Visible once you have access.')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'All plugins' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Everything' })).toHaveAttribute(
       'href',
       '/skills-and-tools',
     );

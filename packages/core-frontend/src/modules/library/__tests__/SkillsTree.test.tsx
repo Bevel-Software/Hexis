@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
 import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
-import { SkillsTree } from '../components/SkillsTree';
+import { PluginsTree, SkillsTree } from '../components/SkillsTree';
 
 /**
  * The Skills section of the Library nav: the shared root as Knowledge's tree
@@ -198,5 +198,65 @@ describe('SkillsTree', () => {
     fireEvent.change(input, { target: { value: 'Marketing' } });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
+  });
+});
+
+/**
+ * The same tree, holding the OTHER root: `Plugins/` exactly as it is on disk,
+ * manifests and all. One component, one set of rows; what differs is the
+ * folder it is handed.
+ */
+describe('PluginsTree', () => {
+  const PLUGINS: FileTreeEntry = dir('.', [
+    dir(KB, [
+      dir(`${KB}/Plugins`, [
+        dir(`${KB}/Plugins/GTM`, [
+          file(`${KB}/Plugins/GTM/plugin.json`),
+          file(`${KB}/Plugins/GTM/mcp.json`),
+          dir(`${KB}/Plugins/GTM/skills`, [
+            dir(`${KB}/Plugins/GTM/skills/outreach`, [file(`${KB}/Plugins/GTM/skills/outreach/SKILL.md`)]),
+          ]),
+        ]),
+        dir(`${KB}/Plugins/personal-u1`, [file(`${KB}/Plugins/personal-u1/plugin.json`)]),
+      ]),
+    ]),
+  ]);
+
+  function renderPlugins(url: string, over: Partial<WorkspaceContextValue> = {}) {
+    const workspace = makeWorkspaceFixture({ fileTree: PLUGINS, kbDirName: KB, ...over });
+    return render(
+      <MemoryRouter initialEntries={[url]}>
+        <WorkspaceContext.Provider value={workspace}>
+          <PluginsTree />
+          <LocationProbe />
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+  }
+
+  it('draws the Plugins root as a reserved folder row, its plugins collapsed under it', () => {
+    renderPlugins('/skills-and-tools');
+    expect(screen.getByTestId('plugins-tree')).toBeInTheDocument();
+    expect(row('Plugins')).toHaveAttribute('aria-expanded', 'true');
+    expect(row('Plugins').closest('[draggable]')).toHaveAttribute('draggable', 'false');
+    expect(row('GTM')).toBeInTheDocument();
+    expect(row('personal-u1')).toBeInTheDocument();
+    expect(screen.queryByText('plugin.json')).not.toBeInTheDocument();
+  });
+
+  it("opens a plugin's files at their canonical default-branch URL — the item route decides the page", () => {
+    renderPlugins('/skills-and-tools');
+    fireEvent.click(row('GTM'));
+    fireEvent.click(row('plugin.json'));
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(
+      `/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/GTM/plugin.json`,
+    );
+  });
+
+  it('draws the folder even when the knowledge base has none yet', () => {
+    const none = dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
+    renderPlugins('/skills-and-tools', { fileTree: none });
+    expect(row('Plugins')).toBeInTheDocument();
+    expect(row('Plugins')).not.toHaveAttribute('aria-expanded');
   });
 });

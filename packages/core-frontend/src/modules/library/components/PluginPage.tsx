@@ -230,7 +230,7 @@ export function PluginPage() {
           to={pathForPluginsIndex()}
           className="mt-2 inline-block rounded-xs text-ui font-semibold text-ink underline"
         >
-          All plugins
+          Everything
         </Link>
       </div>
     );

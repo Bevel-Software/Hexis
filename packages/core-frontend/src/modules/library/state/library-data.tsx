@@ -26,12 +26,14 @@ function isSharedPath(path: string): boolean {
 }
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listPlugins, type PluginSummary } from '../services/plugins.api';
+import { listTeams } from '../services/teams.api';
 import {
   isInPlugin,
   neededToolsFor,
   skillStatus,
   toolStatus,
   type AttentionStatus,
+  type TeamAccess,
 } from '../utils/status';
 
 /**
@@ -98,6 +100,19 @@ export interface LibraryContextValue extends LibraryData {
   pluginSummaries: PluginSummary[];
   pluginsLoading: boolean;
   pluginsError: string | null;
+  /**
+   * What each team can use (`GET /api/teams`), `[]` until loaded and on
+   * error. Loaded and reloaded WITH the plugin summaries: both are answers
+   * from the access rules, and an edit that changes one changes the other.
+   */
+  teams: TeamAccess[];
+  teamsLoading: boolean;
+  /**
+   * Why `teams` is empty when it is: the request failed. Kept apart from
+   * "no teams" so a team page can tell "this team is not there" from "we
+   * could not ask" — the second is not the first.
+   */
+  teamsError: string | null;
   reloadPlugins(): void;
 }
 
@@ -108,6 +123,9 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   const [pluginSummaries, setPluginSummaries] = useState<PluginSummary[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(true);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
+  const [teams, setTeams] = useState<TeamAccess[]>([]);
+  const [teamsLoading, setTeamsLoading] = useState(true);
+  const [teamsError, setTeamsError] = useState<string | null>(null);
   const [pluginsRevision, setPluginsRevision] = useState(0);
 
   useEffect(() => {
@@ -126,6 +144,34 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       })
       .finally(() => {
         if (!cancelled) setPluginsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pluginsRevision]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // The team lens degrades to "no teams" rather than failing the Library:
+    // the sidebar simply has no team rows, and Everything is untouched.
+    // (`teamsLoading` is raised by `reloadPlugins`, as `pluginsLoading` is —
+    // the first load starts raised, and the effect body stays free of a
+    // synchronous setState.)
+    listTeams()
+      .then((next) => {
+        if (cancelled) return;
+        setTeams(next);
+        setTeamsError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setTeams([]);
+        // A blank message is no message: the page tells the error state
+        // apart from "no teams" by this being non-empty.
+        setTeamsError((err instanceof Error && err.message) || "Couldn't load teams.");
+      })
+      .finally(() => {
+        if (!cancelled) setTeamsLoading(false);
       });
     return () => {
       cancelled = true;
@@ -206,6 +252,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   // costs a cascading render on every revision).
   const reloadPlugins = useCallback(() => {
     setPluginsLoading(true);
+    setTeamsLoading(true);
     setPluginsRevision((r) => r + 1);
   }, []);
 
@@ -239,9 +286,12 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       pluginSummaries,
       pluginsLoading,
       pluginsError,
+      teams,
+      teamsLoading,
+      teamsError,
       reloadPlugins,
     }),
-    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, reloadPlugins],
+    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, teams, teamsLoading, teamsError, reloadPlugins],
   );
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;
@@ -296,7 +346,7 @@ export interface PluginAttention {
 }
 
 export function attentionOf(
-  items: LibraryItem[],
+  items: readonly LibraryItem[],
   plugin: string,
   summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
 ): PluginAttention {
@@ -325,7 +375,7 @@ export function attentionOf(
  * exactly the skill this is about.
  */
 export function brokenLinksOf(
-  items: LibraryItem[],
+  items: readonly LibraryItem[],
   plugin: string,
   summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
 ): number {
