@@ -63,6 +63,12 @@ function Out({ href, children }: { href: string; children: ReactNode }) {
  * ever called by someone this deployment already resolved as an admin. The
  * server enforces that too; this just avoids a pointless 403 for everyone
  * else.
+ *
+ * And only once the drawer is OPEN. A closed <details> still mounts its
+ * children, so without that gate every admin who opened the Marketplaces tab
+ * for the git remote fetched a client secret and a private key into a drawer
+ * they never looked at, once per visit. Secrets load when someone is reading
+ * the step that asks for them, not before.
  */
 function ClaudeConnection() {
   const [creds, setCreds] = useState<GitHubFacadeCredentials | null>(null);
@@ -169,7 +175,7 @@ function MarketplaceSteps() {
  * Claude organization: the copy names the Claude side explicitly so an admin
  * without it knows who to hand step 1 to.
  */
-export function CoworkSetupSteps({ isAdmin }: { isAdmin: boolean }) {
+export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened: boolean }) {
   const host = deploymentHost();
 
   return (
@@ -201,7 +207,7 @@ export function CoworkSetupSteps({ isAdmin }: { isAdmin: boolean }) {
                 ignored: nothing here sends webhooks yet, and the private key is required by the
                 form but unused by this flow.
               </Prose>
-              <ClaudeConnection />
+              {opened && <ClaudeConnection />}
               <ScreenshotStep shot={addConfigurationShot} />
             </Step>
 

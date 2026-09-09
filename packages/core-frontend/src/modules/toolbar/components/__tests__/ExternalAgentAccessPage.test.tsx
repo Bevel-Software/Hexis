@@ -396,7 +396,13 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    // Closed, the drawer holds no credentials at all: a client secret is not
+    // put in the DOM of something nobody opened.
+    expect(within(cowork).queryByDisplayValue(FACADE.clientSecret)).toBeNull();
+    expect(facadeMock).not.toHaveBeenCalled();
+
+    await user.click(within(cowork).getByText('Cowork and claude.ai'));
 
     await within(cowork).findByDisplayValue(FACADE.clientSecret);
     for (const value of [FACADE.host, FACADE.appId, FACADE.clientId, FACADE.webhookSecret]) {
@@ -410,6 +416,8 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    await user.click(within(cowork).getByText('Cowork and claude.ai'));
     expect(facadeMock).not.toHaveBeenCalled();
   });
 

@@ -82,6 +82,9 @@ export function ExternalAgentAccessPage() {
   const workspaceUrl = workspaceBaseUrl();
 
   const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
+  // Whether the Cowork drawer is expanded. Only the registration credentials
+  // wait on it; everything else in the drawer renders either way.
+  const [coworkOpen, setCoworkOpen] = useState(false);
   const { isAdmin } = useAdmin();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -332,12 +335,21 @@ export function ExternalAgentAccessPage() {
               claude.ai fetch it as a repository once your account is connected.
             </p>
 
-            <details className="border border-line rounded" data-testid="cowork-section">
+            {/* `onToggle` because a closed <details> still MOUNTS its children:
+                without it, selecting this tab fetched the registration
+                credentials and put a client secret and a private key in the
+                DOM of a drawer nobody had opened. The drawer stays native
+                (uncontrolled); this only watches it. */}
+            <details
+              className="border border-line rounded"
+              data-testid="cowork-section"
+              onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
+            >
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                 Cowork and claude.ai
               </summary>
               <div className="px-3 pb-3 space-y-3">
-                <CoworkSetupSteps isAdmin={isAdmin} />
+                <CoworkSetupSteps isAdmin={isAdmin} opened={coworkOpen} />
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-ink">Your Claude connections</div>
                   {loadError && (
