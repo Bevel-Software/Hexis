@@ -140,6 +140,21 @@ describe('ExternalApiKeyService', () => {
       });
     });
 
+    it('mints a kind that asks for a GitHub-shaped token as prefix plus forty letters and digits', async () => {
+      const { db, calls } = makeFakeDb([[makeRow()]]);
+      const service = new ExternalApiKeyService(db, 'bevel_', {
+        'github-link': { prefix: 'gho_', shape: 'github-token' },
+      });
+
+      const result = await service.mint('user-1', 'Claude', { kind: 'github-link' });
+
+      // GitHub's own tokens are alphanumeric after the prefix; a consumer
+      // that checks the shape must keep ours.
+      expect(result.plaintext).toMatch(/^gho_[A-Za-z0-9]{40}$/);
+      expect(service.looksLikeExternalApiKey(result.plaintext)).toBe(true);
+      expect(calls.values[0][0].tokenHash).toBe(sha256Hex(result.plaintext));
+    });
+
     it('trims the label before persisting', async () => {
       const { db, calls } = makeFakeDb([[makeRow()]]);
       const service = new ExternalApiKeyService(db, 'bevel_');

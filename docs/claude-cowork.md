@@ -24,23 +24,40 @@ they may read.
 2. In Claude, go to **Admin settings → Claude Code → GitHub Enterprise
    Server** and choose **Add manually**. Paste the fields from step 1. Any
    display name will do.
-3. When Claude asks you to connect your GitHub Enterprise account, you land on
-   the platform's sign-in. Approve, and you are back in Claude.
 
 The webhook URL Claude generates can be ignored. Rotate the credentials from
 the same card if they are ever exposed; the Owner then re-enters them.
 
+Registering connects the platform to your Claude organization, not to any
+person: every person, the Owner included, connects their own account before
+they can add the marketplace.
+
 ## Add the marketplace (every person)
 
-1. Copy the marketplace URL from **External agent access → Marketplaces**.
+1. Connect your account. Claude does not prompt for this, and its
+   **Connect to GitHub** button signs in to github.com, which is not it. Use
+   the connect option for the registered instance in the repository picker on
+   **claude.ai/code**; an Owner also has it in the GitHub Enterprise Server
+   section of the admin settings. You land on the platform's sign-in: approve,
+   and you are back in Claude.
+2. Copy the marketplace URL from **External agent access → Marketplaces**.
    It is the same URL Claude Code clones.
-2. In Cowork (or claude.ai), open **Plugins → Add marketplace** and paste it.
-3. Connect your account when asked. You sign in on the platform and approve.
+3. In Cowork (or claude.ai), open **Plugins → Add marketplace** and paste it.
 4. Install the plugins you want. **Update** in Claude pulls what changed.
 
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
-from Claude resumes them.
+from Claude resumes them. "Repository not found" or "GitHub access is
+required" on the marketplace means step 1 has not happened for your account.
+
+## When connecting does not take
+
+Approving on the platform and landing back in Claude proves the browser
+half. Claude's servers then exchange a code with the platform, and Claude
+shows nothing when that exchange is refused. The platform's server log
+does: every refused step is a line starting with `[github-facade]` naming
+the check that failed, such as a client secret that no longer matches the
+registration.
 
 ## Limits
 

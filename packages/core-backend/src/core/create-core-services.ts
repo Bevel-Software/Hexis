@@ -69,7 +69,7 @@ import {
   DbGitHubFacadeCredentialsStore,
   CLAUDE_CONSUMER,
   GITHUB_LINK_KEY_KIND,
-  GITHUB_LINK_KEY_PREFIX,
+  GITHUB_LINK_KEY_SPEC,
 } from '../modules/marketplace/github-facade/index.js';
 import {
   DbSecretsVaultService,
@@ -703,7 +703,7 @@ export async function createCoreServices(
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
   const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
-    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_PREFIX,
+    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC,
   });
 
   // The facade that lets products which sync marketplaces only from a GitHub
