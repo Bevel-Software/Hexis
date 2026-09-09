@@ -43,7 +43,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - SOURCE_COMMIT
       - GIT_TOKEN
       - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}

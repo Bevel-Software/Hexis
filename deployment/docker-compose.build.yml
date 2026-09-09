@@ -50,16 +50,21 @@ services:
       # is also what makes the root .env the one compose reads. So `.` IS the
       # repository root here, subfolder or not.
       context: .
-      # No `args:` block, same reasoning as the root file once carried: the
-      # Dockerfile accepts GIT_SHA (reported by `GET /api/health`), but naming
-      # it here makes deployment UIs prompt for a value nobody sets by hand.
-      # CI passes it directly: `--build-arg GIT_SHA=$(git rev-parse HEAD)`.
+      # The commit sha `GET /api/health` reports, baked into the image at
+      # build time. `${SOURCE_COMMIT:-}` interpolates from the orchestrator's
+      # .env — Coolify writes the checked-out commit there on every deploy —
+      # and an operator building by hand can leave it unset (health then says
+      # 'unknown'). Build-time on purpose: the runtime pass-through this
+      # replaces was materialized by Coolify as an EMPTY LITERAL that
+      # overrode the real value; a sha baked into the image leaves no runtime
+      # variable to blank.
+      args:
+        SOURCE_COMMIT: ${SOURCE_COMMIT:-}
     expose:
       - "3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - SOURCE_COMMIT
       - GIT_TOKEN
       - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}
