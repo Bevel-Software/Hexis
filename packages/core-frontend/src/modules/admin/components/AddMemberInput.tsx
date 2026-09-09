@@ -131,10 +131,13 @@ export function AddMemberInput({
   // The combobox keyboard model: focus STAYS in the input and the arrow keys
   // move an active option, which the input names by id — so a screen reader
   // hears each suggestion as it is reached and Enter takes the active one.
-  // Clamped at render rather than reset in an effect: a shorter list simply
-  // has no active row until the arrows are pressed again.
-  const [active, setActive] = useState(-1);
-  const activeIdx = open && active < suggestions.length ? active : -1;
+  // Keyed by the PERSON, not by position: the list refreshes under the
+  // caller's hands (a new query, an `exclude` that grew), and a numeric index
+  // kept across that would light a different person's row — or Enter would
+  // add them. A person no longer listed is simply no longer active.
+  const [activeEmail, setActiveEmail] = useState<string | null>(null);
+  const activeIdx = open && activeEmail !== null ? suggestions.findIndex((p) => p.email === activeEmail) : -1;
+  const setActive = (index: number) => setActiveEmail(suggestions[index]?.email ?? null);
   const optionId = (index: number) => `${listId}-option-${index}`;
 
   return (
@@ -161,7 +164,7 @@ export function AddMemberInput({
           onChange={(e) => {
             onValueChange(e.target.value);
             setShowSuggest(true);
-            setActive(-1);
+            setActiveEmail(null);
           }}
           onFocus={() => setShowSuggest(true)}
           onKeyDown={(e) => {
@@ -188,7 +191,7 @@ export function AddMemberInput({
             }
             if (e.key === 'Escape') {
               setShowSuggest(false);
-              setActive(-1);
+              setActiveEmail(null);
             }
           }}
           placeholder={placeholder}

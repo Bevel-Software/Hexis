@@ -142,9 +142,45 @@ describe('AddMemberInput', () => {
     expect(input).toHaveAttribute('aria-activedescendant', pat.id);
     await userEvent.keyboard('{Home}');
     expect(input).toHaveAttribute('aria-activedescendant', alice.id);
+    await userEvent.keyboard('{End}');
+    expect(input).toHaveAttribute('aria-activedescendant', pat.id);
+    await userEvent.keyboard('{Home}');
 
     await userEvent.keyboard('{Enter}');
     expect(onSubmit).toHaveBeenCalledWith('alice@example.com');
+  });
+
+  it('the active row follows the person, not the position, when the list refreshes underneath', async () => {
+    vi.mocked(suggestPrincipals).mockResolvedValue(people(ALICE, PAT));
+    const onSubmit = vi.fn();
+    function Refreshing() {
+      const [value, setValue] = useState('');
+      const [exclude, setExclude] = useState<string[]>([]);
+      return (
+        <>
+          <AddMemberInput value={value} onValueChange={setValue} onSubmit={onSubmit} exclude={exclude} inputLabel="Member email" />
+          <button type="button" onClick={() => setExclude([ALICE.email])}>
+            drop alice
+          </button>
+        </>
+      );
+    }
+    render(<Refreshing />);
+    const input = screen.getByRole('combobox', { name: 'Member email' });
+    await userEvent.type(input, 'al');
+    await screen.findByText('Alice Green');
+    await userEvent.keyboard('{ArrowDown}');
+    expect(input).toHaveAttribute('aria-activedescendant', screen.getByRole('option', { name: /Alice Green/ }).id);
+
+    // Alice leaves the list (someone added her elsewhere); the first row is
+    // Pat now, and Pat must not inherit Alice's highlight.
+    await userEvent.click(screen.getByRole('button', { name: 'drop alice' }));
+    await userEvent.click(input);
+    // The refreshed list arrives after the debounce.
+    const patRow = await screen.findByRole('option', { name: /Pat Kim/ });
+    expect(screen.queryByText('Alice Green')).not.toBeInTheDocument();
+    expect(patRow).toHaveAttribute('aria-selected', 'false');
+    expect(input).not.toHaveAttribute('aria-activedescendant');
   });
 
   it('a keyboard alone can reach a suggestion and choose it', async () => {
