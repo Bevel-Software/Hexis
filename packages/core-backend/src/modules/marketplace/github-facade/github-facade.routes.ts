@@ -5,6 +5,7 @@ import '../../tool-auth/external-api-key.interface.js'; // Express Request augme
 import type { MarketplaceRepoService } from '../marketplace-repo.service.js';
 import type { MarketplaceKeyResolver } from '../git-http.routes.js';
 import { GitHubFacadeRequestError, type GitHubFacade } from './github-facade.service.js';
+import { printable } from '../../../shared/printable.js';
 
 export interface GitHubFacadeRoutesDeps {
   facade: GitHubFacade;
@@ -55,11 +56,11 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
   // Every refusal on the connect flow is logged with its reason: the
   // consumer's backend swallows our answer, so a person who "connected and
   // came back to Claude" with nothing to show for it has only this log to
-  // say which hop failed. Reasons name a check, never a secret or a code.
+  // say which hop failed. Reasons name a check, never a secret or a code;
+  // what the caller sent (its user agent) is rendered printable, so the
+  // caller cannot write a line of its own.
   const refused = (req: express.Request, hop: string, err: GitHubFacadeRequestError) => {
-    console.warn(
-      `[github-facade] ${hop} refused (${err.status} ${err.code}): ${err.detail} — from ${req.headers['user-agent'] ?? 'no user-agent'}`,
-    );
+    console.warn(`[github-facade] ${hop} refused (${err.status} ${err.code}): ${err.detail} — from ${userAgentOf(req)}`);
   };
 
   router.get('/login/oauth/authorize', async (req, res) => {
@@ -202,9 +203,15 @@ function bearerOf(req: express.Request): string | null {
 
 /** GitHub's 401 — and a log line saying why, since the consumer's backend will not. */
 function unauthorized(req: express.Request, res: express.Response, why: string): void {
-  console.warn(`[github-facade] ${req.method} ${req.originalUrl} refused: ${why} — from ${req.headers['user-agent'] ?? 'no user-agent'}`);
+  console.warn(`[github-facade] ${req.method} ${printable(req.originalUrl)} refused: ${why} — from ${userAgentOf(req)}`);
   res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-marketplace"');
   res.status(401).json({ message: 'Bad credentials' });
+}
+
+/** The caller's user agent as one printable token — it is theirs to fill with anything. */
+function userAgentOf(req: express.Request): string {
+  const ua = req.headers['user-agent'];
+  return ua ? printable(ua) : 'no user-agent';
 }
 
 /** The token endpoint's reply, in the encoding the client asked for. */

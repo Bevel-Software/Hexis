@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -75,6 +76,23 @@ function makeKeys() {
       };
     },
   };
+}
+
+/** An HTTP/1.1 request written byte for byte (Latin-1), answering with its status code. */
+function rawRequest(base: string, headLines: string[], body = ''): Promise<number> {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), hostname, () => {
+      socket.write(Buffer.from([...headLines, `Host: ${hostname}`, 'Connection: close', '', body].join('\r\n'), 'latin1'));
+    });
+    let received = '';
+    socket.setEncoding('latin1');
+    socket.on('data', (chunk: string) => {
+      received += chunk;
+    });
+    socket.on('end', () => resolve(Number(received.split(' ')[1])));
+    socket.on('error', reject);
+  });
 }
 
 /** One replica: its own bridge over the SHARED stores, its own HTTP listener. */
@@ -262,6 +280,39 @@ describe('the GitHub facade', () => {
         expect(line).not.toContain('not-it');
         expect(line).not.toContain(code);
         expect(line).not.toContain('never-issued');
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the log to one line per event whatever bytes the caller puts in its headers', async () => {
+    // Node's parser already refuses C0 controls and bare CR/LF in a header
+    // value. What it lets through is obs-text — bytes 0x80–0xFF, read as
+    // Latin-1 — and that includes U+009B, the one-byte CSI that starts an
+    // ANSI sequence on its own and that JSON.stringify leaves raw. It goes
+    // over a bare socket: a fetch client refuses to build such a header.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const csi = String.fromCharCode(0x9b);
+      const creds = await a.credentials.ensure();
+      const body = JSON.stringify({ client_id: creds.clientId, client_secret: 'not-it', code: 'x' });
+      const exchange = await rawRequest(b.base, [
+        'POST /login/oauth/access_token HTTP/1.1',
+        `User-Agent: httpx${csi}[31mforged`,
+        'Content-Type: application/json',
+        'Accept: application/vnd.github+json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+      ], body);
+      expect(exchange).toBe(401);
+      const api = await rawRequest(b.base, ['GET /api/v3/repos/git/marketplace HTTP/1.1', `User-Agent: httpx${csi}[31mforged`]);
+      expect(api).toBe(401);
+
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(2);
+      for (const line of lines) {
+        expect(line.includes(csi)).toBe(false);
+        expect(line).toContain('"httpx\\u009b[31mforged"');
       }
     } finally {
       warn.mockRestore();

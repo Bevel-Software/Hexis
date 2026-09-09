@@ -3,6 +3,7 @@ import type { KeyKindSpec, MintedExternalApiKey } from '../../tool-auth/external
 import { signAuthRequest, type McpAuthRequestState } from '../../mcp/oauth/oauth-state.js';
 import type { GitHubFacadeCredentialsService } from './github-facade-credentials.service.js';
 import type { GitHubFacadeCodeStore } from './github-facade-codes.store.js';
+import { printable } from '../../../shared/printable.js';
 
 /**
  * The KIND stored on a connection key minted through the facade, and how
@@ -252,10 +253,16 @@ function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
 }
 
-/** The host of a URL for a log line, or what was sent when it is not one. */
+/**
+ * The host of a URL for a log line, or what was sent when it is not one.
+ * The caller chose the URL, so the host is rendered printable even though a
+ * parsed host is ASCII: the log's one-line rule holds by construction, not
+ * by an argument about URL parsing.
+ */
 function hostOf(url: string): string {
   try {
-    return new URL(url).host || '(empty)';
+    const host = new URL(url).host;
+    return host ? printable(host) : '(empty)';
   } catch {
     return url ? '(not a URL)' : '(empty)';
   }
