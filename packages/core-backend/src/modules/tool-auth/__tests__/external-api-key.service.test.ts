@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { ExternalApiKeyService } from '../external-api-key.service.js';
 import {
   InvalidTokenLabelError,
@@ -99,6 +101,15 @@ function makeRow(overrides: Partial<{
     lastUsedAt: overrides.lastUsedAt ?? null,
     revokedAt: overrides.revokedAt ?? null,
   };
+}
+
+/**
+ * Render a drizzle predicate to SQL text + params, so a test can assert on
+ * WHAT was asked of the database even though the fake never evaluates it.
+ */
+function renderSql(fragment: SQL): { sql: string; params: unknown[] } {
+  const q = new PgDialect().sqlToQuery(fragment);
+  return { sql: q.sql, params: q.params };
 }
 
 function sha256Hex(s: string): string {
@@ -346,6 +357,26 @@ describe('ExternalApiKeyService', () => {
 
       expect(calls.set[0][0].revokedAt).toBeInstanceOf(Date);
       expect((db as any).select).not.toHaveBeenCalled();
+      // The fake DB ignores predicates, so render the one the UPDATE was
+      // given: it must pin the id and the not-yet-revoked state, and must NOT
+      // carry a user_id — that scope is what makes this the admin path. The
+      // owner path (`revoke`) is checked for the opposite below.
+      const where = renderSql(calls.where[0][0]);
+      expect(where.sql).toContain('"id" = ');
+      expect(where.sql).toContain('"revoked_at" is null');
+      expect(where.sql).not.toContain('user_id');
+      expect(where.params).toEqual(['tok-1']);
+    });
+
+    it('owner-scoped revoke, by contrast, does carry the user_id predicate', async () => {
+      const { db, calls } = makeFakeDb([[{ id: 'tok-1' }]]);
+      const service = new ExternalApiKeyService(db, 'bevel_');
+
+      await service.revoke('tok-1', 'user-1');
+
+      const where = renderSql(calls.where[0][0]);
+      expect(where.sql).toContain('"user_id" = ');
+      expect(where.params).toEqual(['tok-1', 'user-1']);
     });
 
     it('is idempotent on an already-revoked token', async () => {

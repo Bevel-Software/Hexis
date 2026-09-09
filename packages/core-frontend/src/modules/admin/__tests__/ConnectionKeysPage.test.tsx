@@ -189,6 +189,70 @@ describe('ConnectionKeysPage', () => {
     expect(screen.getByText('CI pipeline')).toBeInTheDocument();
   });
 
+  it('keeps a revoked key disconnected when the reload after revoking fails', async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
+    vi.mocked(listConnectionKeys).mockRejectedValueOnce(new Error('Could not load connection keys'));
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Revoke CI pipeline for alice@example.com' }),
+    );
+    await userEvent.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Revoke key' }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load connection keys');
+    // The server said yes, so the row is disconnected regardless of the reload:
+    // hidden with the other disconnected keys, and never offering Revoke again.
+    expect(
+      screen.queryByRole('button', { name: 'Revoke CI pipeline for alice@example.com' }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Show disconnected keys' }));
+    expect(screen.getByText('CI pipeline')).toBeInTheDocument();
+    expect(screen.getByText(/2 live keys · 2 disconnected/)).toBeInTheDocument();
+  });
+
+  it('ignores a stale list response that lands after a newer one', async () => {
+    // Two revokes back to back: the reload from the FIRST resolves last, still
+    // showing the second key as live. It must not win over the newer reload.
+    const deferred = () => {
+      let resolve!: (rows: AdminConnectionKey[]) => void;
+      const promise = new Promise<AdminConnectionKey[]>((r) => (resolve = r));
+      return { promise, resolve };
+    };
+    const first = deferred();
+    const second = deferred();
+    vi.mocked(listConnectionKeys)
+      .mockReset()
+      .mockResolvedValueOnce([ALICE_CI, ALICE_LAPTOP])
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    renderPage();
+    await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
+
+    const revoke = async (name: string) => {
+      await userEvent.click(screen.getByRole('button', { name }));
+      await userEvent.click(
+        within(await screen.findByRole('dialog')).getByRole('button', { name: 'Revoke key' }),
+      );
+    };
+    await revoke('Revoke CI pipeline for alice@example.com');
+    await revoke('Revoke Laptop for alice@example.com');
+    await waitFor(() => expect(listConnectionKeys).toHaveBeenCalledTimes(3));
+
+    const ciRevoked = { ...ALICE_CI, revokedAt: NOW };
+    second.resolve([ciRevoked, { ...ALICE_LAPTOP, revokedAt: NOW }]);
+    await waitFor(() => expect(screen.getByText(/0 live keys · 2 disconnected/)).toBeInTheDocument());
+
+    // The stale reload: taken at face value, Laptop would come back to life.
+    first.resolve([ciRevoked, ALICE_LAPTOP]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText(/0 live keys · 2 disconnected/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Revoke Laptop for alice@example.com' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('shows the load error and no empty state when the first load fails', async () => {
     vi.mocked(listConnectionKeys).mockRejectedValueOnce(new Error('Could not load connection keys'));
     renderPage();

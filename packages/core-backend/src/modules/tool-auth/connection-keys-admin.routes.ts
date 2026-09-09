@@ -4,6 +4,9 @@ import { TokenNotFoundError } from './external-api-key.errors.js';
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
+/** Shape of the `api_tokens.id` column (any uuid version; case-insensitive). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * Admin overview of connection keys across the deployment (the core
  * "Connection keys" admin page): every key on every account — owner, label,
@@ -43,6 +46,13 @@ export function createConnectionKeysAdminRoutes(
   // auditable after a leak — there is deliberately no admin hard-delete.
   router.delete('/admin/connection-keys/:id', requireAdmin, async (req, res) => {
     const id = String(req.params.id);
+    // The id column is a uuid: anything else makes Postgres raise a cast
+    // error before the WHERE is even evaluated, which would surface as a 500.
+    // A malformed id names no key, so it is a not-found, same as an unknown one.
+    if (!UUID_RE.test(id)) {
+      res.status(404).json({ error: 'Token not found' });
+      return;
+    }
     try {
       await externalApiKeyService.revokeAny(id);
       // Accountability record: WHO revoked WHICH key. Ids only — the key's

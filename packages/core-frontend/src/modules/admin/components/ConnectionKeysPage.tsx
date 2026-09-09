@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { formatRelativeTime } from '../../../lib/utils';
@@ -44,13 +44,20 @@ export function ConnectionKeysPage() {
   const [pendingRevoke, setPendingRevoke] = useState<AdminConnectionKey | null>(null);
   const [revoking, setRevoking] = useState(false);
 
+  // Generation of the newest load. Two revokes in quick succession start two
+  // reloads, and the older one can land last — carrying a key the newer one
+  // already saw revoked. Only the latest load may write `keys`.
+  const loadGen = useRef(0);
   const refresh = useCallback(() => {
+    const gen = ++loadGen.current;
     listConnectionKeys()
       .then((rows) => {
+        if (gen !== loadGen.current) return;
         setKeys(rows);
         setError(null);
       })
       .catch((err) => {
+        if (gen !== loadGen.current) return;
         setError(err instanceof Error ? err.message : "Couldn't load connection keys.");
         // `keys` is deliberately left alone: a reload that fails keeps the
         // rows it had, and a first load that fails stays `null` rather than
@@ -71,7 +78,16 @@ export function ConnectionKeysPage() {
     setRevoking(true);
     setError(null);
     try {
-      await revokeConnectionKey(pendingRevoke.id);
+      const { id } = pendingRevoke;
+      await revokeConnectionKey(id);
+      // The server has revoked it; say so at once rather than waiting on the
+      // reload. If that reload fails, the row must not sit there looking live
+      // with a Revoke button — the agent holding this key is already cut off.
+      setKeys((prev) =>
+        prev
+          ? prev.map((k) => (k.id === id && k.revokedAt === null ? { ...k, revokedAt: Date.now() } : k))
+          : prev,
+      );
       setPendingRevoke(null);
       refresh();
     } catch (err) {
