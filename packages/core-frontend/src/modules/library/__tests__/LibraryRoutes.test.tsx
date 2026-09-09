@@ -434,11 +434,35 @@ describe('LibraryRoutes', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load plugins.");
   });
 
-  it('keeps the Library up when the teams endpoint fails — the nav simply lists no teams', async () => {
-    teamsMock.listTeams.mockRejectedValue(new Error('down'));
-    renderAt('/skills-and-tools');
-    expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
+  it('keeps the Library up when the teams endpoint fails — the nav lists no teams, and a team page says why', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error("Couldn't load teams."));
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    // The failure is the settlement signal: once the page reports it, the
+    // request is over, and what the nav shows is the post-failure nav.
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/There's no team called/)).toBeNull();
+    expect(await screen.findByRole('heading', { name: 'GTM Team', level: 1 })).toBeInTheDocument();
     expect(within(nav()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
     expect(within(nav()).queryByRole('button', { name: /^GTM Team/ })).toBeNull();
+  });
+
+  it('says it is loading teams on a team page until the slice arrives — never "can use nothing" first', async () => {
+    let resolve: (teams: typeof TEAMS) => void = () => {};
+    teamsMock.listTeams.mockReturnValue(new Promise<typeof TEAMS>((r) => (resolve = r)));
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    expect(await screen.findByText('Loading teams…')).toBeInTheDocument();
+    expect(screen.queryByText(/can't use anything/)).toBeNull();
+    expect(screen.queryByText(/There's no team called/)).toBeNull();
+    resolve(TEAMS);
+    expect(await screen.findByTestId('library-card-skill-outreach')).toBeInTheDocument();
+  });
+
+  it("a team row's counts are the team's slice, not the plugin's totals", async () => {
+    // GTM holds 1 skill + 1 tool by its summary; the team may use the skill only.
+    teamsMock.listTeams.mockResolvedValue([{ name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: [] }]);
+    renderAt('/skills-and-tools/teams/GTM%20Team');
+    const row = await within(main()).findByRole('button', { name: /^GTM/ });
+    expect(row).toHaveTextContent('1 skills · 0 tools');
+    expect(screen.queryByTestId('library-card-integration-heyreach')).toBeNull();
   });
 });

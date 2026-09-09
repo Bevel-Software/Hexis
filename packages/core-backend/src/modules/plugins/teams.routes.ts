@@ -1,5 +1,5 @@
 import express from 'express';
-import { isPersonalPluginDir } from '@bevel-software/platform-shared';
+import { isPersonalPluginDir, isPersonalPluginFolder, pluginOfPath } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
@@ -50,15 +50,20 @@ export function createTeamsRoutes(
     }
     try {
       const wsId = pluginsWorkspaceId();
-      const [{ groups }, catalog, skills, tools] = await Promise.all([
+      const [{ groups }, catalog, allSkills, allTools] = await Promise.all([
         accessControl.kbPrincipals(wsId),
         pluginIndex.catalog(),
         skillService.listSkills(),
         toolManuals.listAllSummaries(),
       ]);
       // A personal plugin is one person's space, not a team's: it has no
-      // roster and admits nobody, so it can never be a team's to read.
+      // roster and admits nobody, so neither it nor anything inside it can
+      // be a team's to read — whatever a hand-written grant in there says.
+      // One rule for the plugin and for its contents, so the two cannot
+      // disagree.
       const plugins = catalog.filter((g) => !g.folders.every(isPersonalPluginDir));
+      const skills = allSkills.filter((s) => !inPersonalPlugin(s.path));
+      const tools = allTools.filter((t) => !inPersonalPlugin(t.path));
       const folderProbes = plugins.flatMap((g) => g.folders);
       const discoverProbes = folderProbes.map(accessMdOf);
       const skillProbes = skills.map((s) => skillMdOf(s.path));
@@ -98,3 +103,8 @@ export function createTeamsRoutes(
 
 const accessMdOf = (folder: string) => `${folder}/access.md`;
 const skillMdOf = (skillPath: string) => `${skillPath}/SKILL.md`;
+/** Under `Plugins/personal-<id>/…` — one person's space, whatever it grants. */
+const inPersonalPlugin = (repoPath: string) => {
+  const folder = pluginOfPath(repoPath);
+  return folder !== null && isPersonalPluginFolder(folder);
+};

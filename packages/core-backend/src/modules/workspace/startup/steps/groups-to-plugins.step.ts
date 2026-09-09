@@ -250,10 +250,14 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
     branch.move(LEGACY_GROUPS_DIR, PLUGINS_DIR);
     details.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
     changed = true;
-    // Rides WITH the rename, not on every run: the rename is what turned the
-    // ignore rule stale, so the run that renames is the run that heals it.
-    changed = (await rewriteIgnoreRootRule(repoDir, branch, details)) || changed;
   }
+  // On EVERY run and every branch, rename or not: the two root rules are
+  // stale for one reason (the plugins root is drawn by the sidebar now), and
+  // a draft migrated by an earlier release carries the `Plugins/` line that
+  // release wrote — the template step, which retires it on the protected
+  // branches, never visits a draft. Idempotent: nothing to drop, nothing
+  // declared.
+  changed = (await retireIgnoreRootRules(repoDir, branch, details)) || changed;
 
   // Runs whether or not the rename just happened, so a KB already on
   // `Plugins/` still gets missing manifests and any half-done reorganisation
@@ -282,32 +286,35 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
 }
 
 /**
- * Retire the KB's `.bevelignore` rule for the renamed root: every exact
- * `Groups/` line goes. It used to become `Plugins/` — the rename's companion
- * edit, so plugin internals stayed out of the file tree and the agent view.
- * The plugins root is no longer hidden at all (the Skills & Tools sidebar
- * draws it as a file tree read from the workspace tree; the template step
- * drops the `Plugins/` rule for the same reason), so a rule for the OLD name
- * has nothing to become: it names a folder that no longer exists and is
- * simply stale.
+ * Retire the KB's `.bevelignore` rules for the plugins root, old name and
+ * new: every exact `Groups/` and `Plugins/` line goes. `Groups/` used to
+ * become `Plugins/` — the rename's companion edit, so plugin internals
+ * stayed out of the file tree and the agent view. The plugins root is no
+ * longer hidden at all (the Skills & Tools sidebar draws it as a file tree
+ * read from the workspace tree), so the old rule has nothing to become and
+ * the new one is as stale as it: a KB this step migrated under an earlier
+ * release carries the `Plugins/` line that release wrote, on every branch
+ * it visited — drafts included, which the template step never reaches.
  *
- * The file is the operator's — this touches only lines the platform's own
- * rename invalidated. Every exact match goes, not just the first: a
+ * The file is the operator's — this touches only the lines the platform's
+ * own root rules put there. Every exact match goes, not just the first: a
  * duplicate left behind would be found again on every boot and never
- * touched, since the first pass is what makes the run a no-op.
+ * touched, since the first pass is what makes the run a no-op. A `!…`
+ * negation is not the rule and stays.
  */
-async function rewriteIgnoreRootRule(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
+async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf-8');
   } catch {
     return false; // no ignore file — nothing went stale
   }
-  const legacyRule = `${LEGACY_GROUPS_DIR}/`;
+  const stale = new Set([`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`]);
   const lines = current.split('\n');
-  if (!lines.some((l) => l.trim() === legacyRule)) return false;
-  branch.write(IGNORE_FILENAME, lines.filter((l) => l.trim() !== legacyRule).join('\n'));
-  details.push(`${IGNORE_FILENAME}: ${legacyRule} dropped`);
+  const dropped = [...new Set(lines.map((l) => l.trim()).filter((l) => stale.has(l)))];
+  if (dropped.length === 0) return false;
+  branch.write(IGNORE_FILENAME, lines.filter((l) => !stale.has(l.trim())).join('\n'));
+  details.push(`${IGNORE_FILENAME}: ${dropped.join(', ')} dropped`);
   return true;
 }
 

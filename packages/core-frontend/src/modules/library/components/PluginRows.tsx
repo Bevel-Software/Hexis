@@ -43,7 +43,11 @@ export function PluginRows({
   const [newPluginOpen, setNewPluginOpen] = useState(false);
 
   const offerCreate = showCreate && isAdmin && workspaceHasNoPlugins(lib);
-  const loading = pluginsLoading && pluginSummaries.length === 0 && entries.length === 0;
+  // Loading is the plugin REQUEST's state, never the rows': the caller's own
+  // space is a row before any request answers, and on a first load the list
+  // beneath it is not yet known. A reload with summaries already in hand
+  // keeps showing them.
+  const loading = pluginsLoading && pluginSummaries.length === 0;
   if (!offerCreate && !pluginsError && !loading && entries.length === 0) return null;
 
   return (

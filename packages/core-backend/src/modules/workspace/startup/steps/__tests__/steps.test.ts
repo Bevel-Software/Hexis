@@ -859,27 +859,32 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# keep\n');
     });
 
-    it("touches only the stale line — a Plugins/ line beside it is the template step's to retire", async () => {
+    it('retires a Plugins/ line beside it too — both root rules are stale for the same reason', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
-        '.bevelignore': 'Groups/\nPlugins/\n',
+        '.bevelignore': '# mine\nGroups/\nPlugins/\n!Plugins/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Plugins/\n');
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n!Plugins/\n');
     });
 
-    it('is not touched by a run that does not rename', async () => {
+    it('retires the rules on a run that does not rename — a branch migrated by an earlier release, a draft included', async () => {
+      // An earlier release renamed `Groups/` to `Plugins/` in the ignore file
+      // of every branch it migrated; the template step retires that line on
+      // the protected branches only, so this step does it wherever it goes.
       await seedUpstream({
         'Plugins/GTM/access.md': 'write:\n  - Admin\n',
         'Plugins/GTM/outreach/SKILL.md': '# Outreach\n',
-        '.bevelignore': 'Groups/\n',
+        '.bevelignore': 'AGENTS.md\nPlugins/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\n');
-      // The run still reorganised the folder — the rule alone was off-limits.
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
       expect(await exists(dir, 'Plugins/GTM/skills/outreach/SKILL.md')).toBe(true);
+      // Idempotent: a second run declares nothing.
+      await migrate();
+      expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
     });
   });
 });

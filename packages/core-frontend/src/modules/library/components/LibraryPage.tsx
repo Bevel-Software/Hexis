@@ -75,10 +75,13 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     [data.items, data.pluginSummaries, filter, data.teams, query, personalLabel],
   );
   const count = plugins.length + visible.length;
-  // A team the server did not list is not a team — a stale link, a renamed
-  // group — and the page says so instead of showing an empty slice as fact.
-  const unknownTeam =
-    filter.kind === 'team' && !data.teamsLoading && !data.teams.some((t) => t.name === filter.group);
+  // A team the server LISTED NOTHING LIKE is not a team — a stale link, a
+  // renamed group — and the page says so instead of showing an empty slice
+  // as fact. Only once the list has arrived, and only when it arrived: a
+  // pending request has no list yet, and a failed one is "we could not
+  // ask", which is not "there is no such team".
+  const teamsSettled = filter.kind === 'team' && !data.teamsLoading && data.teamsError === null;
+  const unknownTeam = teamsSettled && !data.teams.some((t) => t.name === filter.group);
 
   /**
    * Both kinds open a PAGE now — the skill page landed alongside the tool one.
@@ -132,6 +135,15 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         </Banner>
       ) : data.loading ? (
         <div className="py-16 text-center text-ui text-ink-faint">Loading the library…</div>
+      ) : filter.kind === 'team' && data.teamsLoading ? (
+        <div className="py-16 text-center text-ui text-ink-faint">Loading teams…</div>
+      ) : filter.kind === 'team' && data.teamsError ? (
+        <Banner role="alert" tone="danger">
+          {data.teamsError}
+          <button type="button" className="ml-3 font-semibold underline" onClick={data.reloadPlugins}>
+            Try again
+          </button>
+        </Banner>
       ) : unknownTeam ? (
         <div className="py-16 text-center text-ui text-ink-faint">
           {`There's no team called ${filter.kind === 'team' ? filter.group : ''}.`}

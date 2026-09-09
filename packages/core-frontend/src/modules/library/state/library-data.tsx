@@ -107,6 +107,12 @@ export interface LibraryContextValue extends LibraryData {
    */
   teams: TeamAccess[];
   teamsLoading: boolean;
+  /**
+   * Why `teams` is empty when it is: the request failed. Kept apart from
+   * "no teams" so a team page can tell "this team is not there" from "we
+   * could not ask" — the second is not the first.
+   */
+  teamsError: string | null;
   reloadPlugins(): void;
 }
 
@@ -119,6 +125,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   const [pluginsError, setPluginsError] = useState<string | null>(null);
   const [teams, setTeams] = useState<TeamAccess[]>([]);
   const [teamsLoading, setTeamsLoading] = useState(true);
+  const [teamsError, setTeamsError] = useState<string | null>(null);
   const [pluginsRevision, setPluginsRevision] = useState(0);
 
   useEffect(() => {
@@ -152,10 +159,14 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     // synchronous setState.)
     listTeams()
       .then((next) => {
-        if (!cancelled) setTeams(next);
+        if (cancelled) return;
+        setTeams(next);
+        setTeamsError(null);
       })
-      .catch(() => {
-        if (!cancelled) setTeams([]);
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setTeams([]);
+        setTeamsError(err instanceof Error ? err.message : "Couldn't load teams.");
       })
       .finally(() => {
         if (!cancelled) setTeamsLoading(false);
@@ -275,9 +286,10 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       pluginsError,
       teams,
       teamsLoading,
+      teamsError,
       reloadPlugins,
     }),
-    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, teams, teamsLoading, reloadPlugins],
+    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, teams, teamsLoading, teamsError, reloadPlugins],
   );
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;

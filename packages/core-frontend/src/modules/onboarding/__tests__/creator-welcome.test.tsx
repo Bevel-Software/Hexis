@@ -47,6 +47,7 @@ function library(over: Partial<LibraryContextValue> = {}): LibraryContextValue {
     pluginsError: null,
     teams: [],
     teamsLoading: false,
+    teamsError: null,
     reloadPlugins: vi.fn(),
     ...over,
   };

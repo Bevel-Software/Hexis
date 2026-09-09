@@ -352,7 +352,7 @@ export function isInTeam(
  * (`GET /api/teams`); without it the team lens is empty, never everything.
  */
 export function filterLibraryItems<T extends LibraryFilterable>(
-  items: T[],
+  items: readonly T[],
   filter: LibraryFilter,
   query: string,
   teams: readonly TeamAccess[] = [],

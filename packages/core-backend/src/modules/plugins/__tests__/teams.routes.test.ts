@@ -46,6 +46,7 @@ const SKILLS: SkillSummary[] = [
 const TOOLS: ToolManualSummary[] = [
   { slug: 'hubspot', name: 'HubSpot', path: 'Plugins/GTM/mcp.json', type: 'mcp' } as ToolManualSummary,
   { slug: 'books', name: 'Books', path: 'Plugins/Finance/books.tool', type: 'inline' } as ToolManualSummary,
+  { slug: 'gmail', name: 'Gmail', path: 'Plugins/personal-ali/mcp.json', type: 'mcp' } as ToolManualSummary,
 ];
 
 interface HarnessOpts {
@@ -102,6 +103,7 @@ describe('GET /api/teams', () => {
     'Plugins/personal-ali/skills/weekly/SKILL.md',
     'Plugins/GTM/mcp.json',
     'Plugins/Finance/books.tool',
+    'Plugins/personal-ali/mcp.json',
   ];
 
   it('names what the team reads, by id, and only what the caller sees too', async () => {
@@ -151,17 +153,17 @@ describe('GET /api/teams', () => {
     });
   });
 
-  it("never offers a personal plugin, or what lives in it, as a team's", async () => {
+  it("never offers a personal plugin, or what lives in it, as a team's — whatever the resolver says", async () => {
+    // The stub grants EVERYTHING to the team, the personal skill and tool
+    // included (a hand-written grant inside a personal folder could): the
+    // route withholds them by where they live, not by the verdict.
     const h = await harness({
       caller: EVERYTHING,
       team: { 'Sales Team': EVERYTHING },
     });
-    const body = (await (await h.get()).json()) as { teams: { plugins: string[]; skills: string[] }[] };
-    expect(body.teams[0]?.plugins).toEqual(['gtm', 'finance']);
-    // The personal skill is probed like any other; its verdict here is the
-    // stub's "yes", so it stays — what keeps it out is the plugin, not the
-    // skill. A real resolver answers no for it (a personal folder admits no group).
-    expect(body.teams[0]?.plugins).not.toContain('personal-ali');
+    expect(await (await h.get()).json()).toEqual({
+      teams: [{ name: 'Sales Team', plugins: ['gtm', 'finance'], skills: ['outreach', 'ledger'], tools: ['hubspot', 'books'] }],
+    });
   });
 
   it('skips a group the resolver no longer knows', async () => {
@@ -177,9 +179,12 @@ describe('GET /api/teams', () => {
     expect(h.accessControl.canReadBatch).toHaveBeenCalledTimes(1);
     expect(h.accessControl.canReadAsGroupBatch).toHaveBeenCalledTimes(2);
     const [, , probes] = vi.mocked(h.accessControl.canReadBatch).mock.calls[0]!;
-    // Personal folders are not probed as plugins; everything else is, once.
+    // Personal folders are not probed at all — not as plugins, not for what
+    // they hold; everything else is, once.
     expect(probes).toEqual(expect.arrayContaining(['Plugins/GTM', 'Plugins/GTM/access.md', 'Plugins/Finance/books.tool']));
     expect(probes).not.toContain('Plugins/personal-ali');
+    expect(probes).not.toContain('Plugins/personal-ali/skills/weekly/SKILL.md');
+    expect(probes).not.toContain('Plugins/personal-ali/mcp.json');
     expect(new Set(probes).size).toBe(probes.length);
   });
 

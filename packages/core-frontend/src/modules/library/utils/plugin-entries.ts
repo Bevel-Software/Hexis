@@ -1,7 +1,7 @@
 import { attentionOf, type LibraryItem } from '../state/library-data';
 import type { PluginSummary } from '../services/plugins.api';
 import { pluginLabel } from './plugin-summary';
-import type { LibraryFilter, TeamAccess } from './status';
+import { filterLibraryItems, isInPlugin, pluginsOfItem, type LibraryFilter, type TeamAccess } from './status';
 
 /**
  * One plugin row of a gallery page — the Library's plugin renderer takes
@@ -19,7 +19,7 @@ export interface PluginEntry {
   toolCount: number;
   attention: number;
   urgent: boolean;
-  /** The caller is in it (or an item grant reaches inside). */
+  /** The caller can READ it — the server says so, or an item of it is in their catalog. */
   member: boolean;
 }
 
@@ -29,7 +29,10 @@ export interface PluginEntry {
  *  - Everything: the caller's own space, then every plugin the index lists,
  *    members' and locked alike — locked ones are still places on the map.
  *  - Owned by me: the plugins the caller manages, own space first.
- *  - A team: the plugins the team can read, as the server named them.
+ *  - A team: the plugins the team can read, as the server named them; the
+ *    counts on those rows are the TEAM's — how many of the plugin's skills
+ *    and tools are in the team's slice — so a row never claims more than
+ *    the cards beneath it show.
  *  - A plugin's own page and the personal page list items, not plugins.
  *
  * `query` matches the label, so a search narrows plugins with the cards.
@@ -46,9 +49,13 @@ export function pluginEntriesFor(
   const q = query.trim().toLowerCase();
   const matches = (label: string) => !q || label.toLowerCase().includes(q);
 
+  // Both witnesses: the index, and every plugin an item belongs to — by
+  // folder or by link. A plugin the caller reaches only through a shared
+  // skill it links has no folder item to name it, and must still be a row.
   const names = new Set<string>(summaries.map((g) => g.name));
-  for (const item of items) if (item.plugin) names.add(item.plugin);
+  for (const item of items) for (const name of pluginsOfItem(item)) names.add(name);
   const team = filter.kind === 'team' ? teams.find((t) => t.name === filter.group) : undefined;
+  const teamItems = filter.kind === 'team' ? filterLibraryItems(items, filter, '', teams) : null;
 
   const entries: PluginEntry[] = [];
   if (filter.kind !== 'team') {
@@ -69,15 +76,17 @@ export function pluginEntriesFor(
     const derivedTools = countKind(items, name, 'integration');
     const hasItems = derivedSkills + derivedTools > 0;
     const attention = attentionOf(items, name, summaries);
-    const member = summary ? summary.canRead || summary.canWrite || hasItems : hasItems;
+    // Membership is READ, never write: an admin rescued into a plugin's
+    // rules can manage a folder they cannot open, and that row is locked.
+    const member = summary ? summary.canRead || hasItems : hasItems;
     if (filter.kind === 'owned' && !summary?.canWrite) continue;
     if (filter.kind === 'team' && !team?.plugins.includes(name)) continue;
     entries.push({
       name,
       label: pluginLabel(name, summaries),
       summary,
-      skillCount: summary ? summary.skillCount : derivedSkills,
-      toolCount: summary ? summary.toolCount : derivedTools,
+      skillCount: teamItems ? countKind(teamItems, name, 'skill') : summary ? summary.skillCount : derivedSkills,
+      toolCount: teamItems ? countKind(teamItems, name, 'integration') : summary ? summary.toolCount : derivedTools,
       attention: attention.total,
       urgent: attention.brokenLinks > 0,
       member,
@@ -87,14 +96,17 @@ export function pluginEntriesFor(
 }
 
 /**
- * How many of a plugin's items the catalog holds, by FOLDER plugin. `null`
- * is the caller's own space: in no plugin folder and not a shared skill —
- * a shared skill is nobody's alone, however it is linked.
+ * How many of a plugin's items the catalog holds — by folder OR by link,
+ * the way the plugin page lists them. `null` is the caller's own space: in
+ * no plugin folder and not a shared skill — a shared skill is nobody's
+ * alone, however it is linked.
  */
 export function countKind(
   items: readonly LibraryItem[],
   plugin: string | null,
   kind: LibraryItem['kind'],
 ): number {
-  return items.filter((i) => i.plugin === plugin && i.kind === kind && (plugin !== null || !i.shared)).length;
+  return items.filter(
+    (i) => i.kind === kind && (plugin === null ? i.plugin === null && !i.shared : isInPlugin(i, plugin)),
+  ).length;
 }
