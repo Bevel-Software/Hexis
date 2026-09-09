@@ -387,16 +387,26 @@ export function FileViewer() {
    * USER made. A full-bleed file has no pane bar: its header clock stays put
    * and takes the focus instead. Every way out of the log or the comparison
    * goes through `backToDocument`, so none can forget the handoff.
+   *
+   * BOTH clocks are withdrawn by `historyAvailable`, and a comparison
+   * outlives it — the panel is opened by the chat's link, not by a clock, so
+   * it stays up through a failed status poll. Leaving that view with git
+   * silent (or a draft open) would name two controls that are not on screen
+   * and drop focus on `document`, the one outcome this machinery exists to
+   * prevent. So the document's own title is named last: it is rendered in
+   * every one of those states, and landing on it announces the document the
+   * user just came back to.
    */
   const paneClockRef = useRef<HTMLButtonElement>(null);
   const headerClockRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const handoff = useFocusHandoff(activeTab);
   const openHistory = () => {
     handoff('history', headerClockRef);
     setActiveTab('history');
   };
   const backToDocument = () => {
-    handoff('content', paneClockRef, headerClockRef);
+    handoff('content', paneClockRef, headerClockRef, titleRef);
     setActiveTab('content');
   };
 
@@ -1173,6 +1183,7 @@ export function FileViewer() {
         // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
         historyInPane={shellVariant === 'prose'}
         historyButtonRef={headerClockRef}
+        titleRef={titleRef}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}

@@ -83,6 +83,15 @@ export interface KbPageHeaderProps {
    * swap unmounts the control that was activated (see `FileViewer`).
    */
   historyButtonRef?: Ref<HTMLButtonElement>;
+  /**
+   * The document's own title, as the LAST place focus can land when a swap
+   * unmounts the control that was activated and both clocks are withdrawn
+   * (git not answering, or a draft open — see `FileViewer.backToDocument`).
+   * The heading is on screen in every one of those states and it names the
+   * thing the user just came back to, so a screen reader announces the
+   * document rather than nothing at all.
+   */
+  titleRef?: Ref<HTMLHeadingElement>;
   /** Disables Edit and explains why via `title`. */
   lockedBy: string | null;
   historyAvailable: boolean;
@@ -144,6 +153,7 @@ export function KbPageHeader({
   writeActionInPane = false,
   historyInPane = false,
   historyButtonRef,
+  titleRef,
   lockedBy,
   historyAvailable,
   isDirty,
@@ -192,7 +202,17 @@ export function KbPageHeader({
 
   return (
     <div className="mb-2 flex flex-wrap items-center gap-3">
-      <h1 className="min-w-0 text-display font-semibold text-ink">{titleOf(path)}</h1>
+      {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
+          `.focus()` land on it — the standard way to hand focus to a region
+          after a view swap. No focus ring: this is a programmatic landing
+          after the user's own click, not a control they are about to use. */}
+      <h1
+        ref={titleRef}
+        tabIndex={-1}
+        className="min-w-0 text-display font-semibold text-ink focus:outline-none"
+      >
+        {titleOf(path)}
+      </h1>
 
       {/* The three chips the deleted strip used to carry. */}
       {isDirty && <Badge tone="wait">Unsaved</Badge>}

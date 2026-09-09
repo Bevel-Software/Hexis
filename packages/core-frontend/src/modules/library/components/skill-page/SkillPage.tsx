@@ -287,16 +287,24 @@ export function SkillPage({
    * other (`useFocusHandoff`): opening lands on the pressed clock, closing
    * lands on the bar's. Only for a swap the USER made; the log closing
    * because git stopped answering names no target and moves nothing.
+   *
+   * The bar's clock is not guaranteed to come back: the file pane renders no
+   * actions at all while the detail request is in flight, so a refresh that
+   * lands while the log is open leaves the close with nothing to focus. The
+   * page's own title is named last for that — it is on screen in every state
+   * and names the skill the user just came back to. Knowledge does the same
+   * with its document title (`FileViewer.backToDocument`).
    */
   const paneClockRef = useRef<HTMLButtonElement>(null);
   const pressedClockRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const handoff = useFocusHandoff(viewingHistory);
   const openHistory = () => {
     handoff(true, pressedClockRef);
     setHistoryOpen(true);
   };
   const closeHistory = () => {
-    handoff(false, paneClockRef);
+    handoff(false, paneClockRef, titleRef);
     setHistoryOpen(false);
   };
   /**
@@ -529,7 +537,17 @@ export function SkillPage({
 
       <header className="mt-4">
         <div className="flex items-center gap-3">
-          <h1 className="min-w-0 text-display font-semibold text-ink">{skill?.name ?? name}</h1>
+          {/* `tabIndex={-1}` keeps the heading out of the tab order while
+              letting `.focus()` land on it — where focus goes when closing
+              the log finds no clock to hand back to. No focus ring: it is a
+              programmatic landing after the user's own click. */}
+          <h1
+            ref={titleRef}
+            tabIndex={-1}
+            className="min-w-0 text-display font-semibold text-ink focus:outline-none"
+          >
+            {skill?.name ?? name}
+          </h1>
           {skill && owned && (
             <Badge tone="outline" size="xs" className="shrink-0 uppercase">
               Owner

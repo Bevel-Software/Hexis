@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, type RefObject } from 'react';
+import { useCallback, useLayoutEffect, useRef, type RefObject } from 'react';
 
 /**
  * Hands keyboard focus across a swap that unmounts the control the user just
@@ -28,12 +28,18 @@ import { useCallback, useEffect, useRef, type RefObject } from 'react';
  * (a fetch rejecting a moment before) has them flushed BEFORE the click's
  * render; consumed there, the request would look for a control the swap has
  * not mounted yet and find nothing.
+ *
+ * `useLayoutEffect`, not `useEffect`. The swap has already unmounted the
+ * pressed control, so focus is on `document.body` the moment the commit
+ * lands. A passive effect runs after the browser has painted that state —
+ * one painted frame with focus on the body, which is the very thing this
+ * hook exists to avoid. A layout effect restores it before the paint.
  */
 export function useFocusHandoff<S>(
   state: S,
 ): (after: S, ...to: RefObject<HTMLElement | null>[]) => void {
   const pending = useRef<{ after: S; to: RefObject<HTMLElement | null>[] } | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const request = pending.current;
     if (!request || !Object.is(request.after, state)) return;
     pending.current = null;

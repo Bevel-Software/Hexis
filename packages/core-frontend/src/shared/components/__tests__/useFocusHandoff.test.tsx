@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useFocusHandoff } from '../useFocusHandoff';
 
 type View = 'doc' | 'log' | 'diff';
@@ -124,5 +124,57 @@ describe('useFocusHandoff', () => {
 
     await user.click(screen.getByRole('button', { name: 'Now the log' }));
     expect(screen.getByRole('button', { name: 'Landed' })).toHaveFocus();
+  });
+
+  /**
+   * The handoff runs in a LAYOUT effect, so focus is back before the browser
+   * paints the commit — otherwise there is a real frame on screen with focus
+   * on `document.body`, which is the thing this hook exists to prevent.
+   *
+   * "Before paint" is not observable in jsdom, so this asserts the ordering
+   * that produces it: layout effects all run ahead of every passive effect,
+   * children's included. The probe reports from a CHILD's passive effect — it
+   * sees the focused target with a layout effect, and `body` with a passive
+   * one, because a passive handoff in the parent would queue behind it.
+   */
+  it('restores focus before passive effects run, not after', async () => {
+    const seen: string[] = [];
+    function Reporter() {
+      useEffect(() => {
+        const active = document.activeElement;
+        seen.push(
+          !active || active === document.body ? 'BODY' : (active.textContent ?? active.tagName),
+        );
+      });
+      return null;
+    }
+    function Probe() {
+      const [view, setView] = useState<View>('doc');
+      const closeRef = useRef<HTMLButtonElement>(null);
+      const handoff = useFocusHandoff(view);
+      return (
+        <>
+          {view === 'doc' ? (
+            <button
+              onClick={() => {
+                handoff('log', closeRef);
+                setView('log');
+              }}
+            >
+              Open the log
+            </button>
+          ) : (
+            <button ref={closeRef}>Back to the document</button>
+          )}
+          <Reporter />
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    render(<Probe />);
+    seen.length = 0;
+
+    await user.click(screen.getByRole('button', { name: 'Open the log' }));
+    expect(seen).toEqual(['Back to the document']);
   });
 });
