@@ -120,10 +120,14 @@ describe('AddMemberInput', () => {
     await userEvent.type(input, 'al');
     await screen.findByText('Alice Green');
     expect(input).not.toHaveAttribute('aria-activedescendant');
-
-    await userEvent.keyboard('{ArrowDown}');
     const alice = screen.getByRole('option', { name: /Alice Green/ });
     const pat = screen.getByRole('option', { name: /Pat Kim/ });
+
+    // With no row active, Up starts at the bottom…
+    await userEvent.keyboard('{ArrowUp}');
+    expect(input).toHaveAttribute('aria-activedescendant', pat.id);
+    // …and Down from there wraps to the top.
+    await userEvent.keyboard('{ArrowDown}');
     expect(input).toHaveFocus();
     expect(input).toHaveAttribute('aria-activedescendant', alice.id);
     expect(alice).toHaveAttribute('aria-selected', 'true');

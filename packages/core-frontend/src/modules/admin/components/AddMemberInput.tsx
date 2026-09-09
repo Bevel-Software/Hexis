@@ -169,7 +169,10 @@ export function AddMemberInput({
             if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n > 0 && !busy) {
               e.preventDefault();
               setShowSuggest(true);
-              setActive(e.key === 'ArrowDown' ? (activeIdx + 1) % n : (activeIdx - 1 + n) % n);
+              // With no row active, Down starts at the top and Up at the bottom.
+              setActive(
+                e.key === 'ArrowDown' ? (activeIdx + 1) % n : activeIdx < 0 ? n - 1 : (activeIdx - 1 + n) % n,
+              );
               return;
             }
             // Home/End move the caret until a row is active; then they move the row.
