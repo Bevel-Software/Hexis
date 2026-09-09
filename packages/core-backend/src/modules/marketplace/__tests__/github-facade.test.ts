@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -75,6 +76,23 @@ function makeKeys() {
       };
     },
   };
+}
+
+/** An HTTP/1.1 request written byte for byte (Latin-1), answering with its status code. */
+function rawRequest(base: string, headLines: string[], body = ''): Promise<number> {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), hostname, () => {
+      socket.write(Buffer.from([...headLines, `Host: ${hostname}`, 'Connection: close', '', body].join('\r\n'), 'latin1'));
+    });
+    let received = '';
+    socket.setEncoding('latin1');
+    socket.on('data', (chunk: string) => {
+      received += chunk;
+    });
+    socket.on('end', () => resolve(Number(received.split(' ')[1])));
+    socket.on('error', reject);
+  });
 }
 
 /** One replica: its own bridge over the SHARED stores, its own HTTP listener. */
@@ -234,6 +252,71 @@ describe('the GitHub facade', () => {
     expect(minted.user.id).toBe('user-alice');
     expect(minted.kind).toBe(GITHUB_LINK_KEY_KIND);
     expect(minted.label).toBe(CLAUDE_CONSUMER.keyLabel);
+  });
+
+  it('logs every refused hop of the connect flow with the check that failed, never the secret or the code', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const creds = await a.credentials.ensure();
+      const code = await approve(a.base, 'alice');
+
+      const wrongSecret = await exchange(b.base, { client_id: creds.clientId, client_secret: 'not-it', code });
+      expect(wrongSecret.status).toBe(401);
+      const staleCode = await exchange(b.base, { client_id: creds.clientId, client_secret: creds.clientSecret, code: 'never-issued' });
+      expect(staleCode.status).toBe(400);
+      const badClient = await fetch(
+        `${a.base}/login/oauth/authorize?client_id=Iv1.0000&redirect_uri=${encodeURIComponent(CALLBACK)}`,
+        { redirect: 'manual' },
+      );
+      expect(badClient.status).toBe(400);
+
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(3);
+      expect(lines[0]).toMatch(/token exchange refused \(401 incorrect_client_credentials\): client_secret is not the registered one/);
+      expect(lines[1]).toMatch(/token exchange refused \(400 bad_verification_code\): no live code/);
+      expect(lines[2]).toMatch(/authorize refused \(400 unknown_client\): client_id is not the registered one/);
+      for (const line of lines) {
+        expect(line).not.toContain(creds.clientSecret);
+        expect(line).not.toContain('not-it');
+        expect(line).not.toContain(code);
+        expect(line).not.toContain('never-issued');
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the log to one line per event whatever bytes the caller puts in its headers', async () => {
+    // Node's parser already refuses C0 controls and bare CR/LF in a header
+    // value. What it lets through is obs-text — bytes 0x80–0xFF, read as
+    // Latin-1 — and that includes U+009B, the one-byte CSI that starts an
+    // ANSI sequence on its own and that JSON.stringify leaves raw. It goes
+    // over a bare socket: a fetch client refuses to build such a header.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const csi = String.fromCharCode(0x9b);
+      const creds = await a.credentials.ensure();
+      const body = JSON.stringify({ client_id: creds.clientId, client_secret: 'not-it', code: 'x' });
+      const exchange = await rawRequest(b.base, [
+        'POST /login/oauth/access_token HTTP/1.1',
+        `User-Agent: httpx${csi}[31mforged`,
+        'Content-Type: application/json',
+        'Accept: application/vnd.github+json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+      ], body);
+      expect(exchange).toBe(401);
+      const api = await rawRequest(b.base, ['GET /api/v3/repos/git/marketplace HTTP/1.1', `User-Agent: httpx${csi}[31mforged`]);
+      expect(api).toBe(401);
+
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines).toHaveLength(2);
+      for (const line of lines) {
+        expect(line.includes(csi)).toBe(false);
+        expect(line).toContain('"httpx\\u009b[31mforged"');
+      }
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('serves the repository, the head commit and the zipball of that person’s own tree — from the origin, never the configured userinfo', async () => {

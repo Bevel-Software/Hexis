@@ -5,8 +5,8 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { LibraryLayout } from '../components/LibraryLayout';
 import { LibraryPage } from '../components/LibraryPage';
 import { PluginPage } from '../components/PluginPage';
-import { PluginsIndexPage } from '../components/PluginsIndexPage';
 import { PersonalPluginPage } from '../components/PersonalPluginPage';
+import { TeamRoute } from '../components/TeamRoute';
 import { WelcomeRoute } from '../../onboarding/components/WelcomeRoute';
 import { WorkspaceItemRoute } from './WorkspaceItemRoute';
 import { decodePluginSegment, LIBRARY_ROOT, pathForPlugin, urlForLibraryItem, urlForSkillFile } from './library-paths';
@@ -32,14 +32,17 @@ export function LibraryRoutes() {
       <LibraryProvider>
         <Routes>
           <Route element={<LibraryLayout />}>
-            {/* The Library OPENS on its plugins. A plugin is where skills and
-                tools live and who they are for, so the index of them is the
-                orienting view; the undifferentiated card grid is a lens on
-                the same catalog and keeps its own row and URL below. */}
-            <Route index element={<PluginsIndexPage />} />
+            {/* The Library OPENS on Everything: plugins, skills and tools, the
+                whole catalog with the library-wide search. `everything` is
+                the same page at the URL it used to have, so older links
+                still land. */}
+            <Route index element={<LibraryPage filter={{ kind: 'all' }} />} />
+            <Route path="everything" element={<Navigate to={LIBRARY_ROOT} replace />} />
 
-            {/* The whole catalog as cards, with the library-wide search. */}
-            <Route path="everything" element={<LibraryPage filter={{ kind: 'all' }} />} />
+            {/* A team's lens — what one group from the access rules can use.
+                The name is a route param; the page decides whether the
+                team is known. */}
+            <Route path="teams/:group" element={<TeamRoute />} />
 
             {/* The connect-your-agent welcome — inside the layout, so the
                 sidebar (and the pill's selected state) is on screen with it.

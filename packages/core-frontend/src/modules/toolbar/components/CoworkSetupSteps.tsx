@@ -146,9 +146,9 @@ function MarketplaceSteps() {
       <Step title="Install the plugins you want">
         <Prose>
           Syncing lists the plugins, it installs none of them. Open Discover and choose <b>Add</b>{' '}
-          on <b>Hexis all</b>: that is the bundle, everything you may read in one install. The
-          other rows are the same skills split by group, if you would rather pick. <b>Update</b> in
-          Claude pulls what changed later.
+          on <b>Hexis all</b>: one plugin holding every skill you may read, plus the knowledge base
+          as an MCP server. The other rows are subsets of it, if you would rather pick.{' '}
+          <b>Update</b> in Claude pulls what changed later.
         </Prose>
         <ScreenshotStep shot={installPluginsShot} />
       </Step>
@@ -227,7 +227,8 @@ export function CoworkSetupSteps({ isAdmin }: { isAdmin: boolean }) {
             <Prose>
               Do this first: Claude never prompts for it. In the repository picker on{' '}
               <Out href={CLAUDE_CODE_WEB}>claude.ai/code</Out>, use the connect option for {host}.
-              You land on the sign-in here: approve, and you are back in Claude.
+              Claude's <b>Connect to GitHub</b> button is not it: that one signs you in to
+              github.com. You land on the sign-in here: approve, and you are back in Claude.
             </Prose>
           </Step>
         )}

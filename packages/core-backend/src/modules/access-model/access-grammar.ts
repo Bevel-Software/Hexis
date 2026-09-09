@@ -301,6 +301,15 @@ export interface RolesIndex {
       pluginName?: string;
       /** For `kind: 'plugin'`: the repo-relative plugin directory, e.g. `Plugins/GTM`. */
       pluginDir?: string;
+      /**
+       * For `kind: 'plugin'`: the role and group keys whose members the
+       * principal was expanded FROM — the non-user entries of the plugin's
+       * own rules, as `byCanonical` keys. `emails` is the flattened roster;
+       * this is its provenance, kept so a question asked of a PRINCIPAL
+       * rather than a person ("what can this team read?") can follow the
+       * team into the plugins that admit it, the way a member's key set does.
+       */
+      sourceKeys?: Set<string>;
     }
   >;
   byEmail: Map<string, Set<string>>;

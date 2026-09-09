@@ -93,8 +93,9 @@ export function ClaudeConnectionCard() {
           accept marketplaces only from a GitHub Enterprise Server their organization registered.
           Hexis answers as one. Register it once (Owner role, Team or Enterprise plan): in Claude's
           admin settings, under Claude Code, GitHub Enterprise Server, choose <b>Add manually</b>{' '}
-          and paste the fields below. When it asks you to connect your GitHub Enterprise account,
-          you sign in here.
+          and paste the fields below. That connects the deployment to the organization, not to
+          anyone: each person then connects their own account from the same section or from the
+          repository picker on claude.ai/code, and signs in here.
         </p>
       </div>
 

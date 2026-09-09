@@ -29,36 +29,43 @@ they may read.
 The webhook URL Claude generates can be ignored. Rotate the credentials from
 the same card if they are ever exposed; the Owner then re-enters them.
 
-## Connect your account (every person)
-
-Registering the instance signs nobody in, and Claude never prompts for it, so
-this comes before the marketplace.
-
-- Everyone: in the repository picker on claude.ai/code, use the connect option
-  for this deployment.
-- An Owner can also do it from **Admin settings → GitHub**: choose **Connect**,
-  then pick this deployment under **GitHub instance** rather than github.com.
-
-Either way you land on the platform's sign-in. Approve, and you are back in
-Claude.
+Registering connects the platform to your Claude organization, not to any
+person: every person, the Owner included, connects their own account before
+they can add the marketplace.
 
 ## Add the marketplace (every person)
 
-1. Copy the marketplace URL from **External agent access → Marketplaces**.
+1. Connect your account. Claude does not prompt for this, and its
+   **Connect to GitHub** button signs in to github.com, which is not it. Use
+   the connect option for the registered instance in the repository picker on
+   **claude.ai/code**; an Owner also has it in the GitHub Enterprise Server
+   section of the admin settings. You land on the platform's sign-in: approve,
+   and you are back in Claude.
+2. Copy the marketplace URL from **External agent access → Marketplaces**.
    It is the same URL Claude Code clones.
-2. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
+3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
    marketplace**, paste the URL and choose **Sync**.
-3. Syncing lists the plugins, it installs none of them. Open **Discover** and
-   choose **Add** on each one you want. The bundle plugin (`hexis-all`)
-   installs everything you may read at once. **Update** in Claude pulls what
-   changed.
+4. Syncing lists the plugins, it installs none of them. Open **Discover** and
+   choose **Add** on **hexis-all** for everything you may read in one plugin
+   (every skill, and the knowledge base as an MCP server), or single plugins
+   for a subset. **Update** in Claude pulls what changed.
 
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
-from Claude resumes them.
+from Claude resumes them. "Repository not found" or "GitHub access is
+required" on the marketplace means step 1 has not happened for your account.
 
 The same steps, with a screenshot of every screen, are on the **External agent
 access** page in the app. The registration half is shown to admins only.
+
+## When connecting does not take
+
+Approving on the platform and landing back in Claude proves the browser
+half. Claude's servers then exchange a code with the platform, and Claude
+shows nothing when that exchange is refused. The platform's server log
+does: every refused step is a line starting with `[github-facade]` naming
+the check that failed, such as a client secret that no longer matches the
+registration.
 
 ## Limits
 

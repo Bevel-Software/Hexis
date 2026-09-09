@@ -15,8 +15,10 @@ import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.co
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
+import { isAbsence } from '../../../../shared/fs-errors.js';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { withoutIgnoreLine } from './template-files.step.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -250,10 +252,14 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
     branch.move(LEGACY_GROUPS_DIR, PLUGINS_DIR);
     details.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
     changed = true;
-    // Rides WITH the rename, not on every run: the rename is what turned the
-    // ignore rule stale, so the run that renames is the run that heals it.
-    changed = (await rewriteIgnoreRootRule(repoDir, branch, details)) || changed;
   }
+  // On EVERY run and every branch, rename or not: the two root rules are
+  // stale for one reason (the plugins root is drawn by the sidebar now), and
+  // a draft migrated by an earlier release carries the `Plugins/` line that
+  // release wrote — the template step, which retires it on the protected
+  // branches, never visits a draft. Idempotent: nothing to drop, nothing
+  // declared.
+  changed = (await retireIgnoreRootRules(repoDir, branch, details)) || changed;
 
   // Runs whether or not the rename just happened, so a KB already on
   // `Plugins/` still gets missing manifests and any half-done reorganisation
@@ -282,36 +288,42 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
 }
 
 /**
- * Rewrite the KB's `.bevelignore` rule for the renamed root: the exact line
- * `Groups/` becomes `Plugins/`. Without this a migrated KB is left with a
- * stale rule for a folder that no longer exists and NO rule for the new one,
- * so plugin internals start showing up in the file tree and agent view.
+ * Retire the KB's `.bevelignore` rules for the plugins root, old name and
+ * new: every exact `Groups/` and `Plugins/` line goes. `Groups/` used to
+ * become `Plugins/` — the rename's companion edit, so plugin internals
+ * stayed out of the file tree and the agent view. The plugins root is no
+ * longer hidden at all (the Skills & Tools sidebar draws it as a file tree
+ * read from the workspace tree), so the old rule has nothing to become and
+ * the new one is as stale as it: a KB this step migrated under an earlier
+ * release carries the `Plugins/` line that release wrote, on every branch
+ * it visited — drafts included, which the template step never reaches.
  *
- * The file is the operator's — this touches ONE line, the one the platform's
- * own rename invalidated, and only when `Plugins/` is not already listed
- * (in which case the stale line is harmlessly dead and left alone).
+ * The file is the operator's — this touches only the lines the platform's
+ * own root rules put there. Every exact match goes, not just the first: a
+ * duplicate left behind would be found again on every boot and never
+ * touched, since the first pass is what makes the run a no-op. A `!…`
+ * negation is not the rule and stays.
  */
-async function rewriteIgnoreRootRule(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
+async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf-8');
-  } catch {
-    return false; // no ignore file — nothing went stale
+  } catch (err) {
+    // No ignore file — nothing went stale. Anything else (a directory in
+    // its place, a permission hole) is NOT "no file": a rule that may still
+    // be there would hide the tree while the run reports success, so the
+    // hole surfaces as the step's failure instead.
+    if (isAbsence(err)) return false;
+    throw err;
   }
-  const legacyRule = `${LEGACY_GROUPS_DIR}/`;
-  const newRule = `${PLUGINS_DIR}/`;
-  const lines = current.split('\n');
-  if (lines.some((l) => l.trim() === newRule)) return false;
-  const idx = lines.findIndex((l) => l.trim() === legacyRule);
-  if (idx === -1) return false;
-  // EVERY exact-match line follows the rename: the first becomes the new
-  // rule, any further duplicates are dropped — rewriting only the first would
-  // leave stale `Groups/` lines behind, and the already-has-Plugins guard
-  // above means a second pass would never touch them.
-  lines[idx] = newRule;
-  const rewritten = lines.filter((l, i) => i <= idx || l.trim() !== legacyRule);
-  branch.write(IGNORE_FILENAME, rewritten.join('\n'));
-  details.push(`${IGNORE_FILENAME}: ${legacyRule} → ${newRule}`);
+  const stale = [`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`];
+  const present = stale.filter((rule) => current.split('\n').some((l) => l.trim() === rule));
+  if (present.length === 0) return false;
+  // The same drop the template step makes, so a platform comment above a
+  // rule, and the blank line that opened an appended block, go with it.
+  const merged = present.reduce((text, rule) => withoutIgnoreLine(text, rule), current);
+  branch.write(IGNORE_FILENAME, merged);
+  details.push(`${IGNORE_FILENAME}: ${present.join(', ')} dropped`);
   return true;
 }
 

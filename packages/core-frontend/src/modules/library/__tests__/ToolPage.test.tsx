@@ -218,7 +218,7 @@ describe('ToolPage: frame', () => {
     expect(
       await screen.findByText("This tool doesn't exist, or you don't have access to it."),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '‹ All skills & tools' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '‹ Everything' })).toBeInTheDocument();
   });
 
   it('offers Try again when the secrets listing fails, and refetches on click', async () => {

@@ -17,6 +17,7 @@ export {
   GitHubFacadeRequestError,
   GITHUB_LINK_KEY_KIND,
   GITHUB_LINK_KEY_PREFIX,
+  GITHUB_LINK_KEY_SPEC,
   CLAUDE_CONSUMER,
   type GitHubFacadeConsumer,
   type GitHubFacadeDeps,
