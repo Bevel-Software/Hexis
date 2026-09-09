@@ -573,6 +573,10 @@ describe('PersonalSpacesStep', () => {
       // contradiction), and a shared plugin: all untouched.
       'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
       'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
+      // Entries that say nothing about READ — a denial under write, a
+      // download grant — leave the space open to an inherited `read:
+      // everyone`, so it is closed like any other.
+      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\ndownload:\n  - everyone\nowner:\n  - Di <di@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
@@ -596,14 +600,20 @@ describe('PersonalSpacesStep', () => {
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u3/access.md'), 'utf8'))).toBe(
         '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
       );
+      const u4 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u4/access.md'), 'utf8'));
+      expect(u4).toMatch(/read:\n  - deny everyone/);
+      expect(u4).toContain('write:\n  - deny everyone');
+      expect(u4).toContain('download:\n  - everyone');
+      expect(u4).toContain('owner:\n  - Di <di@x.io>');
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
       );
     }
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
-    expect(log).toContain('Keep a personal space private');
+    expect(log).toContain('Keep 2 personal spaces private');
     expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone');
+    expect(log).toContain('Plugins/personal-u4/access.md: read denies everyone');
 
     // Idempotent: the next boot finds every space already closed.
     await makeRunner([new PersonalSpacesStep()]).runAll();

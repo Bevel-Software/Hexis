@@ -7,6 +7,7 @@ import {
   accessMdDeclaresBodyRules,
   parseAccessFile,
   parseOwnAccessEntries,
+  sourceVerbsFor,
   type ParsedEntry,
   type Verb,
 } from '../../../access-model/access-grammar.js';
@@ -93,15 +94,19 @@ async function closePersonalSpaces(branch: KbBranch): Promise<void> {
 export function closePersonalSpaceRules(text: string, relativePath: string): string | null {
   const parsed = parseAccessFile(text, relativePath);
   if (!parsed.ok) return null;
-  // A file whose folder rules already name `everyone` — under any verb — is
-  // left as it is. A denial means the space is closed; a GRANT means someone
-  // opened it on purpose, and a denial written beside it would change
-  // nothing (a same-scope grant wins, and write/owner grants fold into
-  // read) while making the file read as a contradiction.
-  const namesEveryone = KNOWN_VERBS.some((verb) =>
-    parsed.file.entries[verb].some((e) => e.kind === 'role' && e.role === EVERYONE_CANONICAL),
+  // A file whose folder rules already settle `everyone`'s READ is left as it
+  // is: an entry under `read` itself (a denial means the space is closed; a
+  // grant means someone opened it on purpose), or a GRANT under a verb that
+  // folds into read (`write`, `owner` — the grammar's own list). A denial
+  // written beside such a grant would change nothing (a same-scope grant
+  // wins) while making the file read as a contradiction. Anything else —
+  // `deny everyone` under write alone, `download: everyone` — says nothing
+  // about read, and the space is still open to an inherited `read: everyone`.
+  const everyone = (e: ParsedEntry) => e.kind === 'role' && e.role === EVERYONE_CANONICAL;
+  const settled = sourceVerbsFor('read').some((verb) =>
+    parsed.file.entries[verb].some((e) => everyone(e) && (verb === 'read' || !e.deny)),
   );
-  if (namesEveryone) return null;
+  if (settled) return null;
   let next = text;
   for (const { verb, entry } of strandedFrontmatterGrants(text, parsed.file.entries)) {
     next = spliceGrant(next, verb, { kind: 'user', email: entry.email, displayName: entry.displayName }, { target: 'folder' }).text;
