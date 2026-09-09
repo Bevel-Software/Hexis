@@ -24,7 +24,7 @@ they may read.
 2. In Claude, open **Admin settings → Claude Code**, scroll to **Self-hosted
    infrastructure**, and choose **Add manually** beside GitHub Enterprise.
    Paste the fields from step 1. Any display name will do, port 443 is right,
-   and read replicas stay empty.
+   and read replicas stay empty. Choose **Add configuration** to save them.
 
 The webhook URL Claude generates can be ignored. Rotate the credentials from
 the same card if they are ever exposed; the Owner then re-enters them.
