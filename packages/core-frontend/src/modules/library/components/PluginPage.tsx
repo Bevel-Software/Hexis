@@ -484,13 +484,18 @@ export function PluginPage() {
 
       <ClientExtensionsSection kbDirName={kbDirName} folder={folderBelowRoot} />
       {/* Last, and closed by default: the file behind the page, for whoever
-          wants to see exactly what the plugin declares. */}
-      <ManifestSection
-        kbDirName={kbDirName}
-        folder={folderBelowRoot}
-        managed={summary?.linksAreManaged !== false}
-        canWrite={summary?.canWrite === true}
-      />
+          wants to see exactly what the plugin declares. Only once the SUMMARY
+          is in: it is what says where the plugin's folder is (a nested
+          plugin's is not `Plugins/<identity>`) and which manifest file it
+          carries — before it, `folderBelowRoot` is a guess from the URL. */}
+      {summary && (
+        <ManifestSection
+          kbDirName={kbDirName}
+          folder={folderBelowRoot}
+          managed={summary.linksAreManaged !== false}
+          canWrite={summary.canWrite}
+        />
+      )}
       {manageDialog}
     </div>
   );

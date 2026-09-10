@@ -129,8 +129,12 @@ export function ManifestSection({
         Manifest
         <span className="font-mono normal-case tracking-normal text-ink-faint">{file}</span>
       </button>
-      {open && (
-        <div id={panelId} className="mt-2.5">
+      {/* The panel is always in the tree, so the button's `aria-controls`
+          names an element that exists; only its CONTENT waits for `open`
+          (and so does the read behind it). */}
+      <div id={panelId} className={open ? 'mt-2.5' : undefined}>
+        {open && (
+          <>
           <p className="mb-2 max-w-[62ch] text-detail text-ink-muted">
             What the plugin declares: its identifier and version, the skills it links and the
             servers it names.{' '}
@@ -157,8 +161,9 @@ export function ManifestSection({
               Edit the manifest
             </Button>
           )}
-        </div>
-      )}
+          </>
+        )}
+      </div>
     </section>
   );
 }

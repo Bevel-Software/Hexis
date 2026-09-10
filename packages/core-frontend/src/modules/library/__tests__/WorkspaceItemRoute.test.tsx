@@ -263,8 +263,15 @@ describe('WorkspaceItemRoute', () => {
 
     it('waits for the plugin list rather than showing the file, then shows the file when no listed plugin holds it', async () => {
       // No plugin lists this folder (locked to the caller, or a stray file):
-      // once the list has answered, the file is the honest fallback.
+      // once the list has answered, the file is the honest fallback — and
+      // not one frame before, or a manifest would flash as a file on every
+      // page load.
+      let answer: (plugins: PluginSummary[]) => void = () => {};
+      vi.mocked(listPlugins).mockReturnValue(new Promise<PluginSummary[]>((r) => (answer = r)));
       renderAt(itemUrl('Plugins/Nope/plugin.json'));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument());
+      expect(screen.queryByLabelText('file-view')).not.toBeInTheDocument();
+      answer([]);
       await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
       expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Nope/plugin.json'));
     });

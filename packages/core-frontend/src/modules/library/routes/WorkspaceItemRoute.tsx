@@ -129,10 +129,13 @@ export function WorkspaceItemRoute() {
   // skill stays that skill's file, and a plugin the catalog does not list
   // for this caller (locked, unreadable) falls through to the file itself.
   if (isManifestFile(last)) {
+    // The list's word, once it has one: while it is (re)loading, the
+    // summaries on hand may be the previous list's, and a manifest whose
+    // identity just changed would open the wrong page from them.
+    if (data.pluginsLoading) return null;
     const holder = `${PLUGINS_DIR}/${[plugin, ...tail.slice(0, -1)].join('/')}`;
     const listed = data.pluginSummaries.find((s) => s.folders.includes(holder));
     if (listed) return <Navigate to={pathForPlugin(listed.name)} replace />;
-    if (data.pluginsLoading) return null;
   }
 
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
