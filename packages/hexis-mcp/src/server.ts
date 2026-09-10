@@ -25,6 +25,7 @@ import {
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
+  installSessionRecovery,
   flattenManualTool,
   toListedTool,
   toolError,
@@ -385,6 +386,38 @@ export async function createHexisMcpServer(
   const remote = remoteManualTemplate(mcpUrl, registeredKey);
 
   const { client, bindingId } = await buildClient(config, [remote, ...local], localOnly);
+
+  /**
+   * SESSION RECOVERY. A deployment redeploy — or a local `mcp.json` server
+   * restarting — throws away the sessions our manuals hold, and the next call
+   * on one gets the spec's 404/`-32001`. Installed on the client, so the MCP
+   * surface below and any `call_tool_chain` recover through the same mechanism.
+   *
+   * The template is rebuilt HERE rather than captured, for two reasons: the
+   * remote manual must re-register with whatever connection key renewal has
+   * arrived at by now (a restart and a renewal often land together), and
+   * awaiting an in-flight credential swap first keeps the two re-registration
+   * paths off each other — a swap is already re-registering this manual, and
+   * its result is the session the retry should use.
+   */
+  const localByName = new Map(local.map((m) => [String(m.name), m]));
+  installSessionRecovery(client, {
+    manualTemplate: async (name) => {
+      while (swapInProgress) await swapInProgress;
+      if (closed) return undefined;
+      return name === REMOTE_MANUAL_NAME
+        ? remoteManualTemplate(mcpUrl, config.connectionKey)
+        : localByName.get(name);
+    },
+    // Re-registering rediscovers the deployment's own copies of the code-mode
+    // meta-tools, which must not be callable from a chain here (see
+    // `discoverTools`) — the same purge first registration does.
+    afterReregister: async (name) => {
+      if (name === REMOTE_MANUAL_NAME) await removeRemoteMetaTools(client);
+    },
+    // No `log` override: the default writes to stderr, which is the only place
+    // this stdio server may write — stdout is the MCP transport itself.
+  });
 
   // Declared BEFORE the fallible phase below, so the failure path can run the
   // very same teardown: from the moment the client exists, registrations spawn

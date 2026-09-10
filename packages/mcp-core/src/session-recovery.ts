@@ -1,0 +1,270 @@
+import type { CodeModeUtcpClient } from '@utcp/code-mode';
+import type { CallTemplate } from '@utcp/sdk';
+import { registerManual } from './dispatch.js';
+
+/**
+ * Client-side recovery from MCP session loss: when a remote MCP server has
+ * forgotten the session our manual holds — almost always because it restarted —
+ * re-register that manual once and retry the call once.
+ *
+ * WHY IT LIVES ON THE CLIENT OBJECT. Two paths reach a tool call in our stack:
+ * `dispatchToolCall` (the MCP surface of the hosted proxy and of the local
+ * server) goes through `callToolStreaming`, and a code-mode chain
+ * (`call_tool_chain`, gate probes) goes through `callTool` — `callToolChain`
+ * bridges every in-isolate tool function to `this.callTool`. Wrapping those two
+ * methods ON THE CLIENT INSTANCE is the one seam both paths cross, so the
+ * policy exists exactly once instead of being copied into each caller.
+ *
+ * WHY ONLY SESSION LOSS. A retry is only safe when the first attempt provably
+ * did nothing. Session loss is decided in the server's ROUTING layer, before
+ * the request is dispatched to a tool, so a mutating tool cannot have run.
+ * Every other failure — a tool error, an auth refusal, a timeout, a reset
+ * connection — could have executed the tool, and is surfaced unchanged. That is
+ * the whole safety argument: it rests on the trigger class, so
+ * {@link isSessionLoss} is deliberately narrow and separately testable.
+ */
+
+/** The JSON-RPC code the Streamable HTTP transport reserves for a missing session. */
+const SESSION_NOT_FOUND_CODE = -32001;
+
+/** How far up a `cause` chain to look before giving up. */
+const MAX_CAUSE_DEPTH = 8;
+
+/** Each error in `err`'s `cause` chain, nearest first, bounded and cycle-safe. */
+function* errorChain(err: unknown): Generator<Record<string, unknown>> {
+  const seen = new Set<unknown>();
+  let current = err;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth += 1) {
+    if (current === null || typeof current !== 'object' || seen.has(current)) return;
+    seen.add(current);
+    yield current as Record<string, unknown>;
+    current = (current as { cause?: unknown }).cause;
+  }
+}
+
+/**
+ * The HTTP status an error carries, or undefined when it carries none.
+ *
+ * The MCP SDK's `StreamableHTTPError` puts the HTTP status in `code`, which is
+ * also where `McpError` puts its JSON-RPC code — and those two namespaces
+ * OVERLAP on the very number this module cares about: `-32001` is "Session not
+ * found" on the wire but `ErrorCode.RequestTimeout` in the SDK's own enum. The
+ * range test is what keeps them apart: a JSON-RPC code is negative and can
+ * never be read as a status, so a local request timeout never looks like a
+ * session miss (and is never retried).
+ */
+function httpStatusOf(err: Record<string, unknown>): number | undefined {
+  for (const key of ['code', 'status', 'statusCode'] as const) {
+    const value = err[key];
+    if (typeof value === 'number' && value >= 100 && value <= 599) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Does this error's text carry the session-not-found signal?
+ *
+ * The transport surfaces a failed POST as `Error POSTing to endpoint: <body>`,
+ * so the server's JSON-RPC body rides along in the message and is the only
+ * place the `-32001` is visible. Both halves of the spec's signal are accepted
+ * — the code (structural) and the reserved message — because a server may send
+ * either; requiring the 404 alongside is what keeps this from over-matching.
+ */
+function saysSessionNotFound(message: string): boolean {
+  return (
+    new RegExp(`"code"\\s*:\\s*${SESSION_NOT_FOUND_CODE}\\b`).test(message) ||
+    /\bsession not found\b/i.test(message)
+  );
+}
+
+/**
+ * Is `err` unambiguously "the server has forgotten this session"?
+ *
+ * The signal is HTTP 404 carrying JSON-RPC `-32001` / "Session not found", which
+ * the MCP spec reserves for exactly one meaning: the request presented an
+ * `Mcp-Session-Id` the server no longer holds, and the client should
+ * re-initialize. The presented-a-session-id half is not observable from here,
+ * and does not need to be: a request with NO session id is answered 400 /
+ * `-32000` (a client mistake with nothing to recover), so a 404 in this shape
+ * implies a session id was sent.
+ *
+ * Everything else is false — including a 404 whose body is an ordinary
+ * not-found, an auth refusal, a timeout (see {@link httpStatusOf}), and a
+ * refused connection. Pure and exported so this boundary can be pinned by test
+ * rather than inferred from the recovery path around it.
+ */
+export function isSessionLoss(err: unknown): boolean {
+  for (const candidate of errorChain(err)) {
+    if (httpStatusOf(candidate) !== 404) continue;
+    const message = candidate.message;
+    if (typeof message === 'string' && saysSessionNotFound(message)) return true;
+  }
+  return false;
+}
+
+export interface SessionRecoveryOptions {
+  /**
+   * The template to re-register `manualName` with, or undefined when this
+   * surface holds none — an unknown manual is not recovered, and its failure
+   * surfaces unchanged.
+   *
+   * Resolved at RECOVERY time, not at install time, so a manual whose template
+   * carries a credential that can be rotated (the local server renews its
+   * connection key) re-registers with the current one. May be async, which is
+   * also the hook a surface uses to wait out a re-registration of its own that
+   * is already in flight.
+   */
+  manualTemplate: (manualName: string) => CallTemplate | undefined | Promise<CallTemplate | undefined>;
+  /**
+   * Ran after a successful re-registration. Re-registration REDISCOVERS the
+   * manual, so a surface that prunes something from the registry at first
+   * registration (the local server drops the deployment's copies of the
+   * code-mode meta-tools) has to prune it again here.
+   */
+  afterReregister?: (manualName: string) => Promise<void> | void;
+  /** Where the one-line-per-recovery log goes. Defaults to stderr. */
+  log?: (message: string) => void;
+}
+
+/**
+ * Wrap `client`'s tool-call entry points with session recovery, in place.
+ *
+ * Returns the same client so it can be used as an expression at the
+ * construction site. Installing twice is a no-op: the second call would stack a
+ * second retry on the first, which is precisely the "exactly once" guarantee
+ * this module exists to make.
+ */
+const INSTALLED = Symbol.for('@bevel-software/platform-mcp-core.sessionRecovery');
+
+export function installSessionRecovery(
+  client: CodeModeUtcpClient,
+  options: SessionRecoveryOptions,
+): CodeModeUtcpClient {
+  const marked = client as unknown as Record<symbol, unknown>;
+  if (marked[INSTALLED]) return client;
+  marked[INSTALLED] = true;
+
+  const log = options.log ?? ((message: string) => console.error(message));
+  const callTool = client.callTool.bind(client);
+  const callToolStreaming = client.callToolStreaming.bind(client);
+
+  /**
+   * How many times each manual has been re-registered. A call reads this
+   * BEFORE its attempt; if the number moved while the attempt was in flight,
+   * some other call already replaced the session this one was using and the
+   * retry can go straight through — no second re-registration, and no window
+   * in which a burst of failures that arrive slightly apart each starts its
+   * own. Together with `inflight` below, this is what makes the coalescing
+   * hold for concurrent calls whether they fail together or in sequence.
+   */
+  const generations = new Map<string, number>();
+  const inflight = new Map<string, Promise<boolean>>();
+
+  const generationOf = (manualName: string): number => generations.get(manualName) ?? 0;
+
+  /** Deregister + register once. Never throws: the answer is "may we retry?". */
+  async function reregister(manualName: string): Promise<boolean> {
+    const template = await options.manualTemplate(manualName);
+    // Not ours to re-register — or not an MCP manual at all, in which case it
+    // holds no session and the 404 came from somewhere we must not second-guess.
+    if (!template || template.call_template_type !== 'mcp') return false;
+    try {
+      // Deregistering is what closes the manual's (now dead) session, so the
+      // registration below dials a fresh one instead of reusing the cached
+      // transport. Best effort: a manual already gone is not a failure here.
+      await client.deregisterManual(manualName);
+    } catch (err) {
+      log(
+        `[mcp] session lost on '${manualName}': deregistering before re-registration failed ` +
+          `(${err instanceof Error ? err.message : String(err)}); re-registering anyway.`,
+      );
+    }
+    const result = await registerManual(client, template);
+    if (!result.ok) {
+      // The server is very likely still coming back up. The call fails as it
+      // would have anyway; the NEXT one recovers once the server answers.
+      log(`[mcp] session lost on '${manualName}' — re-registration failed: ${result.error}`);
+      return false;
+    }
+    generations.set(manualName, generationOf(manualName) + 1);
+    if (options.afterReregister) {
+      try {
+        await options.afterReregister(manualName);
+      } catch (err) {
+        log(
+          `[mcp] post-re-registration cleanup for '${manualName}' failed: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return true;
+  }
+
+  /** Single-flight {@link reregister}: concurrent losers share one attempt. */
+  function reregisterOnce(manualName: string): Promise<boolean> {
+    const existing = inflight.get(manualName);
+    if (existing) return existing;
+    const tracked = reregister(manualName).finally(() => {
+      if (inflight.get(manualName) === tracked) inflight.delete(manualName);
+    });
+    inflight.set(manualName, tracked);
+    return tracked;
+  }
+
+  /**
+   * May this failed call be retried? True only for session loss on a manual we
+   * hold a template for, and only after the session has actually been replaced.
+   */
+  async function recover(toolName: string, generation: number, err: unknown): Promise<boolean> {
+    if (!isSessionLoss(err)) return false;
+    const manualName = toolName.split('.')[0];
+    if (!manualName) return false;
+    // Someone else re-registered while this call was in flight: the session it
+    // failed against is already gone, so retry against the new one directly.
+    if (generationOf(manualName) !== generation) {
+      log(`[mcp] session lost on '${manualName}' — re-registered by a concurrent call; retrying.`);
+      return true;
+    }
+    if (!(await reregisterOnce(manualName))) return false;
+    log(`[mcp] session lost on '${manualName}' — re-registered and retried.`);
+    return true;
+  }
+
+  client.callTool = async function recoveringCallTool(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+  ): Promise<unknown> {
+    const generation = generationOf(toolName.split('.')[0] ?? '');
+    try {
+      return await callTool(toolName, toolArgs);
+    } catch (err) {
+      if (!(await recover(toolName, generation, err))) throw err;
+      // Exactly one retry: whatever this produces is what the caller sees,
+      // including a second session loss.
+      return await callTool(toolName, toolArgs);
+    }
+  };
+
+  client.callToolStreaming = async function* recoveringCallToolStreaming(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+  ): AsyncGenerator<unknown, void, unknown> {
+    const generation = generationOf(toolName.split('.')[0] ?? '');
+    let yielded = false;
+    try {
+      for await (const chunk of callToolStreaming(toolName, toolArgs)) {
+        yielded = true;
+        yield chunk;
+      }
+      return;
+    } catch (err) {
+      // A stream that already produced output is past the point where session
+      // loss can happen (the session is validated before the first byte), and
+      // replaying it would duplicate the chunks the caller already saw.
+      if (yielded || !(await recover(toolName, generation, err))) throw err;
+    }
+    yield* callToolStreaming(toolName, toolArgs);
+  };
+
+  return client;
+}

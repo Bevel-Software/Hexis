@@ -16,12 +16,14 @@
  * Everything between "a UTCP client with manuals registered" and "an MCP result"
  * is identical, and lives here: name flattening, the tool-name/schema guards
  * that stop one bad tool blanking a client's whole toolset, streaming dispatch,
- * and the code-mode meta-tools.
+ * the code-mode meta-tools, and recovery from a remote server that restarted
+ * and forgot our session (see `session-recovery.ts`).
  *
  * What is NOT here, on purpose: manual DISCOVERY (who may see which manual is
  * an access-control question the hosted REST surface answers), credential
- * resolution (a vault loader server-side, `process.env` locally), and retry
- * policy (see `registerManual`).
+ * resolution (a vault loader server-side, `process.env` locally), and
+ * REGISTRATION retry policy (see `registerManual`) — which is not the same
+ * thing as session recovery, and stays each surface's own.
  */
 
 export {
@@ -54,6 +56,12 @@ export {
 } from './meta-tools.js';
 
 export { registerManual, dispatchToolCall } from './dispatch.js';
+
+export {
+  isSessionLoss,
+  installSessionRecovery,
+  type SessionRecoveryOptions,
+} from './session-recovery.js';
 
 export {
   type SkillSummary,

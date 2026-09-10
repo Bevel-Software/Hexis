@@ -28,6 +28,7 @@ import {
   dispatchMetaTool,
   dispatchToolCall,
   registerManual,
+  installSessionRecovery,
   flattenManualTool,
   toListedTool,
   toolError,
@@ -447,7 +448,24 @@ export class McpService {
       variables,
       load_variables_from: [bevelSecretsLoaderConfig(userId)],
     });
-    return CodeModeUtcpClient.create(process.cwd(), config);
+    const client = await CodeModeUtcpClient.create(process.cwd(), config);
+    /**
+     * SESSION RECOVERY. A proxied third-party MCP server that restarts (or
+     * expires a session) answers our next call with the spec's 404/`-32001`;
+     * without this the session's tools stay broken until the caller reconnects.
+     * Installed on the client, so the dispatch surface and `call_tool_chain`
+     * recover through the same mechanism. Re-registration re-uses the very
+     * template discovery registered with, resolved through the same variable
+     * tiers, so a healed manual is identical to a freshly discovered one.
+     *
+     * Deliberately clear of {@link ManualFailureMemo}: that memo is a circuit
+     * breaker for manuals whose REGISTRATION failed — which have no discovered
+     * tools to call in the first place — so a recovery neither consults it (a
+     * memoized failure must not block healing a manual that registered fine)
+     * nor records into it (an evicted session is not a broken credential).
+     */
+    const byName = new Map(manuals.map((m) => [String(m.name), m]));
+    return installSessionRecovery(client, { manualTemplate: (name) => byName.get(name) });
   }
 
   /**
