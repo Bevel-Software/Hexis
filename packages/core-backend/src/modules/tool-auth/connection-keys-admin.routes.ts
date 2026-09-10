@@ -40,7 +40,7 @@ export function createConnectionKeysAdminRoutes(
     }
   });
 
-  // DELETE /api/admin/connection-keys/:id — revoke (disconnect) a key
+  // DELETE /api/admin/connection-keys/:id — revoke a key
   // belonging to ANY account. Idempotent on an already-revoked key; 404 when
   // no such key exists. Revoked rows are kept so `last_used_at` stays
   // auditable after a leak — there is deliberately no admin hard-delete.

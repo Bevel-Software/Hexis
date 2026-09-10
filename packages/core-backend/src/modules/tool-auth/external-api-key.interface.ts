@@ -152,7 +152,7 @@ export interface IExternalApiKeyService {
 
   /**
    * Permanently delete a token row, dropping its audit trail. Only permitted
-   * on an already-revoked token — an active key must be disconnected first,
+   * on an already-revoked token — an active key must be revoked first,
    * so a live agent's access is never yanked by a single click. Throws
    * TokenNotFoundError if the token doesn't belong to the user, and
    * TokenStillActiveError if it hasn't been revoked yet.
