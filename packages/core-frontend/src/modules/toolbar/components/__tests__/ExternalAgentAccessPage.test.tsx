@@ -81,6 +81,7 @@ beforeEach(() => {
       createdAt: Date.now(),
       lastUsedAt: null,
       revokedAt: null,
+      revokedBy: null,
     },
   });
 });
@@ -473,9 +474,9 @@ describe('the Marketplaces tab', () => {
 
   it('tells Claude connections from keys by their stored kind — never by the label', async () => {
     listMock.mockResolvedValue([
-      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null },
       // A hand-made key wearing the link's usual label is still a key.
-      { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null },
     ]);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
@@ -490,9 +491,30 @@ describe('the Marketplaces tab', () => {
     expect(screen.queryByText('My Cowork link')).toBeNull();
   });
 
+  it('tells a key an admin revoked from one you disconnected yourself', async () => {
+    // "Disconnected" invites reconnecting. A key an admin took will not come
+    // back that way, so the row must say who ended it.
+    listMock.mockResolvedValue([
+      { id: 'k1', kind: 'key', label: 'CI', createdAt: Date.now(), lastUsedAt: null, revokedAt: Date.now(), revokedBy: 'admin' },
+      { id: 'k2', kind: 'key', label: 'Laptop', createdAt: Date.now(), lastUsedAt: null, revokedAt: Date.now(), revokedBy: 'owner' },
+      // Revoked before who-did-it was recorded: read as the owner's doing.
+      { id: 'k3', kind: 'key', label: 'Old', createdAt: Date.now(), lastUsedAt: null, revokedAt: Date.now(), revokedBy: null },
+    ]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText('CI');
+    const rowOf = (label: string) => screen.getByText(label).closest('li') as HTMLElement;
+    expect(rowOf('CI')).toHaveTextContent('Revoked by an admin');
+    expect(rowOf('CI')).not.toHaveTextContent('Disconnected');
+    expect(rowOf('Laptop')).toHaveTextContent('Disconnected');
+    expect(rowOf('Laptop')).not.toHaveTextContent('Revoked by an admin');
+    expect(rowOf('Old')).toHaveTextContent('Disconnected');
+  });
+
   it('says where the keys went when only Claude connections exist, and shows a load error on both tabs', async () => {
     listMock.mockResolvedValue([
-      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null, revokedBy: null },
     ]);
     const user = userEvent.setup();
     const first = mount(PUBLIC_URL);

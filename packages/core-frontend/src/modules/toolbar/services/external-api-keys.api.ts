@@ -8,6 +8,12 @@ export interface ExternalApiKeySummary {
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /**
+   * Who ended it, once revoked: `owner` (you disconnected it) or `admin` (an
+   * admin revoked it — it will not come back by reconnecting). Null while
+   * live, and on keys revoked before this was recorded.
+   */
+  revokedBy: 'owner' | 'admin' | null;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };
 }
@@ -50,13 +56,13 @@ export async function disconnectExternalApiKey(id: string): Promise<void> {
   const res = await authFetch(`/api/mcp/external-api-keys/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) await unwrap(res, "Couldn't revoke this key.");
+  if (!res.ok) await unwrap(res, "Couldn't disconnect this key.");
 }
 
 /**
- * Permanently delete a revoked key (drops its audit row). The backend
+ * Permanently delete a disconnected key (drops its audit row). The backend
  * refuses to delete a still-active key, so callers should only offer this on
- * rows that are already revoked.
+ * rows that are already disconnected.
  */
 export async function deleteExternalApiKey(id: string): Promise<void> {
   const res = await authFetch(

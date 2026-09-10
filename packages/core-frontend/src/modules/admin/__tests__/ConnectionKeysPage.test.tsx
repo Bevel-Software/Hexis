@@ -28,6 +28,7 @@ const ALICE_CI: AdminConnectionKey = {
   createdAt: NOW - 10 * DAY,
   lastUsedAt: NOW - 2 * 60 * 60 * 1000,
   revokedAt: null,
+  revokedBy: null,
   user: ALICE,
 };
 const ALICE_LAPTOP: AdminConnectionKey = {
@@ -37,6 +38,7 @@ const ALICE_LAPTOP: AdminConnectionKey = {
   createdAt: NOW - 3 * DAY,
   lastUsedAt: null,
   revokedAt: null,
+  revokedBy: null,
   user: ALICE,
 };
 const BOB_OLD: AdminConnectionKey = {
@@ -46,6 +48,7 @@ const BOB_OLD: AdminConnectionKey = {
   createdAt: NOW - 40 * DAY,
   lastUsedAt: NOW - 30 * DAY,
   revokedAt: NOW - 20 * DAY,
+  revokedBy: 'owner',
   user: BOB,
 };
 const BOB_LINK: AdminConnectionKey = {
@@ -55,6 +58,7 @@ const BOB_LINK: AdminConnectionKey = {
   createdAt: NOW - 1 * DAY,
   lastUsedAt: NOW - 60 * 1000,
   revokedAt: null,
+  revokedBy: null,
   user: BOB,
 };
 
@@ -107,7 +111,7 @@ describe('ConnectionKeysPage', () => {
     expect(listConnectionKeys).not.toHaveBeenCalled();
   });
 
-  it('lists live keys per account with created / last used, hiding revoked ones by default', async () => {
+  it('lists live keys per account with created / last used, hiding disconnected ones by default', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
 
@@ -125,18 +129,18 @@ describe('ConnectionKeysPage', () => {
     expect(within(bob).getByText('Claude link')).toBeInTheDocument();
     expect(within(bob).queryByText('Old script')).not.toBeInTheDocument();
 
-    expect(screen.getByText(/3 live keys · 1 revoked/)).toBeInTheDocument();
+    expect(screen.getByText(/3 live keys · 1 disconnected/)).toBeInTheDocument();
   });
 
-  it('reveals revoked keys, without a revoke button, when toggled', async () => {
+  it('reveals disconnected keys, without a revoke button, when toggled', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole('checkbox', { name: 'Show revoked keys' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Show disconnected keys' }));
 
     const bob = screen.getByRole('region', { name: 'Keys for bob@example.com' });
     expect(within(bob).getByText('Old script')).toBeInTheDocument();
-    expect(within(bob).getByText(/Revoked 2w ago/)).toBeInTheDocument();
+    expect(within(bob).getByText(/Disconnected by owner 2w ago/)).toBeInTheDocument();
     expect(
       within(bob).queryByRole('button', { name: 'Revoke Old script for bob@example.com' }),
     ).not.toBeInTheDocument();
@@ -189,7 +193,7 @@ describe('ConnectionKeysPage', () => {
     expect(screen.getByText('CI pipeline')).toBeInTheDocument();
   });
 
-  it('keeps a revoked key revoked when the reload after revoking fails', async () => {
+  it('keeps a revoked key disconnected when the reload after revoking fails', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('CI pipeline')).toBeInTheDocument());
     vi.mocked(listConnectionKeys).mockRejectedValueOnce(new Error('Could not load connection keys'));
@@ -202,14 +206,14 @@ describe('ConnectionKeysPage', () => {
     );
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load connection keys');
-    // The server said yes, so the row is revoked regardless of the reload:
-    // hidden with the other revoked keys, and never offering Revoke again.
+    // The server said yes, so the row is disconnected regardless of the reload:
+    // hidden with the other disconnected keys, and never offering Revoke again.
     expect(
       screen.queryByRole('button', { name: 'Revoke CI pipeline for alice@example.com' }),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole('checkbox', { name: 'Show revoked keys' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Show disconnected keys' }));
     expect(screen.getByText('CI pipeline')).toBeInTheDocument();
-    expect(screen.getByText(/2 live keys · 2 revoked/)).toBeInTheDocument();
+    expect(screen.getByText(/2 live keys · 2 disconnected/)).toBeInTheDocument();
   });
 
   it('ignores a stale list response that lands after a newer one', async () => {
@@ -242,12 +246,12 @@ describe('ConnectionKeysPage', () => {
 
     const ciRevoked = { ...ALICE_CI, revokedAt: NOW };
     second.resolve([ciRevoked, { ...ALICE_LAPTOP, revokedAt: NOW }]);
-    await waitFor(() => expect(screen.getByText(/0 live keys · 2 revoked/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/0 live keys · 2 disconnected/)).toBeInTheDocument());
 
     // The stale reload: taken at face value, Laptop would come back to life.
     first.resolve([ciRevoked, ALICE_LAPTOP]);
     await new Promise((r) => setTimeout(r, 0));
-    expect(screen.getByText(/0 live keys · 2 revoked/)).toBeInTheDocument();
+    expect(screen.getByText(/0 live keys · 2 disconnected/)).toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Revoke Laptop for alice@example.com' }),
     ).not.toBeInTheDocument();

@@ -15,6 +15,7 @@ import {
   type IExternalApiKeyService,
   type KeyKindSpec,
   type MintOptions,
+  type RevokedBy,
   type MintedExternalApiKey,
 } from './external-api-key.interface.js';
 
@@ -171,26 +172,31 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
   async revoke(id: string, userId: string): Promise<void> {
     // Scope by userId so a user can never revoke another user's token even
     // if they learn the id.
-    await this.markRevoked(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId))!);
+    await this.markRevoked(
+      and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId))!,
+      'owner',
+    );
   }
 
   async revokeAny(id: string): Promise<void> {
     // No owner scope: the caller is an admin acting across the deployment.
     // The route that exposes this is admin-gated; nothing user-facing may
-    // reach it.
-    await this.markRevoked(eq(externalApiKeys.id, id));
+    // reach it. Recorded as such so the owner is told it was taken, not
+    // that they disconnected it.
+    await this.markRevoked(eq(externalApiKeys.id, id), 'admin');
   }
 
   /**
-   * Set `revokedAt` on the rows matching `scope`. Idempotent on
-   * already-revoked rows because we only set `revokedAt` when it's currently
-   * null — re-revoking returns 0 rows changed but no error. Throws
-   * TokenNotFoundError when `scope` matches nothing at all.
+   * Set `revokedAt` (and who did it) on the rows matching `scope`. Idempotent
+   * on already-revoked rows because we only write when `revokedAt` is
+   * currently null — re-revoking returns 0 rows changed but no error, and
+   * never rewrites who ended it first. Throws TokenNotFoundError when `scope`
+   * matches nothing at all.
    */
-  private async markRevoked(scope: SQL): Promise<void> {
+  private async markRevoked(scope: SQL, by: RevokedBy): Promise<void> {
     const result = await this.db
       .update(externalApiKeys)
-      .set({ revokedAt: new Date() })
+      .set({ revokedAt: new Date(), revokedBy: by })
       .where(and(scope, isNull(externalApiKeys.revokedAt)))
       .returning({ id: externalApiKeys.id });
 
@@ -261,5 +267,6 @@ function toSummary(row: typeof externalApiKeys.$inferSelect): ExternalApiKeySumm
     createdAt: row.createdAt.getTime(),
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.getTime() : null,
     revokedAt: row.revokedAt ? row.revokedAt.getTime() : null,
+    revokedBy: (row.revokedBy as RevokedBy | null) ?? null,
   };
 }

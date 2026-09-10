@@ -148,6 +148,7 @@ describe('ExternalApiKeyService', () => {
         createdAt: row.createdAt.getTime(),
         lastUsedAt: null,
         revokedAt: null,
+        revokedBy: null,
       });
     });
 
@@ -301,6 +302,7 @@ describe('ExternalApiKeyService', () => {
         createdAt: rows[0].createdAt.getTime(),
         lastUsedAt: rows[0].lastUsedAt!.getTime(),
         revokedAt: null,
+        revokedBy: null,
       });
       expect(summaries[1].revokedAt).toBe(rows[1].revokedAt!.getTime());
       // sanity-check that ordering was requested (we can't introspect the
@@ -330,6 +332,7 @@ describe('ExternalApiKeyService', () => {
           createdAt: aliceKey.createdAt.getTime(),
           lastUsedAt: aliceKey.lastUsedAt!.getTime(),
           revokedAt: null,
+          revokedBy: null,
           user: { id: 'u-alice', email: 'alice@example.com', name: 'Alice' },
         },
         {
@@ -339,6 +342,7 @@ describe('ExternalApiKeyService', () => {
           createdAt: bobKey.createdAt.getTime(),
           lastUsedAt: null,
           revokedAt: bobKey.revokedAt!.getTime(),
+          revokedBy: null,
           user: { id: 'u-bob', email: 'bob@example.com', name: 'Bob' },
         },
       ]);
@@ -359,6 +363,8 @@ describe('ExternalApiKeyService', () => {
       await service.revokeAny('tok-1');
 
       expect(calls.set[0][0].revokedAt).toBeInstanceOf(Date);
+      // Recorded as the admin's doing, so the owner's page can say so.
+      expect(calls.set[0][0].revokedBy).toBe('admin');
       expect((db as any).select).not.toHaveBeenCalled();
       // The fake DB ignores predicates, so render the one the UPDATE was
       // given: it must pin the id and the not-yet-revoked state, and must NOT
@@ -407,6 +413,7 @@ describe('ExternalApiKeyService', () => {
 
       const setArgs = calls.set[0][0];
       expect(setArgs.revokedAt).toBeInstanceOf(Date);
+      expect(setArgs.revokedBy).toBe('owner');
       // No follow-up SELECT — the UPDATE found a row.
       expect((db as any).select).not.toHaveBeenCalled();
     });
@@ -450,7 +457,7 @@ describe('ExternalApiKeyService', () => {
       expect((db as any).delete).toHaveBeenCalledWith(externalApiKeys);
     });
 
-    it('throws TokenStillActiveError when the token exists but was never revoked', async () => {
+    it('throws TokenStillActiveError when the token exists but was never disconnected', async () => {
       // SELECT finds the row with a null revokedAt → still active; no delete.
       const { db } = makeFakeDb([[{ revokedAt: null }]]);
       const service = new ExternalApiKeyService(db, 'bevel_');

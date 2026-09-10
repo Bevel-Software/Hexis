@@ -13,6 +13,8 @@ export interface AdminConnectionKey {
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /** Who ended it once revoked: the owner, or an admin. Null while live. */
+  revokedBy: 'owner' | 'admin' | null;
   user: {
     id: string;
     email: string;
@@ -34,7 +36,7 @@ export async function listConnectionKeys(): Promise<AdminConnectionKey[]> {
 }
 
 /**
- * Revoke any account's key. The row is kept so its last-used
+ * Revoke (disconnect) any account's key. The row is kept so its last-used
  * time stays auditable; the agent holding the key loses access at once.
  */
 export async function revokeConnectionKey(id: string): Promise<void> {

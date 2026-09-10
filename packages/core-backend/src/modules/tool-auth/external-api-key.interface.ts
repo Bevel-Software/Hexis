@@ -31,7 +31,16 @@ export interface ExternalApiKeySummary {
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /**
+   * Who ended it, once `revokedAt` is set: the owner themselves, or an admin
+   * from the deployment overview. Null while live (and on rows revoked
+   * before this was recorded, which read as the owner's doing).
+   */
+  revokedBy: RevokedBy | null;
 }
+
+/** Who revoked a key: its owner, or an admin acting across the deployment. */
+export type RevokedBy = 'owner' | 'admin';
 
 /**
  * Result of minting a new connection key. `plaintext` is shown to the user
@@ -143,16 +152,17 @@ export interface IExternalApiKeyService {
   listForDeployment(): Promise<AdminExternalApiKeySummary[]>;
 
   /**
-   * Admin revoke: mark a token revoked WITHOUT scoping by owner. Same
-   * idempotency as {@link revoke}; throws TokenNotFoundError when no such
-   * token exists. Only reachable through an admin-gated route — the
-   * per-user route must keep using {@link revoke}.
+   * Admin revoke: mark a token revoked WITHOUT scoping by owner, recording
+   * `revokedBy: 'admin'` so the owner's page can say it was taken rather than
+   * disconnected. Same idempotency as {@link revoke}; throws
+   * TokenNotFoundError when no such token exists. Only reachable through an
+   * admin-gated route — the per-user route must keep using {@link revoke}.
    */
   revokeAny(id: string): Promise<void>;
 
   /**
    * Permanently delete a token row, dropping its audit trail. Only permitted
-   * on an already-revoked token — an active key must be revoked first,
+   * on an already-revoked token — an active key must be disconnected first,
    * so a live agent's access is never yanked by a single click. Throws
    * TokenNotFoundError if the token doesn't belong to the user, and
    * TokenStillActiveError if it hasn't been revoked yet.
