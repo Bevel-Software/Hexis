@@ -14,7 +14,7 @@ import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
 import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
+import { ManifestButton, ClientExtensionsSection, ManifestSection } from './PluginExtras';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { BandControls, EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
@@ -483,6 +483,14 @@ export function PluginPage() {
       )}
 
       <ClientExtensionsSection kbDirName={kbDirName} folder={folderBelowRoot} />
+      {/* Last, and closed by default: the file behind the page, for whoever
+          wants to see exactly what the plugin declares. */}
+      <ManifestSection
+        kbDirName={kbDirName}
+        folder={folderBelowRoot}
+        managed={summary?.linksAreManaged !== false}
+        canWrite={summary?.canWrite === true}
+      />
       {manageDialog}
     </div>
   );

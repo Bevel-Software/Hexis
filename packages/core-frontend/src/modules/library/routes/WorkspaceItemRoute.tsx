@@ -121,6 +121,20 @@ export function WorkspaceItemRoute() {
   }
   const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
 
+  // A plugin's MANIFEST is the plugin: clicked in the tree, it opens the
+  // plugin page (whose own collapsible shows the file; the page's Manifest
+  // button asks for the raw file by state, handled above). Matched against
+  // the LISTED plugins' folders — the page keys on the plugin's identity,
+  // which the folder name need not be — so a manifest bundled inside a
+  // skill stays that skill's file, and a plugin the catalog does not list
+  // for this caller (locked, unreadable) falls through to the file itself.
+  if (isManifestFile(last)) {
+    const holder = `${PLUGINS_DIR}/${[plugin, ...tail.slice(0, -1)].join('/')}`;
+    const listed = data.pluginSummaries.find((s) => s.folders.includes(holder));
+    if (listed) return <Navigate to={pathForPlugin(listed.name)} replace />;
+    if (data.pluginsLoading) return null;
+  }
+
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
   // ANY depth below `Plugins/` (`walkFiles` over the whole tree), so a manual
   // filed inside a category folder is a real, listed tool — matching only at
@@ -284,6 +298,11 @@ function folderHasSkillMd(tree: FileTreeEntry | null, workspaceRel: string | nul
   const folder = find(tree);
   if (!folder || folder.type !== 'directory') return undefined;
   return (folder.children ?? []).some((c) => c.type === 'file' && c.name === 'SKILL.md');
+}
+
+/** The two files that make a folder a plugin: the native manifest and the bundle dialect's. */
+function isManifestFile(segment: string): boolean {
+  return segment === 'plugin.json' || segment === 'plugin.bundle.json';
 }
 
 /** Whether a path segment names a file rather than a folder. */
