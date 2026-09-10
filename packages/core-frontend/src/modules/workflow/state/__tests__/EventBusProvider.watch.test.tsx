@@ -179,7 +179,7 @@ describe('EventBusProvider watchWorkspace', () => {
   // ...and a reconnect is exactly when it no longer does: the server has a NEW
   // session record with an empty delivery list, so a coalesced resync would
   // leave the tab believing in watches nobody is honouring.
-  it('re-posts the whole list on reconnect, coalescing notwithstanding', async () => {
+  it('re-posts the whole list on every reconnect, coalescing notwithstanding', async () => {
     let bus!: EventBusContextValue;
     render(
       <EventBusProvider>
@@ -190,11 +190,16 @@ describe('EventBusProvider watchWorkspace', () => {
       bus.watchWorkspace('main');
       bus.setFocus('alice%2Fdraft');
     });
-    const sentBefore = focusBodies(fetchMock).length;
     expect(FakeEventSource.instances).toHaveLength(1);
+    const stream = FakeEventSource.instances[0];
 
-    // The browser dropped the stream and reopened it. Same list, sent again.
-    await act(async () => FakeEventSource.instances[0].fire('open'));
+    // The stream's FIRST open, which is not a reconnect. Baseline is taken
+    // after it so the assertion below is about the second one alone.
+    await act(async () => stream.fire('open'));
+    const sentBefore = focusBodies(fetchMock).length;
+
+    // Dropped and restored. The list goes out again, in full.
+    await act(async () => stream.fire('open'));
     const bodies = focusBodies(fetchMock);
     expect(bodies.length).toBe(sentBefore + 1);
     expect(bodies.at(-1)).toEqual({ workspaceId: 'alice%2Fdraft', alsoWatch: ['main'] });
