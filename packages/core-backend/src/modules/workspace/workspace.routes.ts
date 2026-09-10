@@ -4,7 +4,7 @@ import { IGNORE_FILENAME } from './bevel-ignore.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import { DEFAULT_BRANCH, KNOWLEDGE_DIR, reservedRootDirNames } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, KNOWLEDGE_DIR, canonicalRelativePath, reservedRootDirNames } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -901,11 +901,18 @@ export function createWorkspaceRoutes(
   router.put('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    // ONE spelling of the target from here down. `x/a.md`, `./x/a.md` and
+    // `x//a.md` are the same file and all pass the path validator, and this
+    // route coordinates on that path three times over: the in-process write
+    // turn, the workflow lock row, and the bytes themselves. Two clients
+    // spelling one file differently would otherwise take two different locks
+    // and both pass their own precondition.
+    const rawPath = req.query.path as string;
+    if (!rawPath) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
+    const filePath = canonicalRelativePath(rawPath);
     const { content, ifAbsent, ifMatch } = req.body as {
       content?: string;
       ifAbsent?: boolean;

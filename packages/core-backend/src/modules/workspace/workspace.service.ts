@@ -1109,9 +1109,16 @@ export class WorkspaceService implements IWorkspaceService {
    *
    * The route's own per-path lock does not establish this: it deliberately
    * runs the op WITHOUT acquiring when the caller already holds the lock, so
-   * two requests from that holder would interleave. Per process only: across
-   * instances the workflow lock remains the coordinator, and this claims
-   * nothing about a second server or a git push.
+   * two requests from that holder would interleave.
+   *
+   * The reach of the guarantee, exactly: within this process, one mutation at
+   * a time per resolved path. ACROSS instances the workflow lock row is the
+   * coordinator, and it agrees with this queue only because `PUT /file`
+   * canonicalises the path before taking either (see `canonicalRelativePath`);
+   * a caller that reaches the service directly with an odd spelling gets the
+   * local queue and whatever lock it took itself. Case is not folded: on the
+   * Linux deployment target `Foo.md` and `foo.md` are two files, and treating
+   * them as one would be a worse bug than the race it would close.
    */
   async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
     assertValidRelativePath(relativePath);

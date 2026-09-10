@@ -97,6 +97,28 @@ export function validateRelativePath(relativePath: string): string | null {
 }
 
 /**
+ * ONE identity per file, so everything that coordinates on a path agrees about
+ * what it is coordinating on: an in-process queue, a database lock row, and
+ * the bytes on disk. {@link validateRelativePath} accepts a leading `./` and
+ * repeated slashes as spellings of the same path, and two callers spelling one
+ * file differently would otherwise take two different locks and write over
+ * each other. `.` and `..` segments are refused outright by the validator, so
+ * there is nothing to resolve here beyond the separators.
+ *
+ * Case is deliberately left alone. The deployment target is Linux, where
+ * `Foo.md` and `foo.md` are two different files; folding case to suit a
+ * case-insensitive development machine would merge two real files in
+ * production, which is a worse failure than the race it would close.
+ */
+export function canonicalRelativePath(relativePath: string): string {
+  return relativePath
+    .replace(/^\.\//, '')
+    .split('/')
+    .filter((segment) => segment.length > 0)
+    .join('/');
+}
+
+/**
  * Throwing wrapper for the backend service layer — keeps call sites a single
  * line and produces a clear `Error` the route handler can surface as a 400.
  */

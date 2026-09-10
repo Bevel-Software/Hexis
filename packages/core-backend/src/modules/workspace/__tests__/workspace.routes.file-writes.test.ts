@@ -220,6 +220,29 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
     expect(h.writeFileMock).toHaveBeenCalled();
   });
 
+  it('coordinates on one identity: an odd spelling locks and writes the canonical path', async () => {
+    // The turn, the lock row and the bytes must be the same file, whichever
+    // accepted spelling the caller sent.
+    h = await makeHarness();
+
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(`./${KB}//mcp-description.md`)}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: 'After.', ifMatch: 'CONTENT' }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(h.assertContentMatchesMock).toHaveBeenCalledWith(WS, FILE, 'CONTENT');
+    expect(h.writeFileMock).toHaveBeenCalledWith(WS, FILE, 'After.', {
+      failIfExists: false,
+      expectedContent: 'CONTENT',
+    });
+    expect(h.lockedPaths).toEqual([FILE]);
+  });
+
   it('refuses a non-string precondition instead of dropping it', async () => {
     h = await makeHarness();
 
