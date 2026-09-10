@@ -82,13 +82,17 @@ export interface ComposedAgentInstructions {
  */
 export function composeAgentInstructions(preamble: string | null): ComposedAgentInstructions {
   const { text, unterminated } = stripHtmlComments(preamble ?? '');
-  const stripped = text.replace(/\r\n?/g, '\n').trim();
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const stripped = normalized.trim();
   const preambleChars = stripped.length;
   const truncated = preambleChars > PREAMBLE_CAP;
   const body = truncated ? `${cutAtCodePoint(stripped, PREAMBLE_CAP)}\n${PREAMBLE_TRUNCATION_MARKER}` : stripped;
   const instructions = body ? `${PLATFORM_HEADER}\n\n${body}` : PLATFORM_HEADER;
 
-  const paragraph = firstNonHeadingParagraph(stripped);
+  // Classified UNTRIMMED: the leading indentation of a first line is what
+  // makes it an indented code block, and the trim above would turn that
+  // code into prose. The paragraph itself comes back trimmed.
+  const paragraph = firstNonHeadingParagraph(normalized);
   const fullPrefix = paragraph ? `${TOOL_PREFIX_LINE} ${paragraph}` : TOOL_PREFIX_LINE;
   const toolPrefixChars = fullPrefix.length;
   const toolPrefixTruncated = toolPrefixChars > TOOL_PREFIX_CAP;
@@ -201,9 +205,11 @@ function lineKind(line: string): 'heading' | 'rule' | 'container' | 'text' {
  *
  * Indentation decides what is code, as in CommonMark: a fence opens or
  * closes only when indented at most three columns, and a line indented
- * four or more where a block begins is an indented code block — literal
- * text, so a ``` in it is content, not a fence that would swallow the rest
- * of the file. Inside a block the same indentation is a paragraph
+ * four or more where no paragraph is open — at the start of a block, or
+ * right after a heading or a rule, which end whatever came before them —
+ * is an indented code block: literal text, so a ``` in it is content, not
+ * a fence that would swallow the rest of the file. Under paragraph text
+ * (a list item or blockquote included) the same indentation is a
  * continuation, since indented code cannot interrupt a paragraph.
  */
 function paragraphBlocks(text: string): string[][] {
@@ -213,6 +219,12 @@ function paragraphBlocks(text: string): string[][] {
   const flush = () => {
     if (block.length > 0) blocks.push(block);
     block = [];
+  };
+  const paragraphOpen = () => {
+    const last = block[block.length - 1];
+    if (last === undefined) return false;
+    const kind = lineKind(last);
+    return kind === 'text' || kind === 'container';
   };
   for (const raw of text.split('\n')) {
     const line = raw.trim();
@@ -228,7 +240,7 @@ function paragraphBlocks(text: string): string[][] {
       fence = opener[1];
     } else if (line.length === 0) {
       flush();
-    } else if (block.length === 0 && indent >= 4) {
+    } else if (indent >= 4 && !paragraphOpen()) {
       continue; // indented code: skipped line by line, blank lines between flush nothing
     } else {
       block.push(line);

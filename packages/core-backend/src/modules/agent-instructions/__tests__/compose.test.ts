@@ -179,15 +179,18 @@ describe('composeAgentInstructions: the tool prefix', () => {
   it('indentation decides what is a fence: three columns still open one, four make it indented code', () => {
     // A ``` indented four columns is the content of an indented code block,
     // not a fence — so it cannot swallow the prose after it as an unclosed
-    // one. (The text is trimmed as a whole first, so the block sits after a
-    // heading, as it would in a real file.)
-    expect(composeAgentInstructions('# Title\n\n    ```\n    looks like a fence\n\nProse after the code.').toolPrefix).toBe(
+    // one. At the very start of the file too: the text is classified before
+    // it is trimmed, so the first line keeps the indentation that makes it code.
+    expect(composeAgentInstructions('    ```\n    looks like a fence\n\nProse after the code.').toolPrefix).toBe(
       `${TOOL_PREFIX_LINE} Prose after the code.`,
     );
-    // An indented code block is not a paragraph, whatever it says.
-    expect(composeAgentInstructions('# Title\n\n    code line\n\tanother\n\nProse.').toolPrefix).toBe(
-      `${TOOL_PREFIX_LINE} Prose.`,
-    );
+    // An indented code block is not a paragraph, whatever it says — at the
+    // start, after a heading, after a setext heading and after a rule, with
+    // or without a blank line between: each of those ends what came before.
+    expect(composeAgentInstructions('    code line\n\tanother\n\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
+    expect(composeAgentInstructions('# Title\n    code\n\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
+    expect(composeAgentInstructions('Title\n===\n    code\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
+    expect(composeAgentInstructions('---\n    code\n\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
     // Up to three columns the fence is a fence, and so is its closer.
     expect(composeAgentInstructions('   ```\n---\n   ```\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
     // Inside a paragraph, indentation is a continuation, not code.
