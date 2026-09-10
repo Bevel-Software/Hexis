@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -165,16 +166,18 @@ export class WorkspaceService implements IWorkspaceService {
   private readonly lastFetchOk = new Map<string, boolean>();
   private readonly inFlightFetches = new Map<string, Promise<void>>();
   /**
-   * One write at a time per `workspaceId` + path (see {@link writeFile}).
-   * A conditional write compares and then writes, two awaits apart, and the
-   * compare is a precondition only if nothing can land between them. The
-   * route's per-path lock does not establish that on its own: it deliberately
-   * runs the op WITHOUT acquiring when the caller already holds the lock, so
-   * two requests from that holder would interleave. Keyed per path, so
-   * unrelated writes never queue behind each other; per process, so across
-   * instances the workflow lock remains the coordinator.
+   * One mutation at a time per file, keyed by RESOLVED absolute path — so
+   * `x/a.md`, `./x/a.md` and `x//a.md` are one queue and not three. See
+   * {@link withPathTurn} for what takes a turn and why.
    */
   private readonly writeTurns = new Map<string, Promise<void>>();
+  /**
+   * The turns the CURRENT async context already holds. Taking one it holds
+   * runs straight through instead of waiting for itself, which is what lets a
+   * caller wrap a whole read-decide-write sequence in a turn and still call
+   * the ordinary write inside it.
+   */
+  private readonly heldTurns = new AsyncLocalStorage<ReadonlySet<string>>();
 
   /**
    * Late-bound by the composition root — DiffService depends on
@@ -1020,7 +1023,10 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await fs.rm(absolutePath, { recursive: true, force: true });
+    // Under the path's turn like every other single-file mutation: a delete
+    // landing between a conditional write's compare and its write would let
+    // that write recreate the file the delete had just removed.
+    await this.withResolvedPathTurn(absolutePath, () => fs.rm(absolutePath, { recursive: true, force: true }));
     await this.diffService?.markUserDeleted(workspaceId, relativePath);
   }
 
@@ -1043,6 +1049,16 @@ export class WorkspaceService implements IWorkspaceService {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 
+  /**
+   * Rename or move one entry.
+   *
+   * Deliberately NOT under {@link withPathTurn}: a move mutates two paths, and
+   * holding both turns would introduce the one shape that can deadlock here
+   * (a move waiting on a target whose holder is waiting on the move's other
+   * path). A rename onto a path being conditionally written is therefore
+   * outside that guarantee; the workflow lock on the moved path is what
+   * serializes it against the app's own editors.
+   */
   async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
     assertValidRelativePath(newRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
@@ -1080,25 +1096,60 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
-   * Run `op` after every write already queued for `key`, and register it as
-   * the one to wait for next.
+   * Run `op` as the only mutation in flight for `relativePath` in this
+   * process, so a read-then-decide-then-write sequence inside it cannot have
+   * another mutation land in the middle of it.
    *
-   * What is stored is the SETTLED tail, never the caller's promise: a write
-   * that throws must not wedge the queue behind it, and a stored rejection
-   * would also be an unhandled one. The entry is dropped once it is still the
-   * tail, so the map does not grow by an entry per file ever written. See
-   * {@link writeTurns} for why writes take turns at all.
+   * The conditional write ({@link writeFile}'s `expectedContent`) needs that,
+   * and so does a caller whose decision spans more than one call: `PUT /file`
+   * checks the precondition, plans a creator-access grant that COMMITS, and
+   * only then writes, and a save that lands in between would leave that grant
+   * behind for a write about to be refused. Such a caller wraps the sequence
+   * in a turn and the write inside it takes the same one, re-entrantly.
+   *
+   * The route's own per-path lock does not establish this: it deliberately
+   * runs the op WITHOUT acquiring when the caller already holds the lock, so
+   * two requests from that holder would interleave. Per process only: across
+   * instances the workflow lock remains the coordinator, and this claims
+   * nothing about a second server or a git push.
    */
-  private async withWriteTurn<T>(key: string, op: () => Promise<T>): Promise<T> {
-    const previous = this.writeTurns.get(key);
-    const turn = previous ? previous.then(op) : op();
+  async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
+    assertValidRelativePath(relativePath);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absolutePath = path.resolve(workspaceDir, relativePath);
+    this.assertWithinWorkspace(absolutePath, workspaceDir);
+    return this.withResolvedPathTurn(absolutePath, op);
+  }
+
+  /**
+   * {@link withPathTurn} on an already-resolved path.
+   *
+   * A turn this context holds runs through: waiting for itself would hang.
+   * What is stored is the SETTLED tail, never the caller's promise, so a
+   * throwing mutation cannot wedge the queue behind it and no rejection is
+   * left unhandled; the entry is dropped once it is still the tail, so the
+   * map does not grow by an entry per file ever touched.
+   *
+   * Nesting a DIFFERENT file's turn inside one is safe here because the only
+   * caller that does it is `PUT /file`, and the grant it seeds is always an
+   * `access.md` at or above its target: two such sequences cannot each hold
+   * what the other wants, since that would need each target to sit above the
+   * other. Every other holder takes one turn and nests nothing.
+   */
+  private async withResolvedPathTurn<T>(absolutePath: string, op: () => Promise<T>): Promise<T> {
+    const held = this.heldTurns.getStore();
+    if (held?.has(absolutePath)) return op();
+    const run = (): Promise<T> =>
+      this.heldTurns.run(new Set([...(held ?? []), absolutePath]), op);
+    const previous = this.writeTurns.get(absolutePath);
+    const turn = previous ? previous.then(run) : run();
     const tail = turn.then(
       () => undefined,
       () => undefined,
     );
-    this.writeTurns.set(key, tail);
+    this.writeTurns.set(absolutePath, tail);
     void tail.then(() => {
-      if (this.writeTurns.get(key) === tail) this.writeTurns.delete(key);
+      if (this.writeTurns.get(absolutePath) === tail) this.writeTurns.delete(absolutePath);
     });
     return turn;
   }
@@ -1130,7 +1181,7 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await this.withWriteTurn(`${workspaceId}\u0000${relativePath}`, async () => {
+    await this.withResolvedPathTurn(absolutePath, async () => {
       if (options?.expectedContent !== undefined) {
         await assertConditionalWriteMatches(absolutePath, relativePath, options.expectedContent);
       }
@@ -1175,7 +1226,9 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, data);
+    // An upload over a path is a mutation of that path, so it takes the same
+    // turn as a text write: see {@link withPathTurn}.
+    await this.withResolvedPathTurn(absolutePath, () => fs.writeFile(absolutePath, data));
     await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 

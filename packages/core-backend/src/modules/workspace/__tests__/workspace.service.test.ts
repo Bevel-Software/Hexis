@@ -329,6 +329,144 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
   });
 });
 
+/**
+ * The per-path turn the conditional write rests on: what queues behind what,
+ * that two spellings of one file are one queue, and that a caller holding a
+ * turn can still call the ordinary write inside it.
+ */
+describe('WorkspaceService.withPathTurn', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  /** Yield to the microtask queue enough times that an unserialized body interleaves. */
+  const yieldTwice = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  it('runs one turn at a time, so two bodies never interleave', async () => {
+    const order: string[] = [];
+    const body = (name: string) => async (): Promise<void> => {
+      order.push(`${name}:enter`);
+      await yieldTwice();
+      order.push(`${name}:exit`);
+    };
+
+    await Promise.all([
+      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('a')),
+      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('b')),
+    ]);
+
+    expect(order).toEqual(['a:enter', 'a:exit', 'b:enter', 'b:exit']);
+  });
+
+  it('treats two spellings of one file as one queue', async () => {
+    const order: string[] = [];
+    const body = (name: string) => async (): Promise<void> => {
+      order.push(`${name}:enter`);
+      await yieldTwice();
+      order.push(`${name}:exit`);
+    };
+
+    await Promise.all([
+      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('plain')),
+      svc.withPathTurn(workspaceId, './knowledge-base/mcp-description.md', body('dotted')),
+      svc.withPathTurn(workspaceId, 'knowledge-base//mcp-description.md', body('doubled')),
+    ]);
+
+    expect(order).toEqual([
+      'plain:enter', 'plain:exit', 'dotted:enter', 'dotted:exit', 'doubled:enter', 'doubled:exit',
+    ]);
+  });
+
+  it('lets another file run while one path is held: a turn is per file', async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = svc.withPathTurn(workspaceId, 'knowledge-base/one.md', () => held);
+
+    // Would hang if one file's turn queued another's.
+    await expect(
+      svc.withPathTurn(workspaceId, 'knowledge-base/two.md', async () => 'ran'),
+    ).resolves.toBe('ran');
+
+    release();
+    await holder;
+  });
+
+  it('is re-entrant: the write inside a held turn does not wait for itself', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    await svc.withPathTurn(workspaceId, rel, async () => {
+      // The same compare-and-write the route makes inside its own turn.
+      await svc.writeFile(workspaceId, rel, 'After.', { expectedContent: 'Before.' });
+    });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('After.');
+  });
+
+  it('a throwing turn does not wedge the ones queued behind it', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+
+    const failed = svc.withPathTurn(workspaceId, rel, async () => {
+      throw new Error('boom');
+    });
+    const after = svc.withPathTurn(workspaceId, rel, async () => 'ran');
+
+    await expect(failed).rejects.toThrow('boom');
+    await expect(after).resolves.toBe('ran');
+  });
+
+  it('holds a delete and an upload of the same path until the turn ends', async () => {
+    // The mutators cubic named: neither goes through writeFile, and either
+    // landing inside a conditional write's compare-then-write would defeat it.
+    const rel = 'knowledge-base/mcp-description.md';
+    const absolute = path.join(workspaceDir, rel);
+    await fs.writeFile(absolute, 'Held.', 'utf-8');
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = svc.withPathTurn(workspaceId, rel, () => held);
+
+    let deleted = false;
+    let uploaded = false;
+    const del = svc.deleteFile(workspaceId, rel).then(() => {
+      deleted = true;
+    });
+    const up = svc.writeFileBinary(workspaceId, rel, new Uint8Array([1, 2, 3])).then(() => {
+      uploaded = true;
+    });
+    // Real filesystem round trips, not setImmediate: an fs completion runs in
+    // the poll phase, which a check-phase callback can jump ahead of, so
+    // yielding by microtask would prove nothing about a free `fs.rm`.
+    for (let i = 0; i < 5; i += 1) await fs.stat(workspaceDir);
+
+    expect({ deleted, uploaded }).toEqual({ deleted: false, uploaded: false });
+    expect(await fs.readFile(absolute, 'utf-8')).toBe('Held.');
+
+    release();
+    await Promise.all([holder, del, up]);
+    expect({ deleted, uploaded }).toEqual({ deleted: true, uploaded: true });
+  });
+});
+
 describe('WorkspaceService.assertContentMatches', () => {
   let root: string;
   let svc: WorkspaceService;

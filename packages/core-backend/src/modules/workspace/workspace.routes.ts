@@ -927,36 +927,42 @@ export function createWorkspaceRoutes(
       // (loadModel hard-throws). The dedicated App roles surface has its
       // own validate gate; this covers the raw-text editor path.
       if (isRolesYamlPath(filePath, kbDirName)) assertRolesYamlParsable(content);
-      // A stale `ifMatch` is refused HERE, before the plan below: that plan
-      // can commit a seeded access.md under its own lock, and a precondition
-      // failing after it would leave an authorization grant behind for a save
-      // that never landed. The write repeats the compare under its write
-      // turn, which is the one that decides; this is only about side effects.
-      if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
-      // Creator read grant: a brand-new file at a spot whose access chain
-      // doesn't grant the creator `read` would vanish from their own explorer
-      // (read is default-deny). Plan BEFORE the write: a new subtree gets its
-      // access.md seeded first; a loose .md carries the grant in its own
-      // frontmatter as part of this same single write.
-      const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
-      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-      const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
-      // `ifAbsent` = exclusive create: the service's `wx` write turns a
-      // concurrent or stale create against an existing file into a 409
-      // instead of a silent replace. `withLock`'s failure arm releases
-      // without committing, so the refusal leaves no trace.
+      // One turn for the whole sequence, because the DECISION spans three
+      // steps that must agree about the same file: check the precondition,
+      // plan a creator-access grant that COMMITS, then write. A save landing
+      // in between would leave that grant behind for a write about to be
+      // refused, so the check is made here, before the plan, and nothing else
+      // in this process may touch the path until the write is done. The write
+      // inside takes the same turn re-entrantly.
       //
-      // `ifMatch` = conditional write, the same 409 for a stale UPDATE: the
-      // file must still hold the text the caller last read. The service
-      // compares and writes inside one write turn for the path, so no other
-      // write can land between them even when this route runs without
-      // acquiring the lock (a caller that already holds it).
-      await withLock(id, user, filePath, () =>
-        workspaceService.writeFile(id, filePath, toWrite, {
-          failIfExists: ifAbsent === true,
-          expectedContent: ifMatch,
-        }),
-      );
+      // Across instances the workflow lock below is still the coordinator;
+      // this only orders what this server is doing.
+      await workspaceService.withPathTurn(id, filePath, async () => {
+        // A stale `ifMatch` is refused before anything commits.
+        if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
+        // Creator read grant: a brand-new file at a spot whose access chain
+        // doesn't grant the creator `read` would vanish from their own explorer
+        // (read is default-deny). Plan BEFORE the write: a new subtree gets its
+        // access.md seeded first; a loose .md carries the grant in its own
+        // frontmatter as part of this same single write.
+        const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
+        if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
+        const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
+        // `ifAbsent` = exclusive create: the service's `wx` write turns a
+        // concurrent or stale create against an existing file into a 409
+        // instead of a silent replace. `withLock`'s failure arm releases
+        // without committing, so the refusal leaves no trace.
+        //
+        // `ifMatch` = conditional write, the same 409 for a stale UPDATE: the
+        // file must still hold the text the caller last read, re-checked at
+        // the write itself as the decision that counts.
+        await withLock(id, user, filePath, () =>
+          workspaceService.writeFile(id, filePath, toWrite, {
+            failIfExists: ifAbsent === true,
+            expectedContent: ifMatch,
+          }),
+        );
+      });
       res.json({ status: 'written' });
     } catch (err) {
       sendError(res, err);

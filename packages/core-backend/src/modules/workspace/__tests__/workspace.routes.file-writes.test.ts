@@ -38,18 +38,27 @@ interface Harness {
   planForCreate: ReturnType<typeof vi.fn>;
   seedWrites: string[];
   lockedPaths: string[];
+  /** What happened, in order, so the critical section can be asserted. */
+  order: string[];
 }
 
 async function makeHarness(): Promise<Harness> {
   const lockedPaths: string[] = [];
   const seedWrites: string[] = [];
+  const order: string[] = [];
   const readFileMock = vi.fn(async () => 'CONTENT');
   const writeFileMock = vi.fn(async (_id: string, p: string) => {
-    if (p.endsWith('/access.md')) seedWrites.push(p);
+    if (p.endsWith('/access.md')) {
+      seedWrites.push(p);
+      order.push('seed');
+      return;
+    }
+    order.push('write');
   });
   // Stands in for the real precondition check: same 409, same "an absent file
   // reads as empty" rule, so the route's ordering is what this exercises.
   const assertContentMatchesMock = vi.fn(async (_id: string, p: string, expected: string) => {
+    order.push('precondition');
     let current = '';
     try {
       current = (await readFileMock()) as unknown as string;
@@ -61,13 +70,25 @@ async function makeHarness(): Promise<Harness> {
     stale.status = 409;
     throw stale;
   });
+  const withPathTurnMock = vi.fn(async (_id: string, _p: string, op: () => Promise<unknown>) => {
+    order.push('turn:enter');
+    try {
+      return await op();
+    } finally {
+      order.push('turn:exit');
+    }
+  });
   const workspaceService = {
     readFile: readFileMock,
     writeFile: writeFileMock,
     assertContentMatches: assertContentMatchesMock,
+    withPathTurn: withPathTurnMock,
   } as unknown as WorkspaceService;
 
-  const planForCreate = vi.fn(async () => null);
+  const planForCreate = vi.fn(async () => {
+    order.push('plan');
+    return null;
+  });
   const stubCreatorAccess = {
     planForCreate,
     grantInExtractedFile: async () => null,
@@ -122,6 +143,7 @@ async function makeHarness(): Promise<Harness> {
     planForCreate,
     seedWrites,
     lockedPaths,
+    order,
   };
 }
 
@@ -183,16 +205,19 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
     });
   });
 
-  it("sends the service's 409 and its reason back to the caller", async () => {
+  it("sends the WRITE's own 409 and its reason back to the caller", async () => {
+    // `CONTENT` passes the precondition, so the rejection under test is the
+    // write's — the compare that happens at the bytes, after the precheck.
     h = await makeHarness();
     const stale: Error & { status?: number } = new Error(`"${FILE}" changed since you opened it.`);
     stale.status = 409;
     h.writeFileMock.mockRejectedValue(stale);
 
-    const res = await put(h, { content: 'After.', ifMatch: 'Stale.' });
+    const res = await put(h, { content: 'After.', ifMatch: 'CONTENT' });
 
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain('changed since you opened it');
+    expect(h.writeFileMock).toHaveBeenCalled();
   });
 
   it('refuses a non-string precondition instead of dropping it', async () => {
@@ -202,6 +227,22 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
 
     expect(res.status).toBe(400);
     expect(h.writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it('runs the precondition, the plan and the write inside ONE turn for the path', async () => {
+    // The decision spans three steps, so nothing may touch the file between
+    // the check and the write: a save landing in the middle would leave a
+    // committed access grant behind for a write about to be refused.
+    h = await makeHarness();
+    h.planForCreate.mockImplementation(async () => {
+      h!.order.push('plan');
+      return { kind: 'seed-access-md', wsRelPath: `${KB}/access.md`, apply: () => 'seed' } as never;
+    });
+
+    const res = await put(h, { content: 'After.', ifMatch: 'CONTENT' });
+
+    expect(res.status).toBe(200);
+    expect(h.order).toEqual(['turn:enter', 'precondition', 'plan', 'seed', 'write', 'turn:exit']);
   });
 
   it('checks the precondition BEFORE the creator-access plan, so a refusal seeds no access grant', async () => {
@@ -222,6 +263,7 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
     expect(h.seedWrites).toEqual([]);
     expect(h.writeFileMock).not.toHaveBeenCalled();
     expect(h.lockedPaths).toEqual([]);
+    expect(h.order).toEqual(['turn:enter', 'precondition', 'turn:exit']);
   });
 });
 
