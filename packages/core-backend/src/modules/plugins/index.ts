@@ -16,7 +16,9 @@ export { walkKb, type KbWalkListener, type KbWalkResult } from '../../shared/kb-
 export { KbPluginSource } from './discovery/kb-plugin-source.js';
 export { DEFAULT_REGISTRY_PATH } from './discovery/bundle-dialect/bundle.source.js';
 export { pendingProposals, type JoinProposal } from './join-proposals.js';
-export { createPluginsRoutes } from './plugins.routes.js';
+export { createPluginsRoutes, createPluginCreationRoutes } from './plugins.routes.js';
+export { createTeamsRoutes, type TeamAccess } from './teams.routes.js';
+export { registerPluginsTools } from './plugins.tools.js';
 export type {
   IPluginIndexService,
   PluginCatalogEntry,

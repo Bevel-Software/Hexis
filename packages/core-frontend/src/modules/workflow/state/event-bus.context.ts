@@ -24,6 +24,15 @@ export type EventHandler<K extends WorkflowEvent['kind']> = (
  *     `useWorkspaceState`). Setting `null` clears the focus — the session
  *     stays alive but receives no workspace-scoped events.
  *
+ *   - `watchWorkspace(workspaceId)` — ALSO deliver events for a workspace
+ *     that isn't the focused one, until the returned release fn is called.
+ *     For a page whose content comes from somewhere other than the branch
+ *     in the address bar: the skill page renders the default branch's
+ *     files while the reader stands on their own suggestion branch, and
+ *     without this its images never hear that a teammate replaced one.
+ *     Ref-counted, so two components watching the same workspace release
+ *     independently.
+ *
  * The provider owns one EventSource per tab; this interface intentionally
  * doesn't expose connection state — consumers shouldn't care whether the
  * underlying stream is open, reconnecting, or replaying. If a feature
@@ -32,6 +41,7 @@ export type EventHandler<K extends WorkflowEvent['kind']> = (
 export interface EventBusContextValue {
   subscribe<K extends WorkflowEvent['kind']>(kind: K, handler: EventHandler<K>): () => void;
   setFocus(workspaceId: string | null): void;
+  watchWorkspace(workspaceId: string): () => void;
 }
 
 export const EventBusContext = createContext<EventBusContextValue | null>(null);

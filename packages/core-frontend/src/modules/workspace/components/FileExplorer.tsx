@@ -42,12 +42,12 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { PR_STALE_EVENT } from '../../../core/events';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
+import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
 import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { PullRequestsForMe } from '../../git/components/PullRequestsForMe';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useAppRegistry } from '../../../core/registry';
 
@@ -167,6 +167,23 @@ export interface TreeNav {
   /** The workspace-relative path the surface is showing — lights its row, reveals its folders. */
   activePath: string | null;
   open(path: string): void;
+  /**
+   * Extra items for a row's context menu, decided by the SURFACE for the
+   * entry at hand — injected, so the one tree serves every nav without
+   * growing a verb per caller. Rendered after the tree's own create items,
+   * in the order given; absent or empty, the menu is the tree's alone.
+   * (The Library's Plugins tree adds "New plugin" on folders this way.)
+   */
+  menuItems?(entry: FileTreeEntry): TreeMenuItem[];
+}
+
+/** One injected context-menu item — see `TreeNav.menuItems`. */
+export interface TreeMenuItem {
+  /** Stable within one menu; keys the rendered item. */
+  id: string;
+  label: string;
+  icon?: ReactNode;
+  onSelect(): void;
 }
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
 const useTreeNav = () => useContext(TreeNavContext);
@@ -196,6 +213,7 @@ function ContextMenu({
   onDownload,
   returnFocusTo,
   deletable = true,
+  extraItems = [],
 }: {
   x: number;
   y: number;
@@ -208,6 +226,8 @@ function ContextMenu({
   onCreateFolder?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
+  /** The surface's own items for this entry — see `TreeNav.menuItems`. */
+  extraItems?: TreeMenuItem[];
   /** The row this menu was opened from — Escape hands focus back to it. */
   returnFocusTo?: React.RefObject<HTMLElement | null>;
 }) {
@@ -309,6 +329,13 @@ function ContextMenu({
           <span className="flex items-center gap-2"><FolderPlus size={14} />New folder</span>
         </MenuItem>
       )}
+      {/* The surface's own verbs for this entry, after the tree's create
+          items — a "make a thing here" reads with the other two. */}
+      {extraItems.map((item) => (
+        <MenuItem key={item.id} role="menuitem" onClick={() => { item.onSelect(); onClose(); }}>
+          <span className="flex items-center gap-2">{item.icon}{item.label}</span>
+        </MenuItem>
+      ))}
       {isZip && (
         <MenuItem role="menuitem" onClick={handleUnzip} disabled={unzipping}>
           <span className="flex items-center gap-2">
@@ -469,6 +496,7 @@ export function FileTreeNode({
   initiallyExpanded,
   collapseChildren,
   reserved = false,
+  absent = false,
 }: {
   entry: FileTreeEntry;
   depth: number;
@@ -487,6 +515,13 @@ export function FileTreeNode({
    * not do: be renamed, deleted, dragged, or pinned.
    */
   reserved?: boolean;
+  /**
+   * The folder is not on disk yet — a reserved root drawn before the
+   * knowledge base has it, so the way to create it is on screen. Everything
+   * that WRITES works (each write creates its parents); what READS the folder
+   * is withheld: no Download, which would ask the server for a zip of nothing.
+   */
+  absent?: boolean;
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
@@ -504,7 +539,7 @@ export function FileTreeNode({
     const isFolder = entry.type === 'directory';
     const url = isFolder
       ? `/api/workspace/${workspaceId}/folder/zip?path=${encodeURIComponent(entry.relativePath)}&download=1`
-      : `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(entry.relativePath)}&download=1`;
+      : rawFileUrl(workspaceId, entry.relativePath, { download: true });
     const savedAs = isFolder ? `${entry.name}.zip` : entry.name;
     try {
       const outcome = await downloadViaBlob(url, savedAs);
@@ -772,7 +807,10 @@ export function FileTreeNode({
           <button
             ref={rowRef}
             type="button"
-            aria-expanded={isExpanded}
+            // A folder with nothing in it has no caret and nothing to expand,
+            // so it claims neither state: `aria-expanded` is for a control
+            // that can open, and an empty folder cannot.
+            aria-expanded={hasChildren ? isExpanded : undefined}
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
             onClick={() => { if (hasChildren) setUserIntent(!isExpanded); }}
           >
@@ -867,7 +905,8 @@ export function FileTreeNode({
             // offers pinning, and its roots are not reserved.)
             onRename={reserved ? undefined : () => setRenaming(true)}
             deletable={!reserved}
-            onDownload={handleDownload}
+            onDownload={absent ? undefined : handleDownload}
+            extraItems={nav.menuItems?.(entry)}
             returnFocusTo={rowRef}
           />
         )}
@@ -981,6 +1020,7 @@ export function FileTreeNode({
           onClose={() => setContextMenu(null)}
           onRename={() => setRenaming(true)}
           onDownload={handleDownload}
+          extraItems={nav.menuItems?.(entry)}
           returnFocusTo={rowRef}
         />
       )}
@@ -1339,7 +1379,6 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
       </div>
-      <PullRequestsForMe />
     </div>
     </TreeChrome>
   );

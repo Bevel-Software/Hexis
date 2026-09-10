@@ -66,7 +66,7 @@ describe('AdminRolesPage: add-member autocomplete', () => {
     const user = userEvent.setup();
     renderPage();
 
-    const input = await screen.findByRole('textbox', { name: 'Member email' });
+    const input = await screen.findByRole('combobox', { name: 'Member email' });
     await user.type(input, 'al');
 
     // The suggest fetch is debounced 200ms; wait for the list to materialise.

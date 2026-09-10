@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -482,6 +482,151 @@ describe('read-permission gating', () => {
 });
 
 /**
+ * `grep` given a `path` that names a FILE. The walk begins with `readdir`,
+ * which fails on a file and on an absent path alike — so such a grep used to
+ * answer an empty match list, indistinguishable from "your pattern is not in
+ * there". Every case now answers honestly: the file's matches, a note when
+ * there was no text to search, or an error when there is nothing at the path.
+ */
+describe('grep with a path that names a file', () => {
+  interface GrepResult {
+    matches: { path: string; line: number; text: string }[];
+    truncated: boolean;
+    note?: string;
+  }
+  const grep = async (base: string, body: Record<string, unknown>): Promise<GrepResult> =>
+    (await (await post(`${base}/api/agent/tools/grep`, body)).json()) as GrepResult;
+
+  it('searches exactly that file — the match carries that path and a 1-based line number', async () => {
+    const base = await start();
+    await fs.writeFile('notes/deep.md', 'alpha\nbeta needle\ngamma\n');
+    // A sibling holding the same term: a file grep must not reach it.
+    await fs.writeFile('notes/other.md', 'needle elsewhere\n');
+    const res = await grep(base, { pattern: 'needle', path: 'notes/deep.md' });
+    expect(res.matches).toEqual([{ path: 'notes/deep.md', line: 2, text: 'beta needle' }]);
+    expect(res.truncated).toBe(false);
+    expect(res.note).toBeUndefined();
+  });
+
+  it('a file the pattern is simply not in is an empty SUCCESS — no note, no error', async () => {
+    const base = await start();
+    const res = await grep(base, { pattern: 'absent-term', path: 'a.md' });
+    expect(res.matches).toEqual([]);
+    expect(res.truncated).toBe(false);
+    expect(res.note).toBeUndefined();
+  });
+
+  it('caps a file grep at max_results and reports truncated, exactly as a directory grep does', async () => {
+    const base = await start();
+    await fs.writeFile('many.md', 'needle\n'.repeat(5));
+    const res = await grep(base, { pattern: 'needle', path: 'many.md', max_results: 2 });
+    expect(res.matches.map((m) => m.line)).toEqual([1, 2]);
+    expect(res.truncated).toBe(true);
+  });
+
+  it('a file with no searchable text returns empty matches plus a note saying so', async () => {
+    const base = await start();
+    // "needle" followed by a NUL byte: binary content, so nothing to search —
+    // the byte pattern is present but the file is not text.
+    await fs.writeFile('data.bin', Buffer.from('needle\0tail', 'latin1'));
+    await fs.writeFile(
+      'logo.png',
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'),
+    );
+    for (const path of ['data.bin', 'logo.png']) {
+      const res = await grep(base, { pattern: 'needle', path });
+      expect(res.matches, path).toEqual([]);
+      expect(res.note, path).toContain('no searchable text');
+      expect(res.note, path).toContain(path);
+    }
+  });
+
+  it('a path with nothing at it fails with an error naming the path — never an empty success', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: 'notes/ghost.md' });
+    expect(res.status).toBe(404);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain('notes/ghost.md');
+  });
+
+  it('a FILE the caller may not read answers exactly as read_file does — same status, same body', async () => {
+    const secret = `${KB_DIR}/Knowledge/Secret.md`;
+    // Denied AND absent: the two tools must agree here too, or grep's error
+    // would reveal an existence read_file refuses to confirm.
+    const ghost = `${KB_DIR}/Knowledge/Ghost.md`;
+    const base = await start('write', denyReads(new Set(['Knowledge/Secret.md', 'Knowledge/Ghost.md'])));
+    await fs.writeFile(secret, 'secret needle\n');
+    for (const path of [secret, ghost]) {
+      const [readRes, grepRes] = await Promise.all([
+        post(`${base}/api/agent/tools/read_file`, { path }),
+        post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path }),
+      ]);
+      expect(grepRes.status, path).toBe(403);
+      expect(grepRes.status, path).toBe(readRes.status);
+      expect(await grepRes.json(), path).toEqual(await readRes.json());
+    }
+  });
+
+  it('a path UNDER an existing file is nothing-there too — the same 404, not a raw failure', async () => {
+    const base = await start();
+    await fs.writeFile('notes/deep.md', 'alpha\n');
+    // `notes/deep.md` is a FILE, so the filesystem answers ENOTDIR rather than
+    // ENOENT. Nothing can live at this path either, so it earns the same
+    // honest 404 as a plainly absent one.
+    const res = await post(`${base}/api/agent/tools/grep`, {
+      pattern: 'needle',
+      path: 'notes/deep.md/deeper.md',
+    });
+    expect(res.status).toBe(404);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain('notes/deep.md/deeper.md');
+  });
+
+  it("a denied path the filesystem cannot even stat still answers with read_file's 403", async () => {
+    const loop = `${KB_DIR}/Knowledge/Loop.md`;
+    const base = await start('write', denyReads(new Set(['Knowledge/Loop.md'])));
+    await mkdir(join(tempDir, KB_DIR, 'Knowledge'), { recursive: true });
+    // A symlink pointing at ITSELF: stat fails with ELOOP — neither absence
+    // nor a readable file. The permission verdict must still come FIRST, or
+    // grep would leak a filesystem complaint where read_file says only 403.
+    await symlink('Loop.md', join(tempDir, loop));
+    const [readRes, grepRes] = await Promise.all([
+      post(`${base}/api/agent/tools/read_file`, { path: loop }),
+      post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: loop }),
+    ]);
+    expect(grepRes.status).toBe(403);
+    expect(grepRes.status).toBe(readRes.status);
+    expect(await grepRes.json()).toEqual(await readRes.json());
+  });
+
+  it('a READABLE path the filesystem cannot resolve fails exactly as read_file fails', async () => {
+    const loop = `${KB_DIR}/Knowledge/Tangle.md`;
+    const base = await start();
+    await mkdir(join(tempDir, KB_DIR, 'Knowledge'), { recursive: true });
+    await symlink('Tangle.md', join(tempDir, loop));
+    const [readRes, grepRes] = await Promise.all([
+      post(`${base}/api/agent/tools/read_file`, { path: loop }),
+      post(`${base}/api/agent/tools/grep`, { pattern: 'needle', path: loop }),
+    ]);
+    // The gate allows it, so the READ is what answers — and it is the same
+    // `fs.readFile` read_file calls. grep must not dress that up as absence
+    // (a false 404), nor invent a failure of its own: one path, one story.
+    expect(grepRes.status).toBe(readRes.status);
+    expect(await grepRes.json()).toEqual(await readRes.json());
+  });
+
+  it('a DIRECTORY path still walks the whole subtree (unchanged)', async () => {
+    const base = await start();
+    await fs.writeFile('notes/one.md', 'needle here\n');
+    await fs.writeFile('notes/sub/two.md', 'and needle there\n');
+    await fs.writeFile('outside.md', 'needle outside the subtree\n');
+    const res = await grep(base, { pattern: 'needle', path: 'notes' });
+    expect(res.matches.map((m) => m.path).sort()).toEqual(['notes/one.md', 'notes/sub/two.md']);
+    expect(res.note).toBeUndefined();
+  });
+});
+
+/**
  * Document reading: read_file/grep consume the doc-extract service for office
  * documents and PDFs; the agent text-editing tools refuse them. Fixtures are
  * REAL files built in-test (a docx is just a zip with word/document.xml).
@@ -625,6 +770,38 @@ describe('office documents and PDFs', () => {
     const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]' })).json()) as { matches: { path: string }[] };
     expect(markers.matches).toContainEqual(expect.objectContaining({ path: 'deck.pptx' }));
     expect(res.note).toBeUndefined();
+  });
+
+  it('grep on a path naming a DOCUMENT searches its extraction the way the walk does — markers included', async () => {
+    const base = await start();
+    await fs.writeFile('deck.pptx', pptx([['Intro'], ['Roadmap 2026']]));
+    // A second deck carrying the same term: a file grep must not reach it.
+    await fs.writeFile('decoy.pptx', pptx([['Roadmap 2026 decoy deck']]));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'Roadmap', path: 'deck.pptx' })).json()) as {
+      matches: { path: string; line: number; text: string }[];
+      note?: string;
+    };
+    // Same line arithmetic as the directory grep: marker 1, [slide 1] 2,
+    // Intro 3, [slide 2] 4, Roadmap 5.
+    expect(res.matches).toEqual([{ path: 'deck.pptx', line: 5, text: 'Roadmap 2026' }]);
+    expect(res.note).toBeUndefined();
+    // The structure markers are searchable on the single-file path too.
+    const markers = (await (await post(`${base}/api/agent/tools/grep`, { pattern: '\\[slide 2\\]', path: 'deck.pptx' })).json()) as {
+      matches: { path: string; line: number }[];
+    };
+    expect(markers.matches).toEqual([expect.objectContaining({ path: 'deck.pptx', line: 4 })]);
+  });
+
+  it('grep on a path naming a CORRUPT document notes it has no searchable text', async () => {
+    const base = await start();
+    await fs.writeFile('broken.docx', Buffer.from('not really a zip'));
+    const res = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'zip', path: 'broken.docx' })).json()) as {
+      matches: unknown[];
+      note?: string;
+    };
+    expect(res.matches).toEqual([]);
+    expect(res.note).toContain('no searchable text');
+    expect(res.note).toContain('broken.docx');
   });
 
   it('grep extracts at most 20 uncached documents per call and notes the skipped rest; a re-run covers them', async () => {
@@ -871,6 +1048,17 @@ describe('office documents and PDFs', () => {
       expect(def!.description, name).toContain('.doc/.ppt/.xls');
       // …and the replace-by-upload way out.
       expect(def!.description, name).toContain('uploading a new version');
+    }
+  });
+
+  it('the page-writing tools say where images go, so an agent writes the link a page will render', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'write_files']) {
+      const def = tools.find((t) => t.name === name);
+      expect(def, name).toBeDefined();
+      expect(def!.description, name).toContain('`assets/` folder next to the page');
+      expect(def!.description, name).toContain('![Approval screen](./assets/approval-screen.png)');
     }
   });
 });

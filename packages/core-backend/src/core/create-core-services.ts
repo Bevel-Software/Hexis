@@ -17,6 +17,7 @@ import { RoutineWritePolicyService } from '../modules/workspace/routine-write-po
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
 import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
+import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-spaces.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
@@ -69,7 +70,7 @@ import {
   DbGitHubFacadeCredentialsStore,
   CLAUDE_CONSUMER,
   GITHUB_LINK_KEY_KIND,
-  GITHUB_LINK_KEY_PREFIX,
+  GITHUB_LINK_KEY_SPEC,
 } from '../modules/marketplace/github-facade/index.js';
 import {
   DbSecretsVaultService,
@@ -320,6 +321,7 @@ export async function createCoreServices(
   const kbStartupSteps = [
     new GroupsToPluginsStep(),
     new PluginManifestsStep(),
+    new PersonalSpacesStep(),
     new TemplateFilesStep(extraDirs),
     new RolesYamlStep([config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
@@ -351,7 +353,7 @@ export async function createCoreServices(
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
   // gate cannot disagree about who the owner is. They did: the owner could
-  // open Roles & Members and then be refused the save, with the UI showing
+  // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
   const accessControl = new AccessControlService(workspaceService, kbDirName, [
     config.adminEmail,
@@ -703,7 +705,7 @@ export async function createCoreServices(
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
   const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
-    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_PREFIX,
+    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC,
   });
 
   // The facade that lets products which sync marketplaces only from a GitHub

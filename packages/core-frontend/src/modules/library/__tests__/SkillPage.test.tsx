@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -66,9 +66,29 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetch
 vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
-// the raw source so assertions can see the body text.
+// the raw source so assertions can see the body text, plus two probes for the
+// wiring the page hands the view: a click on a percent-encoded link, and what
+// the image resolver answers for a picture beside the file.
 vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
-  KbMarkdownView: ({ source }: { source: string }) => <div data-testid="md-view">{source}</div>,
+  KbMarkdownView: ({
+    source,
+    onOpenFile,
+    resolveImage,
+  }: {
+    source: string;
+    onOpenFile: (href: string) => void;
+    resolveImage?: (src: string) => unknown;
+  }) => (
+    <div data-testid="md-view">
+      {source}
+      <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
+        link-probe
+      </button>
+      <span data-testid="image-probe">
+        {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
+      </span>
+    </div>
+  ),
 }));
 
 // The file bar's Edit-or-Propose decision asks the per-file access resolver.
@@ -227,6 +247,9 @@ function makeFakeBus() {
       };
     },
     setFocus() {},
+    watchWorkspace() {
+      return () => {};
+    },
     emit(e) {
       (handlers[e.kind] ?? []).forEach((h) => h(e));
     },
@@ -246,9 +269,16 @@ function renderPage(
   pageProps?: { provisional?: boolean },
   /** Git state — overridden to test what the page does when there is no log. */
   gitValue: GitContextValue = git,
+  /** Workspace state — overridden to test the page before the KB dir is known. */
+  workspaceValue: WorkspaceContextValue = workspace,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
-  return render(harness(bus, gitValue, routerState, pageProps));
+  return render(harness(bus, gitValue, routerState, pageProps, workspaceValue));
+}
+
+/** Where a link out of the page took the router: the Knowledge app's path. */
+function NavigatedTo() {
+  return <div data-testid="navigated-to">{useLocation().pathname}</div>;
 }
 
 /**
@@ -286,6 +316,7 @@ function harness(
   gitValue: GitContextValue,
   routerState?: Record<string, unknown>,
   pageProps?: { provisional?: boolean },
+  workspaceValue: WorkspaceContextValue = workspace,
 ) {
   return (
     <MemoryRouter
@@ -294,7 +325,7 @@ function harness(
       ]}
     >
       <AuthContext.Provider value={auth}>
-        <WorkspaceContext.Provider value={workspace}>
+        <WorkspaceContext.Provider value={workspaceValue}>
           <GitContext.Provider value={gitValue}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
@@ -306,6 +337,7 @@ function harness(
                   path="/skills-and-tools/skills/:name"
                   element={<SkillPage {...(pageProps ?? {})} />}
                 />
+                <Route path="/workspace/*" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
@@ -643,7 +675,7 @@ describe('SkillPage', () => {
     expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
     expect(screen.getByText('Loading…')).toBeInTheDocument();
     expect(panel).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByRole('button', { name: /All skills & tools/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Everything/ })).toBeInTheDocument();
 
     await act(async () => {
       resolveSkill(skillDetail);
@@ -1177,16 +1209,17 @@ describe('SkillPage: deciding on a change', () => {
    * A skill is a file in the repository, and this page is the ONLY surface it
    * has: the shell routes every default-branch `Plugins/` URL here
    * (`isLibraryLocation`) and the Knowledge tree does not list `Plugins/` at
-   * all, so a `⋯` missing here means the git log for every skill in the
-   * deployment is unreachable — the audit trail the product is sold on,
-   * available for Knowledge pages and for nothing else.
+   * all, so a Version history button missing here means the git log for every
+   * skill in the deployment is unreachable — the audit trail the product is
+   * sold on, available for Knowledge pages and for nothing else. The button
+   * is the clock-arrow beside Edit in the file bar, the same placement the
+   * Knowledge pane uses.
    */
   describe('version history', () => {
     it('opens the log for the file on screen, at its workspace path', async () => {
       renderPage(false);
 
-      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
 
       // The path the panel asks git about is the workspace-relative one the
       // Knowledge viewer would hand it — kbDirName included. Getting this
@@ -1200,13 +1233,41 @@ describe('SkillPage: deciding on a change', () => {
       // And there is a way back, because history is not in the URL.
       fireEvent.click(screen.getByRole('button', { name: 'Back to the file' }));
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      // The activated Back button unmounts with history. Hand keyboard focus
+      // to the replacement clock instead of letting it fall to the document.
+      expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+    });
+
+    /**
+     * The file bar leaves with the file, and the clock with it; the history
+     * view draws the same clock pressed beside its Back link, so the control
+     * that opened the view is still on screen and is the other way back.
+     */
+    it('keeps a pressed clock on screen while the log is open, and it closes the log', async () => {
+      renderPage(false);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
+      await screen.findByText(/^Timeline:/);
+
+      const pressed = screen.getByRole('button', { name: 'Version history' });
+      expect(pressed).toHaveAttribute('aria-pressed', 'true');
+      // The bar's clock unmounted with the bar; a keyboard user's focus lands
+      // on the pressed clock, not on `document`.
+      expect(document.activeElement).toBe(pressed);
+
+      fireEvent.click(pressed);
+      expect(screen.queryByText(/^Timeline:/)).toBeNull();
+      expect(await screen.findByTestId('md-view')).toBeInTheDocument();
+      const paneClock = screen.getByRole('button', { name: 'Version history' });
+      expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+      // And back again: the pressed clock unmounted with the log.
+      expect(document.activeElement).toBe(paneClock);
     });
 
     it('does not follow you to another file of the skill', async () => {
       renderPage(false);
 
-      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
       await screen.findByText('Timeline: knowledge-base/Skills/newsletter/SKILL.md');
 
       // A tab switch is a switch of file, and history is a lens on ONE file.
@@ -1240,11 +1301,11 @@ describe('SkillPage: deciding on a change', () => {
 
       fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
-      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
 
       // It comes back the moment the draft is gone.
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-      expect(await screen.findByRole('button', { name: 'More actions' })).toBeInTheDocument();
+      expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
     });
 
     /**
@@ -1256,8 +1317,7 @@ describe('SkillPage: deciding on a change', () => {
     it('closes for good when git stops answering mid-read', async () => {
       const bus = makeFakeBus();
       const { rerender } = renderPage(false, [], [], bus);
-      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Version history' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Version history' }));
       await screen.findByText(/^Timeline:/);
 
       // A poll fails: the log goes away, and so does its trigger.
@@ -1268,58 +1328,7 @@ describe('SkillPage: deciding on a change', () => {
       rerender(harness(bus, git));
       expect(await screen.findByTestId('md-view')).toBeInTheDocument();
       expect(screen.queryByText(/^Timeline:/)).toBeNull();
-      expect(screen.getByRole('button', { name: 'More actions' })).toBeInTheDocument();
-    });
-
-    /**
-     * The MENU flag needs the same treatment as the log's, and it is a
-     * separate flag: the trigger and its panel both live behind
-     * `historyAvailable`, so an open menu unmounts with them and leaves its
-     * flag set behind an element nobody can see. Found by cubic on #103.
-     */
-    it('does not spring the menu back open when git recovers', async () => {
-      const bus = makeFakeBus();
-      const { rerender } = renderPage(false, [], [], bus);
-      const trigger = await screen.findByRole('button', { name: 'More actions' });
-      fireEvent.click(trigger);
-      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
-
-      // A poll fails while the menu is OPEN — trigger and panel go together.
-      rerender(harness(bus, { ...git, availability: 'error' } as GitContextValue));
-      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
-
-      // The next poll succeeds. The trigger is back, and it is CLOSED.
-      rerender(harness(bus, git));
-      const back = await screen.findByRole('button', { name: 'More actions' });
-      expect(back).toHaveAttribute('aria-expanded', 'false');
-      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
-    });
-
-    /**
-     * `editing` is the same state by a second door, and it is reachable
-     * without a mouse: `useDismissableMenu` dismisses on outside POINTERDOWN,
-     * so tabbing from the open menu to Edit and pressing Enter never dismisses
-     * it. Cancel then used to hand the menu back open over the file.
-     */
-    it('does not spring the menu back open when the editor closes', async () => {
-      accessMock.result = {
-        canWrite: true,
-        eligible: { roles: [], users: [] },
-        owners: { roles: [], users: [] },
-      };
-      renderPage(true);
-      fireEvent.click(await screen.findByRole('button', { name: 'More actions' }));
-      expect(screen.getByRole('menuitem', { name: 'Version history' })).toBeInTheDocument();
-
-      // Reached by keyboard, so no outside pointerdown ever dismissed the menu.
-      // Edit appears once the access verdict lands — its own load, awaited.
-      fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
-      await screen.findByRole('textbox', { name: /Edit SKILL\.md/ });
-      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-
-      const back = await screen.findByRole('button', { name: 'More actions' });
-      expect(back).toHaveAttribute('aria-expanded', 'false');
-      expect(screen.queryByRole('menuitem', { name: 'Version history' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
     });
 
     it('has no trigger at all when git cannot answer', async () => {
@@ -1328,10 +1337,49 @@ describe('SkillPage: deciding on a change', () => {
         availability: 'loading',
       } as GitContextValue);
 
-      // Version history is the whole menu, so no log means no `⋯` — an
-      // overflow opening onto an empty panel is worse than no overflow.
+      // No log means no button — a clock that opens onto nothing is worse
+      // than none.
       expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
     });
+  });
+});
+
+/**
+ * Links and images in the rendered file. The view is stubbed above, so its
+ * probes stand in for a click on a link and for the pipeline's `<img>`; what
+ * is under test is what the PAGE hands the view.
+ */
+describe('SkillPage: links and images in the file', () => {
+  it('opens a percent-encoded link as the file it names, on the default branch', async () => {
+    // The drift this fixes: the page used to resolve the href undecoded, so a
+    // link written `Some File.md` opened `Some%20File.md`, a file that is not there.
+    renderPage(false);
+    await settled();
+    fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
+    const target = await screen.findByTestId('navigated-to');
+    expect(target.textContent).toMatch(
+      new RegExp(
+        `^/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some(%20| )File\\.md$`,
+      ),
+    );
+  });
+
+  it("serves a relative image from the default branch's workspace, under the skill folder", async () => {
+    renderPage(false);
+    await settled();
+    expect(JSON.parse(screen.getByTestId('image-probe').textContent ?? 'null')).toEqual({
+      src: `/api/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/file/raw?path=knowledge-base%2FSkills%2Fnewsletter%2Fassets%2Fshot.png`,
+      path: 'knowledge-base/Skills/newsletter/assets/shot.png',
+    });
+  });
+
+  it('hands the view no resolver before the workspace has named its KB dir', async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+      workspaceId: 'target-company-state',
+      kbDirName: null,
+    } as unknown as WorkspaceContextValue);
+    await settled();
+    expect(screen.getByTestId('image-probe').textContent).toBe('"no-resolver"');
   });
 });

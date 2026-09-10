@@ -31,7 +31,16 @@ export interface ExternalApiKeySummary {
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /**
+   * Who ended it, once `revokedAt` is set: the owner themselves, or an admin
+   * from the deployment overview. Null while live (and on rows revoked
+   * before this was recorded, which read as the owner's doing).
+   */
+  revokedBy: RevokedBy | null;
 }
+
+/** Who revoked a key: its owner, or an admin acting across the deployment. */
+export type RevokedBy = 'owner' | 'admin';
 
 /**
  * Result of minting a new connection key. `plaintext` is shown to the user
@@ -43,14 +52,42 @@ export interface MintedExternalApiKey {
   summary: ExternalApiKeySummary;
 }
 
+/**
+ * One row of the admin "Connection keys" overview: a key summary plus the
+ * account it belongs to. Deployment-wide, so unlike {@link ExternalApiKeySummary}
+ * the owner is not implied by the caller.
+ */
+export interface AdminExternalApiKeySummary extends ExternalApiKeySummary {
+  user: {
+    id: string;
+    email: string;
+    name: string;
+  };
+}
+
 /** The kind of a key a person creates by hand. */
 export const DEFAULT_KEY_KIND = 'key';
 
 /**
+ * How the plaintext of one kind of key is spelled: the prefix the outside
+ * world sees (and that routes the bearer back here), and the shape of the
+ * random part after it. `base64url` is the platform's own — 43 characters
+ * from a 32-byte draw. `github-token` is what a GitHub OAuth token looks
+ * like after its `gho_`: letters and digits only, 40 of them, so a consumer
+ * that validates the shape of a GitHub token (they are documented as
+ * alphanumeric) keeps it. Both hash the same way; the shape is only what a
+ * client is shown.
+ */
+export interface KeyKindSpec {
+  prefix: string;
+  shape?: 'base64url' | 'github-token';
+}
+
+/**
  * How a key is minted. `kind` names one of the kinds the service was built
- * with, each of which carries its own plaintext prefix (the tenant's for the
- * default kind, `gho_` for a Claude link); an unknown kind is refused, since
- * nothing would route its bearer back.
+ * with, each of which carries its own spelling (the tenant's prefix for the
+ * default kind, a GitHub-shaped token for a Claude link); an unknown kind is
+ * refused, since nothing would route its bearer back.
  */
 export interface MintOptions {
   kind?: string;
@@ -106,6 +143,22 @@ export interface IExternalApiKeyService {
    * TokenNotFoundError if the token doesn't belong to the user.
    */
   revoke(id: string, userId: string): Promise<void>;
+
+  /**
+   * Every token on the deployment, active and revoked, with its owner —
+   * the admin overview. Ordered by owner email, then newest-first, so the
+   * caller can group per account without re-sorting.
+   */
+  listForDeployment(): Promise<AdminExternalApiKeySummary[]>;
+
+  /**
+   * Admin revoke: mark a token revoked WITHOUT scoping by owner, recording
+   * `revokedBy: 'admin'` so the owner's page can say it was taken rather than
+   * disconnected. Same idempotency as {@link revoke}; throws
+   * TokenNotFoundError when no such token exists. Only reachable through an
+   * admin-gated route — the per-user route must keep using {@link revoke}.
+   */
+  revokeAny(id: string): Promise<void>;
 
   /**
    * Permanently delete a token row, dropping its audit trail. Only permitted

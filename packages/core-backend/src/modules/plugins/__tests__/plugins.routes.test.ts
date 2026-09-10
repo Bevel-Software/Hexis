@@ -14,7 +14,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import { PluginIndexService } from '../plugins.service.js';
-import { createPluginsRoutes } from '../plugins.routes.js';
+import { createPluginCreationRoutes, createPluginsRoutes } from '../plugins.routes.js';
 import type { JoinRequestsService } from '../join-requests.service.js';
 import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
 
@@ -160,9 +160,18 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // here only need to prove what they hand it and when they refuse to.
   const provision = {
     createPlugin: vi.fn(async () => ({ folder: 'GTM', created: true })),
+    ensurePersonalPlugin: vi.fn(async () => ({ folder: 'personal-u-1', created: false })),
     deletePlugin: vi.fn(async () => undefined),
   };
 
+  // The creation doors are their own router in the server (behind the
+  // key-or-session gate); here they share the fake identity middleware.
+  app.use(
+    '/api',
+    createPluginCreationRoutes(provision as never, async (req) =>
+      req.userEmail ? { ...ALI_USER, email: req.userEmail } : null,
+    ),
+  );
   app.use(
     '/api',
     createPluginsRoutes(
@@ -225,6 +234,51 @@ describe('/api/plugins routes', () => {
       const res = await fetch(`${h.baseUrl}${url}`, { method });
       expect(res.status, `${method} ${url}`).toBe(401);
     }
+  });
+
+  it('POST /plugins hands the service the name and, when given, the grouping folder to make it in', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const post = (body: unknown) =>
+      fetch(`${h.baseUrl}/api/plugins`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await post({ name: 'Sales' })).status).toBe(201);
+    expect(h.provision.createPlugin).toHaveBeenLastCalledWith(expect.objectContaining({ email: ALI }), 'Sales', undefined);
+    expect((await post({ name: 'Sales', parent: 'Teams/EU' })).status).toBe(201);
+    expect(h.provision.createPlugin).toHaveBeenLastCalledWith(expect.anything(), 'Sales', 'Teams/EU');
+    // A parent that is not a string is a bad request, not a service error.
+    expect((await post({ name: 'Sales', parent: 7 })).status).toBe(400);
+    expect(h.provision.createPlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST /plugins/personal ensures the caller’s own space and returns it; no caller, no space', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ folder: 'personal-u-1', created: false });
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+
+    const anon = await makeHarness({ email: null });
+    try {
+      expect((await fetch(`${anon.baseUrl}/api/plugins/personal`, { method: 'POST' })).status).toBe(401);
+      expect(anon.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+    } finally {
+      await close(anon.server);
+    }
+  });
+
+  it("POST /plugins/personal keeps the service's own status — a 503 for incomplete discovery is retryable, not a 500", async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const { PluginProvisionError } = await import('../plugin-provision.service.js');
+    h.provision.ensurePersonalPlugin.mockRejectedValueOnce(new PluginProvisionError('Plugin discovery is incomplete', 503));
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Plugin discovery is incomplete' });
   });
 
   it('lists member plugins sorted, counting by pluginOfPath', async () => {

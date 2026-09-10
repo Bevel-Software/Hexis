@@ -31,6 +31,13 @@ vi.mock('../services/groups.api', async (importOriginal) => {
     renameGroup: vi.fn(),
   };
 });
+// The add-member input suggests people from the access suggest endpoint —
+// stubbed here so these tests stay about the groups roster.
+vi.mock('../../access/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../access/api')>();
+  return { ...actual, suggestPrincipals: vi.fn() };
+});
+import { suggestPrincipals } from '../../access/api';
 
 const MANUAL_ROSTER: GroupsRoster = {
   mode: 'manual',
@@ -68,6 +75,15 @@ const IDP_ROSTER: GroupsRoster = {
   groupsHealth: { ok: true },
 };
 
+/**
+ * The Add button of the row a member input belongs to — each group card has
+ * its own. The input sits inside its own wrapper (the suggestion list anchors
+ * to it), so the button is one level up from the input's closest div.
+ */
+function addButtonFor(input: HTMLElement) {
+  return within(input.closest('div')!.parentElement!).getByRole('button', { name: 'Add' });
+}
+
 function renderPage(opts: {
   isAdmin?: boolean;
   directoryPanel?: (props: GroupsDirectoryPanelProps) => React.ReactElement;
@@ -102,6 +118,9 @@ beforeEach(() => {
   vi.mocked(addGroupMember).mockReset().mockResolvedValue(MANUAL_ROSTER);
   vi.mocked(removeGroupMember).mockReset().mockResolvedValue(MANUAL_ROSTER);
   vi.mocked(renameGroup).mockReset().mockResolvedValue(MANUAL_ROSTER);
+  vi.mocked(suggestPrincipals)
+    .mockReset()
+    .mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
 });
 
 describe('DirectoryGroupsPage', () => {
@@ -117,7 +136,7 @@ describe('DirectoryGroupsPage', () => {
     expect(screen.getByText('pat@example.com')).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'New group name' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete Product' })).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Add member to Product' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Add member to Product' })).toBeInTheDocument();
   });
 
   it('manual mode: creating a group calls the api and applies the returned roster', async () => {
@@ -144,10 +163,10 @@ describe('DirectoryGroupsPage', () => {
 
   it('manual mode: adding and removing members hit the api', async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'dana@example.com');
     // Scope to the input's row — each group card has its own Add button.
-    await userEvent.click(within(input.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(input));
     await waitFor(() =>
       expect(addGroupMember).toHaveBeenCalledWith('design', 'dana@example.com'),
     );
@@ -168,16 +187,16 @@ describe('DirectoryGroupsPage', () => {
     );
     renderPage();
 
-    const productInput = await screen.findByRole('textbox', { name: 'Add member to Product' });
+    const productInput = await screen.findByRole('combobox', { name: 'Add member to Product' });
     await userEvent.type(productInput, 'a@example.com');
-    await userEvent.click(within(productInput.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(productInput));
     await waitFor(() => expect(addGroupMember).toHaveBeenCalledTimes(1));
 
     // Second card: its own busy flag is free, so the click goes through — but
     // the request must queue behind the unresolved first one.
-    const designInput = screen.getByRole('textbox', { name: 'Add member to Design' });
+    const designInput = screen.getByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(designInput, 'b@example.com');
-    await userEvent.click(within(designInput.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(designInput));
     expect(addGroupMember).toHaveBeenCalledTimes(1);
 
     resolvers[0](MANUAL_ROSTER);
@@ -187,7 +206,7 @@ describe('DirectoryGroupsPage', () => {
     resolvers[1](MANUAL_ROSTER);
     // Both cards settle back to idle.
     await waitFor(() =>
-      expect(screen.getByRole('textbox', { name: 'Add member to Design' })).not.toBeDisabled(),
+      expect(screen.getByRole('combobox', { name: 'Add member to Design' })).not.toBeDisabled(),
     );
   });
 
@@ -251,7 +270,7 @@ describe('DirectoryGroupsPage', () => {
     ).toBeInTheDocument();
     // No manual CRUD anywhere: no create form, no add-member inputs, no deletes.
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Delete / })).not.toBeInTheDocument();
   });
 
@@ -284,7 +303,7 @@ describe('DirectoryGroupsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'simulate-connect' }));
     // No create form, no member editing — the IdP owns groups now.
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(
       await screen.findByText(/Groups appear here after its first provisioning push/),
     ).toBeInTheDocument();
@@ -393,7 +412,7 @@ describe('DirectoryGroupsPage', () => {
     // Stale rows + CRUD controls are gone.
     await waitFor(() => expect(screen.queryByText('Product')).not.toBeInTheDocument());
     expect(screen.queryByRole('textbox', { name: 'New group name' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: /Add member/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /Add member/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Delete / })).not.toBeInTheDocument();
     // The pending delete confirm was dismissed — no dialog left to act on the
     // unparseable file.
@@ -427,9 +446,9 @@ describe('DirectoryGroupsPage', () => {
 
   it("a 'group:'-prefixed member value gets the inline hint and no request", async () => {
     renderPage();
-    const input = await screen.findByRole('textbox', { name: 'Add member to Design' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to Design' });
     await userEvent.type(input, 'group:engineering');
-    await userEvent.click(within(input.closest('div')!).getByRole('button', { name: 'Add' }));
+    await userEvent.click(addButtonFor(input));
     expect(
       await screen.findByText(/Group members are emails — 'group:' references aren't allowed/),
     ).toBeInTheDocument();

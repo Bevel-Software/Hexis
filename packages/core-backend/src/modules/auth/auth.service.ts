@@ -77,7 +77,7 @@ export class AuthService {
    *     variable disables it immediately. Lets a fresh deployment sign in
    *     before any account exists.
    *  2. A per-user account: the `users` row's scrypt `password_hash`
-   *     (created by an admin from Roles & Members, or set by the user on
+   *     (created by an admin from App roles, or set by the user on
    *     their Account page). Accounts that only ever signed in via SSO have
    *     no hash and are refused here.
    *
@@ -146,7 +146,7 @@ export class AuthService {
   }
 
   /**
-   * Admin-driven account provisioning (Roles & Members → Accounts). Upserts
+   * Admin-driven account provisioning (App roles → Accounts). Upserts
    * the user by email and sets their password — re-provisioning an existing
    * account (e.g. one that first arrived via SSO, or a reset for a locked-out
    * user) is deliberate admin behavior, not an error.

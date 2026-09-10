@@ -5,6 +5,7 @@ import '../../tool-auth/external-api-key.interface.js'; // Express Request augme
 import type { MarketplaceRepoService } from '../marketplace-repo.service.js';
 import type { MarketplaceKeyResolver } from '../git-http.routes.js';
 import { GitHubFacadeRequestError, type GitHubFacade } from './github-facade.service.js';
+import { printable } from '../../../shared/printable.js';
 
 export interface GitHubFacadeRoutesDeps {
   facade: GitHubFacade;
@@ -52,10 +53,21 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
   const origin = new URL(deps.publicUrl).origin;
   const fullName = `${owner}/${repoName}`;
 
+  // Every refusal on the connect flow is logged with its reason: the
+  // consumer's backend swallows our answer, so a person who "connected and
+  // came back to Claude" with nothing to show for it has only this log to
+  // say which hop failed. Reasons name a check, never a secret or a code;
+  // what the caller sent (its user agent) is rendered printable, so the
+  // caller cannot write a line of its own.
+  const refused = (req: express.Request, hop: string, err: GitHubFacadeRequestError) => {
+    console.warn(`[github-facade] ${hop} refused (${err.status} ${err.code}): ${err.detail} — from ${userAgentOf(req)}`);
+  };
+
   router.get('/login/oauth/authorize', async (req, res) => {
     try {
       res.redirect(302, await facade.authorizeRedirect(req.query as Record<string, unknown>));
     } catch (err) {
+      if (err instanceof GitHubFacadeRequestError) refused(req, 'authorize', err);
       answerError(res, err);
     }
   });
@@ -72,6 +84,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
         negotiated(req, res, 200, await facade.exchangeCode((req.body ?? {}) as Record<string, unknown>));
       } catch (err) {
         if (err instanceof GitHubFacadeRequestError) {
+          refused(req, 'token exchange', err);
           negotiated(req, res, err.status, { error: err.code, error_description: err.message });
           return;
         }
@@ -87,7 +100,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
   api.use(async (req, res, next) => {
     const token = bearerOf(req);
     if (!token || !keys.looksLikeExternalApiKey(token)) {
-      unauthorized(res);
+      unauthorized(req, res, token ? 'bearer is not a connection key' : 'no bearer');
       return;
     }
     let resolved: { tokenId: string; user: AuthUser } | null;
@@ -99,7 +112,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
       return;
     }
     if (!resolved) {
-      unauthorized(res);
+      unauthorized(req, res, 'connection key unknown or revoked');
       return;
     }
     req.userId = resolved.user.id;
@@ -188,9 +201,19 @@ function bearerOf(req: express.Request): string | null {
   return rest.join(' ').trim() || null;
 }
 
-function unauthorized(res: express.Response): void {
+/** GitHub's 401 — and a log line saying why, since the consumer's backend will not. */
+function unauthorized(req: express.Request, res: express.Response, why: string): void {
+  // The PATH, never the full URL: a query string is the caller's to fill,
+  // and a credential put there would otherwise land in the log.
+  console.warn(`[github-facade] ${req.method} ${printable(req.path)} refused: ${why} — from ${userAgentOf(req)}`);
   res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-marketplace"');
   res.status(401).json({ message: 'Bad credentials' });
+}
+
+/** The caller's user agent as one printable token — it is theirs to fill with anything. */
+function userAgentOf(req: express.Request): string {
+  const ua = req.headers['user-agent'];
+  return ua ? printable(ua) : 'no user-agent';
 }
 
 /** The token endpoint's reply, in the encoding the client asked for. */

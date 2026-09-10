@@ -57,7 +57,11 @@ export function withConnectionKey(key: string): string {
 
 /** The marketplace's registered name — what `plugin@<name>` refers to in Claude Code. */
 export const MARKETPLACE_NAME = 'hexis';
-/** The one-install bundle plugin every compiled marketplace carries. */
+/**
+ * The one-install plugin every compiled marketplace carries: every skill the
+ * person may read plus the knowledge base's MCP endpoint, as content — the
+ * same plugin on Claude Code, Cowork and claude.ai.
+ */
 export const BUNDLE_PLUGIN = 'hexis-all';
 
 /**

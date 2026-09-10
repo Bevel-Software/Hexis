@@ -1,3 +1,11 @@
+---
+# This file's own access rule: readable by every signed-in person and their
+# agents, whatever the root access.md says. Agents are told to read this file
+# before their first action, and the root rules grant read to nobody by
+# default — without this line a non-admin's agent would fail on step one.
+read:
+  - everyone
+---
 # Knowledge base
 
 This is a git-backed knowledge base. You are the primary agent responsible for
@@ -124,20 +132,27 @@ answer to that — and `mcp.json` carries only where a server is, never a
 under `extensions["software.bevel.hexis"].mcpServers[<name>]`, which is ours
 to interpret and which other clients ignore by design.
 
-**Plugin folders are made through the app, not by writing files.** A folder
-is a plugin exactly when it carries a `plugin.json` (the platform writes one
-into every legacy plugin folder at startup), and it is LISTED only when it
-also carries an `access.md` — a bare directory under `{{pluginsDir}}/` is neither.
-Plugins may sit at any depth under `{{pluginsDir}}/`; a folder that holds plugins
-deeper down is a grouping folder, not a plugin. A new plugin needs an
+**Plugin folders are made through the platform, not by writing files.** A
+folder is a plugin exactly when it carries a `plugin.json` (the platform
+writes one into every legacy plugin folder at startup), and it is LISTED only
+when it also carries an `access.md` — a bare directory under `{{pluginsDir}}/` is
+neither. Plugins may sit at any depth under `{{pluginsDir}}/`; a folder that holds
+plugins deeper down is a grouping folder, not a plugin. A new plugin needs an
 `access.md` naming who runs it, and the write gate refuses a plain write
 into an unused name there — so do not try to create a plugin by writing a
-skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Send the user to the app's **New plugin** button (or its
-`POST /api/plugins` endpoint), then write into the folder it made. Names
-starting with `personal-` are reserved: one such folder exists per person,
-created automatically with their first personal skill, readable only by its
-owner and never listed as a plugin — a signed-in user's own skills belong
-there, and move into a plugin by moving the skill's folder.
+skill into `{{pluginsDir}}/<new-name>/…`; it will be denied. Use the two tools
+instead:
+
+- `my_plugin` — your user's own private space, created on first use:
+  `{{pluginsDir}}/personal-<id>/`. Readable only by its owner — not even
+  admins — and never listed as a plugin. Their personal skills go under its `skills/`,
+  each in its own folder with a `SKILL.md`; write there with the file tools.
+- `create_plugin` — a shared plugin, named, optionally inside a grouping
+  folder under `{{pluginsDir}}/` (`parent`). The caller runs it; others join
+  through the app or are granted in its `access.md`.
+
+The app's **New plugin** button and `POST /api/plugins` do the same. A skill
+moves from a personal space into a plugin by moving its folder.
 
 Everything under `{{knowledgeBaseDir}}/` is yours to arrange. Subfolders, naming,
 whether a topic is one file or twenty — all of it is a judgement call about
@@ -150,8 +165,9 @@ each carries its own `README.md` describing what belongs in it.
 
 ## Access control
 
-Write access to any path is governed by `roles.yaml` (who has which role) and
-`access.md` files (which roles/users can write where).
+Access to any path — reading it as much as writing it — is governed by
+`roles.yaml` (who has which role), `groups.yaml` (who is in which group) and
+`access.md` files (who may do what, where).
 
 - **Roles** in `roles.yaml` map a role name to a list of emails. Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
@@ -168,12 +184,23 @@ Write access to any path is governed by `roles.yaml` (who has which role) and
   Adding or removing someone on the plugin changes what they can read
   everywhere the token is granted, with no copying.
 - **Access rules** live in `access.md` files, which carry **two blocks with two
-  scopes**: the body declares the rules for the folder the file sits in, and the
-  frontmatter declares who may read and write that `access.md` itself. Each
-  block names verbs (`read`, `write`, `download`, `owner`) whose entries are
-  either grants (bare principal — a role name or `Name <email>`) or denials
-  (the lowercase word `deny`, a space, then the principal). Capitalised forms
-  like `Deny` are *not* triggers; they are treated as part of a name.
+  scopes**: the BODY (below the closing `---`) declares the rules for the
+  folder the file sits in, and the FRONTMATTER declares who may read and
+  write that `access.md` itself. Each block names verbs (`read`, `write`,
+  `download`, `owner`) whose entries are either grants (a bare principal) or
+  denials (the lowercase word `deny`, a space, then the principal).
+  Capitalised forms like `Deny` are *not* triggers; they are treated as part
+  of a name.
+- **Principals** are a role name from `roles.yaml`, a group name from
+  `groups.yaml`, a person as `Name <email>`, a plugin token (above), or
+  **`everyone`** — the built-in org-wide principal: every signed-in person and
+  their agents. `read: everyone` in a folder's BODY opens that folder to the
+  whole organisation; it is how an organisation-wide skill or plugin is
+  shared. The same line in a file's FRONTMATTER only makes that one file
+  visible — a plugin's `access.md` ships with `read: everyone` in its
+  frontmatter so the plugin can be found and joined, and that admits nobody
+  to the plugin itself. A person's own space (`{{pluginsDir}}/personal-<id>/`)
+  denies `everyone` outright, so opening a parent folder never opens it.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
@@ -235,7 +262,8 @@ its owners, never distributed to agents).
 the app's external-agent page that holds a plugin marketplace compiled from
 exactly the skills they may read — one plugin per plugin here, a
 `skills-and-knowledge` plugin for the rest plus this knowledge base's MCP
-server, and a `hexis-all` bundle that installs everything.
+server, and `hexis-all`, one plugin holding every skill they may read and
+the MCP server, for a single install.
 
 ## Tool Manuals (`{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/*.tool`)
 

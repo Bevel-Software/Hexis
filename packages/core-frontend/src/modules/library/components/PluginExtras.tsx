@@ -1,19 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { DEFAULT_BRANCH, PLUGINS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
+import { ChevronRight } from 'lucide-react';
+import { DEFAULT_BRANCH, PLUGINS_DIR, PLUGIN_MANIFEST_FILE, type FileTreeEntry } from '@bevel-software/platform-shared';
+import { cn } from '../../../lib/utils';
 import { Button } from '../../../shared/components';
-import { listFiles } from '../../workspace/services/workspace.api';
+import { listFiles, readFile } from '../../workspace/services/workspace.api';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { findKbRoot } from '../../workspace/utils/fileTree';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /**
  * The plugin page's two smallest sections, both pure REUSE of the Knowledge
- * surface: links are `kbFileUrl` + `rawFile` navigations into the same raw
- * editor the tool page's "Edit the tool file" uses — no new viewer, no new
- * backend. The one exception is a `.tool` file in a namespace listing, which
- * drops the `rawFile` state so the app gate renders its library tool page —
- * the same destination its card in the Tools band reaches.
+ * file viewer: links are `kbFileUrl` + `rawFile` navigations into the same
+ * raw editor the tool page's "Edit the tool file" uses — rendered inside
+ * this app by `WorkspaceItemRoute`; no new viewer, no new backend. The one
+ * exception is a `.tool` file in a namespace listing, which drops the
+ * `rawFile` state so the item route renders its library tool page — the
+ * same destination its card in the Tools band reaches.
  *
  * MANIFEST: writers get a button to `plugin.json`. It is a button to the FILE,
  * not a form, deliberately: the fields worth hand-editing (`version`,
@@ -56,6 +59,122 @@ export function ManifestButton({
       Manifest
     </Button>
   );
+}
+
+/** The bundle dialect's manifest — read-only here; the file is edited in its own repository. */
+const BUNDLE_MANIFEST_FILE = 'plugin.bundle.json';
+
+/**
+ * The manifest's CONTENTS, at the bottom of the plugin page, behind a
+ * disclosure: closed, it is one line naming the file; open, it is the file —
+ * what the plugin declares (its identifier, version, the skills it links,
+ * the servers it declares) shown as the JSON it is, pretty-printed when it
+ * parses and verbatim when it does not. Read only when opened, so a page
+ * view costs no request for a section most visits never expand. A writer
+ * gets the way to the raw editor from here too.
+ */
+export function ManifestSection({
+  kbDirName,
+  folder,
+  managed,
+  canWrite,
+}: {
+  kbDirName: string | null;
+  folder: string;
+  /** A native manifest (`plugin.json`); false for the bundle dialect's file. */
+  managed: boolean;
+  canWrite: boolean;
+}) {
+  const workspaceId = encodeURIComponent(DEFAULT_BRANCH);
+  const navigate = useNavigate();
+  const panelId = useId();
+  const file = managed ? PLUGIN_MANIFEST_FILE : BUNDLE_MANIFEST_FILE;
+  const path = kbDirName ? `${kbDirName}/${PLUGINS_DIR}/${folder}/${file}` : null;
+  const [open, setOpen] = useState(false);
+  // What was read, KEYED BY THE PATH it was read from: a folder change shows
+  // nothing of the previous plugin's file while the new read is in flight,
+  // with no reset to write — a result for another path is simply not this one.
+  const [loaded, setLoaded] = useState<{ path: string; text: string | null; failed: boolean } | null>(null);
+  const current = loaded?.path === path ? loaded : null;
+
+  useEffect(() => {
+    if (!open || path === null) return;
+    let live = true;
+    readFile(workspaceId, path)
+      .then((text) => {
+        if (live) setLoaded({ path, text, failed: false });
+      })
+      .catch(() => {
+        if (live) setLoaded({ path, text: null, failed: true });
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, workspaceId, path]);
+
+  if (path === null) return null;
+
+  return (
+    <section className="mt-8">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className="flex items-center gap-[7px] text-label font-semibold uppercase text-ink-faint transition-colors hover:text-ink"
+      >
+        <span className="flex w-3 flex-none items-center justify-center">
+          <ChevronRight size={11} className={cn('transition-transform duration-150', open && 'rotate-90')} />
+        </span>
+        Manifest
+        <span className="font-mono normal-case tracking-normal text-ink-faint">{file}</span>
+      </button>
+      {/* The panel is always in the tree, so the button's `aria-controls`
+          names an element that exists; only its CONTENT waits for `open`
+          (and so does the read behind it). */}
+      <div id={panelId} className={open ? 'mt-2.5' : undefined}>
+        {open && (
+          <>
+          <p className="mb-2 max-w-[62ch] text-detail text-ink-muted">
+            What the plugin declares: its identifier and version, the skills it links and the
+            servers it names.{' '}
+            {managed
+              ? 'The extensions block is written by the platform; the rest is yours to edit.'
+              : 'Read from the bundle format; it is edited in its own repository.'}
+          </p>
+          {current?.failed ? (
+            <p className="text-detail text-ink-muted">Couldn't read {file}.</p>
+          ) : current?.text == null ? (
+            <p className="text-detail text-ink-faint">Loading…</p>
+          ) : (
+            <pre className="overflow-x-auto rounded-md border border-line bg-sunken px-3.5 py-2.5 font-mono text-detail text-ink">
+              {prettyJson(current.text)}
+            </pre>
+          )}
+          {canWrite && managed && (
+            <Button
+              variant="quiet"
+              size="sm"
+              className="mt-2"
+              onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH, path), { state: { rawFile: true } })}
+            >
+              Edit the manifest
+            </Button>
+          )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** The file as JSON, laid out — or as written, when it is not JSON. */
+function prettyJson(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
 }
 
 interface NamespaceListing {

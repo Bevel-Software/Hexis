@@ -54,6 +54,88 @@ import type {
  * middleware change can never silently un-gate one. Nothing here is reachable
  * with an agent connection key or a manual-auth bearer.
  */
+/**
+ * The two doors through which plugin folders come to exist — ONE
+ * implementation each, for the app and for agents alike:
+ *
+ *  - `POST /plugins` `{ name, parent? }` — a shared plugin. Any authenticated
+ *    user may create one; that is the product model (making a plugin makes
+ *    you the one who runs it), and the seeded access.md immediately fences
+ *    the new folder off from everyone else. `parent` is a grouping folder
+ *    below the plugins root to make it in. See `PluginProvisionService` for
+ *    why this is an endpoint and not a write path.
+ *  - `POST /plugins/personal` — the caller's own space, ensured (idempotent).
+ *    The UI calls it lazily before the first personal-skill write; an agent
+ *    calls it to learn where to put a person's skills.
+ *
+ * Mounted apart from the other plugin routes, behind a gate that admits an
+ * agent's connection key as well as a session (see `keyOrSessionAuth`):
+ * the `create_plugin` and `my_plugin` tools are UTCP descriptions of these
+ * very endpoints, not a second set. `resolveUser` reads the identity either
+ * gate established.
+ */
+export function createPluginCreationRoutes(
+  provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
+  resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+): express.Router {
+  const router = express.Router();
+
+  router.post('/plugins', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    // `req.body` is undefined when no JSON body was sent at all — that is a
+    // 400, not a destructuring crash.
+    const { name, parent } = (req.body ?? {}) as { name?: string; parent?: unknown };
+    if (typeof name !== 'string') {
+      res.status(400).json({ error: 'name is required in body' });
+      return;
+    }
+    // `parent`: a grouping folder below the plugins root to create in
+    // (`Teams`, `Teams/EU`); absent or empty means the root. Validated by
+    // the service, which owns every rule about where a plugin may go.
+    if (parent !== undefined && typeof parent !== 'string') {
+      res.status(400).json({ error: 'parent must be a folder path below the plugins root' });
+      return;
+    }
+    try {
+      const result = await provision.createPlugin(user, name, parent);
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof PluginProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      console.error('[plugins] create failed:', err);
+      res.status(500).json({ error: 'Failed to create the plugin' });
+    }
+  });
+
+  router.post('/plugins/personal', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    try {
+      res.json(await provision.ensurePersonalPlugin(user));
+    } catch (err) {
+      // The service's own refusals keep their status — a 503 for incomplete
+      // discovery tells the caller to try again, which a 500 would not.
+      if (err instanceof PluginProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      console.error('[plugins] personal-folder ensure failed:', err);
+      res.status(500).json({ error: 'Failed to prepare your personal folder' });
+    }
+  });
+
+  return router;
+}
+
 export function createPluginsRoutes(
   pluginIndex: IPluginIndexService,
   accessControl: IAccessControl,
@@ -267,57 +349,10 @@ export function createPluginsRoutes(
    * workflow's: draft branches are ungated, and the merge gate requires an
    * approver who can write the touched access.md.
    */
-  /**
-   * Create a plugin — the ONE door through which `Plugins/<name>/` folders come
-   * to exist. Any authenticated user may create one; that is the product
-   * model (making a plugin makes you the one who runs it), and the seeded
-   * access.md immediately fences the new folder off from everyone else. See
-   * `PluginProvisionService` for why this is an endpoint and not a write path.
-   */
-  router.post('/plugins', async (req, res) => {
-    const user = await resolveUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
-    // `req.body` is undefined when no JSON body was sent at all — that is a
-    // 400, not a destructuring crash.
-    const { name } = (req.body ?? {}) as { name?: string };
-    if (typeof name !== 'string') {
-      res.status(400).json({ error: 'name is required in body' });
-      return;
-    }
-    try {
-      const result = await provision.createPlugin(user, name);
-      res.status(201).json(result);
-    } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      console.error('[plugins] create failed:', err);
-      res.status(500).json({ error: 'Failed to create the plugin' });
-    }
-  });
-
-  /**
-   * Ensure the caller's personal folder (`Plugins/personal-<id>/`) exists —
-   * idempotent; the UI calls it lazily right before the first personal-skill
-   * write. Private by construction: its access.md names only the caller.
-   */
-  router.post('/plugins/personal', async (req, res) => {
-    const user = await resolveUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
-    try {
-      res.json(await provision.ensurePersonalPlugin(user));
-    } catch (err) {
-      console.error('[plugins] personal-folder ensure failed:', err);
-      res.status(500).json({ error: 'Failed to prepare your personal folder' });
-    }
-  });
+  // `POST /plugins` and `POST /plugins/personal` — the creation doors — live
+  // in `createPluginCreationRoutes` below, mounted behind a gate that admits
+  // an agent's connection key as well as a session, since the same two
+  // endpoints are what the `create_plugin` and `my_plugin` tools describe.
 
   /**
    * Delete a plugin — the OWNER's verb, and only theirs. Creating a plugin

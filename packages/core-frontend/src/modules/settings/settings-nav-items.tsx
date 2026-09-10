@@ -76,7 +76,7 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     section: 'admin',
     order: 10,
     icon: <Users size={15} />,
-    label: 'Roles & Members',
+    label: 'App roles',
     path: '/roles-and-members',
   },
   {
@@ -84,7 +84,7 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     section: 'admin',
     order: 15,
     icon: <UsersRound size={15} />,
-    label: 'Groups',
+    label: 'Groups & Members',
     path: '/directory-groups',
   },
   {
@@ -94,6 +94,14 @@ export const CORE_MENU_ITEMS: AdminMenuItem[] = [
     icon: <CircleUserRound size={15} />,
     label: 'User accounts',
     path: '/user-accounts',
+  },
+  {
+    id: 'connection-keys',
+    section: 'admin',
+    order: 25,
+    icon: <KeyRound size={15} />,
+    label: 'Connection keys',
+    path: '/connection-keys',
   },
 ];
 

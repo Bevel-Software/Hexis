@@ -37,6 +37,7 @@ vi.mock('../services/library.api', async (importOriginal) => ({
   removeLibraryItem: libApiMock.removeLibraryItem,
 }));
 
+vi.mock('../services/teams.api', () => ({ listTeams: vi.fn().mockResolvedValue([]) }));
 vi.mock('../services/plugins.api', () => ({
   listPlugins: pluginsMock.listPlugins,
   listJoinRequests: pluginsMock.listJoinRequests,
@@ -661,7 +662,7 @@ describe('PluginPage', () => {
   it('says so when the plugin does not exist', async () => {
     renderPlugin('Nope');
     expect(await screen.findByText("This plugin doesn't exist yet.")).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'All plugins' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Everything' })).toHaveAttribute(
       'href',
       '/skills-and-tools',
     );

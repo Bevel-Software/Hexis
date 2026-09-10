@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import type { ReviewSession } from '@bevel-software/platform-shared';
+import type { FileDiffPayload, ReviewSession } from '@bevel-software/platform-shared';
 import { ReviewPanel } from '../ReviewPanel';
 import { ReviewContext, type ReviewContextValue } from '../../state/review.context';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../../workspace/state/workspace.context';
@@ -42,6 +42,7 @@ function renderPanel(review: ReviewContextValue) {
   const workspace = {
     refreshFileTree: vi.fn(async () => null),
     kbDirName: 'knowledge-base',
+    workspaceId: 'ws-1',
   } as unknown as WorkspaceContextValue;
   const git = { status: { branch: session.branchName } } as unknown as GitContextValue;
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -106,5 +107,28 @@ describe('ReviewPanel top-bar actions (BEVA-77)', () => {
     renderPanel(makeReview({ selectedPath: null }));
     expect((screen.getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Delete' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+/**
+ * This panel reviews the working tree of the branch you are standing on, so
+ * the checked-out workspace IS the diff's new state: an image the agent added
+ * is on disk and can be shown. Bound to that workspace and resolved against
+ * the diffed file.
+ */
+describe('ReviewPanel images in the diff', () => {
+  it('serves a relative image from the checked-out workspace, resolved against the diffed file', () => {
+    const fileDiff = {
+      path: 'processes/onboarding.md',
+      kind: 'modified',
+      isBinary: false,
+      baseline: 'intro\n',
+      current: 'intro\n\n![Approval screen](./assets/approval.png)\n',
+    } as FileDiffPayload;
+    renderPanel(makeReview({ fileDiff }));
+    expect(screen.getByRole('img', { name: 'Approval screen' })).toHaveAttribute(
+      'src',
+      '/api/workspace/ws-1/file/raw?path=processes%2Fassets%2Fapproval.png',
+    );
   });
 });

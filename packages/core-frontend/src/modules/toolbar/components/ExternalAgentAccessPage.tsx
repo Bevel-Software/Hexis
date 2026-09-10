@@ -18,6 +18,7 @@ import {
   workspaceBaseUrl,
 } from '../../../shared/mcp';
 import { GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
 import {
   type ExternalApiKeySummary,
@@ -81,6 +82,9 @@ export function ExternalAgentAccessPage() {
   const workspaceUrl = workspaceBaseUrl();
 
   const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
+  // Whether the Cowork drawer is expanded. Only the registration credentials
+  // wait on it; everything else in the drawer renders either way.
+  const [coworkOpen, setCoworkOpen] = useState(false);
   const { isAdmin } = useAdmin();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -331,38 +335,26 @@ export function ExternalAgentAccessPage() {
               claude.ai fetch it as a repository once your account is connected.
             </p>
 
-            <details className="border border-line rounded" data-testid="cowork-section">
+            {/* CONTROLLED, both attributes together. A closed <details> still
+                MOUNTS its children, so the registration credentials wait on
+                `coworkOpen` rather than loading a client secret and a private
+                key into a drawer nobody opened. Watching the element with
+                `onToggle` alone was not enough: this subtree unmounts on a tab
+                switch and the fresh <details> comes back closed while the
+                state stayed true, which put the secrets right back in a closed
+                drawer. With `open` bound too, the element cannot disagree with
+                the state that gates them. */}
+            <details
+              className="border border-line rounded"
+              data-testid="cowork-section"
+              open={coworkOpen}
+              onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
+            >
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                 Cowork and claude.ai
               </summary>
               <div className="px-3 pb-3 space-y-3">
-                <p className="text-meta text-ink-muted leading-snug">
-                  Cowork and claude.ai take marketplaces only from GitHub, or from a GitHub
-                  Enterprise Server your Claude organization registered. This deployment answers as
-                  one: an Owner of your Claude organization registers it once
-                  {isAdmin ? (
-                    <>
-                      {' '}
-                      (the fields are on the{' '}
-                      <Link to="/deployment" className="underline text-ink-muted hover:text-ink">
-                        Deployment
-                      </Link>{' '}
-                      page)
-                    </>
-                  ) : (
-                    <> (an admin here has the fields)</>
-                  )}
-                  , then every person connects their own account:
-                </p>
-                <ol className="text-meta text-ink-muted leading-snug list-decimal pl-4 space-y-0.5">
-                  <li>In Cowork (or claude.ai), open Plugins → Add marketplace and paste the URL below.</li>
-                  <li>
-                    When it asks you to connect your GitHub Enterprise account, you land on this
-                    deployment's sign-in: approve, and you are back in Claude.
-                  </li>
-                  <li>Install the plugins you want. Update in Claude pulls what changed.</li>
-                </ol>
-                <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
+                <CoworkSetupSteps isAdmin={isAdmin} opened={coworkOpen} />
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-ink">Your Claude connections</div>
                   {loadError && (
@@ -525,7 +517,10 @@ export function ExternalAgentAccessPage() {
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
                             Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
-                            {revoked && ' · Disconnected'}
+                            {/* A key an admin took is not one you can reconnect — say so,
+                                or people try. Your own disconnect keeps its word. */}
+                            {revoked &&
+                              (k.revokedBy === 'admin' ? ' · Revoked by an admin' : ' · Disconnected')}
                           </div>
                           {usage && (
                             <div className="mt-1 max-w-xs">

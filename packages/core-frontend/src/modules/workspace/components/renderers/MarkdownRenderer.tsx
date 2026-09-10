@@ -6,9 +6,9 @@ import {
   useFileNav,
   useNodeIdNav,
   useCanonicalFileUrl,
-  KB_ROUTE_PREFIX,
-  resolveRelativePath,
 } from '../../routing/kb-routes';
+import { useWorkspace } from '../../state/workspace.context';
+import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
 
 /** Decode a URL hash (`#some%20slug`) to its bare slug, tolerating bad escapes. */
@@ -60,9 +60,9 @@ export function MarkdownRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  // openFile here is the navigating version: clicking a markdown link to a file
+  // openLink here is the navigating version: clicking a markdown link to a file
   // updates the URL so the route reflects what's on screen.
-  const { openFile } = useFileNav();
+  const { openLink } = useFileNav();
   // Shared id-link resolver (resolve-id → openFile, heading preserved) — same
   // implementation the chat citation renderer uses.
   const { openNodeId } = useNodeIdNav();
@@ -137,9 +137,6 @@ export function MarkdownRenderer({
     return () => cancelAnimationFrame(raf);
   }, [location.hash, filePath, value, readOnly]);
 
-  // Navigate to a workspace file referenced by a relative link. react-markdown
-  // percent-encodes spaces in hrefs (`Some%20File.md`), so decode before
-  // resolving or the path won't match a real file.
   // Citation deep-link for a heading: the node's canonical URL (its id URL when
   // it's a node, else the path URL) plus the heading's `#slug`. Matches the "copy
   // link to this file" affordance, scoped to a section. Falls back to the current
@@ -151,22 +148,22 @@ export function MarkdownRenderer({
     [canonicalFileUrl, location.pathname],
   );
 
+  // A link out of the page, resolved against this file by `openLink`: decoded
+  // (react-markdown percent-encodes the spaces in `Some File.md`), absolute
+  // citation URLs keeping their own branch. The same grammar every other
+  // rendered-document surface uses.
   const handleFileLink = useCallback(
-    (href: string) => {
-      // Absolute workspace citation URLs (`/workspace/<branch>/<path>`, e.g. the
-      // links the agent emits) carry their own branch and are resolved by
-      // `openFile` directly. Never run them through `resolveRelativePath` — that
-      // would treat them as relative to the current file and mangle the path.
-      if (href.startsWith(`${KB_ROUTE_PREFIX}/`)) {
-        openFile(href);
-        return;
-      }
-      let decoded = href;
-      try { decoded = decodeURIComponent(href); } catch { /* leave as-is */ }
-      openFile(resolveRelativePath(filePath, decoded));
-    },
-    [openFile, filePath],
+    (href: string) => openLink(href, filePath),
+    [openLink, filePath],
   );
+
+  // An image in the page: the same grammar, but the bytes come from this
+  // workspace's raw file route (a plain `<img>` authenticates through the
+  // bevel_token cookie), and the URL carries the workspace's image revision,
+  // which changes when a teammate replaces a file, so an open tab shows the
+  // new picture.
+  const { workspaceId } = useWorkspace();
+  const resolveImage = useWorkspaceImageResolver(workspaceId, filePath);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;
@@ -241,6 +238,7 @@ export function MarkdownRenderer({
           onOpenFile={handleFileLink}
           onOpenNodeId={openNodeId}
           headingLink={headingLink}
+          resolveImage={resolveImage}
           containerRef={scrollContainerRef}
           // The document column scrolls; this view does not. See the prop's
           // docstring — the embed and the library dialog keep the default.

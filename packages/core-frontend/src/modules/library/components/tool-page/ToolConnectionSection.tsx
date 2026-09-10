@@ -317,9 +317,9 @@ export function ToolConnectionSection({
                   variant="quiet"
                   size="tiny"
                   className="mt-1.5"
-                  // `rawFile` steps past the WorkspaceItemGate: this URL is
-                  // the tool page's own canonical address, and the button
-                  // wants the raw editor behind it.
+                  // `rawFile` asks the item route for the raw editor: this
+                  // URL is the tool page's own canonical address, and the
+                  // button wants the file behind it — still in this app.
                   onClick={() =>
                     navigate(kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${tool.path}`), {
                       state: { rawFile: true },

@@ -23,6 +23,8 @@ interface AppLayoutProps {
    * `SidebarFrame`'s `header`.
    */
   sidebarHeader?: ReactNode;
+  /** Pinned below the sidebar's content — see `SidebarFrame`'s `footer`. */
+  sidebarFooter?: ReactNode;
   // Legacy named slots, kept as a convenience/compat signature.
   explorer?: ReactNode;
   viewer?: ReactNode;

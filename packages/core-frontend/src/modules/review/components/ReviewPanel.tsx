@@ -6,10 +6,9 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import {
   useFileNav,
   useNodeIdNav,
-  resolveRelativePath,
   stripJunkBeforeKbDir,
-  KB_ROUTE_PREFIX,
 } from '../../workspace/routing/kb-routes';
+import { useWorkspaceImageResolver } from '../../workspace/hooks/useWorkspaceImageResolver';
 import { pluginOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
@@ -110,8 +109,8 @@ function kindLabel(kind: PendingChange['kind']): string {
  */
 export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   const review = useReview();
-  const { refreshFileTree, kbDirName } = useWorkspace();
-  const { openFile } = useFileNav();
+  const { refreshFileTree, kbDirName, workspaceId } = useWorkspace();
+  const { openFile, openLink } = useFileNav();
   // Links inside a rendered diff. Both resolvers navigate relative to
   // `git.status.branch`, which is CORRECT here and only here: this panel
   // reviews the agent's uncommitted changes on the branch you are already
@@ -120,21 +119,19 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   // passes no resolvers — see the comment at its MarkdownDiffViewer call.)
   const { openNodeId } = useNodeIdNav();
   const diffPath = review.fileDiff?.path ?? '';
+  // Resolved against the diffed file by `openLink`: decoded, an absolute URL
+  // keeping its own branch. The same grammar MarkdownRenderer uses.
   const openDiffLink = useCallback(
-    (href: string) => {
-      // Absolute workspace URLs carry their own branch; running them through
-      // resolveRelativePath would treat them as relative to the diffed file
-      // and mangle the path. Same guard as MarkdownRenderer's handleFileLink.
-      if (href.startsWith(`${KB_ROUTE_PREFIX}/`)) {
-        openFile(href);
-        return;
-      }
-      let decoded = href;
-      try { decoded = decodeURIComponent(href); } catch { /* leave as-is */ }
-      openFile(resolveRelativePath(diffPath, decoded));
-    },
-    [openFile, diffPath],
+    (href: string) => openLink(href, diffPath),
+    [openLink, diffPath],
   );
+  // Images inside a rendered diff, bound to the CHECKED-OUT workspace for the
+  // reason above: the working tree IS the diff's new state, so an image the
+  // agent added is on disk and can be shown. The viewer applies this to the
+  // unchanged and added sides only; a removed image is named, never fetched.
+  // The revision keeps the panel current when the agent replaces a picture
+  // while it is open.
+  const resolveDiffImage = useWorkspaceImageResolver(workspaceId, diffPath);
   const [busy, setBusy] = useState(false);
   // `busy` alone is not re-entrant-safe: two rapid clicks (or a click + a
   // keyboard activation of the same button) can both read `busy === false`
@@ -377,6 +374,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
                   payload={fileDiff}
                   onOpenFile={openDiffLink}
                   onOpenNodeId={openNodeId}
+                  resolveImage={resolveDiffImage}
                   scroll={false}
                 />
               </div>

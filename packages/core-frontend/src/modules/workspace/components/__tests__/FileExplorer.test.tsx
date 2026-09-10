@@ -10,12 +10,6 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
 
-// PullRequestsForMe pulls in router/git wiring we don't want to exercise here;
-// stub it so the toolbar can be tested in isolation.
-vi.mock('../../../git/components/PullRequestsForMe', () => ({
-  PullRequestsForMe: () => null,
-}));
-
 // authFetch is the bearer-token wrapper around window.fetch. The Download
 // click test asserts the URL + ?download=1 flag, so we mock it at the
 // module level rather than monkey-patching globalThis.fetch.
@@ -774,7 +768,11 @@ describe('FileExplorer rows: the prototype tree', () => {
     renderExplorer({ fileTree: TREE });
     const empty = screen.getByText('reports').closest('button')!;
     expect(empty.querySelectorAll('svg')).toHaveLength(0);
-    expect(empty).toHaveAttribute('aria-expanded');
+    // Nothing to open, so no claim about being open: `aria-expanded` is
+    // for a control that can expand — and a click changes nothing.
+    expect(empty).not.toHaveAttribute('aria-expanded');
+    fireEvent.click(empty);
+    expect(empty).not.toHaveAttribute('aria-expanded');
 
     const withKids = screen.getByText('docs').closest('button')!;
     expect(withKids.querySelectorAll('svg')).toHaveLength(1);

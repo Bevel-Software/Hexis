@@ -1,12 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { cn } from '../../../lib/utils';
 import {
   Button,
   buttonClasses,
+  Dialog,
   IconButton,
+  useDismissableMenu,
   Surface,
   ListRow,
   Badge,
@@ -329,5 +331,117 @@ describe('Menu', () => {
   it('MenuLabel renders its section heading', () => {
     render(<MenuLabel>Appearance</MenuLabel>);
     expect(screen.getByText('Appearance')).toBeInTheDocument();
+  });
+});
+
+describe('Dialog', () => {
+  /**
+   * A menu hosted inside the dialog, built the way `ManageAccessDialog`'s
+   * are: it dismisses on an outside `mousedown`, and the HOOK holds the top
+   * modal layer while it is open (registering a second layer here would sit
+   * above the hook's own and steal its Escape). The layer pops when the menu
+   * unmounts — before the same gesture's `click` reaches the scrim.
+   */
+  function HostedMenu({ name, onClose }: { name?: string; onClose(): void }) {
+    const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose });
+    return <div ref={ref} role="menu" aria-label={name ?? 'menu'} />;
+  }
+  // The menu opens from a control inside the dialog, so its layer lands on
+  // the stack ABOVE the dialog's — mounted together, the child's effect
+  // would run first and put it underneath.
+  function Host({ onClose }: { onClose(): void }) {
+    const [menuOpen, setMenuOpen] = useState(false);
+    return (
+      <Dialog open onClose={onClose} title="Host">
+        <button onClick={() => setMenuOpen(true)}>Open the menu</button>
+        {menuOpen && <HostedMenu onClose={() => setMenuOpen(false)} />}
+      </Dialog>
+    );
+  }
+
+  it('a scrim click that dismissed a nested layer on mousedown does not also close the dialog', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<Host onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Open the menu' }));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    const scrim = screen.getByRole('dialog').parentElement!;
+    await user.click(scrim);
+    // The menu went on mousedown; the click that followed belonged to it.
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The next scrim click began with the dialog on top, and closes it.
+    await user.click(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a drag that starts inside the panel and releases on the scrim does not close the dialog', async () => {
+    // Selecting text and overshooting the panel edge makes the browser fire
+    // `click` on the common ancestor of mousedown and mouseup — the scrim
+    // container. The panel's stopPropagation never sees that click, so the
+    // scrim must judge the gesture by where the POINTER WENT DOWN.
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <Dialog open onClose={onClose} title="Host">
+        <p>Some selectable text</p>
+      </Dialog>,
+    );
+    const panel = screen.getByRole('dialog');
+    const scrim = panel.parentElement!;
+
+    fireEvent.mouseDown(panel);
+    fireEvent.mouseUp(scrim);
+    fireEvent.click(scrim);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // A genuine scrim click — down and up on the scrim — still closes.
+    await user.click(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape peels one layer at a time when two menus are open above the dialog', async () => {
+    // Reachable by keyboard only: opening a menu by Enter fires no mousedown,
+    // so nothing dismisses the first menu when the second opens. Each press
+    // of Escape must close exactly the topmost layer, newest first — never
+    // both menus, and never the dialog underneath them.
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    function TwoMenuHost() {
+      const [first, setFirst] = useState(false);
+      const [second, setSecond] = useState(false);
+      return (
+        <Dialog open onClose={onClose} title="Host">
+          <button onClick={() => setFirst(true)}>Open first</button>
+          <button onClick={() => setSecond(true)}>Open second</button>
+          {first && <HostedMenu name="first" onClose={() => setFirst(false)} />}
+          {second && <HostedMenu name="second" onClose={() => setSecond(false)} />}
+        </Dialog>
+      );
+    }
+    render(<TwoMenuHost />);
+    // Enter, not click: a click's mousedown would dismiss the first menu
+    // before the second ever opens — which is why this state is
+    // keyboard-only in the first place.
+    screen.getByRole('button', { name: 'Open first' }).focus();
+    await user.keyboard('{Enter}');
+    screen.getByRole('button', { name: 'Open second' }).focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getAllByRole('menu')).toHaveLength(2);
+
+    await user.keyboard('{Escape}');
+    // Only the newest layer went; its sibling and the dialog stand.
+    expect(screen.getByRole('menu', { name: 'first' })).toBeInTheDocument();
+    expect(screen.queryByRole('menu', { name: 'second' })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

@@ -28,9 +28,11 @@ import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
  *
  * What comes out, for one caller:
  *
- *   .claude-plugin/marketplace.json      Claude Code's catalogue
+ *   .claude-plugin/marketplace.json      Claude Code's catalogue (and Cowork's,
+ *                                        claude.ai's): every plugin below
  *   .agents/plugins/marketplace.json     Codex's catalogue, every entry
- *                                        INSTALLED_BY_DEFAULT
+ *                                        INSTALLED_BY_DEFAULT — without the
+ *                                        bundle, which would install it all twice
  *   plugins/<slug>/…                     one per plugin the caller may read
  *                                        anything of: inline + linked skills,
  *                                        the portable half of mcp.json
@@ -39,10 +41,12 @@ import type { DiscoveredPlugin } from '../discovery/plugin-source.js';
  *                                        only in plugins the caller cannot see,
  *                                        is still one install away — plus the
  *                                        knowledge base's own MCP endpoint
- *   plugins/hexis-all/…                  a bundle whose only content is a
- *                                        dependency on every plugin above —
- *                                        Claude Code installs them all from
- *                                        one `claude plugin install`
+ *   plugins/hexis-all/…                  the one-install bundle: a plugin of
+ *                                        its own holding every readable skill
+ *                                        once and the knowledge base's MCP
+ *                                        endpoint — content, not a dependency
+ *                                        list, because only Claude Code
+ *                                        resolves one
  *   skills/<name>/…                      every readable skill once, flat, for
  *                                        `npx skills add <url> --all`
  *   README.md                            names the source commit
@@ -245,42 +249,55 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     }
   }
 
-  // 4. The one-install bundle: a Claude manifest with nothing but dependencies.
-  const bundle = pluginManifestName(options.bundleName ?? BUNDLE_NAME);
-  const slugs = out.map((p) => p.slug);
-  if (slugs.includes(bundle)) {
-    // Only reachable with a non-default bundle name that folds to a real
-    // plugin's slug: the default is reserved above. Skipping the bundle
-    // beats overwriting that plugin's manifests with a dependency list.
-    warnings.push(`the bundle name "${bundle}" collides with a plugin's manifest name — no bundle plugin emitted`);
-  }
-  if (slugs.length > 0 && !slugs.includes(bundle)) {
-    const shortSha = options.sourceCommit.slice(0, 12) || '0';
-    const description = `Everything in ${options.owner}'s marketplace you may read — one install.`;
-    put(
-      `plugins/${bundle}/.claude-plugin/plugin.json`,
-      `${JSON.stringify({ name: bundle, version: `0.0.0-${shortSha}`, description, dependencies: slugs }, null, 2)}\n`,
-    );
-    put(
-      `plugins/${bundle}/${PLUGIN_MANIFEST_FILE}`,
-      `${JSON.stringify({ $schema: PLUGIN_MANIFEST_SCHEMA, name: bundle, description }, null, 2)}\n`,
-    );
-    put(
-      `plugins/${bundle}/.codex-plugin/plugin.json`,
-      `${JSON.stringify({ name: bundle, description }, null, 2)}\n`,
-    );
-  }
-
-  // 5. The flat root skills/ folder, every readable skill once.
+  // 4. Every readable skill once, by name — ONE set, carried twice: the flat
+  //    root skills/ folder, and the one-install bundle below.
   const flat = dedupeByName(
     [...readableSkills.values()].sort((a, b) => a.path.localeCompare(b.path)),
-    (s, other) => warnings.push(`skills/: "${s.name}" at ${s.path} shares its name with ${other.path} — left out`),
+    (s, other) =>
+      warnings.push(`"${s.name}" at ${s.path} shares its name with ${other.path} — left out of skills/ and the bundle`),
   );
   for (const s of flat) await copySkill(kbRoot, s, `skills/${s.name}`, put);
 
-  // 6. The two catalogues + a README naming the source.
-  const bundleEmitted = slugs.length > 0 && !slugs.includes(bundle);
-  const entries = [...out.map((p) => ({ slug: p.slug, description: p.description ?? p.displayName })), ...(bundleEmitted ? [{ slug: bundle, description: 'Everything you may read, one install' }] : [])];
+  // 5. The one-install bundle: a plugin of its own that IS everything the
+  //    caller may read — every skill once, plus the knowledge base's MCP
+  //    endpoint — not a manifest naming the plugins above as dependencies.
+  //    Only Claude Code resolves a dependency list; Cowork and claude.ai
+  //    install a plugin's content and nothing more, so for one install to
+  //    mean the same thing on every surface, the content has to be there.
+  //    Its version is the source commit, so an auto-update sees every change.
+  const bundle = pluginManifestName(options.bundleName ?? BUNDLE_NAME);
+  const bundleTaken = out.some((p) => p.slug === bundle);
+  if (bundleTaken) {
+    // Only reachable with a non-default bundle name that folds to a real
+    // plugin's slug: the default is reserved above. Skipping the bundle
+    // beats overwriting that plugin's tree with everything.
+    warnings.push(`the bundle name "${bundle}" collides with a plugin's manifest name — no bundle plugin emitted`);
+  }
+  const bundleEmitted = !bundleTaken && (flat.length > 0 || kbMcp !== undefined);
+  if (bundleEmitted) {
+    const base = `plugins/${bundle}`;
+    const shortSha = options.sourceCommit.slice(0, 12) || '0';
+    const description = `Everything in ${options.owner}'s marketplace you may read, in one install.`;
+    put(
+      `${base}/.claude-plugin/plugin.json`,
+      `${JSON.stringify({ name: bundle, version: `0.0.0-${shortSha}`, description }, null, 2)}\n`,
+    );
+    put(
+      `${base}/${PLUGIN_MANIFEST_FILE}`,
+      `${JSON.stringify({ $schema: PLUGIN_MANIFEST_SCHEMA, name: bundle, description }, null, 2)}\n`,
+    );
+    if (kbMcp) {
+      put(`${base}/${PLUGIN_MCP_FILE}`, `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: kbMcp }, null, 2)}\n`);
+      put(`${base}/.mcp.json`, `${JSON.stringify({ mcpServers: kbMcp }, null, 2)}\n`);
+    }
+    for (const s of flat) await copySkill(kbRoot, s, `${base}/skills/${s.name}`, put);
+  }
+
+  // 6. The two catalogues + a README naming the source. The bundle is listed
+  //    for Claude's surfaces only: Codex installs every catalogue entry on
+  //    add, and the bundle repeats what the other entries already carry.
+  const entries = out.map((p) => ({ slug: p.slug, description: p.description ?? p.displayName }));
+  const claudeEntries = [...entries, ...(bundleEmitted ? [{ slug: bundle, description: 'Everything you may read, one install' }] : [])];
   put(
     '.claude-plugin/marketplace.json',
     `${JSON.stringify(
@@ -288,7 +305,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
         name: options.name,
         owner: { name: options.owner },
         ...(options.description ? { description: options.description } : {}),
-        plugins: entries.map((e) => ({ name: e.slug, source: `./plugins/${e.slug}`, description: e.description })),
+        plugins: claudeEntries.map((e) => ({ name: e.slug, source: `./plugins/${e.slug}`, description: e.description })),
       },
       null,
       2,
@@ -318,12 +335,12 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       `Compiled from ${options.owner}'s knowledge base at commit \`${options.sourceCommit}\`.`,
       'This tree is generated: edit the knowledge base, not these files.',
       '',
-      `Plugins: ${entries.map((e) => e.slug).join(', ') || 'none'}.`,
+      `Plugins: ${claudeEntries.map((e) => e.slug).join(', ') || 'none'}.`,
       '',
     ].join('\n'),
   );
 
-  return { files, warnings, plugins: entries.map((e) => e.slug) };
+  return { files, warnings, plugins: claudeEntries.map((e) => e.slug) };
 }
 
 // --- helpers ------------------------------------------------------------------

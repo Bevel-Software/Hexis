@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useState } from 'react';
 import { Download } from 'lucide-react';
 import { Button } from '../../../../shared/components';
 import { useWorkspace } from '../../state/workspace.context';
+import { rawFileUrl } from '../../services/workspace.api';
 import { downloadViaBlob } from './downloadFile';
 
 /**
@@ -44,7 +45,7 @@ export function DownloadFileButton({
     setError(null);
     try {
       const outcome = await downloadViaBlob(
-        `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}&download=1`,
+        rawFileUrl(workspaceId, filePath, { download: true }),
         fileName,
       );
       if (!outcome.ok) {

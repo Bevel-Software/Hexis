@@ -14,7 +14,7 @@ import { pluginLabel, primaryFolderOf } from '../utils/plugin-summary';
 import { RenamePluginDialog } from './RenamePluginDialog';
 import { PluginJoinRequests } from './PluginJoinRequests';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { ManifestButton, ClientExtensionsSection } from './PluginExtras';
+import { ManifestButton, ClientExtensionsSection, ManifestSection } from './PluginExtras';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { AddToPluginDialog } from './AddToPluginDialog';
 import { BandControls, EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
@@ -230,7 +230,7 @@ export function PluginPage() {
           to={pathForPluginsIndex()}
           className="mt-2 inline-block rounded-xs text-ui font-semibold text-ink underline"
         >
-          All plugins
+          Everything
         </Link>
       </div>
     );
@@ -483,6 +483,19 @@ export function PluginPage() {
       )}
 
       <ClientExtensionsSection kbDirName={kbDirName} folder={folderBelowRoot} />
+      {/* Last, and closed by default: the file behind the page, for whoever
+          wants to see exactly what the plugin declares. Only once the SUMMARY
+          is in: it is what says where the plugin's folder is (a nested
+          plugin's is not `Plugins/<identity>`) and which manifest file it
+          carries — before it, `folderBelowRoot` is a guess from the URL. */}
+      {summary && (
+        <ManifestSection
+          kbDirName={kbDirName}
+          folder={folderBelowRoot}
+          managed={summary.linksAreManaged !== false}
+          canWrite={summary.canWrite}
+        />
+      )}
       {manageDialog}
     </div>
   );

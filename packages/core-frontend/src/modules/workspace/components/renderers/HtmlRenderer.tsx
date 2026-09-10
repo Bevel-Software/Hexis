@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Pencil, Eye, RotateCw } from 'lucide-react';
-import { useFileNav, KB_ROUTE_PREFIX, resolveRelativePath } from '../../routing/kb-routes';
+import { useFileNav } from '../../routing/kb-routes';
 import type { FileRendererProps, RendererSaveState } from './types';
 import { buildSandboxedHtml, sanitizeAgentHtml } from './htmlSandbox';
 
@@ -14,7 +14,7 @@ export function HtmlRenderer({
   onSaveStateChange,
   readOnly = false,
 }: FileRendererProps) {
-  const { openFile } = useFileNav();
+  const { openLink } = useFileNav();
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   const [value, setValue] = useState(content);
   const [savedValue, setSavedValue] = useState(savedContent ?? content);
@@ -82,10 +82,10 @@ export function HtmlRenderer({
   // Navigation bridge: agent HTML deep-links into the KB by calling
   // `window.bevel.openNode(href)` or clicking an `<a>` whose href points at a
   // node — both post a `bevel.navigate` message (the iframe sandbox can't
-  // navigate the host window itself). We resolve the href the same way the
-  // markdown renderer does (absolute `/workspace/…` URLs pass through; relative
-  // `.md` paths resolve against this file) and route it through the in-app
-  // navigation so the URL reflects what's on screen.
+  // navigate the host window itself). `openLink` resolves the href the same
+  // way the markdown renderer does (absolute `/workspace/…` URLs keep their
+  // branch; relative paths resolve against this file) and routes it through
+  // the in-app navigation so the URL reflects what's on screen.
   useEffect(() => {
     function onNavMessage(event: MessageEvent) {
       const iframeWin = iframeRef.current?.contentWindow;
@@ -94,17 +94,11 @@ export function HtmlRenderer({
       if (!msg || typeof msg !== 'object' || msg.type !== 'bevel.navigate') return;
       const href = typeof msg.href === 'string' ? msg.href : null;
       if (!href) return;
-      if (href.startsWith(`${KB_ROUTE_PREFIX}/`)) {
-        openFile(href);
-        return;
-      }
-      let decoded = href;
-      try { decoded = decodeURIComponent(href); } catch { /* leave as-is */ }
-      openFile(resolveRelativePath(filePath, decoded));
+      openLink(href, filePath);
     }
     window.addEventListener('message', onNavMessage);
     return () => window.removeEventListener('message', onNavMessage);
-  }, [openFile, filePath]);
+  }, [openLink, filePath]);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;

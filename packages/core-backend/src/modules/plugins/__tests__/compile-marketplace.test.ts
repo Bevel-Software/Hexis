@@ -127,8 +127,19 @@ describe('compileMarketplace', () => {
     expect(paths).toContain('skills/pitch/SKILL.md');
     expect(paths).toContain('skills/outreach/SKILL.md');
 
-    // The bundle depends on every other plugin; the catalogues list them all.
-    expect(json(tree, 'plugins/hexis-all/.claude-plugin/plugin.json').dependencies.sort()).toEqual(['gtm', 'skills-and-knowledge']);
+    // The bundle IS everything the caller may read — every skill once and the
+    // knowledge base's MCP endpoint — with no dependency list: only Claude
+    // Code resolves one, and Cowork and claude.ai install content alone.
+    const bundleManifest = json(tree, 'plugins/hexis-all/.claude-plugin/plugin.json');
+    expect(bundleManifest).not.toHaveProperty('dependencies');
+    expect(bundleManifest.version).toMatch(/^0\.0\.0-/);
+    for (const name of ['deploy', 'pitch', 'outreach']) expect(paths).toContain(`plugins/hexis-all/skills/${name}/SKILL.md`);
+    expect(paths).toContain('plugins/hexis-all/skills/deploy/references/notes.md');
+    expect(json(tree, 'plugins/hexis-all/.mcp.json')).toEqual({
+      mcpServers: { hexis: { type: 'streamable-http', url: 'https://kb.acme.com/api/mcp' } },
+    });
+    // Claude's catalogue lists it; Codex's does not, since Codex installs
+    // every entry on add and the bundle repeats what the others carry.
     const claude = json(tree, '.claude-plugin/marketplace.json');
     expect(claude.name).toBe('acme-hexis');
     expect(claude.plugins.map((p: { name: string; source: string }) => [p.name, p.source])).toEqual([
@@ -137,6 +148,7 @@ describe('compileMarketplace', () => {
       ['hexis-all', './plugins/hexis-all'],
     ]);
     const codex = json(tree, '.agents/plugins/marketplace.json');
+    expect(codex.plugins.map((p: { name: string }) => p.name)).toEqual(['gtm', 'skills-and-knowledge']);
     expect(codex.plugins.every((p: { policy: { installation: string } }) => p.policy.installation === 'INSTALLED_BY_DEFAULT')).toBe(true);
     expect(codex.plugins[0].source).toEqual({ source: 'local', path: './plugins/gtm' });
     expect(text(tree, 'README.md')).toContain('Compiled from Acme');

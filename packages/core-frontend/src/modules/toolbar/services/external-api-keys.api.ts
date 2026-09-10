@@ -8,6 +8,12 @@ export interface ExternalApiKeySummary {
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /**
+   * Who ended it, once revoked: `owner` (you disconnected it) or `admin` (an
+   * admin revoked it — it will not come back by reconnecting). Null while
+   * live, and on keys revoked before this was recorded.
+   */
+  revokedBy: 'owner' | 'admin' | null;
   /** Model-proxy usage for this key today + the daily cap (in tokens). */
   llmUsage?: { usedTodayTokens: number; dailyTokenCap: number };
 }

@@ -1,20 +1,23 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { MintedExternalApiKey } from '../../tool-auth/external-api-key.interface.js';
+import type { KeyKindSpec, MintedExternalApiKey } from '../../tool-auth/external-api-key.interface.js';
 import { signAuthRequest, type McpAuthRequestState } from '../../mcp/oauth/oauth-state.js';
 import type { GitHubFacadeCredentialsService } from './github-facade-credentials.service.js';
 import type { GitHubFacadeCodeStore } from './github-facade-codes.store.js';
+import { printable } from '../../../shared/printable.js';
 
 /**
- * The KIND stored on a connection key minted through the facade, and the
- * plaintext prefix that kind is minted with. `gho_` is what a GitHub OAuth
- * token looks like — the shape a consumer expecting a GitHub Enterprise host
- * accepts; the key is otherwise an ordinary connection key — hashed at rest,
- * revocable from the person's external-agent page, accepted by every surface
- * a connection key is. The kind, not the label, is what tells such a key
- * apart: a label is the person's to edit.
+ * The KIND stored on a connection key minted through the facade, and how
+ * that kind is spelled. `gho_` plus forty letters and digits is what a
+ * GitHub OAuth token looks like — the shape a consumer expecting a GitHub
+ * Enterprise host accepts, and may well check; the key is otherwise an
+ * ordinary connection key — hashed at rest, revocable from the person's
+ * external-agent page, accepted by every surface a connection key is. The
+ * kind, not the label, is what tells such a key apart: a label is the
+ * person's to edit.
  */
 export const GITHUB_LINK_KEY_KIND = 'github-link';
 export const GITHUB_LINK_KEY_PREFIX = 'gho_';
+export const GITHUB_LINK_KEY_SPEC: KeyKindSpec = { prefix: GITHUB_LINK_KEY_PREFIX, shape: 'github-token' };
 
 /**
  * A product that talks to this deployment as if it were a GitHub Enterprise
@@ -62,11 +65,21 @@ export interface GitHubFacadeDeps {
   publicFrontendUrl: string;
 }
 
+/**
+ * A refusal the caller is answered with in GitHub's terms — and, for the
+ * server log only, WHY: `detail` names the check that failed (a client
+ * secret that is not the registered one, a code nobody issued) where the
+ * response deliberately says no more than GitHub would. A consumer's
+ * backend never shows its user what we answered; the log is the only place
+ * an operator can see which hop of the connect flow went wrong. It never
+ * carries a secret or a code.
+ */
 export class GitHubFacadeRequestError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly detail: string = message,
   ) {
     super(message);
     this.name = 'GitHubFacadeRequestError';
@@ -103,10 +116,20 @@ export class GitHubFacade {
     const state = str(query.state);
     const creds = await this.deps.credentials.ensure();
     if (!clientId || !safeEqual(clientId, creds.clientId)) {
-      throw new GitHubFacadeRequestError(400, 'unknown_client', 'Unknown client_id.');
+      throw new GitHubFacadeRequestError(
+        400,
+        'unknown_client',
+        'Unknown client_id.',
+        clientId ? 'client_id is not the registered one (rotated since, or mistyped)' : 'no client_id in the request',
+      );
     }
     if (!this.consumerFor(redirectUri)) {
-      throw new GitHubFacadeRequestError(400, 'invalid_redirect', 'redirect_uri does not belong to a known consumer.');
+      throw new GitHubFacadeRequestError(
+        400,
+        'invalid_redirect',
+        'redirect_uri does not belong to a known consumer.',
+        `redirect_uri host is ${hostOf(redirectUri)}, not a consumer's`,
+      );
     }
     const signed = signAuthRequest(this.deps.stateSecret, {
       c: clientId,
@@ -169,27 +192,47 @@ export class GitHubFacade {
     const clientId = str(body.client_id);
     const clientSecret = str(body.client_secret);
     const code = str(body.code);
-    if (!clientId || !clientSecret || !safeEqual(clientId, creds.clientId) || !safeEqual(clientSecret, creds.clientSecret)) {
-      throw new GitHubFacadeRequestError(401, 'incorrect_client_credentials', 'The client_id and/or client_secret passed are incorrect.');
+    // One answer for every credential failure, as GitHub gives; the log
+    // alone says which half was wrong.
+    const credentialsWrong = (detail: string) =>
+      new GitHubFacadeRequestError(
+        401,
+        'incorrect_client_credentials',
+        'The client_id and/or client_secret passed are incorrect.',
+        detail,
+      );
+    if (!clientId || !safeEqual(clientId, creds.clientId)) {
+      throw credentialsWrong(clientId ? 'client_id is not the registered one (rotated since, or mistyped)' : 'no client_id in the request');
     }
-    const pending = code ? await this.deps.codes.peek(hashCode(code)) : null;
-    if (!pending || pending.clientId !== clientId) {
-      throw new GitHubFacadeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
+    if (!clientSecret || !safeEqual(clientSecret, creds.clientSecret)) {
+      throw credentialsWrong(clientSecret ? 'client_secret is not the registered one (rotated since, or mistyped)' : 'no client_secret in the request');
     }
+    const codeWrong = (detail: string) =>
+      new GitHubFacadeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.', detail);
+    if (!code) throw codeWrong('no code in the request');
+    const pending = await this.deps.codes.peek(hashCode(code));
+    if (!pending) throw codeWrong('no live code with that value: never issued, already spent, or older than 10 minutes');
+    if (pending.clientId !== clientId) throw codeWrong('the code was issued under a different client id');
     const redirectUri = str(body.redirect_uri);
     if (redirectUri && redirectUri !== pending.redirectUri) {
-      throw new GitHubFacadeRequestError(400, 'redirect_uri_mismatch', 'The redirect_uri does not match the authorization.');
+      throw new GitHubFacadeRequestError(
+        400,
+        'redirect_uri_mismatch',
+        'The redirect_uri does not match the authorization.',
+        `redirect_uri host is ${hostOf(redirectUri)}, the code was issued for ${hostOf(pending.redirectUri)}`,
+      );
     }
     const spent = await this.deps.codes.consume(pending.codeHash);
-    if (!spent) {
-      throw new GitHubFacadeRequestError(400, 'bad_verification_code', 'The code passed is incorrect or expired.');
-    }
+    if (!spent) throw codeWrong('the code was spent by a concurrent exchange');
     // The consumer is the one the code was issued for — the redirect the
     // person approved names it — so the key is labelled for that product.
     const consumer = this.consumerFor(spent.redirectUri);
     const minted = await this.deps.keys.mint(spent.userId, consumer?.keyLabel ?? 'GitHub-compatible link', {
       kind: GITHUB_LINK_KEY_KIND,
     });
+    console.info(
+      `[github-facade] ${printable(consumer?.name ?? 'a consumer')} connected user ${printable(spent.userId)}: link key ${printable(minted.summary.id)} minted`,
+    );
     return { access_token: minted.plaintext, token_type: 'bearer', scope: '' };
   }
 
@@ -208,6 +251,21 @@ export class GitHubFacade {
 
 function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
+}
+
+/**
+ * The host of a URL for a log line, or what was sent when it is not one.
+ * The caller chose the URL, so the host is rendered printable even though a
+ * parsed host is ASCII: the log's one-line rule holds by construction, not
+ * by an argument about URL parsing.
+ */
+function hostOf(url: string): string {
+  try {
+    const host = new URL(url).host;
+    return host ? printable(host) : '(empty)';
+  } catch {
+    return url ? '(not a URL)' : '(empty)';
+  }
 }
 
 function str(v: unknown): string {

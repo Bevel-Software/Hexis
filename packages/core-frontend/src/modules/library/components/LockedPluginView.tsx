@@ -81,7 +81,7 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
     <div className="pb-14">
       <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
         <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-          All plugins
+          Everything
         </Link>
         <span aria-hidden="true">›</span>
         <span aria-current="page" className="truncate text-ink-muted">

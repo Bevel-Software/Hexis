@@ -679,3 +679,183 @@ describe('ManageAccessDialog: grantee rows badge roles vs groups', () => {
     expect(screen.queryByText('Group')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * CLOSING A VERB MENU WITHOUT PICKING ANYTHING.
+ *
+ * Both permission dropdowns (a grantee row's checklist and the add-row's verb
+ * selector) used to stay open until an item inside them was clicked or the
+ * trigger was clicked again: a click anywhere else in the dialog left the menu
+ * hanging, and Escape closed the whole dialog around it. Outside click and
+ * Escape now close the menu — and only the menu.
+ */
+describe('ManageAccessDialog: dismissing a verb menu', () => {
+  /** Alice, read + write directly here — her trigger reads "Can edit". */
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [A] },
+    readers: { restricted: true, roles: [], users: [A] },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: { 'u:alice@x.com': { read: [{ kind: 'direct' }], write: [{ kind: 'direct' }] } },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+  });
+
+  /** The add-row's verb selector reads "Can edit" too; Alice's row trigger is the later one. */
+  async function aliceTrigger() {
+    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
+    return triggers[triggers.length - 1];
+  }
+
+  it("a click outside a row's menu closes it and leaves the dialog open", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    await user.click(await aliceTrigger());
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+
+    // The dialog's own heading: inside the dialog, outside the menu.
+    await user.click(screen.getByRole('dialog'));
+
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(api.grantAccess).not.toHaveBeenCalled();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it("a click outside the add-row's verb selector closes it", async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const [addRowTrigger] = await screen.findAllByRole('button', { name: /^can edit$/i });
+    await user.click(addRowTrigger);
+    // The open selector adds a "Can download" item; Alice's closed row adds none.
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('dialog'));
+
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
+  });
+
+  it('a menu re-rendered with fresh callbacks still dismisses cleanly, once', async () => {
+    // The dismiss hook mirrors a fresh-per-render `onDismiss` arrow into a
+    // ref itself. Asserted through the surface a user sees: after re-renders
+    // of the OPEN menu (each verb toggle re-renders the dialog with new
+    // arrows), one Escape closes the menu — and only the menu, exactly once,
+    // with the dialog left standing.
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+    const [addRowTrigger] = await screen.findAllByRole('button', { name: /^can edit$/i });
+
+    await user.click(addRowTrigger);
+    // Two re-renders of the open menu with fresh callback identities.
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
+    // The dialog is still up: the menu's layer owned that Escape.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('the trigger itself still toggles: one click opens, a second closes', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await aliceTrigger();
+    await user.click(trigger);
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+    // The outside-click listener must NOT fire on the trigger, or this click
+    // would close-then-reopen and the menu would look stuck open.
+    await user.click(trigger);
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+  });
+
+  /**
+   * The scrim is the dialog's own outside-click. The menu closes on
+   * `mousedown` and pops its modal layer as it unmounts, so by the time the
+   * scrim's `click` fires the dialog is the top layer again — and used to
+   * close on the same gesture, taking the half-filled add row with it.
+   * Escape peels one layer at a time; so does the scrim.
+   */
+  it('a click on the scrim closes the menu and only the menu', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    await user.click(await aliceTrigger());
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+
+    const scrim = screen.getByRole('dialog').parentElement!;
+    await user.click(scrim);
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    // With no menu open, the scrim closes the dialog as it always did.
+    await user.click(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A verb click leaves the checklist open while the grant is in flight, with
+   * every item frozen. The trigger used to freeze too — and `.focus()` on a
+   * disabled button is a no-op, so Escape during that window dropped focus
+   * to `document`. The trigger only opens and closes the checklist; it does
+   * not need to freeze.
+   */
+  it('Escape while a grant is in flight still returns focus to the trigger', async () => {
+    const user = userEvent.setup();
+    let settle!: (view: AccessResponse) => void;
+    api.grantAccess.mockReturnValue(new Promise<AccessResponse>((resolve) => (settle = resolve)));
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await aliceTrigger();
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: /^owner$/i }));
+    expect(api.grantAccess).toHaveBeenCalledTimes(1);
+    // In flight: the checklist's items are frozen, the trigger is not.
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeDisabled();
+    expect(trigger).not.toBeDisabled();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+
+    settle(VIEW);
+    await waitFor(() => expect(trigger).not.toBeDisabled());
+  });
+
+  it('Escape closes the menu, not the dialog, and returns focus to the trigger', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    const trigger = await aliceTrigger();
+    await user.click(trigger);
+    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+
+    // With the menu gone the dialog is the top layer again: Escape closes it.
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

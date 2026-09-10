@@ -1,7 +1,7 @@
 import { authFetch } from '../../../lib/api';
 
 /**
- * Typed client for the admin Roles & Members surface — MEMBERSHIP editing
+ * Typed client for the admin App roles surface — MEMBERSHIP editing
  * only (roles are app-defined capabilities; there is no create/rename/delete).
  * Mirrors the backend shape in `roles-admin.service.ts`. Re-declared here
  * (rather than imported from `@bevel-software/platform-shared`) to match the

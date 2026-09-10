@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Banner, Button } from '../../../shared/components';
 import { Dialog } from '../../../shared/components/Dialog';
 import { CopyBlock } from '../../../shared/mcp';
+import { ClaudeConnectionFields } from './ClaudeConnectionFields';
 import {
   fetchGitHubFacade,
   rotateGitHubFacade,
@@ -92,8 +93,10 @@ export function ClaudeConnectionCard() {
           accept marketplaces only from a GitHub Enterprise Server their organization registered.
           Hexis answers as one. Register it once (Owner role, Team or Enterprise plan): in Claude's
           admin settings, under Claude Code, GitHub Enterprise Server, choose <b>Add manually</b>{' '}
-          and paste the fields below. When it asks you to connect your GitHub Enterprise account,
-          you sign in here.
+          and paste the fields below. That connects the deployment to the organization, not to
+          anyone: each person then connects their own account under Claude's admin settings,
+          GitHub, with <b>Connect</b> (or from the repository picker on claude.ai/code), and signs
+          in here.
         </p>
       </div>
 
@@ -110,12 +113,7 @@ export function ClaudeConnectionCard() {
 
       {creds && (
         <div className="border border-line rounded p-3 space-y-3">
-          <CopyBlock label="Hostname" value={creds.host} rows={1} />
-          <CopyBlock label="App ID" value={creds.appId} rows={1} />
-          <CopyBlock label="Client ID" value={creds.clientId} rows={1} />
-          <CopyBlock label="Client secret" value={creds.clientSecret} rows={1} />
-          <CopyBlock label="Webhook secret" value={creds.webhookSecret} rows={1} />
-          <CopyBlock label="Private key" value={creds.privateKeyPem} rows={6} />
+          <ClaudeConnectionFields creds={creds} />
           <p className="text-meta text-ink-muted leading-snug">
             The webhook URL Claude generates after saving can be ignored: nothing here sends
             webhooks yet. The private key is required by the form but not used by the

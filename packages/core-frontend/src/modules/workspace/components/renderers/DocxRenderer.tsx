@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import mammoth from 'mammoth/mammoth.browser.js';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
 import { DownloadFileButton } from './DownloadFileButton';
 import type { FileRendererProps } from './types';
@@ -42,9 +43,7 @@ export function DocxRenderer({ filePath }: FileRendererProps) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
-        );
+        const res = await authFetch(rawFileUrl(workspaceId, filePath));
         if (cancelled) return;
         if (!res.ok) {
           setError(`Failed to load Word document (HTTP ${res.status})`);

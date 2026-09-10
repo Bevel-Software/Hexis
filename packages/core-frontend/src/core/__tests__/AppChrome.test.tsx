@@ -19,9 +19,6 @@ vi.mock('../../modules/layout/components/DemoBanner', () => ({
 vi.mock('../../modules/admin/components/RolesCorruptedBanner', () => ({
   RolesCorruptedBanner: () => null,
 }));
-vi.mock('../../modules/update-check/components/UpdateBanner', () => ({
-  UpdateBanner: () => null,
-}));
 
 /**
  * A stand-in app surface carrying the two gestures these tests need — the

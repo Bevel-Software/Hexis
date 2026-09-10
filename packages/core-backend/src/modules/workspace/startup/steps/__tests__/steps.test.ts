@@ -8,6 +8,7 @@ import { KbStartupRunner } from '../../kb-startup-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
 import { PluginManifestsStep } from '../plugin-manifests.step.js';
+import { PersonalSpacesStep } from '../personal-spaces.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
 import { TemplateFilesStep } from '../template-files.step.js';
@@ -170,10 +171,12 @@ describe('TemplateFilesStep', () => {
     expect(agents).not.toContain('{{');
     expect(agents).not.toContain('KnowledgeBase/');
     const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
-    expect(ignore).toContain('plugins/');
-    // The skills root stays VISIBLE: the Skills & Tools sidebar reads it from the workspace tree.
+    // Both roots stay VISIBLE, whatever they are called: the Skills & Tools
+    // sidebar reads each from the workspace tree.
+    expect(ignore).not.toContain('plugins/');
     expect(ignore).not.toContain('skills/');
     expect(ignore).not.toContain('Plugins/');
+    expect(ignore).toContain('roles.yaml');
     expect(await exists(dir, 'docs/.gitkeep')).toBe(true);
 
     // And a second boot sees the rendered guide as current: no churn commit.
@@ -233,7 +236,8 @@ describe('TemplateFilesStep', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
-    expect(text).toBe('# mine\n.git/\nAGENTS.md\nPlugins/\n');
+    // The plugins-root rule goes with it — the same sidebar draws that root now.
+    expect(text).toBe('# mine\n.git/\nAGENTS.md\n');
     // Idempotent: a second boot has nothing to change.
     await makeRunner([new TemplateFilesStep()]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
@@ -252,7 +256,7 @@ describe('TemplateFilesStep', () => {
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
   });
 
   it('recognises the legacy comment for a renamed plugins root with a space in its name', async () => {
@@ -267,7 +271,7 @@ describe('TemplateFilesStep', () => {
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n');
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
   });
 
   it("keeps an operator's Skills/ rule whose own comment merely opens like the platform's", async () => {
@@ -275,7 +279,7 @@ describe('TemplateFilesStep', () => {
     // same way and goes on differently was never written by the platform.
     const scaffold = await fullScaffold();
     const text =
-      'AGENTS.md\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, and I hide it anyway\nSkills/\n';
+      'AGENTS.md\n# The shared-skills root is rendered by the Skills & Tools app, and I hide it anyway\nSkills/\n';
     scaffold['.bevelignore'] = text;
     await seedUpstream(scaffold);
 
@@ -287,15 +291,53 @@ describe('TemplateFilesStep', () => {
 
   it("keeps a Skills/ rule the operator wrote themselves — provenance is the platform's comment", async () => {
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = 'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n';
+    scaffold['.bevelignore'] = 'AGENTS.md\n# I hide skills on purpose\nSkills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      'AGENTS.md\nPlugins/\n# I hide skills on purpose\nSkills/\n',
+      'AGENTS.md\n# I hide skills on purpose\nSkills/\n',
     );
+  });
+
+  it('drops EVERY Plugins/ rule, whoever wrote it — the sidebar draws that root now, and the seed left no comment to know it by', async () => {
+    // The first template ever seeded hid the plugins root as a bare line at
+    // the end of the file, so provenance cannot tell the platform's copy
+    // from an operator's; both would empty the Plugins tree, and both go.
+    // One under the platform's own comment loses the comment with it; a
+    // `!Plugins/` negation is not the rule and stays.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      '# mine\nAGENTS.md\nPlugins/\nMy-Own-Rule/\n# Added by the platform: the conventions doc is not node content.\nPlugins/\n!Plugins/\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
+    expect(text).toBe('# mine\nAGENTS.md\nMy-Own-Rule/\n!Plugins/\n');
+    // Idempotent: a second boot has nothing to change.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(text);
+  });
+
+  it("declares a custom template's ignore file without the Plugins/ rule it still ships", async () => {
+    // A distribution's own template may still carry the rule the packaged
+    // one dropped; a KB seeded from it must not start out hiding the root.
+    const customTemplate = path.join(root, 'custom-template-plugins-rule');
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, '.bevelignore'), '.git/\nAGENTS.md\n\nPlugins/\n');
+    await seedUpstream({ 'marker.txt': 'seeded' });
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
+    expect(lines).not.toContain('Plugins/');
+    expect(lines).toContain('AGENTS.md');
   });
 
   it('seeds a binary template file byte for byte and keeps a script executable — text is what decodes', async () => {
@@ -349,27 +391,27 @@ describe('TemplateFilesStep', () => {
 
   it("leaves an operator's !Skills/ negation alone — there is nothing of the platform's to remove", async () => {
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = 'AGENTS.md\nPlugins/\n!Skills/\n';
+    scaffold['.bevelignore'] = 'AGENTS.md\n!Skills/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\nPlugins/\n!Skills/\n');
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n!Skills/\n');
   });
 
   it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
     // Appending the positive rule after the negation would WIN under ordered
     // matching and silently defeat the operator's stated choice to show it.
     const scaffold = await fullScaffold();
-    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nPlugins/\n';
+    scaffold['.bevelignore'] = '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n';
     await seedUpstream(scaffold);
 
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      '# operator wants the doc visible\n!AGENTS.md\nPlugins/\n',
+      '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n',
     );
   });
 
@@ -488,29 +530,118 @@ describe('PluginManifestsStep', () => {
       'Plugins/functional/access.md': '---\n---\nread:\n  - everyone\n',
       // Nothing plugin-shaped at all.
       'Plugins/notes/README.md': 'just a folder',
+      // A legacy plugin whose vendored dependency ships a manifest: the walk
+      // does not enter node_modules, so the folder is the plugin, not a
+      // grouping folder over one.
+      'Plugins/Vendored/access.md': '---\n---\nread:\n  - everyone\n',
+      'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
+      // A plain folder whose only SKILL.md is vendored: not a plugin either.
+      'Plugins/deps/node_modules/some-pkg/SKILL.md': '---\ndescription: z\n---\n',
     });
 
     await makeRunner([new PluginManifestsStep()]).runAll();
 
     for (const branch of PROTECTED) {
       const dir = await checkout(branch);
-      for (const legacy of ['GTM', 'Servers', 'Bare']) {
+      for (const legacy of ['GTM', 'Servers', 'Bare', 'Vendored']) {
         const manifest = JSON.parse(await fs.readFile(path.join(dir, `Plugins/${legacy}/plugin.json`), 'utf8'));
         expect(manifest.name).toBe(legacy.toLowerCase());
       }
       expect(await exists(dir, 'Plugins/functional/plugin.json')).toBe(false);
       expect(await exists(dir, 'Plugins/notes/plugin.json')).toBe(false);
+      expect(await exists(dir, 'Plugins/deps/plugin.json')).toBe(false);
       expect(await fs.readFile(path.join(dir, 'Plugins/Modern/plugin.json'), 'utf8')).toBe('{"name":"modern"}');
     }
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
-    expect(log).toContain('Add plugin manifests to 3 legacy plugin folders');
+    expect(log).toContain('Add plugin manifests to 4 legacy plugin folders');
     expect(log).toContain('Plugins/GTM: plugin.json written');
 
     // Idempotent: nothing left to write on the next boot.
     await makeRunner([new PluginManifestsStep()]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one migration commit
+  });
+});
+
+describe('PersonalSpacesStep', () => {
+  // A personal folder as the previous template seeded it: the owner's grants
+  // and nothing else — private only while nothing above grants read.
+  const LEGACY_PERSONAL =
+    '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\nread: []\n';
+
+  it("adds `deny everyone` to every personal space's read rules on every branch, keeping the rest, once", async () => {
+    const scaffold = await fullScaffold();
+    const seed = await seedUpstream({
+      ...scaffold,
+      'Plugins/personal-u1/plugin.json': '{"name":"personal-u1"}',
+      'Plugins/personal-u1/access.md': LEGACY_PERSONAL,
+      // A space someone already closed, one its owner opened on purpose (a
+      // denial beside that grant would be overruled and read as a
+      // contradiction), and a shared plugin: all untouched.
+      'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+      'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
+      // Entries that say nothing about READ — a denial under write, a
+      // download grant — leave the space open to an inherited `read:
+      // everyone`, so it is closed like any other.
+      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\ndownload:\n  - everyone\nowner:\n  - Di <di@x.io>\n',
+      // The old seed's frontmatter grants are carried into the body ONLY where
+      // the body has no word on that person: a denial someone wrote there
+      // stands, and is not overridden by the older grant.
+      'Plugins/personal-u5/access.md': '---\nread:\n  - Ed <ed@x.io>\nowner:\n  - Ed <ed@x.io>\n---\nread:\n  - deny Ed <ed@x.io>\n',
+      'Plugins/GTM/plugin.json': '{"name":"gtm"}',
+      'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
+    });
+    // A draft carrying a personal space too: the step visits every branch,
+    // not only the protected ones.
+    await git(seed, ['checkout', '-b', 'ali/draft']);
+    await git(seed, ['push', 'origin', 'ali/draft']);
+
+    await makeRunner([new PersonalSpacesStep()]).runAll();
+
+    for (const branch of [...PROTECTED, 'ali/draft']) {
+      const dir = await checkout(branch);
+      const closed = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u1/access.md'), 'utf8'));
+      // The old seed's frontmatter grants stay as written; the body — which
+      // governs the folder — now denies everyone (Admin included: nobody is
+      // named) and carries the owner's grants so they can still read, write
+      // and own their space.
+      expect(closed).toBe(
+        '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\n' +
+          'read:\n  - Ali Vega <ali@x.io>\n  - deny everyone\n\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>',
+      );
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u2/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+      );
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u3/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
+      );
+      const u4 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u4/access.md'), 'utf8'));
+      expect(u4).toMatch(/read:\n  - deny everyone/);
+      expect(u4).toContain('write:\n  - deny everyone');
+      expect(u4).toContain('download:\n  - everyone');
+      expect(u4).toContain('owner:\n  - Di <di@x.io>');
+      const u5 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u5/access.md'), 'utf8'));
+      const u5Body = u5.slice(u5.indexOf('\n---\n', 4) + 5);
+      // Ed's read denial stands — the frontmatter's read grant is NOT carried
+      // beside it — while the owner grant, which the body said nothing about, is.
+      expect(u5Body.match(/read:\n((?:  - [^\n]*\n)*)/)![1]).toBe('  - deny Ed <ed@x.io>\n  - deny everyone\n');
+      expect(u5Body).toMatch(/owner:\n  - Ed <ed@x.io>/);
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
+        '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
+      );
+    }
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Keep 3 personal spaces private');
+    expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone');
+    expect(log).toContain('Plugins/personal-u4/access.md: read denies everyone');
+    expect(log).toContain('Plugins/personal-u5/access.md: read denies everyone');
+
+    // Idempotent: the next boot finds every space already closed.
+    await makeRunner([new PersonalSpacesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
   });
 });
 
@@ -552,10 +683,11 @@ describe('GroupsToPluginsStep', () => {
       expect(mcp.mcpServers.notion).toEqual({ type: 'streamable-http', url: 'https://mcp.notion.com/mcp' });
       const manifest = JSON.parse(await fs.readFile(path.join(dir, 'Plugins/GTM/plugin.json'), 'utf8'));
       expect(manifest.name).toBe('gtm');
-      // The rename's companion edit: the stale ignore rule now names Plugins/.
+      // The rename's companion edit: the stale ignore rule is retired — and
+      // not replaced, since the plugins root is drawn by the sidebar now.
       const ignore = await fs.readFile(path.join(dir, '.bevelignore'), 'utf8');
-      expect(ignore).toContain('Plugins/');
       expect(ignore).not.toContain('Groups/');
+      expect(ignore.split('\n').map((l) => l.trim())).not.toContain('Plugins/');
     }
 
     const dir = await checkout(DEFAULT_BRANCH);
@@ -785,6 +917,29 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
     });
   });
 
+  it('leaves a plain folder under the root alone — a .gitkeep is not a plugin, and a grouping folder holding one is not either', async () => {
+    await seedUpstream({
+      'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+      // Made with "New folder" in the tree: nothing plugin-shaped in it.
+      'Plugins/TestFolder/.gitkeep': '',
+      // A grouping folder with a plugin INSIDE: a manifest on the folder
+      // would hide the plugin beneath it from every catalog.
+      'Plugins/Teams/Agent Made/plugin.json': '{"name":"agent-made"}',
+      // A legacy plugin whose vendored dependency happens to ship a
+      // manifest: `node_modules` is nothing to the walk, so the folder is
+      // still the plugin it was.
+      'Plugins/Vendored/access.md': 'write:\n  - Admin\n',
+      'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'Plugins/GTM/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/TestFolder/plugin.json')).toBe(false);
+    expect(await exists(dir, 'Plugins/Teams/plugin.json')).toBe(false);
+    expect(await exists(dir, 'Plugins/Teams/Agent Made/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/Vendored/plugin.json')).toBe(true);
+  });
+
   it('leaves a personal folder a valid plugin', async () => {
     await seedUpstream({
       'Groups/personal-u-123/access.md': 'write:\n  - Ali <ali@x.com>\n',
@@ -796,7 +951,7 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
   });
 
   describe('the .bevelignore root rule', () => {
-    it('follows the rename, preserving every other line', async () => {
+    it('retires the rule with the rename — nothing takes its place — preserving every other line', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
         '.bevelignore': '# mine\nGroups/\nMy-Own-Rule/\n',
@@ -804,48 +959,92 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
       const ignore = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
-      expect(ignore.split('\n')).toContain('Plugins/');
-      expect(ignore).not.toContain('Groups/');
-      expect(ignore).toContain('# mine');
-      expect(ignore).toContain('My-Own-Rule/');
+      expect(ignore).toBe('# mine\nMy-Own-Rule/\n');
     });
 
-    it('rewrites EVERY exact Groups/ line — the first becomes Plugins/, duplicates are dropped', async () => {
+    it('drops EVERY exact Groups/ line, keeping the lines between them', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
         '.bevelignore': 'Groups/\n# keep\nGroups/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n');
-      expect(lines.filter((l) => l.trim() === 'Plugins/')).toHaveLength(1);
-      expect(lines.filter((l) => l.trim() === 'Groups/')).toHaveLength(0);
-      expect(lines).toContain('# keep');
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# keep\n');
     });
 
-    it('is left alone when Plugins/ is already listed', async () => {
+    it('retires a Plugins/ line beside it too — both root rules are stale for the same reason', async () => {
       await seedUpstream({
         'Groups/GTM/access.md': 'write:\n  - Admin\n',
-        '.bevelignore': 'Groups/\nPlugins/\n',
+        '.bevelignore': '# mine\nGroups/\nPlugins/\n!Plugins/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      // The stale line is harmlessly dead; deleting it would be editing the
-      // operator's file beyond what the rename made stale.
-      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\nPlugins/\n');
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n!Plugins/\n');
     });
 
-    it('is not touched by a run that does not rename', async () => {
+    it('retires the rules on a branch with neither root — nothing to migrate there, and the rules are as stale', async () => {
+      await seedUpstream({
+        'marker.txt': 'seeded',
+        '.bevelignore': 'Plugins/\nGroups/\nkeep/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('keep/\n');
+      const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+      expect(log).toContain('.bevelignore: Groups/, Plugins/ dropped');
+    });
+
+    it('names the commit for what happened: a migrated branch that only lost the rules was not reorganised', async () => {
+      await seedUpstream({
+        'Plugins/GTM/plugin.json': '{"name":"gtm"}',
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore': 'Plugins/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+      expect(log.split('\n')[0]).toBe('Retire the stale Groups/ and Plugins/ ignore rules');
+      expect(log).not.toContain('Reorganise');
+    });
+
+    it('retires the rules on a run that does not rename — a branch migrated by an earlier release, a draft included', async () => {
+      // An earlier release renamed `Groups/` to `Plugins/` in the ignore file
+      // of every branch it migrated; the template step retires that line on
+      // the protected branches only, so this step does it wherever it goes.
       await seedUpstream({
         'Plugins/GTM/access.md': 'write:\n  - Admin\n',
         'Plugins/GTM/outreach/SKILL.md': '# Outreach\n',
-        '.bevelignore': 'Groups/\n',
+        '.bevelignore': 'AGENTS.md\nPlugins/\n',
       });
       await migrate();
       const dir = await checkout(DEFAULT_BRANCH);
-      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('Groups/\n');
-      // The run still reorganised the folder — the rule alone was off-limits.
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
       expect(await exists(dir, 'Plugins/GTM/skills/outreach/SKILL.md')).toBe(true);
+      // Idempotent: a second run declares nothing.
+      await migrate();
+      expect(norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
+    });
+
+    it("takes a platform comment above a stale rule with it, and the blank line that opened the block — the template step's own tidy-up, on a branch it never visits", async () => {
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore':
+          '# mine\n.git/\n\n# Added by the platform: the conventions doc is not node content.\nPlugins/\n# The shared-skills root is rendered by the Skills & Tools app, like Groups/.\nGroups/\n',
+      });
+      await migrate();
+      const dir = await checkout(DEFAULT_BRANCH);
+      expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('# mine\n.git/\n');
+    });
+
+    it('fails the run when the ignore file cannot be read — a hole is not "no file"', async () => {
+      // A directory where the file should be: readable as neither. Treating
+      // that as absence would leave a possible `Plugins/` rule in place and
+      // report the migration done.
+      await seedUpstream({
+        'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+        '.bevelignore/keep': '',
+      });
+      await expect(migrate()).rejects.toThrow(/EISDIR/);
     });
   });
 });

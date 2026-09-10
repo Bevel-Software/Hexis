@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { copyToClipboard } from '../../../../lib/clipboard';
 import { DownloadFileButton } from './DownloadFileButton';
 import { MAX_EMAIL_BYTES, attachmentLine, type EmailMessageView } from './emailMessage';
@@ -60,7 +61,7 @@ export function EmailRenderer({ filePath }: FileRendererProps) {
     (async () => {
       try {
         const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          rawFileUrl(workspaceId, filePath),
           { signal: controller.signal },
         );
         if (cancelled) return;

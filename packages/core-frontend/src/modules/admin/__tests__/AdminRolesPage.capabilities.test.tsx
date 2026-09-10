@@ -240,7 +240,7 @@ describe('AdminRolesPage: membership-only surface', () => {
     expect(screen.queryByRole('button', { name: /delete role/i })).not.toBeInTheDocument();
     // What remains is membership: member emails and (where assignable) groups.
     const adminCard = within(await findCard('Admin'));
-    expect(adminCard.getByRole('textbox', { name: 'Member email' })).toBeInTheDocument();
+    expect(adminCard.getByRole('combobox', { name: 'Member email' })).toBeInTheDocument();
   });
 
   it('the Admin ≥1-direct-email 422 renders the backend message inline on the card', async () => {
@@ -269,7 +269,7 @@ describe('AdminRolesPage: membership-only surface', () => {
     renderPage();
     const editorCard = within(await findCard('Editor'));
     await userEvent.type(
-      editorCard.getByRole('textbox', { name: 'Member email' }),
+      editorCard.getByRole('combobox', { name: 'Member email' }),
       'group:engineering',
     );
     await userEvent.click(editorCard.getByRole('button', { name: 'Add' }));

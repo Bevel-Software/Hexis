@@ -21,7 +21,13 @@ import { registerWorkflowTools } from '../modules/workflow/agent-tools/workflow.
 import { registerWorkspaceTools } from '../modules/workspace/workspace.tools.js';
 import { RECOVERY_BOT_EMAIL } from '../modules/workflow/recovery-bot.js';
 import { registerSkillsTools, createSkillsRoutes, createSkillAccessRequestRoutes } from '../modules/skills/index.js';
-import { createPluginsRoutes } from '../modules/plugins/index.js';
+import {
+  createPluginCreationRoutes,
+  createPluginsRoutes,
+  createTeamsRoutes,
+  registerPluginsTools,
+} from '../modules/plugins/index.js';
+import { keyOrSessionAuth } from '../modules/tool-auth/key-or-session.middleware.js';
 import type { SessionOntologyGate } from '../modules/workspace/session-ontology.gate.js';
 import {
   createSecretsVaultRoutes,
@@ -32,6 +38,7 @@ import { createAdminAccessRoutes } from '../modules/admin/admin-access.routes.js
 import { createGroupsAdminRoutes } from '../modules/access/groups-admin.routes.js';
 import { createUpdateCheckRoutes } from '../modules/update-check/update-check.routes.js';
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
+import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import {
   createKbSyncRoutes,
@@ -411,6 +418,9 @@ export async function createCoreServer(
   registerWorkflowTools(core.toolRegistry, toolsRouter, ta, th, core.kbDirName);
   registerWorkspaceTools(core.toolRegistry, toolsRouter, ta, th, core.spillStore, core.docExtractService, core.accessControl, core.kbDirName, sessionOntologyGate, core.routineWritePolicy, core.sessionSink);
   registerSkillsTools(core.toolRegistry, toolsRouter, ta, th, core.skillService);
+  // Definitions only: the endpoints they describe are the app's own plugin
+  // creation routes, mounted below behind the key-or-session gate.
+  registerPluginsTools(core.toolRegistry);
   registerToolManualsTools(core.toolRegistry, toolsRouter, ta, th, core.toolManualService, {
     accessControl: core.accessControl,
     // The vault satisfies the module's local VariableStatusPort — `list_tool_setup`
@@ -457,6 +467,28 @@ export async function createCoreServer(
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
   ext.postTools?.(app, core);
+
+  // The plugin creation doors — `POST /api/plugins`, `POST /api/plugins/personal`
+  // — take an agent's connection key as well as a session, because the
+  // `create_plugin` and `my_plugin` tools describe these very endpoints.
+  // Mounted HERE, before the first `app.use('/api', authMiddleware, …)`
+  // below: every one of those runs the JWT check for EVERY `/api` request
+  // that reaches it, whether or not its router matches, so a connection key
+  // sent to these paths would be refused before the gate saw it.
+  app.use(
+    '/api',
+    keyOrSessionAuth({
+      sessionAuth: core.authMiddleware,
+      toolAuth: core.toolAuthMiddleware,
+      isToolCredential: (token) =>
+        core.internalTokenService.looksLikeInternalToken(token) ||
+        core.externalApiKeyService.looksLikeExternalApiKey(token),
+    }),
+    createPluginCreationRoutes(
+      core.pluginProvisionService,
+      async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
+    ),
+  );
 
   // Protected routes
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
@@ -527,7 +559,9 @@ export async function createCoreServer(
   // Plugin enumeration + join requests. Browser-only (JWT), and fail-closed
   // like every other read surface: plugins the caller cannot access (member,
   // manager, or discoverable via the access.md file's own read grant) are
-  // absent from the list. A join request is a plain change request.
+  // absent from the list. A join request is a plain change request. (The
+  // creation doors are mounted above, before the first JWT-only `/api`
+  // mount — see there.)
   app.use('/api', core.authMiddleware, createPluginsRoutes(
     core.pluginIndexService,
     core.accessControl,
@@ -540,6 +574,14 @@ export async function createCoreServer(
     core.pluginLinksService,
     core.pluginRenameService,
   ));
+  // The Library's "Your teams" lens: what each group can use, sliced from
+  // the catalogs the caller already sees. Same JWT gate, same fail-closed
+  // shape as the plugin index.
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createTeamsRoutes(core.accessControl, core.pluginIndexService, core.skillService, core.toolManualService),
+  );
   // Admin-status resolver (CORE — see the note in admin-access.routes.ts;
   // the full admin router is an enterprise `ext.authed` extension).
   app.use('/api', core.authMiddleware, createAdminAccessRoutes(core.adminAccess));
@@ -564,6 +606,13 @@ export async function createCoreServer(
     core.adminAccess,
     core.accountErasureService,
   ));
+  // Connection keys across the deployment (list per account, revoke any) —
+  // admin-gated inside. The per-user key surface stays on /api/mcp/…
+  app.use(
+    '/api',
+    core.authMiddleware,
+    createConnectionKeysAdminRoutes(core.externalApiKeyService, core.adminAccess),
+  );
   // First-run setup. Mounted with the other authed routes but touching NO
   // workspace — it has to work on a deployment that has no knowledge base yet,
   // which is the whole reason it exists. The startup runner rides along for

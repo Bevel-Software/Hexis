@@ -3,6 +3,7 @@ import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@be
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
 import { useLibrary } from '../state/library-data';
+import { FileRoute } from '../../workspace/components/FileRoute';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
@@ -24,10 +25,23 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  * itself. Waiting on the catalog here raced every reload and lost (the
  * just-created skill bounced to its plugin's page).
  *
- * The two roots differ only in where a path that is NO skill goes: a
- * container folder or a loose file belongs to its plugin page under
- * `Plugins/`; under `Skills/` a scope folder has no page (home) and a loose
- * file opens as the plain file it is.
+ * The two roots differ only in where a FOLDER that is no skill goes: a
+ * container belongs to its plugin page under `Plugins/`; under `Skills/` a
+ * scope folder has no page (home). A loose FILE — a folder's `access.md`,
+ * a plugin's `plugin.json`, a stray upload — opens as the plain file it is
+ * under either root, HERE, inside this app: the same `FileRoute` Knowledge
+ * renders, in the Library's own frame. Which app a file opens in follows
+ * the folder it is in — the two roots ARE the two apps — never the viewer it
+ * needs, so a person reading a plugin's manifest keeps the Skills & Tools nav
+ * and switcher around it. (The plugin page was never the file either: it
+ * keys on the plugin's identity, which a folder name need not be — a
+ * personal space, a folder spelled unlike its manifest — so the old bounce
+ * there landed on "doesn't exist" for a file plainly present.)
+ *
+ * Router state `rawFile` asks for that raw view OUTRIGHT, whatever the URL
+ * would otherwise resolve to — the tool page's "Edit the tool file", the
+ * plugin page's manifest button. State, not URL: a shared link never carries
+ * it, so nobody lands on the editor by accident.
  *
  * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
  * declare an explicit id different from its filename); the filename is the
@@ -56,6 +70,17 @@ export function WorkspaceItemRoute() {
   }
 
   /**
+   * The Knowledge file route, in this frame. `canonicalize` is OFF: its id
+   * redirect would send an id-bearing file (a `.tool`, a note with an `id`)
+   * to an id URL, which is no library location — and the surface would
+   * switch to Knowledge after all. The path URL is the one the tree gave.
+   */
+  const fileView = () => <FileRoute canonicalize={false} />;
+
+  // Asked for the raw file by name: no resolution, the editor it is.
+  if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return fileView();
+
+  /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the
    * catalog lands (folder name → declared id), and without a remount the page
    * would render once with the new name still holding the old name's failed
@@ -65,6 +90,13 @@ export function WorkspaceItemRoute() {
   const skillPage = (name: string, activeFile: string, provisional: boolean) => (
     <SkillPage key={name} name={name} activeFile={activeFile} provisional={provisional} />
   );
+
+  /**
+   * A loose file (a folder's access.md, a plugin's manifest, a stray note)
+   * opens as the plain file it is — the Knowledge file route, rendered right
+   * here in the Library's column, same URL, same viewer, this app's frame.
+   */
+  const rawFileView = fileView;
 
   if (kbRoot === SKILLS_DIR) {
     const rest = segments.slice(2);
@@ -77,24 +109,8 @@ export function WorkspaceItemRoute() {
       case 'container':
         // A scope has no page of its own — the sidebar's tree is where it is browsed.
         return <Navigate to={LIBRARY_ROOT} replace />;
-      case 'loose-file': {
-        // A file filed directly in a scope (its access.md, a stray note)
-        // opens as the plain file it is, in the pane workspace. Router STATE,
-        // not a different URL: the shell reads `rawFile` to step past the
-        // shape rule, and a shared link can never carry state — so nobody
-        // lands on the raw view by accident. Once asked, hold still: the
-        // shell is swapping surfaces on that state, and asking again from
-        // here would be a navigation loop.
-        const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-        if (rawRequested) return null;
-        return (
-          <Navigate
-            to={`${location.pathname}${location.search}${location.hash}`}
-            state={{ rawFile: true }}
-            replace
-          />
-        );
-      }
+      case 'loose-file':
+        return rawFileView();
     }
   }
 
@@ -104,6 +120,23 @@ export function WorkspaceItemRoute() {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
   const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
+
+  // A plugin's MANIFEST is the plugin: clicked in the tree, it opens the
+  // plugin page (whose own collapsible shows the file; the page's Manifest
+  // button asks for the raw file by state, handled above). Matched against
+  // the LISTED plugins' folders — the page keys on the plugin's identity,
+  // which the folder name need not be — so a manifest bundled inside a
+  // skill stays that skill's file, and a plugin the catalog does not list
+  // for this caller (locked, unreadable) falls through to the file itself.
+  if (isManifestFile(last)) {
+    // The list's word, once it has one: while it is (re)loading, the
+    // summaries on hand may be the previous list's, and a manifest whose
+    // identity just changed would open the wrong page from them.
+    if (data.pluginsLoading) return null;
+    const holder = `${PLUGINS_DIR}/${[plugin, ...tail.slice(0, -1)].join('/')}`;
+    const listed = data.pluginSummaries.find((s) => s.folders.includes(holder));
+    if (listed) return <Navigate to={pathForPlugin(listed.name)} replace />;
+  }
 
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
   // ANY depth below `Plugins/` (`walkFiles` over the whole tree), so a manual
@@ -150,11 +183,12 @@ export function WorkspaceItemRoute() {
     case 'wait':
       return null;
     case 'container':
-    case 'loose-file':
-      // A category has no page of its own; its plugin does. A file that can
-      // be no skill's — `access.md` at either level, a stray upload — is the
-      // plugin's business too.
+      // A category has no page of its own; its plugin does.
       return <Navigate to={pathForPlugin(plugin)} replace />;
+    case 'loose-file':
+      // A file that can be no skill's — `access.md` at either level, the
+      // manifest, a stray upload — is shown as the file it is.
+      return rawFileView();
   }
 }
 
@@ -267,6 +301,11 @@ function folderHasSkillMd(tree: FileTreeEntry | null, workspaceRel: string | nul
   const folder = find(tree);
   if (!folder || folder.type !== 'directory') return undefined;
   return (folder.children ?? []).some((c) => c.type === 'file' && c.name === 'SKILL.md');
+}
+
+/** The two files that make a folder a plugin: the native manifest and the bundle dialect's. */
+function isManifestFile(segment: string): boolean {
+  return segment === 'plugin.json' || segment === 'plugin.bundle.json';
 }
 
 /** Whether a path segment names a file rather than a folder. */
