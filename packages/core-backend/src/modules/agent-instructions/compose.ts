@@ -170,7 +170,7 @@ const LIST_ITEM_OR_QUOTE = /^([-*+]|\d{1,9}[.)])(\s|$)|^>/;
  */
 function firstNonHeadingParagraph(text: string): string {
   for (const block of paragraphBlocks(text)) {
-    const kinds = block.map(lineKind);
+    const kinds = block.map((l) => l.kind);
     // A list item or blockquote owns every line beneath it until the block
     // ends (a lazy continuation is trimmed to look like paragraph text), so
     // once one opens, no rule further down the block is an underline.
@@ -178,13 +178,21 @@ function firstNonHeadingParagraph(text: string): string {
     let underline = -1;
     kinds.forEach((kind, i) => {
       if (kind === 'container') container = true;
-      else if (kind === 'rule' && i > 0 && !container && kinds[i - 1] === 'text' && SETEXT_UNDERLINE.test(block[i]))
+      else if (kind === 'rule' && i > 0 && !container && kinds[i - 1] === 'text' && SETEXT_UNDERLINE.test(block[i].text))
         underline = i;
     });
-    const content = block.filter((_, i) => i > underline && (kinds[i] === 'text' || kinds[i] === 'container'));
-    if (content.length > 0) return content.join(' ').replace(/\s+/g, ' ');
+    const content = block.filter((l, i) => i > underline && (l.kind === 'text' || l.kind === 'container'));
+    if (content.length > 0) return content.map((l) => l.text).join(' ').replace(/\s+/g, ' ');
   }
   return '';
+}
+
+type LineKind = 'heading' | 'rule' | 'container' | 'text';
+
+/** A block's line: its trimmed text and what it is, decided where it was read (see `paragraphBlocks`). */
+interface BlockLine {
+  text: string;
+  kind: LineKind;
 }
 
 /**
@@ -193,7 +201,7 @@ function firstNonHeadingParagraph(text: string): string {
  * items. Whether a rule underlines the text above it depends on its
  * neighbours and is decided by the caller.
  */
-function lineKind(line: string): 'heading' | 'rule' | 'container' | 'text' {
+function lineKind(line: string): LineKind {
   if (ATX_HEADING.test(line)) return 'heading';
   if (THEMATIC_BREAK.test(line) || SETEXT_UNDERLINE.test(line)) return 'rule';
   if (LIST_ITEM_OR_QUOTE.test(line)) return 'container';
@@ -210,11 +218,15 @@ function lineKind(line: string): 'heading' | 'rule' | 'container' | 'text' {
  * is an indented code block: literal text, so a ``` in it is content, not
  * a fence that would swallow the rest of the file. Under paragraph text
  * (a list item or blockquote included) the same indentation is a
- * continuation, since indented code cannot interrupt a paragraph.
+ * continuation, since indented code cannot interrupt a paragraph — and a
+ * continuation is paragraph TEXT whatever it says once trimmed: `    # x`
+ * under a line of prose is not a heading and `    ---` is not a rule, so
+ * each line's kind is decided here, with its indentation in hand, and
+ * carried with it.
  */
-function paragraphBlocks(text: string): string[][] {
-  const blocks: string[][] = [];
-  let block: string[] = [];
+function paragraphBlocks(text: string): BlockLine[][] {
+  const blocks: BlockLine[][] = [];
+  let block: BlockLine[] = [];
   let fence: string | null = null; // the opener of the fenced code block being skipped
   const flush = () => {
     if (block.length > 0) blocks.push(block);
@@ -222,9 +234,7 @@ function paragraphBlocks(text: string): string[][] {
   };
   const paragraphOpen = () => {
     const last = block[block.length - 1];
-    if (last === undefined) return false;
-    const kind = lineKind(last);
-    return kind === 'text' || kind === 'container';
+    return last !== undefined && (last.kind === 'text' || last.kind === 'container');
   };
   for (const raw of text.split('\n')) {
     const line = raw.trim();
@@ -240,10 +250,12 @@ function paragraphBlocks(text: string): string[][] {
       fence = opener[1];
     } else if (line.length === 0) {
       flush();
-    } else if (indent >= 4 && !paragraphOpen()) {
-      continue; // indented code: skipped line by line, blank lines between flush nothing
+    } else if (indent >= 4) {
+      // Indented code, skipped line by line (blank lines between flush
+      // nothing) — or, under an open paragraph, a continuation of it.
+      if (paragraphOpen()) block.push({ text: line, kind: 'text' });
     } else {
-      block.push(line);
+      block.push({ text: line, kind: lineKind(line) });
     }
   }
   flush();

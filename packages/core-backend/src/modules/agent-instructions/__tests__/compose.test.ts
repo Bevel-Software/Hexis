@@ -193,9 +193,18 @@ describe('composeAgentInstructions: the tool prefix', () => {
     expect(composeAgentInstructions('---\n    code\n\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
     // Up to three columns the fence is a fence, and so is its closer.
     expect(composeAgentInstructions('   ```\n---\n   ```\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
-    // Inside a paragraph, indentation is a continuation, not code.
+    // Inside a paragraph, indentation is a continuation, not code — and a
+    // continuation is text whatever it looks like once trimmed: `    # x`
+    // is not a heading and `    ---` is not a rule, so neither ends the
+    // paragraph nor drops the lines after it.
     expect(composeAgentInstructions('First line\n    continued.\n\nNext.').toolPrefix).toBe(
       `${TOOL_PREFIX_LINE} First line continued.`,
+    );
+    expect(composeAgentInstructions('First line\n    # not a heading\n    still here.\n\nNext.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} First line # not a heading still here.`,
+    );
+    expect(composeAgentInstructions('First line\n    ---\n    still here.\n\nNext.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} First line --- still here.`,
     );
   });
 
