@@ -17,8 +17,10 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
-import { marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { AgentInstructionsCard } from './AgentInstructionsCard';
+import { CoworkSetupSteps } from './CoworkSetupSteps';
+import { useAdmin } from '../../admin/state/admin.context';
 import {
   type ExternalApiKeySummary,
   type MintedExternalApiKey,
@@ -40,20 +42,26 @@ function formatRelative(ts: number | null): string {
 
 /**
  * The External agent access page, routed standalone at
- * `/external-agent-access` (below the persistent toolbar), in two tabs:
+ * `/external-agent-access` (below the persistent toolbar), in three tabs:
  *
  *  - "Your agent" (default) — connecting the user's own interactive agent
  *    (Claude Code, Claude Desktop, Cursor…). No key: the agent gets only the
  *    server URL, and on first connect the browser opens our authorization
  *    flow (sign in + choose tools on /connect). Copy-paste configs only.
+ *  - "Marketplaces" — skills as native plugins rather than through the MCP
+ *    server: the git remote Claude Code and Codex install from (with a key
+ *    from the autonomous tab), and the Cowork / claude.ai route, where the
+ *    person connects their Claude account and gets the marketplace compiled
+ *    for what they may read. Their Claude links are listed here.
  *  - "Autonomous agents" — the external-API-key surface for pipelines/CI
  *    that can't open a browser: lists existing keys, mints new ones,
- *    disconnects revoked ones, permanently deletes disconnected ones. The
+ *    revokes live ones, permanently deletes revoked ones. The
  *    plaintext of a minted key is only shown once — there is no read-it-back
  *    endpoint.
  *
- * Glossary terms used in copy: "External API key", "Disconnect" (= revoke),
- * "External agent" (= MCP client). See docs/glossary.md.
+ * Glossary terms used in copy: "External API key", "Revoke" (a revoked key is
+ * gone for good — "Disconnect" is reserved for a Claude link, which can be
+ * connected again), "External agent" (= MCP client).
  */
 export function ExternalAgentAccessPage() {
   const labelInputId = useId();
@@ -75,7 +83,11 @@ export function ExternalAgentAccessPage() {
    */
   const workspaceUrl = workspaceBaseUrl();
 
-  const [tab, setTab] = useState<'agent' | 'autonomous'>('agent');
+  const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
+  // Whether the Cowork drawer is expanded. Only the registration credentials
+  // wait on it; everything else in the drawer renders either way.
+  const [coworkOpen, setCoworkOpen] = useState(false);
+  const { isAdmin } = useAdmin();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -90,7 +102,7 @@ export function ExternalAgentAccessPage() {
   const [reveal, setReveal] = useState<MintedExternalApiKey | null>(null);
   const { copied, copy } = useCopyFeedback();
 
-  // The disconnected key awaiting a permanent-delete confirmation. Non-null
+  // The revoked key awaiting a permanent-delete confirmation. Non-null
   // drives the themed confirm Dialog below; `deleting` keeps the request in
   // flight so the confirm can't be dismissed mid-delete.
   const [pendingDelete, setPendingDelete] = useState<{ id: string; label: string } | null>(null);
@@ -136,7 +148,7 @@ export function ExternalAgentAccessPage() {
       await disconnectExternalApiKey(id);
       await refresh();
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Couldn't disconnect this key.");
+      setLoadError(err instanceof Error ? err.message : "Couldn't revoke this key.");
     }
   }
 
@@ -159,10 +171,17 @@ export function ExternalAgentAccessPage() {
   const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating;
 
   // Surface the keys that matter: active keys first (most-recently-used at the
-  // top, never-used ones last among the active), with disconnected keys sunk
+  // top, never-used ones last among the active), with revoked keys sunk
   // to the bottom. Non-destructive — nothing is hidden or deleted, just ordered
   // so a long list of stale/test keys doesn't bury the ones in use.
-  const sortedKeys = [...keys].sort((a, b) => {
+  // ONE list from the server, two views of it: live Claude links belong to
+  // the Marketplaces tab (they were minted by a connection, not created
+  // here), everything else — hand-made keys, and Claude links once
+  // revoked, so they can be deleted — to the autonomous tab. Told
+  // apart by the stored kind, never the label.
+  const isClaudeLink = (k: ExternalApiKeySummary) => k.kind === GITHUB_LINK_KIND;
+  const claudeLinks = keys.filter((k) => isClaudeLink(k) && k.revokedAt === null);
+  const sortedKeys = keys.filter((k) => !isClaudeLink(k) || k.revokedAt !== null).sort((a, b) => {
     const aRevoked = a.revokedAt !== null;
     const bRevoked = b.revokedAt !== null;
     if (aRevoked !== bRevoked) return aRevoked ? 1 : -1;
@@ -179,6 +198,7 @@ export function ExternalAgentAccessPage() {
           {(
             [
               ['agent', 'Your agent'],
+              ['marketplace', 'Marketplaces'],
               ['autonomous', 'Autonomous agents'],
             ] as const
           ).map(([id, name]) => (
@@ -285,15 +305,107 @@ export function ExternalAgentAccessPage() {
               </div>
             </details>
 
+            <p className="text-meta text-ink-muted leading-snug">
+              Prefer your skills installed as native plugins rather than read through the MCP
+              server? The{' '}
+              <button
+                type="button"
+                onClick={() => setTab('marketplace')}
+                className="underline text-ink-muted hover:text-ink"
+              >
+                Marketplaces
+              </button>{' '}
+              tab has the git remote for Claude Code and Codex, and the Cowork route.
+            </p>
+
+            <p className="text-[11px] text-ink-muted leading-snug">
+              Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
+              <button
+                type="button"
+                onClick={() => setTab('autonomous')}
+                className="underline text-ink-muted hover:text-ink"
+              >
+                Autonomous agents
+              </button>{' '}
+              tab instead.
+            </p>
+          </div>
+        )}
+
+        {tab === 'marketplace' && (
+          <div className="px-4 py-3 space-y-4">
+            <p className="text-xs text-ink-muted leading-snug">
+              Every skill you may read, compiled into a plugin marketplace. One address serves
+              every Claude surface: Claude Code and Codex clone it as a git remote, Cowork and
+              claude.ai fetch it as a repository once your account is connected.
+            </p>
+
+            {/* CONTROLLED, both attributes together. A closed <details> still
+                MOUNTS its children, so the registration credentials wait on
+                `coworkOpen` rather than loading a client secret and a private
+                key into a drawer nobody opened. Watching the element with
+                `onToggle` alone was not enough: this subtree unmounts on a tab
+                switch and the fresh <details> comes back closed while the
+                state stayed true, which put the secrets right back in a closed
+                drawer. With `open` bound too, the element cannot disagree with
+                the state that gates them. */}
+            <details
+              className="border border-line rounded"
+              data-testid="cowork-section"
+              open={coworkOpen}
+              onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
+            >
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
+                Cowork and claude.ai
+              </summary>
+              <div className="px-3 pb-3 space-y-3">
+                <CoworkSetupSteps isAdmin={isAdmin} opened={coworkOpen} />
+                <div className="space-y-1">
+                  <div className="text-xs font-medium text-ink">Your Claude connections</div>
+                  {loadError && (
+                    <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                      {loadError}
+                    </div>
+                  )}
+                  {loading ? (
+                    <div className="text-meta text-ink-muted">Loading…</div>
+                  ) : loadError ? null : claudeLinks.length === 0 ? (
+                    <div className="text-meta text-ink-muted">
+                      None yet. One appears here after you connect from Cowork or claude.ai.
+                    </div>
+                  ) : (
+                    <ul className="divide-y divide-line border border-line rounded">
+                      {claudeLinks.map((k) => (
+                        <li key={k.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">{k.label}</div>
+                            <div className="text-meta text-ink-muted">
+                              Connected {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleDisconnect(k.id)}
+                            className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
+                            title="Disconnect this Claude account. Its marketplace stops updating; connect again from Claude to resume."
+                          >
+                            Disconnect
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </details>
+
             <details className="border border-line rounded" data-testid="marketplace-section">
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
-                Skills as native plugins (marketplace)
+                Claude Code, Codex and the skills CLI
               </summary>
               <div className="px-3 pb-3 space-y-3">
                 <p className="text-meta text-ink-muted leading-snug">
-                  Instead of reading skills through the MCP server, an agent can install them
-                  as native plugins. Every skill you may read is compiled into a plugin
-                  marketplace at the git remote below; it needs an external API key from the{' '}
+                  These clone the marketplace as a git remote. The URL carries an external API
+                  key from the{' '}
                   <button
                     type="button"
                     onClick={() => setTab('autonomous')}
@@ -301,7 +413,7 @@ export function ExternalAgentAccessPage() {
                   >
                     Autonomous agents
                   </button>{' '}
-                  tab, which the key dialog shows filled in.
+                  tab — the key dialog there shows these commands filled in.
                 </p>
                 <CopyBlock label="Marketplace git remote" value={marketplaceGitUrl()} rows={2} />
                 <CopyBlock
@@ -321,7 +433,9 @@ export function ExternalAgentAccessPage() {
                 />
                 <p className="text-meta text-ink-muted leading-snug">
                   The key stays in the URL: Claude Code refreshes marketplaces in the background
-                  without credential helpers. Revoke the key here to cut the agent off.
+                  without credential helpers. Revoke the key to cut the agent off. In Claude Code
+                  add it through the CLI or the Claude Code section of the Desktop app's
+                  Customize screen; the Chat and Cowork screens use the route above instead.
                 </p>
                 <p className="text-meta text-ink-muted leading-snug">
                   Add it through Claude Code: the CLI, or the Claude Code section of the
@@ -331,18 +445,6 @@ export function ExternalAgentAccessPage() {
                 </p>
               </div>
             </details>
-
-            <p className="text-[11px] text-ink-muted leading-snug">
-              Running an unattended pipeline or CI agent that can't open a browser? Use the{' '}
-              <button
-                type="button"
-                onClick={() => setTab('autonomous')}
-                className="underline text-ink-muted hover:text-ink"
-              >
-                Autonomous agents
-              </button>{' '}
-              tab instead.
-            </p>
           </div>
         )}
 
@@ -395,8 +497,11 @@ export function ExternalAgentAccessPage() {
               )}
               {loading ? (
                 <div className="text-xs text-ink-muted">Loading…</div>
-              ) : keys.length === 0 ? (
-                <div className="text-xs text-ink-muted">No external API keys yet.</div>
+              ) : sortedKeys.length === 0 ? (
+                <div className="text-xs text-ink-muted">
+                  No external API keys yet.
+                  {claudeLinks.length > 0 && ' Your Claude connections are on the Marketplaces tab.'}
+                </div>
               ) : (
                 <ul className="divide-y divide-line border border-line rounded">
                   {sortedKeys.map((k) => {
@@ -417,7 +522,7 @@ export function ExternalAgentAccessPage() {
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
                             Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
-                            {revoked && ' · Disconnected'}
+                            {revoked && ' · Revoked'}
                           </div>
                           {usage && (
                             <div className="mt-1 max-w-xs">
@@ -444,7 +549,7 @@ export function ExternalAgentAccessPage() {
                           <button
                             onClick={() => setPendingDelete({ id: k.id, label: k.label })}
                             className="text-xs px-2 py-1 rounded text-red-600 hover:bg-red-50 border border-line"
-                            title="Permanently delete this disconnected key and its usage history."
+                            title="Permanently delete this revoked key and its usage history."
                           >
                             Delete
                           </button>
@@ -452,9 +557,9 @@ export function ExternalAgentAccessPage() {
                           <button
                             onClick={() => handleDisconnect(k.id)}
                             className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
-                            title="Disconnect this external API key. The external agent using it will lose access."
+                            title="Revoke this external API key. The external agent using it will lose access."
                           >
-                            Disconnect
+                            Revoke
                           </button>
                         )}
                       </li>
@@ -514,7 +619,7 @@ export function ExternalAgentAccessPage() {
             </div>
             <div className="px-4 py-3 space-y-3">
               <p className="text-xs text-ink leading-snug">
-                This is the only time you'll see the full key. If you lose it, disconnect it and create a new one.
+                This is the only time you'll see the full key. If you lose it, revoke it and create a new one.
               </p>
               <div className="relative">
                 <textarea

@@ -244,7 +244,10 @@ export class TemplateFilesStep implements OnServerStart {
       // it: the on-disk reconciliation below never sees a file that was
       // absent, so the declared content is reconciled here instead.
       if (rel === IGNORE_FILENAME) {
-        content = withoutPlatformIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`);
+        content = withoutIgnoreLine(
+          withoutPlatformIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`),
+          `${PLUGINS_DIR}/`,
+        );
       }
       branch.write(rel, content);
       added.push(rel);
@@ -271,10 +274,22 @@ export class TemplateFilesStep implements OnServerStart {
     // it, for the same reason the negation above is kept: the file is
     // theirs. The Knowledge explorer never rendered the root and still does
     // not. Spelled with the CONFIGURED root name, since a deployment may
-    // have renamed it. ONE read-modify-write for both rules: two passes
-    // would each read the on-disk file and the second declared write would
-    // lose the first's.
-    added.push(...(await reconcileIgnoreRules(repoDir, branch, { add: ['AGENTS.md'], drop: [`${SKILLS_DIR}/`] })));
+    // have renamed it.
+    //
+    // The plugins root follows the skills root: the same sidebar now draws
+    // it as a file tree too, so the rule that hid it since the first seed
+    // comes out. That one has no comment to know it by — it was in the
+    // template body from the start — so every line spelling it goes,
+    // whoever wrote it (see `withoutIgnoreLine`). ONE read-modify-write for
+    // all the rules: separate passes would each read the on-disk file and
+    // a later declared write would lose an earlier one's.
+    added.push(
+      ...(await reconcileIgnoreRules(repoDir, branch, {
+        add: ['AGENTS.md'],
+        drop: [`${SKILLS_DIR}/`],
+        dropEvery: [`${PLUGINS_DIR}/`],
+      })),
+    );
 
     // AGENTS.md is MANAGED, not merely seeded: the platform owns its content,
     // and a stale copy is replaced with the packaged template's every startup
@@ -403,7 +418,7 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
 async function reconcileIgnoreRules(
   repoDir: string,
   branch: KbBranch,
-  rules: { add: string[]; drop: string[] },
+  rules: { add: string[]; drop: string[]; dropEvery?: string[] },
 ): Promise<string[]> {
   let current: string;
   try {
@@ -415,10 +430,45 @@ async function reconcileIgnoreRules(
     return [];
   }
   const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
-  const merged = rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added);
+  const merged = (rules.dropEvery ?? []).reduce(
+    (text, pattern) => withoutIgnoreLine(text, pattern),
+    rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
+  );
   if (merged === current) return [];
   branch.write(IGNORE_FILENAME, merged);
   return [IGNORE_FILENAME];
+}
+
+/**
+ * `text` without EVERY line that is exactly `pattern`, whoever wrote it, and
+ * without a platform comment sitting directly above one. The other drop keeps
+ * an operator's identical line; this one does not, and the difference is
+ * deliberate: the plugins-root rule was in the template from the first seed
+ * with no comment to know it by, so provenance cannot decide it — and the
+ * Skills & Tools sidebar now renders that root as a file tree read from the
+ * workspace tree, which the rule would empty. A `!pattern` negation is not
+ * the pattern and stays. A platform comment directly above a dropped line
+ * goes with it, and so does the blank line that opened an appended block —
+ * the same tidy-up `withoutPlatformIgnorePattern` does, so a file either
+ * step cleans reads the same afterwards.
+ *
+ * Exported for the Groups→Plugins step, which retires the same rules on the
+ * branches this step never visits (drafts).
+ */
+export function withoutIgnoreLine(text: string, pattern: string): string {
+  const lines = text.split('\n');
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (line.trim() !== pattern) {
+      kept.push(line);
+      continue;
+    }
+    const above = kept[kept.length - 1];
+    if (above === undefined || !isPlatformRuleComment(above)) continue;
+    kept.pop();
+    if (above.trim() === PLATFORM_RULE_COMMENT && kept.length > 1 && kept[kept.length - 1]?.trim() === '') kept.pop();
+  }
+  return kept.join('\n');
 }
 
 /** The comment `withIgnorePattern` writes above a line it appends. */

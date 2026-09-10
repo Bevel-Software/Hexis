@@ -14,12 +14,17 @@
  * Pure: parse once, expand many. Unknown ids and cycles are warnings, never
  * throws — a registry typo must not take every plugin down.
  */
+import {
+  judgeMcpServerEntry,
+  type PortableHttpEntry,
+  type PortableStdioEntry,
+} from '../../../tool-manuals/mcp-json-discovery.js';
 
 export interface RegistryServer {
   id: string;
   name?: string;
-  /** The server as one `mcp.json` entry — converted, and therefore usable, at parse time. */
-  entry: Record<string, unknown>;
+  /** The server as one `mcp.json` entry — judged, and therefore usable, at parse time. */
+  entry: PortableStdioEntry | PortableHttpEntry;
 }
 
 export interface RegistryProfile {
@@ -56,8 +61,10 @@ export function parseRegistry(text: string): McpRegistry {
       continue;
     }
     // Converting IS the validation: a server the registry keeps is one whose
-    // entry a client can run, and nothing decides the transport twice.
-    const converted = mcpEntryOf(isRecord(raw.config) ? raw.config : raw);
+    // entry a client can run — judged by the ONE rule every mcp.json entry
+    // meets (name, transport, required fields), after the customer's shape
+    // is translated into that of mcp.json.
+    const converted = mcpEntryOf(raw.id, isRecord(raw.config) ? raw.config : raw);
     if ('reason' in converted) {
       warnings.push(`registry.json: server "${raw.id}" ${converted.reason} — skipped`);
       continue;
@@ -127,42 +134,32 @@ export function expandProfile(
 /**
  * A registry config → one `mcp.json` server entry, or why there is none.
  *
- * The transport is decided ONCE, here: a declared `type` names it, and an
+ * The registry's OWN knowledge is the customer's shape: a declared `type`
+ * names the transport (`http` is their spelling of `streamable-http`), an
  * undeclared one is read off the fields — a `url` means http, else a
- * `command` means stdio. Blank strings are absent, whatever the transport.
- * An http-style server (`http`, `streamable-http`, `sse`) keeps `url` (+
- * literal `headers`); a stdio server keeps `command`/`args`/`env`/`cwd`.
+ * `command` means stdio — and blank strings are absent. That translation
+ * done, whether the entry can work is the shared judgement's call, the same
+ * one every `mcp.json` entry meets: a name that can be a server name, a
+ * transport the client speaks (no `sse`), the field that transport needs.
  */
-function mcpEntryOf(config: Record<string, unknown>): { entry: Record<string, unknown> } | { reason: string } {
+function mcpEntryOf(
+  id: string,
+  config: Record<string, unknown>,
+): { entry: PortableStdioEntry | PortableHttpEntry } | { reason: string } {
   const declared = typeof config.type === 'string' ? config.type.trim().toLowerCase() : undefined;
   const url = nonBlank(config.url);
   const command = nonBlank(config.command);
-
-  let transport: 'streamable-http' | 'sse' | 'stdio';
-  if (declared === undefined) {
-    if (url) transport = 'streamable-http';
-    else if (command) transport = 'stdio';
-    else return { reason: 'has neither a url nor a command' };
-  } else if (declared === 'http' || declared === 'streamable-http') {
-    transport = 'streamable-http';
-  } else if (declared === 'sse' || declared === 'stdio') {
-    transport = declared;
-  } else {
-    return { reason: `has an unknown transport "${declared}"` };
+  const type =
+    declared === undefined ? (url ? 'streamable-http' : command ? 'stdio' : undefined) : declared === 'http' ? 'streamable-http' : declared;
+  if (type === undefined) return { reason: 'has neither a url nor a command' };
+  const candidate: Record<string, unknown> = { type };
+  if (url) candidate.url = url;
+  if (command) candidate.command = command;
+  for (const key of ['args', 'env', 'cwd', 'headers'] as const) {
+    if (config[key] !== undefined) candidate[key] = config[key];
   }
-
-  if (transport === 'stdio') {
-    if (!command) return { reason: 'has transport "stdio" but no command' };
-    const entry: Record<string, unknown> = { type: 'stdio', command };
-    if (Array.isArray(config.args)) entry.args = config.args.map(String);
-    if (isRecord(config.env)) entry.env = config.env;
-    if (typeof config.cwd === 'string') entry.cwd = config.cwd;
-    return { entry };
-  }
-  if (!url) return { reason: `has transport "${declared}" but no url` };
-  const entry: Record<string, unknown> = { type: transport, url };
-  if (isRecord(config.headers)) entry.headers = config.headers;
-  return { entry };
+  const verdict = judgeMcpServerEntry(id, candidate);
+  return verdict.ok ? { entry: verdict.entry } : { reason: verdict.reason };
 }
 
 function nonBlank(v: unknown): string | undefined {

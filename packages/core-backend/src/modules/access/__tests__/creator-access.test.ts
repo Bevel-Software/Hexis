@@ -92,7 +92,13 @@ describe('CreatorAccessService.planForCreate', () => {
     expect(plan?.kind).toBe('seed-access-md');
     if (plan?.kind !== 'seed-access-md') return;
     expect(plan.wsRelPath).toBe(`${KB}/KnowledgeBase/Projects/access.md`);
-    expect(plan.apply('')).toBe('---\nread:\n  - Alice <alice@example.com>\n---\n');
+    // The platform's two-block file: a comment-only frontmatter (the file
+    // follows the folder's rules), then the body that governs the folder,
+    // explained in place, with the creator's grant as its one rule.
+    const seeded = plan.apply('');
+    expect(seeded.startsWith('---\n# THIS BLOCK (the frontmatter) governs this access.md FILE only')).toBe(true);
+    expect(seeded).toContain('\n---\n# THIS BLOCK (the body) governs the FOLDER');
+    expect(seeded.endsWith('\nread:\n  - Alice <alice@example.com>\n')).toBe(true);
   });
 
   it('the seed MERGES into existing access.md text — a concurrent creator grant survives', async () => {

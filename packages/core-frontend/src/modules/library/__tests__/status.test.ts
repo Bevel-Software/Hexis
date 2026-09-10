@@ -205,6 +205,23 @@ describe('filterLibraryItems (sidebar selection + search)', () => {
     expect(filterLibraryItems(items, { kind: 'all' }, '')).toHaveLength(4);
   });
 
+  it("a team is the server's slice, by id — never a property of the items", () => {
+    const named = items.map((i) => ({ ...i, id: i.name.toLowerCase() }));
+    const teams = [{ name: 'Sales', plugins: ['gtm'], skills: ['rfi responder'], tools: ['slack'] }];
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Sales' }, '', teams).map((i) => i.name)).toEqual([
+      'RFI responder',
+      'Slack',
+    ]);
+    // A skill's id is looked up among skills, a tool's among tools: a tool
+    // named like a listed skill is not in the team.
+    const crossed = [{ name: 'Sales', plugins: [], skills: ['slack'], tools: [] }];
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Sales' }, '', crossed)).toEqual([]);
+    // No slice for the team, or no ids on the items: nothing, never everything.
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Ops' }, '', teams)).toEqual([]);
+    expect(filterLibraryItems(items, { kind: 'team', group: 'Sales' }, '', teams)).toEqual([]);
+    expect(filterLibraryItems(named, { kind: 'team', group: 'Sales' }, '')).toEqual([]);
+  });
+
   it('search matches name or description within the selection, case-insensitively', () => {
     expect(filterLibraryItems(items, { kind: 'all' }, 'friday').map((i) => i.name)).toEqual([
       'Weekly newsletter',

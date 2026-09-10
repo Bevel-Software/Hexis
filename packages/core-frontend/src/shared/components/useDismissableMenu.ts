@@ -1,4 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react';
+import { useModalLayer } from './useModalLayer';
+import { useLatestRef } from './useLatestRef';
 
 /**
  * The behaviour `MenuPanel` deliberately does not provide.
@@ -15,14 +17,31 @@ import { useEffect, useRef, type RefObject } from 'react';
  * whatever opened the menu — otherwise focus is left on a node that just
  * unmounted and the next Tab starts from the top of the document.
  *
+ * The hook owns two contracts its callers used to carry:
+ *
+ * - **It is a modal layer.** An open menu registers on the modal-layer stack,
+ *   and its Escape acts only while the menu is the TOPMOST layer. That is
+ *   what makes Escape peel one layer at a time in every composition: a menu
+ *   inside a `<Dialog>` closes before the dialog (the dialog's own Escape
+ *   guard sees it is not topmost), and two menus open at once — reachable by
+ *   keyboard, where no mousedown dismisses the first — close one per press,
+ *   newest first, instead of both on one press. Outside-click is different on
+ *   purpose: clicking away is "dismiss everything light-weight", so it stays
+ *   unguarded.
+ * - **`onClose` may be a fresh arrow every render.** The hook mirrors it into
+ *   a ref itself, so its document listeners subscribe once for the life of
+ *   the open menu. Callers must not wrap it in their own ref-plus-stable-
+ *   callback scaffolding — that pattern's drift is exactly what this replaces.
+ *
  * Returns the ref to put on the panel.
  */
 export interface DismissableMenuOptions {
   open: boolean;
+  /** Close the menu. May be a fresh arrow each render — the hook mirrors it. */
   onClose: () => void;
   /**
    * The control that opened the menu. Clicks on it are ignored (its own
-   * handler toggles), and Escape hands focus back to it.
+   * handler toggles), and Escape hands focus back to it. A stable ref.
    */
   returnFocusTo?: RefObject<HTMLElement | null>;
 }
@@ -33,6 +52,8 @@ export function useDismissableMenu<T extends HTMLElement>({
   returnFocusTo,
 }: DismissableMenuOptions): RefObject<T | null> {
   const panelRef = useRef<T>(null);
+  const onCloseRef = useLatestRef(onClose);
+  const isTop = useModalLayer(open);
 
   useEffect(() => {
     if (!open) return;
@@ -43,19 +64,20 @@ export function useDismissableMenu<T extends HTMLElement>({
       // A click on the trigger is the trigger's business — closing here too
       // would make a toggle button close-then-reopen on a single click.
       if (returnFocusTo?.current?.contains(target)) return;
-      onClose();
+      onCloseRef.current();
     }
 
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
-      // Stops window-level Escape handlers from also acting on this key. It
-      // does NOT protect against a `<Dialog>` hosting the menu — Dialog binds
-      // on `document` too, and same-node listeners are unaffected by
-      // stopPropagation. Nothing here mounts a menu inside a dialog; if
-      // something ever does, the fix is `useModalLayer`, not a third
-      // listener.
+      // Only the topmost layer owns this Escape. Same-node `document`
+      // listeners are unaffected by stopPropagation, so without this guard a
+      // second open menu — or the `<Dialog>` hosting this one — would act on
+      // the same keypress. Listeners run in subscription order (oldest
+      // first), so every layer below the top returns here and exactly one
+      // closes per press.
+      if (!isTop()) return;
       e.stopPropagation();
-      onClose();
+      onCloseRef.current();
       returnFocusTo?.current?.focus();
     }
 
@@ -65,7 +87,7 @@ export function useDismissableMenu<T extends HTMLElement>({
       document.removeEventListener('mousedown', onPointerDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [open, onClose, returnFocusTo]);
+  }, [open, isTop, returnFocusTo, onCloseRef]);
 
   return panelRef;
 }

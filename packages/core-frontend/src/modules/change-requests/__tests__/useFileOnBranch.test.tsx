@@ -6,7 +6,7 @@ vi.mock('../services/change-requests.api', () => ({
   readFileOnBranch: api.readFileOnBranch,
 }));
 
-import { useFileOnBranch } from '../hooks/useFileOnBranch';
+import { useFileOnBranch, useFileOnBranchRead } from '../hooks/useFileOnBranch';
 
 beforeEach(() => {
   api.readFileOnBranch
@@ -68,5 +68,51 @@ describe('useFileOnBranch', () => {
     const { result } = renderHook(() => useFileOnBranch('main', 'skill/SKILL.md'));
     await new Promise((r) => setTimeout(r, 0));
     expect(result.current).toBeNull();
+  });
+});
+
+/**
+ * A caller that cannot tell "failed" from "in flight" can only render
+ * "Loading…" for both — which is what left the change-request pane hanging on
+ * a file the default branch does not have.
+ */
+describe('useFileOnBranchRead', () => {
+  it('reports a settled failure as a failure, not as a wait', async () => {
+    api.readFileOnBranch.mockRejectedValue(new Error('404'));
+    const { result } = renderHook(() => useFileOnBranchRead('main', 'Ops/gone.yaml'));
+    expect(result.current).toEqual({ content: null, failed: false });
+    await waitFor(() => expect(result.current).toEqual({ content: null, failed: true }));
+    // Settled means settled: the failure is cached, not retried on every render.
+    expect(api.readFileOnBranch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a landed read is not a failure, and an unasked one is neither', async () => {
+    const { result, rerender } = renderHook(({ path }) => useFileOnBranchRead('main', path), {
+      initialProps: { path: null as string | null },
+    });
+    expect(result.current).toEqual({ content: null, failed: false });
+
+    rerender({ path: 'skill/SKILL.md' });
+    await waitFor(() =>
+      expect(result.current).toEqual({ content: 'content of skill/SKILL.md', failed: false }),
+    );
+  });
+
+  it('keys the failure to its own path — a sibling read is unaffected', async () => {
+    api.readFileOnBranch.mockImplementation(async (_branch: string, path: string) => {
+      if (path === 'Ops/gone.yaml') throw new Error('404');
+      return `content of ${path}`;
+    });
+    const { result, rerender } = renderHook(({ path }) => useFileOnBranchRead('main', path), {
+      initialProps: { path: 'Ops/gone.yaml' },
+    });
+    await waitFor(() => expect(result.current.failed).toBe(true));
+
+    rerender({ path: 'Ops/here.yaml' });
+    await waitFor(() => expect(result.current.content).toBe('content of Ops/here.yaml'));
+    expect(result.current.failed).toBe(false);
+
+    rerender({ path: 'Ops/gone.yaml' });
+    expect(result.current).toEqual({ content: null, failed: true });
   });
 });

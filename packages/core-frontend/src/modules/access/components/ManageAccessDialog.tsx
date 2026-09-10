@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
@@ -16,6 +17,7 @@ import {
   Dialog,
   MenuItem,
   MenuPanel,
+  useDismissableMenu,
 } from '../../../shared/components';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { useAuth } from '../../auth/state/auth.context';
@@ -38,7 +40,7 @@ import {
   type Principal,
   type SuggestResponse,
 } from '../api';
-import { EMAIL_RE } from '../../../lib/email';
+import { EMAIL_RE, initials, labelInitials } from '../../../lib/email';
 
 interface Props {
   entry: FileTreeEntry;
@@ -217,13 +219,6 @@ const AVATAR_TONES = [
   { bg: '#faf0e2', fg: '#8a6a2f' },
 ];
 
-function initials(label: string): string {
-  const parts = label.replace(/[<>]/g, '').trim().split(/[\s@.]+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
-
 function avatarTone(seed: string): { bg: string; fg: string } {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
@@ -304,8 +299,32 @@ const MENU_MIN_WIDTH = 200;
  * attached yet when this component's layout effect runs (React attaches refs
  * bottom-up, children first), so the first placement would silently no-op and
  * the panel would stay hidden.
+ *
+ * Dismissal is the caller's to opt into with `onDismiss`. A menu whose open
+ * state is a boolean the caller owns (the verb checklists) has to close on an
+ * outside click and on Escape, or it sits open until something inside it is
+ * picked — a trap for anyone driving the app from the keyboard, and a surprise
+ * for everyone else. That is `useDismissableMenu`'s job, plus one thing the
+ * hook's own docstring warns it does NOT do: co-exist with the `Dialog` this
+ * menu lives in, which also listens for Escape on `document` and would close
+ * itself on the same keypress. Registering the open menu as a modal layer
+ * makes it the topmost, so `Dialog` stands down until the menu is gone. The
+ * suggestion list leaves `onDismiss` unset: its openness is derived from what
+ * is typed, not from a flag a click could clear.
  */
 function AnchoredMenu({
+  /**
+   * Close the menu. Called on a mousedown outside the panel and its trigger,
+   * and on Escape (which also hands focus back to the trigger). Leave unset
+   * for a panel whose visibility is not an open flag.
+   */
+  onDismiss,
+  /**
+   * The control that opened us. Clicks on it are the trigger's own business
+   * (its handler toggles), and Escape returns focus to it. Goes with
+   * `onDismiss`; a stable ref, as `useDismissableMenu` lists it in its deps.
+   */
+  triggerRef,
   /**
    * Panel width in px, or `'anchor'` to match the trigger (the combobox case).
    * Clamped up to {@link MENU_MIN_WIDTH} either way.
@@ -316,12 +335,24 @@ function AnchoredMenu({
   className = '',
   children,
 }: {
+  onDismiss?: () => void;
+  triggerRef?: RefObject<HTMLElement | null>;
   width?: number | 'anchor';
   align?: 'left' | 'right';
   className?: string;
   children: ReactNode;
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  const dismissable = onDismiss !== undefined;
+  // The hook owns both contracts this component used to carry by hand: it
+  // mirrors a fresh `onDismiss` arrow into a ref itself (so its document
+  // listeners subscribe once per open menu), and it registers the open menu
+  // as a modal layer (so Escape peels it before the Dialog hosting it, and
+  // one press never closes two layers).
+  const panelRef = useDismissableMenu<HTMLDivElement>({
+    open: dismissable,
+    onClose: () => onDismiss?.(),
+    returnFocusTo: triggerRef,
+  });
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useLayoutEffect(() => {
@@ -379,7 +410,7 @@ function AnchoredMenu({
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [width, align]);
+  }, [width, align, panelRef]);
 
   return (
     <div
@@ -441,6 +472,11 @@ export function ManageAccessDialog({
   const [mutateError, setMutateError] = useState<string | null>(null);
   // Which existing row's verb checklist is open (one at a time).
   const [openRowKey, setOpenRowKey] = useState<string | null>(null);
+  // The triggers the two verb menus return focus to on Escape. One ref serves
+  // every grantee row: only the OPEN row's trigger carries it (one menu at a
+  // time), so it always names the button whose menu is on screen.
+  const openRowTriggerRef = useRef<HTMLButtonElement>(null);
+  const verbTriggerRef = useRef<HTMLButtonElement>(null);
   // When set, the "Remove from parent?" confirmation is open for this principal.
   // `ancestors` are the granting access.md path(s) (repo-relative, opaque) to
   // echo back on remove-from-parent. `verb` scopes the action to a single verb
@@ -600,12 +636,22 @@ export function ManageAccessDialog({
     for (const u of data.owners.users) touchUser(u).verbs.owner = true;
     for (const c of collectivesOf(data.eligible)) touchCollective(c).verbs.write = true;
     for (const u of data.eligible.users) touchUser(u).verbs.write = true;
-    // Read membership is per-principal only for a restricted node. When
-    // `restricted` is false, read is `everyone` and the reader lists are empty.
-    if (data.readers.restricted) {
-      for (const c of collectivesOf(data.readers)) touchCollective(c).verbs.read = true;
-      for (const u of data.readers.users) touchUser(u).verbs.read = true;
+    // Read grants are rows whether or not the node is public: on a public
+    // node they are what MAKES it public, and a row is the ONE place any
+    // grant is removed. The built-in `everyone` is a row like any principal
+    // — when a file spells it. A derived everyone (public only through a
+    // plugin principal) has no line of its own; the plugin's row is that grant.
+    for (const c of collectivesOf(data.readers)) {
+      if (c.kind === 'role' && isEveryoneRole({ kind: 'role', role: c.name })) {
+        if (!lookupSources(data.sources, 'r:everyone')?.read?.length) continue;
+        const row = touchCollective(c);
+        row.label = 'Everyone';
+        row.verbs.read = true;
+        continue;
+      }
+      touchCollective(c).verbs.read = true;
     }
+    for (const u of data.readers.users) touchUser(u).verbs.read = true;
     for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 
@@ -803,41 +849,20 @@ export function ManageAccessDialog({
     }
   }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, effectiveNewVerbs, reload]);
 
-  // Revoke the public-read grant (`read: everyone`) at THIS path. Clears the
-  // "Anyone can read" state when it was granted here; an inherited public grant
-  // (from a parent folder) stays and is removed where it was set.
-  const removePublicRead = useCallback(async () => {
-    if (!workspaceId || repoRelative === null) return;
-    setBusy(true);
-    setMutateError(null);
-    try {
-      await revokeAccess(workspaceId, {
-        path: entry.relativePath,
-        kind: targetKind,
-        principal: { kind: 'role', role: 'everyone' },
-        verb: 'read',
-      });
-      reload();
-    } catch (err) {
-      // The public-read grant lives in a parent folder — route the 409 into the
-      // same "Remove from parent? / Restrict here?" confirmation the grantee rows
-      // use, instead of a raw error toast.
-      const inherited = asInheritedError(err);
-      if (inherited) {
-        setConfirmRemove({
-          principal: { kind: 'role', role: 'everyone' },
-          label: 'Everyone',
-          ancestors: ancestorsFromSources(inherited.sources),
-          verb: 'read',
-        });
-      } else {
-        setMutateError(err instanceof Error ? err.message : String(err));
-        reload();
-      }
-    } finally {
-      setBusy(false);
-    }
-  }, [workspaceId, repoRelative, entry.relativePath, targetKind, reload]);
+  // WHY the node is public, said in the band and acted on in the rows: every
+  // literal `everyone` line (here, or in a parent) is the Everyone row's
+  // source; every public plugin principal granted read is that plugin's
+  // row. The band only describes — one mechanism removes, and it is the
+  // same one for every principal.
+  const publicReasons = [
+    ...(lookupSources(data?.sources, 'r:everyone')?.read ?? []).map((s) =>
+      s.kind === 'direct' ? 'granted here' : `inherited from ${folderLabel((s as { path: string }).path)}`,
+    ),
+    ...(data?.readers.publicVia ?? []).map((token) => {
+      const parsed = parsePluginPrincipalToken(token);
+      return `through ${parsed ? pluginPrincipalLabel(parsed.plugin, parsed.verb) : token}`;
+    }),
+  ];
 
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
@@ -1042,7 +1067,7 @@ export function ManageAccessDialog({
       <div key={p.key} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
         {p.kind !== 'user' ? (
           <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-detail font-bold text-ink-muted">
-            {initials(p.label)}
+            {labelInitials(p.label)}
           </span>
         ) : (
           <span
@@ -1094,18 +1119,25 @@ export function ManageAccessDialog({
           </span>
         ) : canManage ? (
           <div className="ml-auto shrink-0">
+            {/* Not `disabled={busy}`: the checklist's items freeze while a
+                grant or revoke is in flight, and this button only opens or
+                closes the checklist. Disabled, it could not take focus back
+                on Escape (`.focus()` on a disabled button is a no-op), and
+                focus fell to `document`. */}
             <Button
+              ref={openRowKey === p.key ? openRowTriggerRef : undefined}
               variant="quiet"
               size="sm"
-              disabled={busy}
               onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
               trailingIcon={<ChevronDown size={14} />}
             >
               {summarizeVerbs(p.verbs)}
             </Button>
             {openRowKey === p.key && (
-              <AnchoredMenu>
-                {TIER_ROLES.map((role) => {
+              <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
+                {/* Everyone is public READ only (the grant route refuses the
+                    rest), so its row offers exactly the verb it can hold. */}
+                {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : TIER_ROLES).map((role) => {
                   const k = ROLE_TO_KEY[role];
                   const checked = p.verbs[k];
                   const disabled =
@@ -1124,21 +1156,22 @@ export function ManageAccessDialog({
                     </MenuItem>
                   );
                 })}
-                <div className="my-1 border-t border-line" />
-                {(() => {
-                  const checked = p.verbs.download;
-                  const disabled = busy || p.verbs.owner;
-                  return (
-                    <MenuItem
-                      disabled={disabled}
-                      active={checked}
-                      onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
-                      trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
-                    >
-                      Can download
-                    </MenuItem>
-                  );
-                })()}
+                {!isEveryoneRole(p.principal) && <div className="my-1 border-t border-line" />}
+                {!isEveryoneRole(p.principal) &&
+                  (() => {
+                    const checked = p.verbs.download;
+                    const disabled = busy || p.verbs.owner;
+                    return (
+                      <MenuItem
+                        disabled={disabled}
+                        active={checked}
+                        onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
+                        trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
+                      >
+                        Can download
+                      </MenuItem>
+                    );
+                  })()}
                 <div className="my-1 border-t border-line" />
                 <MenuItem
                   tone="danger"
@@ -1237,7 +1270,7 @@ export function ManageAccessDialog({
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                          {initials(g)}
+                          {labelInitials(g)}
                         </span>
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
@@ -1251,7 +1284,7 @@ export function ManageAccessDialog({
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                          {initials(g)}
+                          {labelInitials(g)}
                         </span>
                         <span className="min-w-0 flex-1 truncate">{g}</span>
                       </MenuItem>
@@ -1268,7 +1301,7 @@ export function ManageAccessDialog({
                           }
                         >
                           <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
-                            {initials(name)}
+                            {labelInitials(name)}
                           </span>
                           <span className="min-w-0 flex-1 truncate">{pluginPrincipalLabel(name, verb)}</span>
                         </MenuItem>
@@ -1302,6 +1335,7 @@ export function ManageAccessDialog({
 
               <div className="shrink-0">
                 <Button
+                  ref={verbTriggerRef}
                   variant="outline"
                   size="sm"
                   className="max-w-44"
@@ -1311,7 +1345,7 @@ export function ManageAccessDialog({
                   <span className="truncate">{summarizeVerbs(effectiveNewVerbs)}</span>
                 </Button>
                 {verbOpen && (
-                  <AnchoredMenu>
+                  <AnchoredMenu onDismiss={() => setVerbOpen(false)} triggerRef={verbTriggerRef}>
                     {TIER_ROLES.map((role) => {
                       const k = ROLE_TO_KEY[role];
                       const checked = effectiveNewVerbs[k];
@@ -1412,6 +1446,10 @@ export function ManageAccessDialog({
               )}
             </h3>
 
+            {/* A statement, not a control: it says the node is public and
+                why. Each reason is a grant with a row below — the Everyone
+                row for a literal line, the plugin's row for a public plugin
+                principal — and the row is where it is removed. */}
             {data && !data.readers.restricted && (
               <div className="flex items-center gap-3 py-1.5">
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ok-soft text-ok">
@@ -1420,20 +1458,11 @@ export function ManageAccessDialog({
                 <div className="min-w-0 flex-1">
                   <div className="text-ui text-ink">Anyone can read</div>
                   <div className="text-detail text-ink-muted">
-                    Public: every signed-in user can read this {targetKind}
+                    {`Public: every signed-in user can read this ${targetKind}${
+                      publicReasons.length > 0 ? ` — ${publicReasons.join(', ')}` : ''
+                    }.`}
                   </div>
                 </div>
-                {canManage && (
-                  <Button
-                    variant="danger"
-                    size="tiny"
-                    className="shrink-0"
-                    disabled={busy}
-                    onClick={removePublicRead}
-                  >
-                    Remove
-                  </Button>
-                )}
               </div>
             )}
 

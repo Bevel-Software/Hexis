@@ -1,8 +1,9 @@
 import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
-import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
 import { useLibrary } from '../state/library-data';
+import { FileRoute } from '../../workspace/components/FileRoute';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
@@ -24,10 +25,23 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  * itself. Waiting on the catalog here raced every reload and lost (the
  * just-created skill bounced to its plugin's page).
  *
- * The two roots differ only in where a path that is NO skill goes: a
- * container folder or a loose file belongs to its plugin page under
- * `Plugins/`; under `Skills/` a scope folder has no page (home) and a loose
- * file opens as the plain file it is.
+ * The two roots differ only in where a FOLDER that is no skill goes: a
+ * container belongs to its plugin page under `Plugins/`; under `Skills/` a
+ * scope folder has no page (home). A loose FILE — a folder's `access.md`,
+ * a plugin's `plugin.json`, a stray upload — opens as the plain file it is
+ * under either root, HERE, inside this app: the same `FileRoute` Knowledge
+ * renders, in the Library's own frame. Which app a file opens in follows
+ * the folder it is in — the two roots ARE the two apps — never the viewer it
+ * needs, so a person reading a plugin's manifest keeps the Skills & Tools nav
+ * and switcher around it. (The plugin page was never the file either: it
+ * keys on the plugin's identity, which a folder name need not be — a
+ * personal space, a folder spelled unlike its manifest — so the old bounce
+ * there landed on "doesn't exist" for a file plainly present.)
+ *
+ * Router state `rawFile` asks for that raw view OUTRIGHT, whatever the URL
+ * would otherwise resolve to — the tool page's "Edit the tool file", the
+ * plugin page's manifest button. State, not URL: a shared link never carries
+ * it, so nobody lands on the editor by accident.
  *
  * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
  * declare an explicit id different from its filename); the filename is the
@@ -39,8 +53,10 @@ export function WorkspaceItemRoute() {
   const location = useLocation();
   const splat = params['*'] ?? '';
   const branch = safeDecode(params.branch ?? '');
-  const { kbDirName } = useWorkspace();
+  const { kbDirName, fileTree } = useWorkspace();
   const data = useLibrary();
+  // The workspace tree as a second witness — see `resolveSkillPath`.
+  const witness = (folderRel: string) => folderHasSkillMd(fileTree, kbDirName ? `${kbDirName}/${folderRel}` : null);
 
   // Shape re-validation: the route pattern (`:branch/*`) is broader than the
   // shape the shell dispatches here, and a stray URL must not read as a page.
@@ -54,6 +70,17 @@ export function WorkspaceItemRoute() {
   }
 
   /**
+   * The Knowledge file route, in this frame. `canonicalize` is OFF: its id
+   * redirect would send an id-bearing file (a `.tool`, a note with an `id`)
+   * to an id URL, which is no library location — and the surface would
+   * switch to Knowledge after all. The path URL is the one the tree gave.
+   */
+  const fileView = () => <FileRoute canonicalize={false} />;
+
+  // Asked for the raw file by name: no resolution, the editor it is.
+  if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return fileView();
+
+  /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the
    * catalog lands (folder name → declared id), and without a remount the page
    * would render once with the new name still holding the old name's failed
@@ -64,9 +91,16 @@ export function WorkspaceItemRoute() {
     <SkillPage key={name} name={name} activeFile={activeFile} provisional={provisional} />
   );
 
+  /**
+   * A loose file (a folder's access.md, a plugin's manifest, a stray note)
+   * opens as the plain file it is — the Knowledge file route, rendered right
+   * here in the Library's column, same URL, same viewer, this app's frame.
+   */
+  const rawFileView = fileView;
+
   if (kbRoot === SKILLS_DIR) {
     const rest = segments.slice(2);
-    const resolved = resolveSkillPath(data, `${SKILLS_DIR}/${rest.join('/')}`, rest, null);
+    const resolved = resolveSkillPath(data, `${SKILLS_DIR}/${rest.join('/')}`, rest, null, witness);
     switch (resolved.kind) {
       case 'skill':
         return skillPage(resolved.name, resolved.file, resolved.provisional);
@@ -75,24 +109,8 @@ export function WorkspaceItemRoute() {
       case 'container':
         // A scope has no page of its own — the sidebar's tree is where it is browsed.
         return <Navigate to={LIBRARY_ROOT} replace />;
-      case 'loose-file': {
-        // A file filed directly in a scope (its access.md, a stray note)
-        // opens as the plain file it is, in the pane workspace. Router STATE,
-        // not a different URL: the shell reads `rawFile` to step past the
-        // shape rule, and a shared link can never carry state — so nobody
-        // lands on the raw view by accident. Once asked, hold still: the
-        // shell is swapping surfaces on that state, and asking again from
-        // here would be a navigation loop.
-        const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-        if (rawRequested) return null;
-        return (
-          <Navigate
-            to={`${location.pathname}${location.search}${location.hash}`}
-            state={{ rawFile: true }}
-            replace
-          />
-        );
-      }
+      case 'loose-file':
+        return rawFileView();
     }
   }
 
@@ -102,6 +120,23 @@ export function WorkspaceItemRoute() {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
   const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
+
+  // A plugin's MANIFEST is the plugin: clicked in the tree, it opens the
+  // plugin page (whose own collapsible shows the file; the page's Manifest
+  // button asks for the raw file by state, handled above). Matched against
+  // the LISTED plugins' folders — the page keys on the plugin's identity,
+  // which the folder name need not be — so a manifest bundled inside a
+  // skill stays that skill's file, and a plugin the catalog does not list
+  // for this caller (locked, unreadable) falls through to the file itself.
+  if (isManifestFile(last)) {
+    // The list's word, once it has one: while it is (re)loading, the
+    // summaries on hand may be the previous list's, and a manifest whose
+    // identity just changed would open the wrong page from them.
+    if (data.pluginsLoading) return null;
+    const holder = `${PLUGINS_DIR}/${[plugin, ...tail.slice(0, -1)].join('/')}`;
+    const listed = data.pluginSummaries.find((s) => s.folders.includes(holder));
+    if (listed) return <Navigate to={pathForPlugin(listed.name)} replace />;
+  }
 
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
   // ANY depth below `Plugins/` (`walkFiles` over the whole tree), so a manual
@@ -141,18 +176,19 @@ export function WorkspaceItemRoute() {
 
   // `Plugins/<plugin>/SKILL.md` makes the plugin folder itself the skill,
   // which is what the backend's walk would report for it.
-  const resolved = resolveSkillPath(data, repoRel, tail, plugin);
+  const resolved = resolveSkillPath(data, repoRel, tail, plugin, witness);
   switch (resolved.kind) {
     case 'skill':
       return skillPage(resolved.name, resolved.file, resolved.provisional);
     case 'wait':
       return null;
     case 'container':
-    case 'loose-file':
-      // A category has no page of its own; its plugin does. A file that can
-      // be no skill's — `access.md` at either level, a stray upload — is the
-      // plugin's business too.
+      // A category has no page of its own; its plugin does.
       return <Navigate to={pathForPlugin(plugin)} replace />;
+    case 'loose-file':
+      // A file that can be no skill's — `access.md` at either level, the
+      // manifest, a stray upload — is shown as the file it is.
+      return rawFileView();
   }
 }
 
@@ -196,18 +232,24 @@ type SkillPathResolution =
  * be a skill's: it sits directly in the root folder (structurally never
  * inside a skill), or its own folder is a known container. A file under an
  * UNKNOWN folder is left alone — that folder is most likely a skill the
- * catalog hasn't caught up with. When nothing positive settled it and the
- * catalog is still loading, WAIT: the evidence may be one render away, and
- * guessing flashes a page for a name that is about to change. Only then is
- * the URL read structurally — a file belongs to the folder holding it, a
- * bare folder names itself — and provisionally, so `SkillPage` must not turn
- * a failed lookup into "doesn't exist" until the catalog has answered.
+ * catalog hasn't caught up with — unless the WORKSPACE TREE, the second
+ * witness, has the folder and shows no `SKILL.md` in it: then it is a
+ * container (a scope with nothing the caller may read beneath) or a loose
+ * file in one, and no catalog can make it a skill. When nothing positive
+ * settled it and the catalog is still loading, WAIT: the evidence may be one
+ * render away, and guessing flashes a page for a name that is about to
+ * change. Only then is the URL read structurally — a file belongs to the
+ * folder holding it, a bare folder names itself — and provisionally, so
+ * `SkillPage` must not turn a failed lookup into "doesn't exist" until the
+ * catalog has answered.
  */
 function resolveSkillPath(
   data: { items: readonly { kind: string; id: string; path: string }[]; loading: boolean },
   repoRel: string,
   tail: readonly string[],
   selfName: string | null,
+  /** Whether a repo-relative folder holds a SKILL.md — true, false, or undefined when the tree cannot say. */
+  witness?: (folderRel: string) => boolean | undefined,
 ): SkillPathResolution {
   const last = tail[tail.length - 1]!;
   const owner = deepestSkillOwning(data.items, repoRel);
@@ -216,11 +258,17 @@ function resolveSkillPath(
     return { kind: 'skill', name: owner.id, file: file || 'SKILL.md', provisional: false };
   }
   const parentName = tail.length >= 2 ? tail[tail.length - 2]! : selfName;
+  const parentRel = repoRel.slice(0, repoRel.length - last.length - 1);
+  // The tree's verdict comes BEFORE any structural reading of the URL: a
+  // folder the tree holds with no SKILL.md in it is no skill, whatever the
+  // path is called — a `SKILL.md` URL into it included.
+  if (witness?.(hasExtension(last) ? parentRel : repoRel) === false) {
+    return hasExtension(last) ? { kind: 'loose-file' } : { kind: 'container' };
+  }
   if (last === 'SKILL.md' && parentName !== null) {
     return { kind: 'skill', name: parentName, file: 'SKILL.md', provisional: true };
   }
   if (!hasExtension(last) && containsCatalogSkill(data.items, repoRel)) return { kind: 'container' };
-  const parentRel = repoRel.slice(0, repoRel.length - last.length - 1);
   if (hasExtension(last) && (tail.length === 1 || containsCatalogSkill(data.items, parentRel))) {
     return { kind: 'loose-file' };
   }
@@ -231,6 +279,33 @@ function resolveSkillPath(
       : { kind: 'skill', name: parentName, file: last, provisional: true };
   }
   return { kind: 'skill', name: last, file: 'SKILL.md', provisional: true };
+}
+
+/**
+ * Whether the folder at `workspaceRel` holds a `SKILL.md`, by the workspace
+ * tree: true or false when the tree has the folder, undefined when it does
+ * not (not loaded, not readable, not on this branch) — an absence that
+ * proves nothing, exactly like the catalog's.
+ */
+function folderHasSkillMd(tree: FileTreeEntry | null, workspaceRel: string | null): boolean | undefined {
+  if (!tree || workspaceRel === null) return undefined;
+  const find = (node: FileTreeEntry): FileTreeEntry | null => {
+    if (node.relativePath === workspaceRel) return node;
+    if (!node.children || !workspaceRel.startsWith(node.relativePath === '.' ? '' : `${node.relativePath}/`)) return null;
+    for (const child of node.children) {
+      const hit = find(child);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const folder = find(tree);
+  if (!folder || folder.type !== 'directory') return undefined;
+  return (folder.children ?? []).some((c) => c.type === 'file' && c.name === 'SKILL.md');
+}
+
+/** The two files that make a folder a plugin: the native manifest and the bundle dialect's. */
+function isManifestFile(segment: string): boolean {
+  return segment === 'plugin.json' || segment === 'plugin.bundle.json';
 }
 
 /** Whether a path segment names a file rather than a folder. */

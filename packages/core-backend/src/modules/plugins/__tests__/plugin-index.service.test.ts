@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { PluginIndexService } from '../plugins.service.js';
+import type { PluginLinkIndex } from '../plugin-links.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -84,8 +85,9 @@ describe('PluginIndexService', () => {
     await pluginDir('Engineering');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Engineering', 'GTM']);
-    expect(catalog[1].folders).toEqual(['Plugins/GTM']);
+    // The manifest name is the identity; the folder is what people see.
+    expect(catalog.map((g) => g.name)).toEqual(['engineering', 'gtm']);
+    expect(catalog[1]).toMatchObject({ displayName: 'GTM', folders: ['Plugins/GTM'] });
   });
 
   test('a folder without an access.md is not a plugin', async () => {
@@ -102,7 +104,7 @@ describe('PluginIndexService', () => {
     await pluginDir('Real');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Real']);
+    expect(catalog.map((g) => g.name)).toEqual(['real']);
   });
 
   test('the retired Skills/ and Tools/ roots are NOT plugin roots', async () => {
@@ -111,7 +113,7 @@ describe('PluginIndexService', () => {
     await pluginDir('Engineering');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['Engineering']);
+    expect(catalog.map((g) => g.name)).toEqual(['engineering']);
   });
 
   test('ignores loose files and dot-dirs under the plugin root', async () => {
@@ -122,7 +124,7 @@ describe('PluginIndexService', () => {
     await writeFile(join(kb(), 'Plugins', 'slack.tool'), '{}');
 
     const catalog = await svc().catalog();
-    expect(catalog.map((g) => g.name)).toEqual(['GTM']);
+    expect(catalog.map((g) => g.name)).toEqual(['gtm']);
   });
 
   test('counts skills and tools from the global catalogs by pluginOfPath', async () => {
@@ -135,12 +137,45 @@ describe('PluginIndexService', () => {
       tools: tools('Plugins/GTM/heyreach.tool', 'Plugins/slack.tool'),
     }).catalog();
 
-    const gtm = catalog.find((g) => g.name === 'GTM')!;
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
     expect(gtm.skillCount).toBe(2);
     expect(gtm.toolCount).toBe(1);
-    const product = catalog.find((g) => g.name === 'Product')!;
+    const product = catalog.find((g) => g.name === 'product')!;
     expect(product.skillCount).toBe(1);
     expect(product.toolCount).toBe(0);
+  });
+
+  test("counts the linked skills a plugin's members cannot read, from the unfiltered link index", async () => {
+    await pluginDir('GTM');
+    await pluginDir('Product');
+    // The link index's view: GTM links two shared skills, one of which lost
+    // its grant; Product's inline skill is granted by definition.
+    const membership = vi.fn(async () => ({
+      bySkill: new Map([
+        ['Skills/Eng/deploy', [{ name: 'gtm', linked: true, granted: false }]],
+        ['Skills/Eng/rollback', [{ name: 'gtm', linked: true, granted: true }]],
+        ['Plugins/Product/roadmap', [{ name: 'product', linked: false, granted: true }]],
+      ]),
+      byPlugin: new Map(),
+    }));
+    const links = { membership } as unknown as PluginLinkIndex;
+    const catalog = await new PluginIndexService(
+      workspaceService,
+      principals,
+      skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
+      toolService(),
+      KB_DIR,
+      Date.now,
+      links,
+    ).catalog();
+
+    expect(catalog.find((g) => g.name === 'gtm')).toMatchObject({ skillCount: 2, brokenLinks: 1 });
+    expect(catalog.find((g) => g.name === 'product')).toMatchObject({ skillCount: 1, brokenLinks: 0 });
+    // Both counts from ONE read of the index: its cache has no single-flight,
+    // so two concurrent reads of a cold catalog would build the tree twice.
+    expect(membership).toHaveBeenCalledTimes(1);
+    // Without a link index there are no links to be broken.
+    expect((await svc().catalog()).every((g) => g.brokenLinks === 0)).toBe(true);
   });
 
   test('resolves principals on the plugin folder', async () => {
@@ -199,7 +234,7 @@ describe('PluginIndexService', () => {
     await expect(service.catalog()).resolves.toEqual([]);
 
     fail = false;
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     warn.mockRestore();
   });
 
@@ -223,12 +258,12 @@ describe('PluginIndexService', () => {
     await pluginDir('GTM');
     const service = svc();
 
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     // A plugin added out of band is NOT seen while the cache holds…
     await pluginDir('Finance');
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['gtm']);
     // …and IS seen once the file-change subscriber drops it.
     service.invalidate();
-    expect((await service.catalog()).map((g) => g.name)).toEqual(['Finance', 'GTM']);
+    expect((await service.catalog()).map((g) => g.name)).toEqual(['finance', 'gtm']);
   });
 });

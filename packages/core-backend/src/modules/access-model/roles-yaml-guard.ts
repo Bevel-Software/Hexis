@@ -5,7 +5,7 @@
  * app. The runtime resolver's `loadModel` HARD-THROWS `AccessConfigError` on a
  * parse failure, and `isAdmin` swallows that into `false` for EVERYONE — so a
  * single malformed `roles.yaml` is an app-wide, in-app-unrecoverable admin
- * lockout. The dedicated Roles & Members service already validates every
+ * lockout. The dedicated App roles service already validates every
  * candidate before writing (`assertLoadable`), but the two RAW write paths do
  * not:
  *   - the human editor save  (`PUT /workspace/:id/file`)

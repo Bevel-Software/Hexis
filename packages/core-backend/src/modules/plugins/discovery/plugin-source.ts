@@ -1,3 +1,5 @@
+import type { KbWalkListener } from '../../../shared/kb-walk.js';
+
 /**
  * Plugin DISCOVERY as an interface — the one seam between "what a plugin is
  * on disk" and everything that consumes plugins (the plugin index, the link
@@ -18,11 +20,14 @@
  */
 export interface DiscoveredPlugin {
   /**
-   * The plugin's identity everywhere a person or a URL names it — the folder
-   * name for a native plugin; the bundle's `name` (or its leaf folder) for a
-   * dialect plugin. Unique per source.
+   * The plugin's IDENTITY everywhere a URL, a grant or a marketplace names
+   * it: the manifest's `name` — an Agent Plugins identifier — or the folder
+   * name folded into one when the manifest declares none it can be. A bundle
+   * plugin's is the bundle's `name`. Unique per source.
    */
   name: string;
+  /** What a person sees it called: the manifest's `displayName`, else the folder name. */
+  displayName: string;
   /** Repo-relative folder holding the plugin, e.g. `Plugins/GTM`. */
   folder: string;
   /** The same folder relative to the plugins root, e.g. `GTM` or `functional/x/y`. */
@@ -58,6 +63,34 @@ export interface Discovery {
   plugins: DiscoveredPlugin[];
   /** What was skipped and why — unparsable files, unknown profiles. */
   warnings: string[];
+  /**
+   * HOLES: identity-bearing things that exist but could NOT be read
+   * (permissions, I/O), repo-relative — a folder that could not be listed,
+   * a manifest or bundle that could not be opened. Nothing behind a hole is
+   * in `plugins`: not absent, unseen, and never listed under a guessed name.
+   * A file that carries no identity (an `mcp.json`) is never a hole; its
+   * failure is a warning. A reader that only shows what it can carries on
+   * (the catalog does); a WRITER that keys a change on the set of plugins
+   * (a rename claiming a name) must refuse while this is not empty, or it
+   * may take an identity it could not see.
+   */
+  unreadable: string[];
+  /**
+   * Every folder a plugin CLAIMS, repo-relative — in `plugins` or not: a
+   * twin skipped for sharing a slug, a manifest that could not be read.
+   * Nothing beneath a claimed folder is a plugin to discovery, so nothing
+   * may be CREATED beneath one either: a plugin made inside a skipped twin
+   * would be listed by no catalog. `plugins` answers "what is there";
+   * this answers "where may nothing new go".
+   */
+  claimed: string[];
+}
+
+/** What one walk yields when discovery shares it: the plugins, and every hole the walk met anywhere. */
+export interface PluginSourceWalk {
+  discovery: Discovery;
+  /** Every folder the walk could not list, repo-relative — under the plugins root or anywhere else. */
+  holes: string[];
 }
 
 export interface PluginSource {
@@ -65,4 +98,11 @@ export interface PluginSource {
   readonly dialect: string;
   /** Enumerate the plugins in a KB checkout. Never throws: a broken tree yields warnings. */
   discover(kbRoot: string): Promise<Discovery>;
+  /**
+   * Discover while driving other listeners from the SAME walk — a writer
+   * that needs plugins and grant files alike reads the tree once, and sees
+   * one set of holes. Optional: a source that cannot share its walk is
+   * discovered on its own and the caller walks separately.
+   */
+  walkWith?(kbRoot: string, listeners: readonly KbWalkListener[]): Promise<PluginSourceWalk>;
 }

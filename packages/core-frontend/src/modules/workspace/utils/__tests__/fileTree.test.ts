@@ -50,6 +50,21 @@ describe('suggestedPages', () => {
     ]);
   });
 
+  it('skips a folder named after ANY reserved root, at any depth — the same set the root selection uses', () => {
+    const page = (rel: string) => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' as const });
+    const tree = dir('', [
+      dir('knowledge-base', [
+        dir('knowledge-base/KnowledgeBase', [
+          dir('knowledge-base/KnowledgeBase/Data', [page('knowledge-base/KnowledgeBase/Data/rows.md')]),
+          dir('knowledge-base/KnowledgeBase/Pipelines', [page('knowledge-base/KnowledgeBase/Pipelines/run.md')]),
+          dir('knowledge-base/KnowledgeBase/Skills', [page('knowledge-base/KnowledgeBase/Skills/x.md')]),
+          dir('knowledge-base/KnowledgeBase/Team', [page('knowledge-base/KnowledgeBase/Team/People.md')]),
+        ]),
+      ]),
+    ]);
+    expect(suggestedPages(tree, 10).map((e) => e.name)).toEqual(['People.md']);
+  });
+
   it('honours the limit breadth-first and reports an empty knowledge base as such', () => {
     expect(suggestedPages(TREE, 1).map((e) => e.name)).toEqual(['Onboarding.md']);
     expect(suggestedPages(dir('', [dir('knowledge-base', [dir('knowledge-base/KnowledgeBase', [])])]), 3)).toEqual([]);

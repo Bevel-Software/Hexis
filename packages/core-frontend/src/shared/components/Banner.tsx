@@ -16,10 +16,14 @@ import { cn } from '../../lib/utils';
  * conditional element.
  */
 
-export type BannerTone = 'wait' | 'ok' | 'danger' | 'neutral';
+export type BannerTone = 'wait' | 'urgent' | 'ok' | 'danger' | 'neutral';
 
 const TONE: Record<BannerTone, string> = {
   wait: 'bg-wait-soft text-ink',
+  // Above wait, below danger: blocking other people, not just the reader.
+  // Orange ink, unlike wait's neutral ink: amber text on amber fails contrast
+  // (2.6:1), orange on its soft ground passes AA (5.1:1).
+  urgent: 'bg-urgent-soft text-urgent',
   ok: 'bg-ok-soft text-ok',
   danger: 'bg-danger-soft text-danger',
   neutral: 'bg-sunken text-ink',

@@ -4,13 +4,14 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { WorkspaceContext, type WorkspaceContextValue } from '../../workspace/state/workspace.context';
 import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
-import { SkillsTree } from '../components/SkillsTree';
+import { PluginsTree, SkillsTree } from '../components/SkillsTree';
 
 /**
  * The Skills section of the Library nav: the shared root as Knowledge's tree
- * rows, headed by a label instead of a root row, with the two things that
- * differ from Knowledge — where a click goes (the skill page, on the default
- * branch) and which row is current (the file the URL names).
+ * rows, the root itself a collapsible folder row like Knowledge and Data in
+ * the explorer, with the two things that differ from Knowledge — where a
+ * click goes (the skill page, on the default branch) and which row is
+ * current (the file the URL names).
  */
 
 const KB = 'knowledge-base';
@@ -61,15 +62,23 @@ function renderTree(url: string, over: Partial<WorkspaceContextValue> = {}) {
 const row = (name: string) => screen.getByRole('button', { name });
 
 describe('SkillsTree', () => {
-  it('heads the scopes with a Skills label and draws no root row', () => {
+  it('draws the root as a folder row, open with its scopes collapsed under it', () => {
     renderTree('/skills-and-tools');
-    expect(screen.getByText('Skills')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Skills' })).not.toBeInTheDocument();
-    // The scopes are the top level, collapsed until opened.
+    expect(row('Skills')).toHaveAttribute('aria-expanded', 'true');
+    // The scopes sit under the root, collapsed until opened.
     expect(row('Engineering')).toBeInTheDocument();
     expect(row('Sales')).toBeInTheDocument();
     expect(screen.queryByText('deploy')).not.toBeInTheDocument();
     expect(screen.queryByText('discovery-call')).not.toBeInTheDocument();
+  });
+
+  it('collapses and reopens like any folder — Knowledge and Data get the same row', () => {
+    renderTree('/skills-and-tools');
+    fireEvent.click(row('Skills'));
+    expect(row('Skills')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: 'Engineering' })).not.toBeInTheDocument();
+    fireEvent.click(row('Skills'));
+    expect(row('Engineering')).toBeInTheDocument();
   });
 
   it('reveals and marks the file the URL names — the Library never sets an open tab', () => {
@@ -92,31 +101,76 @@ describe('SkillsTree', () => {
     );
   });
 
-  it('renders nothing when the tree has no Skills root — no heading over nothing', () => {
+  it('draws the Skills folder even when the knowledge base has none yet, and creates it on first use', () => {
     const noSkills = dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
-    renderTree('/skills-and-tools', { fileTree: noSkills });
+    const createDirectory = vi.fn().mockResolvedValue(undefined);
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderTree('/skills-and-tools', { fileTree: noSkills, createDirectory, dispatchUpload });
+    // The row is there, empty: nothing beneath it, and — with nothing to
+    // open — no claim to be expanded either.
+    const skills = row('Skills');
+    expect(skills).toBeInTheDocument();
+    expect(skills).not.toHaveAttribute('aria-expanded');
+    expect(screen.queryByRole('button', { name: 'Engineering' })).not.toBeInTheDocument();
+    // What writes is offered; what would read a folder that is not there is not.
+    fireEvent.contextMenu(skills);
+    const menu = screen.getByRole('menu', { name: 'Actions for Skills' });
+    expect(within(menu).getByRole('menuitem', { name: /New folder/ })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: /Download/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    // A new scope goes to the folder's future path — the write creates it.
+    fireEvent.click(screen.getByRole('button', { name: 'New folder in Skills' }));
+    const input = screen.getByPlaceholderText('folder name');
+    fireEvent.change(input, { target: { value: 'Marketing' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
+
+    // So does a drop.
+    const dropped = new File(['x'], 'SKILL.md');
+    fireEvent.drop(skills, { dataTransfer: { getData: () => '', items: undefined, files: [dropped] } });
+    expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
+  });
+
+  it('renders nothing while the tree has not loaded', () => {
+    renderTree('/skills-and-tools', { fileTree: null });
     expect(screen.queryByText('Skills')).not.toBeInTheDocument();
   });
 
-  it('takes a drop on its heading — the heading is the root row, so it uploads into Skills/', () => {
+  it('takes a drop on the root row, uploading into Skills/', () => {
     const dispatchUpload = vi.fn().mockResolvedValue(undefined);
     renderTree('/skills-and-tools', { dispatchUpload });
     const dropped = new File(['x'], 'notes.md');
-    fireEvent.drop(screen.getByText('Skills'), {
+    fireEvent.drop(row('Skills'), {
       dataTransfer: { getData: () => '', items: undefined, files: [dropped] },
     });
     expect(dispatchUpload).toHaveBeenCalledWith({ kind: 'files', files: [dropped] }, `${KB}/Skills`);
   });
 
-  it("opens the folder's menu on the heading, minus what a reserved root must not do", () => {
+  it('cannot be dragged away — a reserved root stays where the platform put it', () => {
     renderTree('/skills-and-tools');
-    fireEvent.contextMenu(screen.getByText('Skills'));
+    expect(row('Skills').closest('[draggable]')).toHaveAttribute('draggable', 'false');
+    expect(row('Engineering').closest('[draggable]')).toHaveAttribute('draggable', 'true');
+  });
+
+  it("opens the folder's menu on the root row, minus what a reserved root must not do", () => {
+    renderTree('/skills-and-tools');
+    fireEvent.contextMenu(row('Skills'));
     const menu = screen.getByRole('menu', { name: 'Actions for Skills' });
     expect(within(menu).getByRole('menuitem', { name: /New folder/ })).toBeInTheDocument();
     expect(within(menu).getByRole('menuitem', { name: /Manage access/ })).toBeInTheDocument();
     expect(within(menu).queryByRole('menuitem', { name: /Rename/ })).not.toBeInTheDocument();
     expect(within(menu).queryByRole('menuitem', { name: /Delete/ })).not.toBeInTheDocument();
     expect(within(menu).queryByRole('menuitem', { name: /Pin/ })).not.toBeInTheDocument();
+  });
+
+  it('hands focus back to the root row when its menu closes on Escape', () => {
+    renderTree('/skills-and-tools');
+    fireEvent.contextMenu(row('Skills'));
+    screen.getByRole('menu', { name: 'Actions for Skills' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menu', { name: 'Actions for Skills' })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(row('Skills'));
   });
 
   it('keeps a right-click anywhere in the section from reaching the nav behind it', () => {
@@ -131,12 +185,12 @@ describe('SkillsTree', () => {
         </WorkspaceContext.Provider>
       </MemoryRouter>,
     );
-    fireEvent.contextMenu(screen.getByText('Skills'));
+    fireEvent.contextMenu(row('Skills'));
     fireEvent.contextMenu(screen.getByTestId('skills-tree'));
     expect(onNav).not.toHaveBeenCalled();
   });
 
-  it("the heading's New folder button creates a scope directly under the root", () => {
+  it("the root row's New folder button creates a scope directly under the root", () => {
     const createDirectory = vi.fn().mockResolvedValue(undefined);
     renderTree('/skills-and-tools', { createDirectory });
     fireEvent.click(screen.getByRole('button', { name: 'New folder in Skills' }));
@@ -144,5 +198,127 @@ describe('SkillsTree', () => {
     fireEvent.change(input, { target: { value: 'Marketing' } });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(createDirectory).toHaveBeenCalledWith(`${KB}/Skills/Marketing`);
+  });
+});
+
+/**
+ * The same tree, holding the OTHER root: `Plugins/` exactly as it is on disk,
+ * manifests and all. One component, one set of rows; what differs is the
+ * folder it is handed.
+ */
+describe('PluginsTree', () => {
+  const PLUGINS: FileTreeEntry = dir('.', [
+    dir(KB, [
+      dir(`${KB}/Plugins`, [
+        dir(`${KB}/Plugins/GTM`, [
+          file(`${KB}/Plugins/GTM/plugin.json`),
+          file(`${KB}/Plugins/GTM/mcp.json`),
+          dir(`${KB}/Plugins/GTM/skills`, [
+            dir(`${KB}/Plugins/GTM/skills/outreach`, [file(`${KB}/Plugins/GTM/skills/outreach/SKILL.md`)]),
+          ]),
+        ]),
+        dir(`${KB}/Plugins/personal-u1`, [file(`${KB}/Plugins/personal-u1/plugin.json`)]),
+      ]),
+    ]),
+  ]);
+
+  function renderPlugins(
+    url: string,
+    over: Partial<WorkspaceContextValue> = {},
+    onCreatePlugin?: (parent: string) => void,
+    isGroupingFolder?: (rel: string) => boolean,
+  ) {
+    const workspace = makeWorkspaceFixture({ fileTree: PLUGINS, kbDirName: KB, ...over });
+    return render(
+      <MemoryRouter initialEntries={[url]}>
+        <WorkspaceContext.Provider value={workspace}>
+          <PluginsTree onCreatePlugin={onCreatePlugin} isGroupingFolder={isGroupingFolder} />
+          <LocationProbe />
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+  }
+
+  it('draws the Plugins root as a reserved folder row, its plugins collapsed under it', () => {
+    renderPlugins('/skills-and-tools');
+    expect(screen.getByTestId('plugins-tree')).toBeInTheDocument();
+    expect(row('Plugins')).toHaveAttribute('aria-expanded', 'true');
+    expect(row('Plugins').closest('[draggable]')).toHaveAttribute('draggable', 'false');
+    expect(row('GTM')).toBeInTheDocument();
+    expect(row('personal-u1')).toBeInTheDocument();
+    expect(screen.queryByText('plugin.json')).not.toBeInTheDocument();
+  });
+
+  it("opens a plugin's files at their canonical default-branch URL — the item route decides the page", () => {
+    renderPlugins('/skills-and-tools');
+    fireEvent.click(row('GTM'));
+    fireEvent.click(row('plugin.json'));
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(
+      `/workspace/${DEFAULT_BRANCH}/${KB}/Plugins/GTM/plugin.json`,
+    );
+  });
+
+  it('draws the folder even when the knowledge base has none yet', () => {
+    const none = dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, [])])]);
+    renderPlugins('/skills-and-tools', { fileTree: none });
+    expect(row('Plugins')).toBeInTheDocument();
+    expect(row('Plugins')).not.toHaveAttribute('aria-expanded');
+  });
+
+  it("offers New plugin on every folder's menu when wired — after the tree's own create items — and on no file's", () => {
+    const onCreatePlugin = vi.fn();
+    renderPlugins('/skills-and-tools', {}, onCreatePlugin);
+
+    fireEvent.contextMenu(row('Plugins'));
+    const rootMenu = screen.getByRole('menu', { name: 'Actions for Plugins' });
+    const labels = within(rootMenu).getAllByRole('menuitem').map((i) => i.textContent);
+    expect(labels.indexOf('New plugin')).toBeGreaterThan(labels.indexOf('New folder'));
+    fireEvent.click(within(rootMenu).getByRole('menuitem', { name: 'New plugin' }));
+    // The root: the plugin goes at the top of Plugins/.
+    expect(onCreatePlugin).toHaveBeenLastCalledWith('');
+    expect(screen.queryByRole('menu')).toBeNull();
+
+    // A folder below it: the plugin goes INSIDE, named by its path below the root.
+    fireEvent.contextMenu(row('GTM'));
+    fireEvent.click(within(screen.getByRole('menu', { name: 'Actions for GTM' })).getByRole('menuitem', { name: 'New plugin' }));
+    expect(onCreatePlugin).toHaveBeenLastCalledWith('GTM');
+
+    fireEvent.click(row('GTM'));
+    fireEvent.contextMenu(row('plugin.json'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for plugin.json' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+
+  it('offers New plugin only where a plugin may be made — the root and grouping folders, never a plugin or what is inside one', () => {
+    const onCreatePlugin = vi.fn();
+    // The layout's answer, from membership: the fixture's two plugin folders
+    // (the shared GTM and the personal space) own everything beneath them.
+    const pluginFolders = ['Plugins/GTM', 'Plugins/personal-u1'];
+    const isGroupingFolder = (rel: string) => !pluginFolders.some((f) => rel === f || rel.startsWith(`${f}/`));
+    renderPlugins('/skills-and-tools', {}, onCreatePlugin, isGroupingFolder);
+    fireEvent.contextMenu(row('Plugins'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Plugins' })).getByRole('menuitem', { name: 'New plugin' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    for (const folder of ['GTM', 'personal-u1']) {
+      fireEvent.contextMenu(row(folder));
+      expect(within(screen.getByRole('menu', { name: `Actions for ${folder}` })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+      fireEvent.keyDown(document, { key: 'Escape' });
+    }
+    fireEvent.click(row('GTM'));
+    fireEvent.contextMenu(row('skills'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for skills' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+
+  it('offers no New plugin when nothing is wired — the tree grows no verb of its own', () => {
+    renderPlugins('/skills-and-tools');
+    fireEvent.contextMenu(row('Plugins'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Plugins' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
+  });
+});
+
+describe('SkillsTree: menu', () => {
+  it('is the folder menu alone — New plugin is the Plugins tree\'s injection, not the tree\'s', () => {
+    renderTree('/skills-and-tools');
+    fireEvent.contextMenu(row('Engineering'));
+    expect(within(screen.getByRole('menu', { name: 'Actions for Engineering' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
   });
 });

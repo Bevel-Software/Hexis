@@ -45,6 +45,9 @@ function library(over: Partial<LibraryContextValue> = {}): LibraryContextValue {
     pluginSummaries: [],
     pluginsLoading: false,
     pluginsError: null,
+    teams: [],
+    teamsLoading: false,
+    teamsError: null,
     reloadPlugins: vi.fn(),
     ...over,
   };
@@ -136,7 +139,7 @@ beforeEach(() => {
   resetOnboardingForTests();
   setSidebarCollapsed(false, true);
   serviceMocks.createPlugin.mockReset();
-  serviceMocks.createPlugin.mockResolvedValue({ folder: 'Design' });
+  serviceMocks.createPlugin.mockResolvedValue({ folder: 'Design', name: 'design' });
   serviceMocks.createEmptySkill.mockReset();
   serviceMocks.createEmptySkill.mockResolvedValue({
     repoRelativePath: 'Plugins/personal-u1/weekly-report/SKILL.md',
@@ -244,13 +247,14 @@ describe('creator welcome actions', () => {
     await user.type(screen.getByRole('textbox', { name: 'Plugin name' }), 'Design');
     await user.click(screen.getByRole('button', { name: 'Create plugin' }));
 
-    await waitFor(() => expect(serviceMocks.createPlugin).toHaveBeenCalledWith('Design'));
+    await waitFor(() => expect(serviceMocks.createPlugin).toHaveBeenCalledWith('Design', ''));
     // The navigation is the LAST link of the create chain (create -> refresh
     // indexes -> navigate), so it is the settled state to wait for; asserting
     // it immediately races the refresh microtasks and flakes under CI load.
     await waitFor(() =>
+      // The new plugin's page is addressed by its identity, not its folder.
       expect(screen.getByLabelText('pathname')).toHaveTextContent(
-        '/skills-and-tools/plugins/Design',
+        '/skills-and-tools/plugins/design',
       ),
     );
     expect(data.reload).toHaveBeenCalledOnce();

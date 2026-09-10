@@ -1,11 +1,11 @@
 import path from 'node:path';
-import { DEFAULT_BRANCH, skillUnderRoot } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, pluginManifestName, skillUnderRoot } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/skills.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
-import { PLUGIN_TOKEN_PREFIX } from '../access-model/access-grammar.js';
+import { canonicalRoleName, pluginPrincipalKey } from '../access-model/access-grammar.js';
 import type { PluginMembership } from './plugins.contract.js';
 import type { PluginSource } from './discovery/plugin-source.js';
 import { KbPluginSource } from './discovery/kb-plugin-source.js';
@@ -151,7 +151,7 @@ export class PluginLinkIndex {
         linksAreManaged: plugin.linksAreManaged,
       });
       if (linkedSkills.length === 0) continue;
-      const token = `${PLUGIN_TOKEN_PREFIX}${plugin.name}/read`;
+      const token = pluginPrincipalKey(pluginManifestName(plugin.name), 'read');
       for (const skillPath of linkedSkills) {
         // A skill that also sits INSIDE this plugin folder is inline, and its
         // inline membership already stands.
@@ -170,7 +170,8 @@ export class PluginLinkIndex {
     try {
       const readers = await this.accessControl.eligibleReaders(wsId, skillPath);
       if (!readers.restricted) return true; // readable by everyone — the plugin's members included
-      return (readers.principals ?? []).some((p) => p.kind === 'plugin' && p.name === token);
+      // The resolver reports display names; compare through the one canonicaliser.
+      return (readers.principals ?? []).some((p) => p.kind === 'plugin' && canonicalRoleName(p.name) === token);
     } catch {
       return false; // fail closed: an unreadable tree reports the link as needing repair
     }

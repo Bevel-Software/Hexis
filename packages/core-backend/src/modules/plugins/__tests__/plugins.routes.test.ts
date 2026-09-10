@@ -14,7 +14,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../../skills/skills.contract.js';
 import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/tool-manuals.contract.js';
 import { PluginIndexService } from '../plugins.service.js';
-import { createPluginsRoutes } from '../plugins.routes.js';
+import { createPluginCreationRoutes, createPluginsRoutes } from '../plugins.routes.js';
 import type { JoinRequestsService } from '../join-requests.service.js';
 import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
 
@@ -53,6 +53,8 @@ interface HarnessOpts {
   email?: string | null;
   skills?: SkillSummary[];
   tools?: ToolManualSummary[];
+  /** More plugins: folder path below `Plugins/` → manifest name. */
+  extraPlugins?: Record<string, string>;
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {
@@ -77,11 +79,16 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const kbRoot = path.join(workspaceDir, KB);
   // Both carry the manifest that makes a folder a plugin to discovery, and
   // the access.md that makes it exist to the index.
-  for (const name of ['GTM', 'Finance']) {
-    await fs.mkdir(path.join(kbRoot, 'Plugins', name), { recursive: true });
-    await fs.writeFile(path.join(kbRoot, 'Plugins', name, 'plugin.json'), `{"name":"${name.toLowerCase()}"}`);
+  const fixtures: [string, string][] = [
+    ['GTM', 'gtm'],
+    ['Finance', 'finance'],
+    ...Object.entries(opts.extraPlugins ?? {}),
+  ];
+  for (const [folder, name] of fixtures) {
+    await fs.mkdir(path.join(kbRoot, 'Plugins', folder), { recursive: true });
+    await fs.writeFile(path.join(kbRoot, 'Plugins', folder, 'plugin.json'), `{"name":"${name}"}`);
     await fs.writeFile(
-      path.join(kbRoot, 'Plugins', name, 'access.md'),
+      path.join(kbRoot, 'Plugins', folder, 'access.md'),
       '---\nread:\n  - everyone\n---\nread: []\n',
     );
   }
@@ -153,9 +160,18 @@ async function makeHarness(opts: HarnessOpts = {}) {
   // here only need to prove what they hand it and when they refuse to.
   const provision = {
     createPlugin: vi.fn(async () => ({ folder: 'GTM', created: true })),
+    ensurePersonalPlugin: vi.fn(async () => ({ folder: 'personal-u-1', created: false })),
     deletePlugin: vi.fn(async () => undefined),
   };
 
+  // The creation doors are their own router in the server (behind the
+  // key-or-session gate); here they share the fake identity middleware.
+  app.use(
+    '/api',
+    createPluginCreationRoutes(provision as never, async (req) =>
+      req.userEmail ? { ...ALI_USER, email: req.userEmail } : null,
+    ),
+  );
   app.use(
     '/api',
     createPluginsRoutes(
@@ -220,6 +236,51 @@ describe('/api/plugins routes', () => {
     }
   });
 
+  it('POST /plugins hands the service the name and, when given, the grouping folder to make it in', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const post = (body: unknown) =>
+      fetch(`${h.baseUrl}/api/plugins`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await post({ name: 'Sales' })).status).toBe(201);
+    expect(h.provision.createPlugin).toHaveBeenLastCalledWith(expect.objectContaining({ email: ALI }), 'Sales', undefined);
+    expect((await post({ name: 'Sales', parent: 'Teams/EU' })).status).toBe(201);
+    expect(h.provision.createPlugin).toHaveBeenLastCalledWith(expect.anything(), 'Sales', 'Teams/EU');
+    // A parent that is not a string is a bad request, not a service error.
+    expect((await post({ name: 'Sales', parent: 7 })).status).toBe(400);
+    expect(h.provision.createPlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST /plugins/personal ensures the caller’s own space and returns it; no caller, no space', async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ folder: 'personal-u-1', created: false });
+    expect(h.provision.ensurePersonalPlugin).toHaveBeenCalledWith(expect.objectContaining({ email: ALI }));
+
+    const anon = await makeHarness({ email: null });
+    try {
+      expect((await fetch(`${anon.baseUrl}/api/plugins/personal`, { method: 'POST' })).status).toBe(401);
+      expect(anon.provision.ensurePersonalPlugin).not.toHaveBeenCalled();
+    } finally {
+      await close(anon.server);
+    }
+  });
+
+  it("POST /plugins/personal keeps the service's own status — a 503 for incomplete discovery is retryable, not a 500", async () => {
+    const h = await makeHarness();
+    server = h.server;
+    const { PluginProvisionError } = await import('../plugin-provision.service.js');
+    h.provision.ensurePersonalPlugin.mockRejectedValueOnce(new PluginProvisionError('Plugin discovery is incomplete', 503));
+    const res = await fetch(`${h.baseUrl}/api/plugins/personal`, { method: 'POST' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'Plugin discovery is incomplete' });
+  });
+
   it('lists member plugins sorted, counting by pluginOfPath', async () => {
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,
@@ -232,9 +293,33 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const { status, plugins } = await listPlugins(h.baseUrl);
     expect(status).toBe(200);
-    expect(plugins.map((g) => g.name)).toEqual(['Finance', 'GTM']);
+    // Named by identity (the manifest), labelled by folder.
+    expect(plugins.map((g) => [g.name, g.displayName])).toEqual([['finance', 'Finance'], ['gtm', 'GTM']]);
     expect(plugins[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1 });
     expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0 });
+  });
+
+  it("carries the index's broken-link count into the summary — the server's, not the caller's slice", async () => {
+    const entry = {
+      name: 'gtm',
+      displayName: 'GTM',
+      folders: ['Plugins/GTM'],
+      linksAreManaged: true,
+      skillCount: 2,
+      toolCount: 0,
+      brokenLinks: 2,
+      owners: { roles: [], users: [] },
+      writers: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+    };
+    const h = await makeHarness({
+      readable: MEMBER_OF_BOTH,
+      index: { catalog: async () => [entry], invalidate: () => {} } as unknown as IPluginIndexService,
+    });
+    server = h.server;
+    const { plugins } = await listPlugins(h.baseUrl);
+    expect(plugins).toHaveLength(1);
+    expect(plugins[0]).toMatchObject({ name: 'gtm', brokenLinks: 2 });
   });
 
   it('a DISCOVERABLE plugin (access.md readable, folder not) lists locked with hasRequested from the join CR', async () => {
@@ -244,7 +329,7 @@ describe('/api/plugins routes', () => {
     });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.map((g) => g.name)).toEqual(['Finance']);
+    expect(plugins.map((g) => g.name)).toEqual(['finance']);
     expect(plugins[0]).toMatchObject({
       canRead: false,
       canWrite: false,
@@ -257,8 +342,9 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
     const { plugins, raw } = await listPlugins(h.baseUrl);
-    expect(plugins.map((g) => g.name)).toEqual(['Finance']);
-    expect(raw).not.toContain('"name":"GTM"');
+    expect(plugins.map((g) => g.name)).toEqual(['finance']);
+    expect(raw).not.toContain('"name":"gtm"');
+    expect(raw).not.toContain('"GTM"');
     expect(raw).not.toContain('Plugins/GTM');
   });
 
@@ -266,7 +352,7 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.map((g) => g.name)).toEqual(['GTM']);
+    expect(plugins.map((g) => g.name)).toEqual(['gtm']);
     expect(plugins[0]).toMatchObject({ canRead: false, canWrite: true });
   });
 
@@ -277,7 +363,7 @@ describe('/api/plugins routes', () => {
     });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins[0]).toMatchObject({ name: 'GTM', canRead: true, hasRequested: false });
+    expect(plugins[0]).toMatchObject({ name: 'gtm', canRead: true, hasRequested: false });
   });
 
   it('lists the owner verdict per caller — the folder verdict, not the manager one', async () => {
@@ -287,8 +373,8 @@ describe('/api/plugins routes', () => {
     });
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'GTM')).toMatchObject({ isOwner: true });
-    expect(plugins.find((g) => g.name === 'Finance')).toMatchObject({ isOwner: false });
+    expect(plugins.find((g) => g.name === 'gtm')).toMatchObject({ isOwner: true });
+    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({ isOwner: false });
   });
 
   it('delete: 404 for unknown AND for a non-owner — a manager included (identical, fail-closed)', async () => {
@@ -300,7 +386,7 @@ describe('/api/plugins routes', () => {
       writable: { [ALI]: ['Plugins/GTM/access.md'] },
     });
     server = h.server;
-    for (const name of ['Nope', 'GTM']) {
+    for (const name of ['Nope', 'gtm']) {
       const res = await fetch(`${h.baseUrl}/api/plugins/${name}`, { method: 'DELETE' });
       expect(res.status, name).toBe(404);
       expect(await res.json()).toEqual({ error: 'Unknown plugin', kind: 'unknown-plugin' });
@@ -308,12 +394,13 @@ describe('/api/plugins routes', () => {
     expect(h.provision.deletePlugin).not.toHaveBeenCalled();
   });
 
-  it('delete: an OWNER deletes through the provision door, by the catalog name', async () => {
+  it('delete: an OWNER deletes through the provision door — found by identity, deleted by folder', async () => {
     const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM`, { method: 'DELETE' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+    // Provisioning owns folders, so it is handed the folder, not the name.
     expect(h.provision.deletePlugin).toHaveBeenCalledWith(
       expect.objectContaining({ email: ALI }),
       'GTM',
@@ -325,7 +412,7 @@ describe('/api/plugins routes', () => {
     const { PluginProvisionError } = await import('../plugin-provision.service.js');
     h.provision.deletePlugin.mockRejectedValueOnce(new PluginProvisionError('Unknown plugin', 404));
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM`, { method: 'DELETE' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' });
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'Unknown plugin' });
   });
@@ -335,7 +422,7 @@ describe('/api/plugins routes', () => {
     const h = await makeHarness({ owner: { [ALI]: ['Plugins/GTM'] } });
     h.provision.deletePlugin.mockRejectedValueOnce(new Error('push refused'));
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM`, { method: 'DELETE' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm`, { method: 'DELETE' });
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: 'Failed to delete the plugin' });
     error.mockRestore();
@@ -344,7 +431,7 @@ describe('/api/plugins routes', () => {
   it('join-request: 404 for unknown AND for undiscoverable (identical, fail-closed)', async () => {
     const h = await makeHarness({});
     server = h.server;
-    for (const name of ['Nope', 'GTM']) {
+    for (const name of ['Nope', 'gtm']) {
       const res = await fetch(`${h.baseUrl}/api/plugins/${name}/join-request`, { method: 'POST' });
       expect(res.status, name).toBe(404);
       expect(await res.json()).toEqual({ error: 'Unknown plugin', kind: 'unknown-plugin' });
@@ -354,7 +441,7 @@ describe('/api/plugins routes', () => {
   it('join-request: 409 when the caller can already read the folder', async () => {
     const h = await makeHarness({ readable: MEMBER_OF_BOTH });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/Finance/join-request`, { method: 'POST' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(409);
     expect((await res.json()).kind).toBe('already-readable');
   });
@@ -362,10 +449,12 @@ describe('/api/plugins routes', () => {
   it('join-request: branch + splice + commit + CR, on the deterministic join branch', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/Finance/join-request`, { method: 'POST' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, number: 42 });
 
+    // The branch is cut from the FOLDER name, as every join branch before the
+    // manifest became the identity was — so none of them is orphaned.
     const branch = joinBranchFor(ALI, 'Finance');
     expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
     // The write went to the plugin's access.md and added the caller to the
@@ -388,13 +477,26 @@ describe('/api/plugins routes', () => {
     );
   });
 
+  it('keys a join request by the folder PATH below the root — two folders sharing a basename never share a branch', async () => {
+    const h = await makeHarness({
+      extraPlugins: { 'teams/GTM': 'team-gtm' },
+      readable: { [ALI]: ['Plugins/teams/GTM/access.md'] },
+    });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/team-gtm/join-request`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    const branch = joinBranchFor(ALI, 'teams/GTM');
+    expect(branch).not.toBe(joinBranchFor(ALI, 'GTM'));
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
+  });
+
   it('join-request is idempotent: an existing open join CR is returned, nothing new is created', async () => {
     const h = await makeHarness({
       readable: { [ALI]: ['Plugins/Finance/access.md'] },
       authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/Finance/join-request`, { method: 'POST' });
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, number: 9 });
     expect(h.workflow.createBranch).not.toHaveBeenCalled();
@@ -417,7 +519,7 @@ describe('/api/plugins routes', () => {
   it('join-requests: a MANAGER gets the service\'s list for the plugin', async () => {
     const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests`);
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ requests: [] });
     expect(h.joinRequests.list).toHaveBeenCalledWith(
@@ -433,7 +535,7 @@ describe('/api/plugins routes', () => {
     // question only the server answers.
     const h = await makeHarness({ readable: MEMBER_OF_BOTH });
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests`);
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ requests: [] });
     expect(h.joinRequests.list).not.toHaveBeenCalled();
@@ -442,7 +544,7 @@ describe('/api/plugins routes', () => {
   it('reconcile: 404 for a non-manager — indistinguishable from a missing request', async () => {
     const h = await makeHarness({ readable: MEMBER_OF_BOTH, authoredCrs: [cr({ number: 7 })] });
     server = h.server;
-    const denied = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests/7/reconcile`, {
+    const denied = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests/7/reconcile`, {
       method: 'POST',
     });
     expect(denied.status).toBe(404);
@@ -452,7 +554,7 @@ describe('/api/plugins routes', () => {
   it('reconcile: 404 for a manager when the change request does not exist', async () => {
     const h = await makeHarness({ writable: { [ALI]: ['Plugins/GTM/access.md'] } });
     server = h.server;
-    const missing = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests/999/reconcile`, {
+    const missing = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests/999/reconcile`, {
       method: 'POST',
     });
     expect(missing.status).toBe(404);
@@ -466,7 +568,7 @@ describe('/api/plugins routes', () => {
     });
     (h.joinRequests.reconcile as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     server = h.server;
-    const res = await fetch(`${h.baseUrl}/api/plugins/GTM/join-requests/7/reconcile`, {
+    const res = await fetch(`${h.baseUrl}/api/plugins/gtm/join-requests/7/reconcile`, {
       method: 'POST',
     });
     expect(res.status).toBe(200);

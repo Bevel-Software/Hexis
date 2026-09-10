@@ -3,6 +3,8 @@ import { authFetch } from '../../../lib/api';
 export interface ExternalApiKeySummary {
   id: string;
   label: string;
+  /** `key` for one created by hand; `github-link` for one minted when a product (Claude) connected through the GitHub facade. */
+  kind: string;
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
@@ -48,13 +50,13 @@ export async function disconnectExternalApiKey(id: string): Promise<void> {
   const res = await authFetch(`/api/mcp/external-api-keys/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) await unwrap(res, "Couldn't disconnect this key.");
+  if (!res.ok) await unwrap(res, "Couldn't revoke this key.");
 }
 
 /**
- * Permanently delete a disconnected key (drops its audit row). The backend
+ * Permanently delete a revoked key (drops its audit row). The backend
  * refuses to delete a still-active key, so callers should only offer this on
- * rows that are already disconnected.
+ * rows that are already revoked.
  */
 export async function deleteExternalApiKey(id: string): Promise<void> {
   const res = await authFetch(

@@ -8,14 +8,16 @@ import { WorkflowEventBus } from '../event-bus.js';
  * tests can simulate focus changes without re-subscribing.
  */
 function makeSubscriber(sessionId: string, userId: string, initialFocus: string | null = null) {
-  let focus = initialFocus;
+  let watched = initialFocus === null ? [] : [initialFocus];
   const push = vi.fn();
   return {
     sessionId,
     userId,
     push,
-    getFocusedWorkspaceId: () => focus,
-    setFocus: (id: string | null) => { focus = id; },
+    getFocusedWorkspaceIds: () => watched,
+    setFocus: (id: string | null) => { watched = id === null ? [] : [id]; },
+    /** Add a workspace alongside the focused one, as `alsoWatch` does. */
+    alsoWatch: (id: string) => { watched = [...watched, id]; },
   };
 }
 
@@ -40,6 +42,53 @@ describe('WorkflowEventBus', () => {
 
       expect(onA.push).toHaveBeenCalledTimes(1);
       expect(onB.push).not.toHaveBeenCalled();
+    });
+
+    // A page can read from a workspace other than the one in the address bar:
+    // the skill page renders the default branch's files while the reader
+    // stands on their own suggestion branch. With one focus per session, the
+    // `file-changed` for a screenshot a teammate replaced on the default
+    // branch reached nobody who wasn't standing there, and every such page
+    // showed the old picture until a reload.
+    it('delivers to a session watching a second workspace alongside its focus', () => {
+      const bus = new WorkflowEventBus();
+      const onBranch = makeSubscriber('s-a', 'u-1', 'alice%2Fdraft');
+      onBranch.alsoWatch('main');
+      const elsewhere = makeSubscriber('s-b', 'u-2', 'bob%2Fdraft');
+      bus.subscribe(onBranch);
+      bus.subscribe(elsewhere);
+
+      bus.emit({
+        kind: 'file-changed',
+        workspaceId: 'main',
+        branch: 'main',
+        path: 'knowledge-base/Skills/deploy/assets/shot.png',
+        newSha: 'abc',
+        byUserId: 'u-3',
+        byUserName: 'Carol',
+      });
+
+      expect(onBranch.push).toHaveBeenCalledTimes(1);
+      expect(elsewhere.push).not.toHaveBeenCalled();
+    });
+
+    it('still delivers the focused workspace to a session that also watches another', () => {
+      const bus = new WorkflowEventBus();
+      const sub = makeSubscriber('s-a', 'u-1', 'alice%2Fdraft');
+      sub.alsoWatch('main');
+      bus.subscribe(sub);
+
+      bus.emit({
+        kind: 'file-changed',
+        workspaceId: 'alice/draft',
+        branch: 'alice/draft',
+        path: 'Foo.md',
+        newSha: 'abc',
+        byUserId: 'u-1',
+        byUserName: 'Alice',
+      });
+
+      expect(sub.push).toHaveBeenCalledTimes(1);
     });
 
     it('matches workspace focus across URL-encoded vs decoded forms', () => {
@@ -186,7 +235,7 @@ describe('WorkflowEventBus', () => {
   describe('replay', () => {
     it('returns events strictly after the last-seen id', () => {
       const bus = new WorkflowEventBus();
-      const sub = { userId: 'u-1', getFocusedWorkspaceId: () => 'ws-a' };
+      const sub = { userId: 'u-1', getFocusedWorkspaceIds: () => ['ws-a'] };
       bus.emit({ kind: 'lock-released', workspaceId: 'ws-a', branch: 'a', path: '1.md' });
       bus.emit({ kind: 'lock-released', workspaceId: 'ws-a', branch: 'a', path: '2.md' });
       bus.emit({ kind: 'lock-released', workspaceId: 'ws-a', branch: 'a', path: '3.md' });
@@ -198,7 +247,7 @@ describe('WorkflowEventBus', () => {
 
     it('respects scope filtering on replay (no leak of other workspaces)', () => {
       const bus = new WorkflowEventBus();
-      const sub = { userId: 'u-1', getFocusedWorkspaceId: () => 'ws-a' };
+      const sub = { userId: 'u-1', getFocusedWorkspaceIds: () => ['ws-a'] };
       bus.emit({ kind: 'lock-released', workspaceId: 'ws-a', branch: 'a', path: 'a.md' });
       bus.emit({ kind: 'lock-released', workspaceId: 'ws-b', branch: 'b', path: 'b.md' });
       bus.emit({ kind: 'change-request-merged', number: 5 });
@@ -219,7 +268,7 @@ describe('WorkflowEventBus', () => {
       for (let i = 0; i < 501; i++) {
         bus.emit({ kind: 'change-request-merged', number: i + 1 });
       }
-      const sub = { userId: 'u-1', getFocusedWorkspaceId: () => null };
+      const sub = { userId: 'u-1', getFocusedWorkspaceIds: () => [] };
       // After 501 emits with capacity 500: ids 2..501 remain, id 1 evicted.
       // Requesting events after id 0 means "everything from id 1 onward",
       // but id 1 is gone — bus must signal a resync rather than silently
@@ -238,7 +287,7 @@ describe('WorkflowEventBus', () => {
       // The bus must return `null` so the route emits a `resync` and the
       // client refetches state from scratch.
       const bus = new WorkflowEventBus();
-      const sub = { userId: 'u-1', getFocusedWorkspaceId: () => null };
+      const sub = { userId: 'u-1', getFocusedWorkspaceIds: () => [] };
       expect(bus.replayAfter(42, sub)).toBeNull();
       // First-time client (Last-Event-ID === 0) on an empty buffer is
       // genuinely caught up — replay is an empty array, not a resync.
@@ -256,7 +305,7 @@ describe('WorkflowEventBus', () => {
       for (let i = 0; i < 5; i++) {
         bus.emit({ kind: 'change-request-merged', number: i + 1 });
       }
-      const sub = { userId: 'u-1', getFocusedWorkspaceId: () => null };
+      const sub = { userId: 'u-1', getFocusedWorkspaceIds: () => [] };
       // Newest id is 5; 100 is far ahead → resync.
       expect(bus.replayAfter(100, sub)).toBeNull();
       // 4 is in-buffer → caller gets event 5 back.

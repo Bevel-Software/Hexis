@@ -1,11 +1,11 @@
 import { useMemo, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText } from 'lucide-react';
+import { Check, XCircle, Lock, AlertTriangle, ArrowLeft, FileText, History } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { EditorTabs } from './EditorTabs';
 import { KbPageHeader } from './KbPageHeader';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
-import { Banner, Button, Surface } from '../../../shared/components';
+import { Banner, Button, IconButton, Surface, useFocusHandoff } from '../../../shared/components';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { useGit } from '../../git/state/git.context';
 import { LayoutContext } from '../../layout/state/layout.context';
@@ -206,7 +206,6 @@ export function FileViewer() {
     fromBranch: string;
     toBranch: string;
   } | null>(null);
-  const historyAvailable = git.availability === 'ready';
   const hasUnsavedWork = isManualDirty || manualSaveState === 'saving';
 
   const hasPending = pendingFileContent !== null;
@@ -347,6 +346,69 @@ export function FileViewer() {
   // acquiring + reloading. Renders the button as "Loading…" and
   // disables it so a double-click can't fire two acquires.
   const [isEnteringEdit, setIsEnteringEdit] = useState(false);
+
+  /**
+   * The log, and the clock that opens it, are withdrawn while a draft is
+   * open. Opening the log unmounts the editor; coming back re-mounts it from
+   * its seed, while `proposeBufferRef` still holds the newer keystrokes — so
+   * "Back to the document" would show the old text, and Send proposal would
+   * submit the new text nobody could see. The skill page applies the same
+   * rule (`!editing`) for the same reason. The `isEntering*` beats are in for
+   * the "Loading…" moment between the click and the editor, so the clock
+   * cannot open the log over an editor that is about to mount.
+   */
+  const historyAvailable =
+    git.availability === 'ready' &&
+    !editMode &&
+    !isEnteringEdit &&
+    !proposeMode &&
+    !isEnteringPropose;
+  // Losing the log CLOSES the view, rather than parking `activeTab` on it.
+  // `availability` is re-derived from a polled status call, so one failed
+  // poll flips it off and the next good one flips it back. Left on
+  // 'history', the tab would keep the column full-bleed with no panel in it
+  // (a bare document, no pane card, no way back but the next poll), and then
+  // put the log back over the file the moment git recovered, minutes after
+  // the reader had gone back to reading. Same rule the skill page applies to
+  // its own open flag.
+  //
+  // The LOG only. A comparison is asked for by the chat's "View full
+  // comparison" link, not by a clock this flag withdraws, and the panel
+  // reports git's state itself. Resetting it here too cancelled a click that
+  // landed before the first status poll answered (`availability` starts
+  // 'loading'), with nothing on screen to say so.
+  if (activeTab === 'history' && !historyAvailable) setActiveTab('content');
+  /**
+   * Opening the log from the pane bar's clock unmounts the pane bar, and with
+   * it the clock a keyboard user just activated; closing it hands the column
+   * back to prose, which hides the header's clock again (`historyInPane`).
+   * Either way focus would fall to `document`, so the clocks hand focus to
+   * each other across the swap (`useFocusHandoff`), and only for a swap the
+   * USER made. A full-bleed file has no pane bar: its header clock stays put
+   * and takes the focus instead. Every way out of the log or the comparison
+   * goes through `backToDocument`, so none can forget the handoff.
+   *
+   * BOTH clocks are withdrawn by `historyAvailable`, and a comparison
+   * outlives it — the panel is opened by the chat's link, not by a clock, so
+   * it stays up through a failed status poll. Leaving that view with git
+   * silent (or a draft open) would name two controls that are not on screen
+   * and drop focus on `document`, the one outcome this machinery exists to
+   * prevent. So the document's own title is named last: it is rendered in
+   * every one of those states, and landing on it announces the document the
+   * user just came back to.
+   */
+  const paneClockRef = useRef<HTMLButtonElement>(null);
+  const headerClockRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const handoff = useFocusHandoff(activeTab);
+  const openHistory = () => {
+    handoff('history', headerClockRef);
+    setActiveTab('history');
+  };
+  const backToDocument = () => {
+    handoff('content', paneClockRef, headerClockRef, titleRef);
+    setActiveTab('content');
+  };
 
   // Mirror the lock state into edit mode, but only on a transition from
   // "we held the lock" to "we don't" — that's the idle-release /
@@ -999,7 +1061,7 @@ export function FileViewer() {
   // rule). While a mode is OPEN it shows the way out instead. The header's
   // own cluster is suppressed for prose files (`writeActionInPane`).
   const lockedBy = fileLock.externalLock?.holderName ?? null;
-  const paneActions = isReviewingPending || viewOnly ? null : proposeMode ? (
+  const writeAction = isReviewingPending || viewOnly ? null : proposeMode ? (
     <>
       <Button variant="quiet" size="tiny" onClick={handleDiscardProposal} disabled={proposalBusy}>
         Discard
@@ -1054,6 +1116,30 @@ export function FileViewer() {
       {isEnteringEdit ? 'Loading…' : 'Edit'}
     </Button>
   );
+  // "Who changed this, when" — the clock-arrow beside Edit, where Google Docs
+  // keeps it. It sits in the bar for the same reason Edit does: history is a
+  // thing you do to THE FILE, and the bar is where the file's actions live.
+  // It used to be the lone item behind a ⋯ in the page header — two clicks
+  // and a menu for a question people ask often. Not gated on `viewOnly` or a
+  // pending review: reading the log changes nothing. Full-bleed renderers
+  // have no bar, so the header carries it for them (`historyInPane`).
+  const historyAction = historyAvailable ? (
+    <IconButton
+      ref={paneClockRef}
+      aria-label="Version history"
+      title="Version history"
+      onClick={openHistory}
+    >
+      <History size={14} />
+    </IconButton>
+  ) : null;
+  const paneActions =
+    historyAction || writeAction ? (
+      <>
+        {historyAction}
+        {writeAction}
+      </>
+    ) : null;
 
   return (
     <div className="h-full w-full flex flex-col bg-white min-w-0 relative">
@@ -1093,6 +1179,11 @@ export function FileViewer() {
         // `viewOnly` rides the same flag: it tells the header "the write
         // action is not yours to render" — and the pane bar renders none.
         writeActionInPane={shellVariant === 'prose' || viewOnly}
+        // Prose gets a pane card, and the card's bar carries Version history
+        // beside Edit. Not `viewOnly`: a view-only full-bleed file has no bar.
+        historyInPane={shellVariant === 'prose'}
+        historyButtonRef={headerClockRef}
+        titleRef={titleRef}
         lockedBy={fileLock.externalLock?.holderName ?? null}
         historyAvailable={historyAvailable}
         isDirty={isManualDirty}
@@ -1101,7 +1192,10 @@ export function FileViewer() {
         activeTab={activeTab}
         onEdit={handleEnterEditMode}
         onDone={handleExitEditMode}
-        onOpenHistory={() => setActiveTab('history')}
+        // While the log is open the column is full-bleed, so the header
+        // carries the clock (pressed). A second click on a pressed clock is a
+        // request to put the document back, not to open the log again.
+        onOpenHistory={activeTab === 'history' ? backToDocument : openHistory}
         onShare={handleShare}
         onCopyPage={canCopyPage ? handleCopyPage : undefined}
         onCopyLink={handleCopyLink}
@@ -1113,12 +1207,12 @@ export function FileViewer() {
           route home would be reopening the file. */}
       {activeTab === 'history' && historyAvailable ? (
         <>
-          <BackToDocument onBack={() => setActiveTab('content')} label="Version history" />
+          <BackToDocument onBack={backToDocument} label="Version history" />
           <FileHistoryPanel filePath={openFilePath} />
         </>
-      ) : activeTab === 'compare' && historyAvailable ? (
+      ) : activeTab === 'compare' ? (
         <>
-          <BackToDocument onBack={() => setActiveTab('content')} label="Compare versions" />
+          <BackToDocument onBack={backToDocument} label="Compare versions" />
           <FileComparisonPanel
             filePath={openFilePath}
             initialFrom={comparisonOverride?.fromBranch ?? null}

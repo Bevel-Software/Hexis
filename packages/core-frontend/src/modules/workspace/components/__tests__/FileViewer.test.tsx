@@ -131,6 +131,7 @@ import { GitContext, type GitContextValue } from '../../../git/state/git.context
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { OPEN_COMPARISON_EVENT } from '../../../../core/events';
 
 let injectPendingFromTest: ((value?: string) => void) | null = null;
 
@@ -152,12 +153,15 @@ const fetchFileHistoryMock = vi.fn(async () => [
   },
 ]);
 
-function makeGit(status: WorkingTreeStatus | null): GitContextValue {
+function makeGit(
+  status: WorkingTreeStatus | null,
+  availability: GitContextValue['availability'] = 'ready',
+): GitContextValue {
   const branches: BranchInfo[] = [];
   return {
     status,
     branches,
-    availability: 'ready',
+    availability,
     lastError: null,
     refreshStatus: async () => null,
     refreshBranches: async () => {},
@@ -194,8 +198,11 @@ function ViewerHarness({
   changeRequests = [],
   authUser = null,
   captureTyped = false,
+  gitAvailability = 'ready',
 }: {
   initialContent?: string;
+  /** What git reports about itself; the history views need `'ready'`. */
+  gitAvailability?: GitContextValue['availability'];
   pendingValue?: string;
   /** `null` = git status has not loaded (or failed) — there is no branch yet. */
   branch?: string | null;
@@ -248,6 +255,7 @@ function ViewerHarness({
     workspaceId: 'ws-1',
     kbDirName,
     fileTree,
+    bootstrapError: null,
     openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
@@ -326,7 +334,7 @@ function ViewerHarness({
   const tree = (
       <AuthContext.Provider value={auth}>
         <WorkspaceContext.Provider value={workspace}>
-          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null)}>
+          <GitContext.Provider value={makeGit(branch ? makeStatus(branch) : null, gitAvailability)}>
             <ReviewContext.Provider value={review}>
                 <OpenChangeRequestsContext.Provider
                   value={{
@@ -680,17 +688,151 @@ describe('FileViewer', () => {
     expect(screen.queryByRole('button', { name: 'Compare' })).not.toBeInTheDocument();
   });
 
-  it('opens Version history from ⋯ and offers a way back to the document', async () => {
+  it('opens Version history from the clock-arrow beside Edit and offers a way back to the document', async () => {
     const user = userEvent.setup();
     render(<ViewerHarness initialContent="historic" />);
 
-    await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: /Version history/ }));
+    // ONE clock: the prose pane bar carries it beside Edit, and the header
+    // stands down (`historyInPane`) rather than offering a second.
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
 
     const back = await screen.findByRole('button', { name: /Back to the document/ });
     await user.click(back);
     // The document is back, and so is its Edit affordance.
     expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // The Back button unmounted with the log. Keyboard focus lands on the
+    // bar's clock, the same handoff the header's pressed clock makes, rather
+    // than falling to `document`.
+    expect(screen.getByRole('button', { name: 'Version history' })).toHaveFocus();
+  });
+
+  /**
+   * Opening the log unmounts the editor. Coming back re-mounts it from its
+   * seed, while the buffer Send reads still holds the newer keystrokes: the
+   * page would show one text and submit another. So the clock goes away for
+   * exactly as long as a draft is open, the rule the skill page applies.
+   */
+  it('withdraws Version history while the editor is open, and returns it on Done', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="draft me" />);
+
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit' }));
+    await screen.findByRole('button', { name: 'Done' });
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  /**
+   * The chat's "View full comparison" link lands whenever the agent answers,
+   * and `availability` starts 'loading' until the first status poll returns.
+   * The comparison is not gated on the log's availability: the panel asks git
+   * itself and reports what it gets. Cancelling the tab here instead dropped
+   * the click with nothing on screen to say so.
+   */
+  it('opens the comparison a chat link asks for before git has answered, and keeps it through a failed poll', async () => {
+    const { rerender } = render(<ViewerHarness initialContent="compared" gitAvailability="loading" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    expect(await screen.findByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+
+    // A poll fails while the comparison is up. It stays up: the reader asked
+    // for it, and only the log closes when git stops answering.
+    rerender(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+    expect(screen.getByRole('button', { name: /Back to the document/ })).toBeInTheDocument();
+    expect(screen.getByText('Compare versions')).toBeInTheDocument();
+  });
+
+  /**
+   * The comparison outliving `historyAvailable` is the case where the focus
+   * handoff has no clock to hand back to: both are withdrawn while git is
+   * silent. Leaving the comparison then would drop focus on `document`, the
+   * one outcome the handoff exists to prevent, so the document's own title is
+   * named last. Found by cubic on #135.
+   */
+  it('lands focus on the document title when leaving a comparison git cannot back with a clock', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="compared" gitAvailability="error" />);
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_COMPARISON_EVENT, {
+          detail: { path: 'knowledge-base/Knowledge/Foo.md', fromBranch: 'main', toBranch: 'alice/draft' },
+        }),
+      );
+    });
+    const back = await screen.findByRole('button', { name: /Back to the document/ });
+    // Neither clock is on screen to catch the focus.
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(back);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    const title = screen.getByRole('heading', { level: 1, name: 'Foo' });
+    expect(document.activeElement).toBe(title);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  // With the log open the column goes full-bleed and the header carries the
+  // clock, pressed. Clicking it again is the other way back.
+  /**
+   * `availability` is re-derived from a POLLED status call, so one failed
+   * poll flips it off and the next good one flips it back. If `activeTab`
+   * survived that on 'history', the column would stay full-bleed with no
+   * panel in it (a bare document, no pane card, no way back but the next
+   * poll), and then put the log back over the file the moment git recovered.
+   * Found by cubic on #134; the skill page already had the rule.
+   */
+  it('puts the document back when git stops answering mid-read, and does not reopen the log when it recovers', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+
+    // A poll fails: the log goes, and the document is back in its pane card
+    // with its Edit, not stranded full-bleed.
+    rerender(<ViewerHarness initialContent="historic" gitAvailability="error" />);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByTestId('file-pane-card')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    // The next poll succeeds. The file is still what is on screen, and the
+    // clock is back, unpressed.
+    rerender(<ViewerHarness initialContent="historic" gitAvailability="ready" />);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Version history' })).toBeInTheDocument();
+  });
+
+  it('closes Version history from the pressed clock in the header', async () => {
+    const user = userEvent.setup();
+    render(<ViewerHarness initialContent="historic" />);
+
+    await user.click(screen.getByRole('button', { name: 'Version history' }));
+    await screen.findByRole('button', { name: /Back to the document/ });
+    // The pane bar's clock unmounted with the bar; focus lands on the
+    // header's pressed clock rather than falling to `document`.
+    const pressed = screen.getByRole('button', { name: 'Version history' });
+    expect(pressed).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(pressed);
+
+    await user.click(pressed);
+    expect(screen.queryByRole('button', { name: /Back to the document/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    // And back: the header's clock hid again, so focus lands on the bar's.
+    const paneClock = screen.getByRole('button', { name: 'Version history' });
+    expect(paneClock).not.toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(paneClock);
   });
 
   it('shares the file itself from Share, and the parent folder from the chevron', async () => {
@@ -935,6 +1077,37 @@ describe('FileViewer: proposing a change without write access', () => {
     // The branch already says exactly this — no write, no empty commit.
     await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument());
     expect(proposeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The seeded case is where the clock did real damage: the editor re-mounts
+   * from `proposeSeed` on the way back from the log, while `proposeBufferRef`
+   * still holds the newer keystrokes — the old text on screen, the new text
+   * sent. No clock while a proposal is open.
+   */
+  it('withdraws Version history while a proposal is open, and returns it on Discard', async () => {
+    denyWrite();
+    myCrsMock.mockResolvedValue([
+      { number: 12, state: 'open', branch: 'suggestions/reader-u9/knowledge' },
+    ]);
+    readBranchMock.mockResolvedValue('first proposed paragraph');
+    const user = userEvent.setup();
+    render(
+      <ViewerHarness
+        initialContent="official"
+        branch="target-company-state"
+        authUser={reader}
+        captureTyped
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Propose changes' }));
+    await screen.findByRole('textbox');
+    expect(screen.queryByRole('button', { name: 'Version history' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(await screen.findByRole('button', { name: 'Version history' })).toBeInTheDocument();
   });
 
   it('discard walks away without sending anything', async () => {

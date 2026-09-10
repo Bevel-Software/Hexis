@@ -62,7 +62,29 @@ export function EventBusProvider({ children }: { children: ReactNode }) {
   // retry is possible whenever desired ≠ synced.
   const focusRef = useRef<string | null>(null);
   const desiredFocusRef = useRef<string | null>(null);
+  // Extra workspaces this tab wants events for beyond the focused one, and how
+  // many mounted consumers each. Ref-counted because two components can want
+  // the same workspace (a skill page and its review panel) and must release
+  // independently — a plain Set would let the first unmount cut the second's
+  // events. Kept in a ref, not state: it changes on mount/unmount, and the
+  // POST is driven by `focusVersion` like every other focus change.
+  const watchCountsRef = useRef<Map<string, number>>(new Map());
+  // What the last ACCEPTED POST carried, primary + extras. The synced/desired
+  // comparison in `setFocus` is against this, so adding a watch on the same
+  // primary focus still counts as a desync and gets posted.
+  const syncedKeyRef = useRef<string | null>(null);
+  // Tail of the focus-POST chain. See `postFocus`.
+  const focusChainRef = useRef<Promise<void>>(Promise.resolve());
   const [focusVersion, setFocusVersion] = useState(0);
+
+  /** What this tab wants delivered, primary first — the wire form and the key. */
+  const watchListOf = useCallback(
+    (primary: string) => [
+      primary,
+      ...[...watchCountsRef.current.keys()].filter((id) => id !== primary),
+    ],
+    [],
+  );
 
   const dispatch = useCallback((event: WorkflowEvent) => {
     // Heartbeats are connection-keepalives only — they shouldn't reach
@@ -109,22 +131,40 @@ export function EventBusProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const postFocus = useCallback(async (workspaceId: string | null) => {
+  /**
+   * Send the CURRENT desired list, once. Reads `desiredFocusRef` and the watch
+   * counts at send time rather than taking them as arguments: by the time a
+   * queued send runs, a watch may have been added or released, and the only
+   * list worth sending is the one that is true now.
+   */
+  const sendFocus = useCallback(async () => {
     if (!sessionId) return;
+    const workspaceId = desiredFocusRef.current;
     if (workspaceId === null) {
       // No "clear focus" endpoint server-side; setting null is a frontend
       // signal that we don't currently want workspace events. The next
       // setFocus(workspaceId) re-syncs the server. This is fine because
       // an idle focus simply means no workspace-scoped events arrive.
       focusRef.current = null;
+      syncedKeyRef.current = null;
       return;
     }
+    const alsoWatch = watchListOf(workspaceId).slice(1);
+    const key = [workspaceId, ...alsoWatch].join('\n');
+    // Coalesce: several sends can queue behind one slow request (a watch
+    // added and released while it is in flight), and every one of them would
+    // otherwise re-send a list the server already has. `syncedKeyRef` is
+    // cleared on reconnect, so this never skips the resync.
+    if (syncedKeyRef.current === key) return;
     try {
       const response = await fetch(`/api/events/${encodeURIComponent(sessionId)}/focus`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
+        // `workspaceId` stays the primary field it always was; `alsoWatch`
+        // carries the rest. A server that doesn't know the second field still
+        // gets the focus right, it just doesn't deliver the extras.
+        body: JSON.stringify({ workspaceId, alsoWatch }),
       });
       if (!response.ok) {
         // Server rejected the focus update (most likely 404 — session
@@ -146,24 +186,71 @@ export function EventBusProvider({ children }: { children: ReactNode }) {
       }
       // Server accepted: synced focus catches up to desired.
       focusRef.current = workspaceId;
+      syncedKeyRef.current = key;
     } catch (err) {
       // Network blip — `focusRef` stays at its last successfully-synced
       // value, so a follow-up setFocus to the same workspaceId still
       // detects desync and retries.
       console.warn('[event-bus] focus POST failed:', err);
     }
-  }, [sessionId]);
+  }, [sessionId, watchListOf]);
+
+  /**
+   * ONE FOCUS POST AT A TIME, in the order they were asked for.
+   *
+   * These requests are not independent: each one REPLACES the session's whole
+   * delivery list, so the last to reach the server wins. Fired concurrently —
+   * which is what a watch registered while a focus change is in flight does —
+   * two can be processed out of order, leaving the server holding the older
+   * list while this tab records the newer one as synced. Nothing retries after
+   * that, and the workspace that lost its watch goes quiet for the life of the
+   * tab: the exact silent staleness the watch list exists to fix.
+   *
+   * Chaining is enough because `sendFocus` reads the desired state when it
+   * runs, so a queued send carries the latest list rather than a stale
+   * snapshot, and a redundant one returns without a request.
+   */
+  const postFocus = useCallback(() => {
+    const next = focusChainRef.current.then(() => sendFocus());
+    focusChainRef.current = next.catch(() => {});
+    return next;
+  }, [sendFocus]);
 
   const setFocus = useCallback<EventBusContextValue['setFocus']>((workspaceId) => {
-    // Compare against SYNCED focus, not desired — that way a retry
-    // after a previous POST failure isn't short-circuited.
-    if (focusRef.current === workspaceId) {
+    // Compare against the SYNCED list, not the desired one — that way a retry
+    // after a previous POST failure isn't short-circuited. The whole list, not
+    // just the primary, so a watch added while the focus stands still is still
+    // a desync worth posting.
+    const desiredKey = workspaceId === null ? null : watchListOf(workspaceId).join('\n');
+    if (syncedKeyRef.current === desiredKey && focusRef.current === workspaceId) {
       desiredFocusRef.current = workspaceId;
       return;
     }
     console.debug('[event-bus] setFocus', { from: focusRef.current, to: workspaceId });
     desiredFocusRef.current = workspaceId;
     setFocusVersion((v) => v + 1);
+  }, [watchListOf]);
+
+  /**
+   * Add a workspace to this tab's delivery list until the returned fn runs.
+   * Re-POSTs the focus so the server hears about it; if there is no focus yet
+   * the new entry rides along with the first `setFocus`, which the workspace
+   * bootstrap always issues.
+   */
+  const watchWorkspace = useCallback<EventBusContextValue['watchWorkspace']>((workspaceId) => {
+    const counts = watchCountsRef.current;
+    counts.set(workspaceId, (counts.get(workspaceId) ?? 0) + 1);
+    if (desiredFocusRef.current !== null) setFocusVersion((v) => v + 1);
+    let released = false;
+    return () => {
+      // Idempotent: a double release must not decrement someone else's count.
+      if (released) return;
+      released = true;
+      const remaining = (counts.get(workspaceId) ?? 1) - 1;
+      if (remaining > 0) counts.set(workspaceId, remaining);
+      else counts.delete(workspaceId);
+      if (desiredFocusRef.current !== null) setFocusVersion((v) => v + 1);
+    };
   }, []);
 
   // EventSource lifecycle. One connection per tab, opened once on mount,
@@ -183,7 +270,13 @@ export function EventBusProvider({ children }: { children: ReactNode }) {
       // self-heals on the next open. First-time-open will have desired
       // === null until a consumer (workspace state) calls setFocus.
       if (desiredFocusRef.current !== null) {
-        void postFocus(desiredFocusRef.current);
+        // A reconnect is a NEW server-side session record, with an empty
+        // delivery list — whatever this tab had synced is gone with the old
+        // one. Clearing the synced key is what stops `sendFocus` coalescing
+        // the resync away as "already sent".
+        syncedKeyRef.current = null;
+        focusRef.current = null;
+        void postFocus();
       }
     };
 
@@ -223,10 +316,13 @@ export function EventBusProvider({ children }: { children: ReactNode }) {
   // lifecycle so a focus change doesn't reconnect.
   useEffect(() => {
     if (focusVersion === 0) return;
-    void postFocus(desiredFocusRef.current);
+    void postFocus();
   }, [focusVersion, postFocus]);
 
-  const value = useMemo<EventBusContextValue>(() => ({ subscribe, setFocus }), [subscribe, setFocus]);
+  const value = useMemo<EventBusContextValue>(
+    () => ({ subscribe, setFocus, watchWorkspace }),
+    [subscribe, setFocus, watchWorkspace],
+  );
 
   return <EventBusContext.Provider value={value}>{children}</EventBusContext.Provider>;
 }

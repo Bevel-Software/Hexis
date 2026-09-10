@@ -1,18 +1,23 @@
+import { PR_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
-import { pluginOfPath, isPersonalPluginFolder, SKILLS_DIR } from '@bevel-software/platform-shared';
+import { SKILLS_DIR } from '@bevel-software/platform-shared';
+import { pluginNameForPath } from '../utils/plugin-summary';
 import type { PluginMembership } from '../services/library.api';
 
 /**
- * The plugin a card files under — with personal folders mapped to `null`, the
- * "yours alone" bucket. A personal folder (`Plugins/personal-<id>/`) is where
- * a person's own skills live; it is a place, not a plugin, and the only
- * personal items a caller can ever read are their own (the folder's seeded
- * access.md names nobody else), so `null` here always means "yours".
+ * The plugin a card files under, by IDENTITY — the server's own answer for a
+ * skill it decorated (the inline membership), else the folder resolved
+ * through the plugin summaries (see `pluginNameForPath`). Personal folders
+ * map to `null`, the "yours alone" bucket: a personal folder is a place, not
+ * a plugin, and the only personal items a caller can ever read are their own.
  */
-function displayPluginOf(path: string): string | null {
-  const plugin = pluginOfPath(path);
-  return plugin !== null && isPersonalPluginFolder(plugin) ? null : plugin;
+function pluginOfItem(
+  path: string,
+  memberships: readonly { name: string; linked: boolean }[] | undefined,
+  summaries: readonly PluginSummary[],
+): string | null {
+  return memberships?.find((m) => !m.linked)?.name ?? pluginNameForPath(path, summaries);
 }
 
 /** Under the shared `Skills/` root — owned by a scope, not by a person or a plugin folder. */
@@ -21,12 +26,14 @@ function isSharedPath(path: string): boolean {
 }
 import { useLibraryData, type LibraryData } from '../hooks/useLibraryData';
 import { listPlugins, type PluginSummary } from '../services/plugins.api';
+import { listTeams } from '../services/teams.api';
 import {
   isInPlugin,
   neededToolsFor,
   skillStatus,
   toolStatus,
   type AttentionStatus,
+  type TeamAccess,
 } from '../utils/status';
 
 /**
@@ -93,15 +100,32 @@ export interface LibraryContextValue extends LibraryData {
   pluginSummaries: PluginSummary[];
   pluginsLoading: boolean;
   pluginsError: string | null;
+  /**
+   * What each team can use (`GET /api/teams`), `[]` until loaded and on
+   * error. Loaded and reloaded WITH the plugin summaries: both are answers
+   * from the access rules, and an edit that changes one changes the other.
+   */
+  teams: TeamAccess[];
+  teamsLoading: boolean;
+  /**
+   * Why `teams` is empty when it is: the request failed. Kept apart from
+   * "no teams" so a team page can tell "this team is not there" from "we
+   * could not ask" — the second is not the first.
+   */
+  teamsError: string | null;
   reloadPlugins(): void;
 }
 
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const data = useLibraryData();
+  const { reload } = data;
   const [pluginSummaries, setPluginSummaries] = useState<PluginSummary[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(true);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
+  const [teams, setTeams] = useState<TeamAccess[]>([]);
+  const [teamsLoading, setTeamsLoading] = useState(true);
+  const [teamsError, setTeamsError] = useState<string | null>(null);
   const [pluginsRevision, setPluginsRevision] = useState(0);
 
   useEffect(() => {
@@ -126,6 +150,34 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     };
   }, [pluginsRevision]);
 
+  useEffect(() => {
+    let cancelled = false;
+    // The team lens degrades to "no teams" rather than failing the Library:
+    // the sidebar simply has no team rows, and Everything is untouched.
+    // (`teamsLoading` is raised by `reloadPlugins`, as `pluginsLoading` is —
+    // the first load starts raised, and the effect body stays free of a
+    // synchronous setState.)
+    listTeams()
+      .then((next) => {
+        if (cancelled) return;
+        setTeams(next);
+        setTeamsError(null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setTeams([]);
+        // A blank message is no message: the page tells the error state
+        // apart from "no teams" by this being non-empty.
+        setTeamsError((err instanceof Error && err.message) || "Couldn't load teams.");
+      })
+      .finally(() => {
+        if (!cancelled) setTeamsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pluginsRevision]);
+
   const items: LibraryItem[] = useMemo(() => {
     const skillItems: LibraryItem[] = data.skills.map((s) => ({
       kind: 'skill',
@@ -133,7 +185,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
-      plugin: displayPluginOf(s.path),
+      plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
       lifecycle: s.lifecycle,
@@ -160,7 +212,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
-      plugin: displayPluginOf(s.path),
+      plugin: pluginOfItem(s.path, undefined, pluginSummaries),
       shared: isSharedPath(s.path),
       path: s.path,
       version: s.version,
@@ -180,7 +232,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
       owned: t.canWrite,
-      plugin: displayPluginOf(t.path),
+      plugin: pluginOfItem(t.path, undefined, pluginSummaries),
       path: t.path,
       status: toolStatus(t),
     }));
@@ -191,6 +243,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     data.tools,
     data.ownedSkills,
     data.allowedToolsBySkill,
+    pluginSummaries,
   ]);
 
   // The loading flag is raised HERE rather than in the effect: `useState(true)`
@@ -199,19 +252,46 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   // costs a cascading render on every revision).
   const reloadPlugins = useCallback(() => {
     setPluginsLoading(true);
+    setTeamsLoading(true);
     setPluginsRevision((r) => r + 1);
   }, []);
+
+  // ONE reload for the whole Library. The plugin summaries carry counts and
+  // verdicts derived from the same knowledge base as the catalog — how many
+  // skills a plugin holds, how many of its links are broken, who may read
+  // it — so a page that refreshes the catalog after a link, a repair or an
+  // access edit must refresh the summaries too, or the sidebar count and the
+  // plugin page's banner keep the number from before the change.
+  const reloadAll = useCallback(() => {
+    reload();
+    reloadPlugins();
+  }, [reload, reloadPlugins]);
+
+  // The catalog carries its own view of open change requests (proposals,
+  // review boxes). The shell's change-request provider refreshes on this
+  // event; so does the whole Library, or the two would disagree after a
+  // proposal lands or is resolved — and a merged change can move plugin
+  // links and access, so the summaries refresh with the catalog here too.
+  useEffect(() => {
+    const onStale = () => reloadAll();
+    window.addEventListener(PR_STALE_EVENT, onStale);
+    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+  }, [reloadAll]);
 
   const value = useMemo(
     (): LibraryContextValue => ({
       ...data,
+      reload: reloadAll,
       items,
       pluginSummaries,
       pluginsLoading,
       pluginsError,
+      teams,
+      teamsLoading,
+      teamsError,
       reloadPlugins,
     }),
-    [data, items, pluginSummaries, pluginsLoading, pluginsError, reloadPlugins],
+    [data, reloadAll, items, pluginSummaries, pluginsLoading, pluginsError, teams, teamsLoading, teamsError, reloadPlugins],
   );
 
   return <LibraryContext.Provider value={value}>{children}</LibraryContext.Provider>;
@@ -245,17 +325,63 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
 }
 
 /**
- * How many of a plugin's integrations need setup — the amber count on the
- * sidebar row and the plugin page's banner, computed from one place so the two
- * can never disagree.
+ * How much of a plugin needs a person — the count on the sidebar row, the
+ * index badge and the plugin page's banners, computed from one place so they
+ * can never disagree. Two kinds, added together:
  *
- * Only integrations count. A skill that reports `warn` is warning about the
- * very integration already counted here, so counting both would double every
- * broken connection; pending change requests are a review concern, not a setup
- * one, and belong to a different surface.
+ *  - integrations that need setup (`brokenLinksOf` subtracted from this
+ *    gives that number alone);
+ *  - linked skills the plugin's members cannot read (`brokenLinksOf`).
+ *
+ * A skill that reports `warn` about a tool is NOT counted: it is warning
+ * about the very integration already counted here, so counting both would
+ * double every broken connection. Pending change requests are a review
+ * concern, not a setup one, and belong to a different surface.
  */
-export function attentionOf(items: LibraryItem[], plugin: string): number {
-  return items.filter(
+export interface PluginAttention {
+  /** Everything that needs a person: integrations to set up plus broken links. */
+  total: number;
+  /** The broken-link part alone — what turns the count orange. */
+  brokenLinks: number;
+}
+
+export function attentionOf(
+  items: readonly LibraryItem[],
+  plugin: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+): PluginAttention {
+  // One pass for the links, returned beside the total: every caller wants
+  // both, and computing the part again for the tone would filter the whole
+  // catalog a second time per plugin.
+  const brokenLinks = brokenLinksOf(items, plugin, summaries);
+  const integrations = items.filter(
     (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
+  ).length;
+  return { total: integrations + brokenLinks, brokenLinks };
+}
+
+/**
+ * How many of `plugin`'s LINKED skills its members cannot read: the link is
+ * in the manifest but the skill folder no longer grants the plugin's readers.
+ * Counted apart from the integrations because it is a different kind of
+ * problem — a tool that needs setup blocks the reader's own use; a link
+ * without its grant blocks every member of the plugin, right now — and the
+ * sidebar and the plugin page rank it above amber for that reason.
+ *
+ * The SERVER's count wins when the summary carries one: it comes from the
+ * unfiltered link index, so a manager whom the missing grant locks out of
+ * the skill still sees it. The caller's own catalog is only the fallback for
+ * an older server — it cannot list a skill the caller may not read, which is
+ * exactly the skill this is about.
+ */
+export function brokenLinksOf(
+  items: readonly LibraryItem[],
+  plugin: string,
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+): number {
+  const served = summaries.find((s) => s.name === plugin)?.brokenLinks;
+  if (served !== undefined) return served;
+  return items.filter(
+    (i) => i.kind === 'skill' && (i.plugins ?? []).some((m) => m.name === plugin && m.linked && m.granted === false),
   ).length;
 }

@@ -17,6 +17,7 @@ import { RoutineWritePolicyService } from '../modules/workspace/routine-write-po
 import { KbStartupRunner } from '../modules/workspace/startup/kb-startup-runner.js';
 import { GroupsToPluginsStep } from '../modules/workspace/startup/steps/groups-to-plugins.step.js';
 import { PluginManifestsStep } from '../modules/workspace/startup/steps/plugin-manifests.step.js';
+import { PersonalSpacesStep } from '../modules/workspace/startup/steps/personal-spaces.step.js';
 import { TemplateFilesStep } from '../modules/workspace/startup/steps/template-files.step.js';
 import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.step.js';
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
@@ -57,10 +58,20 @@ import {
   JoinRequestsService,
   PluginLinkIndex,
   PluginLinksService,
+  PluginRenameService,
   MarketplaceCompilerService,
   KbPluginSource,
 } from '../modules/plugins/index.js';
 import { MarketplaceRepoService } from '../modules/marketplace/index.js';
+import {
+  GitHubFacadeCredentialsService,
+  GitHubFacade,
+  DbGitHubFacadeCodeStore,
+  DbGitHubFacadeCredentialsStore,
+  CLAUDE_CONSUMER,
+  GITHUB_LINK_KEY_KIND,
+  GITHUB_LINK_KEY_SPEC,
+} from '../modules/marketplace/github-facade/index.js';
 import {
   DbSecretsVaultService,
   McpOAuthDiscoveryService,
@@ -160,10 +171,14 @@ export interface CoreServices {
   pluginLinkIndex: PluginLinkIndex;
   /** Link / unlink / repair shared skills into plugins. */
   pluginLinksService: PluginLinksService;
+  pluginRenameService: PluginRenameService;
   /** Source layout → distribution layout, for one audience. */
   marketplaceCompiler: MarketplaceCompilerService;
   /** The bare repository the per-user marketplace git endpoint serves from. */
   marketplaceRepo: MarketplaceRepoService;
+  /** The GitHub Enterprise facade products such as claude.ai add the marketplace through. */
+  githubFacade: GitHubFacade;
+  githubFacadeCredentials: GitHubFacadeCredentialsService;
   authService: AuthService;
   authMiddleware: ReturnType<typeof createAuthMiddleware>;
   accountErasureService: AccountErasureService;
@@ -313,6 +328,7 @@ export async function createCoreServices(
   const kbStartupSteps = [
     new GroupsToPluginsStep(),
     new PluginManifestsStep(),
+    new PersonalSpacesStep(),
     new TemplateFilesStep(extraDirs),
     new RolesYamlStep([config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
@@ -344,7 +360,7 @@ export async function createCoreServices(
   // rescues (`roles.yaml` and any `access.md`) — the SAME list
   // `AdminAccessService` below is given, so the admin surfaces and the write
   // gate cannot disagree about who the owner is. They did: the owner could
-  // open Roles & Members and then be refused the save, with the UI showing
+  // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
   const accessControl = new AccessControlService(workspaceService, kbDirName, [
     config.adminEmail,
@@ -516,6 +532,20 @@ export async function createCoreServices(
     eventBus,
     () => pluginIndexService.invalidate(),
   );
+  // A rename rewrites grants across the knowledge base in one batch commit,
+  // then drops every cache that keyed on the old identity.
+  const pluginRenameService = new PluginRenameService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    pluginSource,
+    kbDirName,
+    eventBus,
+    () => {
+      pluginIndexService.invalidate();
+      pluginLinkIndex.invalidate();
+    },
+  );
   // Source → distribution. The marketplace's identity is fixed for now; the
   // per-user git endpoint and any mirror both compile through this.
   const marketplaceCompiler = new MarketplaceCompilerService(
@@ -678,7 +708,30 @@ export async function createCoreServices(
   // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
   // over loopback and re-exposes every tool, dispatching calls back through the
   // REST tool surface (so agent logic + metering live there, once).
-  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix);
+  // Connection keys also come as GitHub-shaped links (`gho_…`, kind
+  // `github-link`): the same key, minted by the marketplace facade below when
+  // a person connects an account on claude.ai, told apart by its stored kind.
+  const externalApiKeyService = new ExternalApiKeyService(db, config.externalApiKeyPrefix, {
+    [GITHUB_LINK_KEY_KIND]: GITHUB_LINK_KEY_SPEC,
+  });
+
+  // The facade that lets products which sync marketplaces only from a GitHub
+  // Enterprise Server (claude.ai, Cowork) add the per-user marketplace:
+  // generated app credentials an Owner registers once, and the connect flow
+  // that turns a hexis session into a connection key the product holds.
+  // Reuses the MCP flow's signed state and /connect page — see
+  // modules/marketplace/github-facade.
+  const githubFacadeCredentials = new GitHubFacadeCredentialsService(
+    new DbGitHubFacadeCredentialsStore(db, config.secretsEncKey ? new TokenCrypto(config.secretsEncKey) : null),
+  );
+  const githubFacade = new GitHubFacade({
+    credentials: githubFacadeCredentials,
+    codes: new DbGitHubFacadeCodeStore(db),
+    keys: externalApiKeyService,
+    consumers: [CLAUDE_CONSUMER],
+    stateSecret: config.jwtSecret,
+    publicFrontendUrl: config.publicFrontendUrl,
+  });
   const mcpSessionStore = new McpSessionStore();
   // What every connected agent is told at session start: the admin's preamble
   // at the repository root, read as the platform (the root is default-deny
@@ -905,8 +958,11 @@ export async function createCoreServices(
     joinRequestsService,
     pluginLinkIndex,
     pluginLinksService,
+    pluginRenameService,
     marketplaceCompiler,
     marketplaceRepo,
+    githubFacade,
+    githubFacadeCredentials,
     authService,
     authMiddleware,
     accountErasureService,

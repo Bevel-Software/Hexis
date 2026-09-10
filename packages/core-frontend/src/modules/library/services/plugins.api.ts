@@ -27,8 +27,10 @@ export interface PluginReaders extends PluginPrincipals {
 }
 
 export interface PluginSummary {
-  /** Plugin folder name, e.g. `GTM`. */
+  /** The plugin's identity — its manifest name, e.g. `gtm`. Grants, URLs and the marketplace spell it. */
   name: string;
+  /** What people see it called, e.g. `GTM`. Absent from an older server: show `name`. */
+  displayName?: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
   /** Per-caller: can read the folder (membership). Locked === !canRead. */
@@ -41,9 +43,23 @@ export interface PluginSummary {
    * enforces this same verdict, so it also decides who sees the affordance.
    */
   isOwner: boolean;
+  /**
+   * Whether this platform writes the plugin's links (a native manifest).
+   * False for a plugin read from an external format — its links are edited
+   * in that repository, and the link endpoints refuse it. Absent from an
+   * older server, which knew only managed plugins.
+   */
+  linksAreManaged?: boolean;
   /** The plugin's TOTALS, not the caller's slice. */
   skillCount: number;
   toolCount: number;
+  /**
+   * How many of the plugin's linked skills its members cannot read, counted
+   * by the server from the unfiltered link index — so a manager the missing
+   * grant locks out of the skill still sees the count. Absent from an older
+   * server: fall back to what the caller's own catalog shows.
+   */
+  brokenLinks?: number;
   owners: PluginPrincipals;
   writers: PluginPrincipals;
   readers: PluginReaders;
@@ -67,17 +83,43 @@ export async function listPlugins(): Promise<PluginSummary[]> {
  * seeded `access.md` before answering, and refuses with its own words —
  * worth surfacing verbatim.
  */
-export async function createPlugin(name: string): Promise<{ folder: string }> {
+/**
+ * Make a plugin. `parent` is a grouping folder below the plugins root to
+ * make it in (`Teams`, `Teams/EU`); omitted or empty, it goes at the root.
+ * The server owns every rule about where a plugin may go.
+ */
+export async function createPlugin(name: string, parent = ''): Promise<{ folder: string; name: string }> {
   const res = await authFetch('/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(parent ? { name, parent } : { name }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Couldn't create that plugin.");
   }
-  return (await res.json()) as { folder: string };
+  return (await res.json()) as { folder: string; name: string };
+}
+
+/**
+ * Rename a plugin: its identifier (which rewrites every grant naming it),
+ * its display name, or both. The refusal's message names the reason — a
+ * taken name, a bad identifier, files the caller cannot edit.
+ */
+export async function renamePlugin(
+  name: string,
+  patch: { name?: string; displayName?: string },
+): Promise<{ name: string; displayName: string; rewritten: string[] }> {
+  const res = await authFetch(`/api/plugins/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? "Couldn't rename the plugin.");
+  }
+  return (await res.json()) as { name: string; displayName: string; rewritten: string[] };
 }
 
 /**

@@ -110,6 +110,25 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean>>;
 
   /**
+   * Batched read for a GROUP rather than a person: what being in `group`
+   * (a `groups.yaml` display name, or the active group source's) confers on
+   * each path, through the same closeness-first walk `canReadBatch` runs —
+   * the group's own key, every role that lists the group, every plugin
+   * principal whose roster the group is part of, and the public keys every
+   * caller holds. No person is involved, so nothing a member holds for a
+   * reason of their own (a direct `Name <email>` grant, another role,
+   * deployment ownership) counts, and no admin rescue applies.
+   *
+   * `null` when no such group exists — distinct from a map of `false`s,
+   * which is a real group that can read none of the paths.
+   */
+  canReadAsGroupBatch(
+    workspaceId: string,
+    group: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null>;
+
+  /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
    * by the input paths, with `true` / `false` for each. Reuses one config
    * load per call.
@@ -199,11 +218,13 @@ export interface IAccessControl {
   /**
    * Answers the file viewer's "who can see this?" affordance. `restricted` is
    * false only when `read: everyone` applies without an effective user-level
-   * denial — the node is readable by all signed-in users, and the role/user
-   * lists are empty because their content would be meaningless. When
-   * `restricted` is true the lists name the principals (roles + direct users)
-   * that may read, with owners folded in (an `owner:` grant confers read). The
-   * lists may be empty for a default-denied path with no grants.
+   * denial — the node is readable by all signed-in users. The lists name the
+   * principals (roles + direct users) granted read whether or not the node
+   * is public, with owners folded in (an `owner:` grant confers read); on a
+   * public node they include what makes it public. `publicVia` names the
+   * PUBLIC plugin principals granted read here — principals every signed-in
+   * user holds — so a caller can tell public-through-a-plugin from a literal
+   * `everyone` grant. The lists may be empty for a default-denied path.
    */
   eligibleReaders(
     workspaceId: string,
@@ -213,6 +234,7 @@ export interface IAccessControl {
     principals?: ResolvedPrincipal[];
     roles: string[];
     users: { name: string; email: string }[];
+    publicVia?: string[];
   }>;
 
   /**
@@ -300,7 +322,7 @@ export interface IAccessControl {
 
   /**
    * Validate a candidate `roles.yaml` text against the resolver's OWN loader,
-   * WITHOUT writing it. The single safety gate behind the admin Roles & Members
+   * WITHOUT writing it. The single safety gate behind the admin App roles
    * surface: `roles.yaml` has no admin-rescue and `loadModel` hard-throws on a
    * parse failure (which `isAdmin` swallows into `false` for everyone), so a
    * malformed write would be a permanent, app-wide, in-app-unrecoverable admin

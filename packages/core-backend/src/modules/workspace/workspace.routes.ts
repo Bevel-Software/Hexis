@@ -282,6 +282,13 @@ export function createWorkspaceRoutes(
       );
       res.json({ workspace, fileTree });
     } catch (error) {
+      // A typed domain answer — a branch origin no longer has (410), a name
+      // git refuses (400) — is the client's to act on, not a failure of ours;
+      // it keeps its status so the browser can say what happened.
+      if (error instanceof WorkflowDomainError) {
+        sendError(res, error);
+        return;
+      }
       // Log the full stack so the next 500 isn't a guessing game — the
       // bare `error.message` we returned before lost most diagnostic
       // signal (cause chain, stack frames, error class).
@@ -537,6 +544,29 @@ export function createWorkspaceRoutes(
     }
   }
 
+  /**
+   * GET /workspace/:id/file/raw?path=<file>[&download=1][&v=<n>]
+   *
+   * The bytes of one workspace file: for the document renderers' fetches, the
+   * file tree's Download, and the `<img>` tags the markdown pipeline emits for
+   * `![alt](./assets/x.png)`. An `<img>` sends no Authorization header, so it
+   * is the auth middleware's `bevel_token` cookie fallback that lets a plain
+   * image tag through.
+   *
+   *   request ──▶ auth: Bearer, else the cookie
+   *           ──▶ read gate on the path             403 if the caller may not read it
+   *           ──▶ download gate, if ?download=1     403 without the download: verb
+   *           ──▶ readFileBinary                    404 missing, 403 traversal
+   *           ──▶ Content-Type from the extension, nosniff, a CSP sandbox for
+   *               inline svg, attachment disposition for a download, and
+   *               Cache-Control: private, no-cache
+   *           ──▶ res.send(buffer): Express sets a weak ETag and answers 304 to
+   *               a matching If-None-Match, so a revisited page costs a read
+   *               and a hash per image rather than the bytes on the wire
+   *
+   * `?v=` is not read here. The frontend bumps it when it learns an image
+   * changed, so the browser asks for a URL it has not cached.
+   */
   router.get('/workspace/:id/file/raw', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
@@ -604,6 +634,12 @@ export function createWorkspaceRoutes(
           `attachment; filename*=UTF-8''${encodeURIComponent(basename)}`,
         );
       }
+      // `private`: this is one person's authenticated file, and a shared cache
+      // (a CDN, a corporate proxy) must not hand it to the next person.
+      // `no-cache`: the browser may keep it but asks before reusing it, which
+      // the ETag answers with a 304; a picture replaced under the same name is
+      // therefore never older than one revalidation.
+      res.setHeader('Cache-Control', 'private, no-cache');
       res.send(buffer);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
@@ -870,7 +906,7 @@ export function createWorkspaceRoutes(
     try {
       // Refuse a hand-edit that would leave roles.yaml unparseable BEFORE any
       // byte hits disk — a broken roles.yaml is an app-wide admin lockout
-      // (loadModel hard-throws). The dedicated Roles & Members surface has its
+      // (loadModel hard-throws). The dedicated App roles surface has its
       // own validate gate; this covers the raw-text editor path.
       if (isRolesYamlPath(filePath, kbDirName)) assertRolesYamlParsable(content);
       // Creator read grant: a brand-new file at a spot whose access chain

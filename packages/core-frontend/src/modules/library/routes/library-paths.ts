@@ -17,19 +17,25 @@ export const LIBRARY_ROOT = '/skills-and-tools';
 
 /**
  * What the sidebar should show as selected for a path. `null` on the pages that
- * are not a filtered view of the catalog — the all-plugins index (the root, see
- * `isPluginsIndexPath`) and the item pages — where the gallery rows are all
- * inactive.
+ * are not a filtered view of the catalog — the item pages and the plugin
+ * pages — where the gallery rows are all inactive.
+ *
+ * The root IS Everything: the Library opens on the whole catalog, plugins
+ * included, and `everything` survives as a second spelling of the same
+ * page so older links still land.
  *
  * `matchPath` hands params back RAW (react-router decodes neither here nor in
  * `useParams`), so a plugin named `Sales & Ops` arrives as `Sales%20%26%20Ops`
  * and has to be decoded to match the catalog's folder name. The plugin page owes
- * the same decode on `useParams().plugin`.
+ * the same decode on `useParams().plugin`; a team's name is read the same way.
  */
 export function libraryFilterForPath(pathname: string): LibraryFilter | null {
+  if (matchPath({ path: LIBRARY_ROOT, end: true }, pathname)) return { kind: 'all' };
   if (matchPath({ path: `${LIBRARY_ROOT}/everything`, end: true }, pathname)) return { kind: 'all' };
   if (matchPath({ path: `${LIBRARY_ROOT}/owned`, end: true }, pathname)) return { kind: 'owned' };
   if (matchPath({ path: `${LIBRARY_ROOT}/yours`, end: true }, pathname)) return { kind: 'ungrouped' };
+  const team = matchPath({ path: `${LIBRARY_ROOT}/teams/:group`, end: true }, pathname);
+  if (team?.params.group) return { kind: 'team', group: decodeSegment(team.params.group) };
   const plugin = matchPath({ path: `${LIBRARY_ROOT}/plugins/:plugin`, end: true }, pathname);
   if (plugin?.params.plugin) return { kind: 'group', plugin: decodeSegment(plugin.params.plugin) };
   return null;
@@ -39,11 +45,13 @@ export function libraryFilterForPath(pathname: string): LibraryFilter | null {
 export function pathForLibraryFilter(filter: LibraryFilter): string {
   switch (filter.kind) {
     case 'all':
-      return `${LIBRARY_ROOT}/everything`;
+      return LIBRARY_ROOT;
     case 'owned':
       return `${LIBRARY_ROOT}/owned`;
     case 'ungrouped':
       return `${LIBRARY_ROOT}/yours`;
+    case 'team':
+      return pathForTeam(filter.group);
     case 'group':
       return pathForPlugin(filter.plugin);
   }
@@ -54,10 +62,15 @@ export function pathForPlugin(plugin: string): string {
   return `${LIBRARY_ROOT}/plugins/${encodeURIComponent(plugin)}`;
 }
 
+/** The route for one team's lens: what the group can use, as cards. */
+export function pathForTeam(group: string): string {
+  return `${LIBRARY_ROOT}/teams/${encodeURIComponent(group)}`;
+}
+
 /**
- * The all-plugins index — the Library's HOME. Plugins are the structure of this
- * surface, so the index of them is what the root shows; `plugins` is kept as a
- * redirect so the links that used to name it still land.
+ * The Library's HOME — Everything, plugins and all. The all-plugins index used
+ * to live here and is folded into it; `plugins` is kept as a redirect so the
+ * links that used to name the index still land.
  */
 export function pathForPluginsIndex(): string {
   return LIBRARY_ROOT;
@@ -171,22 +184,6 @@ export function pathForSkill(name: string): string {
   return `${LIBRARY_ROOT}/skills/${encodeURIComponent(name)}`;
 }
 
-/**
- * Whether a path is the all-plugins index — the one path that lights the "All
- * plugins" row. It is not a `LibraryFilter`: the index lists PLACES, not a
- * filtered slice of the catalog, which is why selection for it travels beside
- * the filter rather than inside it.
- *
- * `plugins` answers true as well even though it only ever redirects, so the row
- * is already lit while the redirect resolves.
- */
-export function isPluginsIndexPath(pathname: string): boolean {
-  return (
-    matchPath({ path: LIBRARY_ROOT, end: true }, pathname) !== null ||
-    matchPath({ path: `${LIBRARY_ROOT}/plugins`, end: true }, pathname) !== null
-  );
-}
-
 /** A malformed escape is a bad link, not a crash — fall back to the raw segment. */
 function decodeSegment(raw: string): string {
   try {
@@ -200,22 +197,35 @@ function decodeSegment(raw: string): string {
  * Where an item's back link points: the page the item LIVES on.
  *
  * `‹ All skills & tools` used to be the one answer, and it stopped being
- * true the day the Library's root became the all-plugins index — a skill
+ * true the day items got pages of their own to be opened from — a skill
  * opened from its plugin page went "back" to a page the reader had never
  * been on. The honest destination is derivable from the path alone: the
  * plugin page for a grouped item, the personal page for a personal one, and
- * the root only for the legacy shapes that live in neither.
+ * the root — Everything — for a shared skill that lives in neither.
  */
-export function libraryHomeForItemPath(repoRelativePath: string): {
+export function libraryHomeForItemPath(
+  repoRelativePath: string,
+  /**
+   * The plugin's IDENTITY, resolved by the caller through the catalog. Both
+   * `undefined` (not resolved) and `null` (resolved to no plugin) fall back
+   * to the folder — a personal shelf is decided by the folder before either.
+   */
+  pluginName?: string | null,
+  /** The label for that identity; identity by default. */
+  labelOf: (name: string) => string = (n) => n,
+): {
   label: string;
   path: string;
 } {
-  const plugin = pluginOfPath(repoRelativePath);
-  if (plugin !== null && !isPersonalPluginFolder(plugin)) {
-    return { label: plugin, path: pathForPlugin(plugin) };
-  }
-  if (plugin !== null) {
+  const folder = pluginOfPath(repoRelativePath);
+  // A personal shelf is decided by the FOLDER, whatever identity the caller
+  // resolved (a personal item's identity is null: a shelf is not a plugin).
+  if (folder !== null && isPersonalPluginFolder(folder)) {
     return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
   }
-  return { label: 'All skills & tools', path: LIBRARY_ROOT };
+  const plugin = pluginName ?? folder;
+  if (plugin !== null) {
+    return { label: labelOf(plugin), path: pathForPlugin(plugin) };
+  }
+  return { label: 'Everything', path: LIBRARY_ROOT };
 }

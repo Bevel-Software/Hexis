@@ -18,10 +18,10 @@
  *     precedence then resolves (group first, `role/<name>` for the role).
  *   - DEGRADE LOUDLY: a broken groups source never fails access resolution
  *     closed — groups contribute nothing and the model carries a
- *     `groupsHealth` marker, which the roster exposes so the Groups page can
+ *     `groupsHealth` marker, which the roster exposes so the Groups & Members page can
  *     banner it. A broken MANUAL groups.yaml additionally makes the roster
  *     answer 422 with the parse message (the operator must see what to fix —
- *     never a dead Groups page, never a silent empty roster they might
+ *     never a dead Groups & Members page, never a silent empty roster they might
  *     "repair" by re-creating groups over live bytes).
  */
 
@@ -87,7 +87,7 @@ export interface GroupsRoster {
   /**
    * Health of the active groups source — `ok: false` when the source exists
    * but is unreadable/unparseable (resolution degrades: groups contribute
-   * nothing). Shipped for the Groups page banner (frontend increment).
+   * nothing). Shipped for the Groups & Members page banner (frontend increment).
    */
   groupsHealth: GroupsHealth;
 }

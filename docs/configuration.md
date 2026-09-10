@@ -26,6 +26,7 @@ pin in `.env` cannot be changed out from under you in the UI.
 | `PUBLIC_BACKEND_URL` / `PUBLIC_FRONTEND_URL` | production | Public origins for OAuth redirects + post-login bounces (derived from `DOMAIN` when set) |
 | `TRUST_PROXY` | behind a proxy | Reverse-proxy hop count, so `req.ip` and the login rate limit see the real client (defaults to `1` when `DOMAIN` is set) |
 | `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | no | Generic OIDC SSO; the login method appears once all three are set |
+| `OIDC_SCOPES` / `OIDC_PROVIDER_LABEL` | no | Scopes requested from the issuer (default `openid profile email`) and the name of the SSO button on the login screen |
 | `ALLOWED_EMAIL_DOMAINS` | with multi-tenant SSO | Signup allow-list for SSO auto-provisioning |
 | `LOGIN_PASSWORD` | no | `false` hides password login and rejects the endpoint |
 | `PORT` | no | Backend port (default 3001) |
@@ -34,6 +35,8 @@ pin in `.env` cannot be changed out from under you in the UI.
 | `KB_KNOWLEDGE_BASE_DIR` / `KB_SKILLS_DIR` / `KB_PLUGINS_DIR` | setup screen | The three top-level folders of the repository (defaults `KnowledgeBase`, `Skills`, `Plugins`). Rename them to read a repository laid out by someone else; the three must differ. Restart to apply |
 | `TENANT_ID` | no | Slug branding credential prefixes (default `bevel`) |
 | `KB_TEMPLATE_DIR` | no | Overrides the packaged KB seed template |
+| `INTERNAL_TOKEN_SECRET` | no | Dedicated HMAC key for internal (loopback) tool tokens; unset, one is derived from `JWT_SECRET` |
+| `UPDATE_CHECK` | no | `false` disables the release check behind the admin upgrade banner, the app's one outbound request (air-gapped deployments) |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
 
 ## Generating the two secrets

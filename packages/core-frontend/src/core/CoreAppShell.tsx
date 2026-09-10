@@ -36,7 +36,6 @@ import {
 import { MaintenanceOverlay } from '../modules/layout/components/MaintenanceOverlay';
 import { AdminProvider } from '../modules/admin/state/admin.context';
 import { RolesCorruptedBanner } from '../modules/admin/components/RolesCorruptedBanner';
-import { UpdateBanner } from '../modules/update-check/components/UpdateBanner';
 import { ConnectToolsPage } from '../modules/secrets-vault/components/ConnectToolsPage';
 import { SettingsLayout } from '../modules/settings/components/SettingsLayout';
 import { DeploymentPage } from '../modules/settings/components/DeploymentPage';
@@ -46,10 +45,12 @@ import { ExternalAgentAccessPage } from '../modules/toolbar/components/ExternalA
 import { AdminRolesPage } from '../modules/admin/components/AdminRolesPage';
 import { UserAccountsPage } from '../modules/admin/components/UserAccountsPage';
 import { DirectoryGroupsPage } from '../modules/admin/components/DirectoryGroupsPage';
+import { ConnectionKeysPage } from '../modules/admin/components/ConnectionKeysPage';
 import { ToolsExplorerPage } from '../modules/tools/ToolsExplorerPage';
 import { LibraryRoutes } from '../modules/library/routes/LibraryRoutes';
 import { RootLanding } from '../modules/onboarding/components/RootLanding';
 import { ConnectAgentPill } from '../modules/onboarding/components/ConnectAgentPill';
+import { PullRequestsForMe } from '../modules/git/components/PullRequestsForMe';
 import { OpenChangeRequestDialog } from '../modules/pr/components/OpenChangeRequestDialog';
 import { useMediaQuery } from '../modules/layout/hooks/useMediaQuery';
 import { NARROW_QUERY } from '../modules/layout/breakpoints';
@@ -173,9 +174,6 @@ function AuthenticatedAppInner() {
 const CORE_BANNERS: BannerDef[] = [
   { id: 'demo', order: 20, node: <DemoBanner /> },
   { id: 'roles-corrupted', order: 30, node: <RolesCorruptedBanner /> },
-  // Admins-only "a newer release exists" line — quiet, dismissible per
-  // version, below the louder condition banners above.
-  { id: 'update-available', order: 35, node: <UpdateBanner /> },
 ];
 
 // Core panes; merged (by `order`) with registry-contributed panes (the
@@ -231,9 +229,12 @@ const CORE_APPS: AppDef[] = [
  * repo's two roots ARE the two apps — `KnowledgeBase/` paths get the pane
  * workspace, default-branch `Plugins/` paths get the library. The catalog is
  * never consulted for the surface, so a just-created skill routes correctly
- * before any reload. Router state `rawFile` steps past the shape rule to the
- * raw file view (the tool page's "Edit the tool file"); it is state, not URL,
- * so a shared link can never land there by accident.
+ * before any reload. The shape rule is the WHOLE rule: a file under one of
+ * the library's roots opens in the library whatever it is — a manifest, an
+ * access.md, a stray upload — with the same viewer Knowledge uses rendered
+ * inside the library's frame (see `WorkspaceItemRoute`). Router state
+ * `rawFile` asks that route for the raw view; it never changes which app is
+ * on screen.
  *
  * While the library renders under a `/workspace` URL it CLAIMS the Skills &
  * Tools app (see {@link AppClaimContext}), so the switcher and the toolbar's
@@ -242,15 +243,20 @@ const CORE_APPS: AppDef[] = [
 function CoreSurfaces() {
   const location = useLocation();
   const claim = useContext(AppClaimContext);
-  const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-  const library = !rawRequested && isLibraryLocation(location.pathname);
+  const library = isLibraryLocation(location.pathname);
   const claimsSkills = library && location.pathname.startsWith(KB_ROUTE_PREFIX);
   useEffect(() => {
     if (!claimsSkills) return;
     claim('skills-tools');
     return () => claim(null);
   }, [claimsSkills, claim]);
-  return library ? <LibraryRoutes /> : <KnowledgeSurface />;
+  // Mounted here, once, above BOTH surfaces: the Knowledge tree, the tab
+  // strip, the viewer's banner AND the Library's Skills tree all ask the same
+  // question, and a tree rendered outside the provider would read the empty
+  // default and never show a proposed file.
+  return (
+    <OpenChangeRequestsProvider>{library ? <LibraryRoutes /> : <KnowledgeSurface />}</OpenChangeRequestsProvider>
+  );
 }
 
 /**
@@ -272,23 +278,22 @@ function KnowledgeSurface() {
       ),
     [registry],
   );
-  // Mounted here, once, because three separate subtrees ask the same question:
-  // the tree (per row), the tab strip (per tab) and the viewer's banner. A
-  // plain hook per consumer would give every tree row its own request.
   return (
-    <OpenChangeRequestsProvider>
-      {/* The connect-your-agent reminder rides Knowledge's sidebar too, and
-          the shell is where that is decided: `layout` is the app's generic
-          consistency layer and must not name a domain component, so the pill
-          is passed IN from the composition root. The Library passes the same
-          one from `LibraryLayout` — one pill, both surfaces, so a person who
-          skipped the welcome page and stayed in Knowledge still sees it. */}
-      <AppLayout
-        panes={panes}
-        onController={setController}
-        sidebarHeader={<ConnectAgentPill />}
-      />
-    </OpenChangeRequestsProvider>
+    /* The connect-your-agent reminder rides Knowledge's sidebar too, and
+       the shell is where that is decided: `layout` is the app's generic
+       consistency layer and must not name a domain component, so the pill
+       is passed IN from the composition root. The Library passes the same
+       one from `LibraryLayout` — one pill, both surfaces, so a person who
+       skipped the welcome page and stayed in Knowledge still sees it. */
+    <AppLayout
+      panes={panes}
+      onController={setController}
+      sidebarHeader={<ConnectAgentPill />}
+      // The change-request dock, pinned under the tree — and under the
+      // Library's nav, which passes the same one: the requests waiting on
+      // you are the same whichever app you are in.
+      sidebarFooter={<PullRequestsForMe />}
+    />
   );
 }
 
@@ -414,6 +419,7 @@ export function ShellRoutes({ apps }: { apps: AppDef[] }) {
         <Route path="/deployment" element={<DeploymentPage />} />
         <Route path="/user-accounts" element={<UserAccountsPage />} />
         <Route path="/directory-groups" element={<DirectoryGroupsPage />} />
+        <Route path="/connection-keys" element={<ConnectionKeysPage />} />
         <Route path="/tools" element={<ToolsExplorerPage />} />
       </Route>
       {/* `/` consults the onboarding: a brand-new account's FIRST visit lands

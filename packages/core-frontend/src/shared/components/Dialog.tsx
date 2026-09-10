@@ -6,6 +6,7 @@ import {
 } from 'react';
 import { X } from 'lucide-react';
 import { useModalLayer } from './useModalLayer';
+import { useLatestRef } from './useLatestRef';
 
 /**
  * The one centered-modal primitive for the app. Before this existed every
@@ -78,20 +79,29 @@ export function Dialog({
 
   // Callers pass a fresh `onClose` arrow each render; mirror it into a ref so
   // the trap effect below doesn't re-fire (and re-snapshot focus) every render.
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-
-  const busyRef = useRef(busy);
-  useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
+  const onCloseRef = useLatestRef(onClose);
+  const busyRef = useLatestRef(busy);
 
   // Only the topmost open modal layer reacts to Escape / backdrop clicks, so a
   // nested modal (its own or a hand-rolled one that opts in) can be dismissed
   // without also closing this dialog behind it.
   const isTopLayer = useModalLayer(open);
+  // Whether the pointer went DOWN on the scrim itself, with this dialog as
+  // the top layer. Both halves matter, and both must be judged at mousedown:
+  //
+  // - A menu inside the dialog dismisses itself on `mousedown` and pops its
+  //   layer as it unmounts, so by the time the scrim's `click` fires the
+  //   dialog is topmost again — and would close on the same gesture that
+  //   closed the menu. Escape peels one layer at a time; so does the scrim.
+  // - A drag that STARTS inside the panel and releases on the scrim (text
+  //   selection overshooting the panel edge) makes the browser fire `click`
+  //   on their common ancestor — this scrim container. The panel's own
+  //   stopPropagation can't help: the click never happened inside it. Only
+  //   the mousedown target says where the gesture began.
+  //
+  // Recorded here rather than in each menu, so no menu has to learn to defer
+  // its own pop.
+  const scrimPointerDown = useRef(false);
 
   // Dialog a11y: move focus into the panel on open, trap focus + Escape closes
   // + restore focus on close.
@@ -140,15 +150,21 @@ export function Dialog({
       document.removeEventListener('keydown', onKeyDown);
       previouslyFocused?.focus?.();
     };
-  }, [open, isTopLayer]);
+    // The refs are stable for the component's life; listed for the linter.
+  }, [open, isTopLayer, onCloseRef, busyRef]);
 
   if (!open) return null;
 
   return (
     <div
       className="fixed inset-0 z-50 bg-scrim flex items-center justify-center p-4"
+      onMouseDown={(e) => {
+        scrimPointerDown.current = e.target === e.currentTarget && isTopLayer();
+      }}
       onClick={() => {
-        if (busy || !isTopLayer()) return;
+        const startedOnScrim = scrimPointerDown.current;
+        scrimPointerDown.current = false;
+        if (busy || !startedOnScrim || !isTopLayer()) return;
         onClose();
       }}
     >

@@ -46,6 +46,13 @@ vi.mock('../services/library.api', () => ({
   getSkill: libraryMock.getSkill,
 }));
 
+// The page resolves the tool's plugin through `useLibrary()`. With an empty
+// catalog the folder name stands in as the label — which is what the frame
+// tests assert on — and the provider's own fetches stay out of the picture.
+vi.mock('../state/library-data', () => ({
+  useLibrary: () => ({ pluginSummaries: [] }),
+}));
+
 const sourceMock = vi.hoisted(() => ({ readFileOnBranch: vi.fn() }));
 vi.mock('../../change-requests/services/change-requests.api', () => sourceMock);
 
@@ -211,7 +218,7 @@ describe('ToolPage: frame', () => {
     expect(
       await screen.findByText("This tool doesn't exist, or you don't have access to it."),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '‹ All skills & tools' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '‹ Everything' })).toBeInTheDocument();
   });
 
   it('offers Try again when the secrets listing fails, and refetches on click', async () => {

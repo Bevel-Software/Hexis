@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
@@ -8,36 +8,58 @@ import {
   TokenNotFoundError,
   TokenStillActiveError,
 } from './external-api-key.errors.js';
-import type {
-  ExternalApiKeySummary,
-  IExternalApiKeyService,
-  MintedExternalApiKey,
+import {
+  DEFAULT_KEY_KIND,
+  type AdminExternalApiKeySummary,
+  type ExternalApiKeySummary,
+  type IExternalApiKeyService,
+  type KeyKindSpec,
+  type MintOptions,
+  type MintedExternalApiKey,
 } from './external-api-key.interface.js';
 
-// Plaintext format: `<tenant>_<43 base64url chars>`. 32 random bytes encoded
+// Plaintext format: `<prefix><43 base64url chars>`. 32 random bytes encoded
 // base64url is 43 chars and gives 256 bits of entropy — overkill against
-// brute force, cheap to copy. The tenant prefix (default `bevel_`) lets the
-// auth middleware route key-vs-JWT requests without parsing both shapes.
+// brute force, cheap to copy. The prefix lets the auth middleware route
+// key-vs-JWT requests without parsing both shapes.
 const TOKEN_BYTES = 32;
+// A GitHub-shaped token: 20 random bytes as 40 hex digits — alphanumeric,
+// as GitHub's own are, and 160 bits, which a hash lookup never exhausts.
+const GITHUB_TOKEN_BYTES = 20;
 
 const MAX_LABEL_LEN = 200;
 
 export class ExternalApiKeyService implements IExternalApiKeyService {
+  private readonly prefixes: readonly string[];
+
   /**
    * @param keyPrefix Tenant-derived plaintext prefix (e.g. `bevel_`) — injected
    *   from {@link AppConfig.externalApiKeyPrefix} so a deploy can brand its keys.
+   *   Every key of the default kind is minted with it.
+   * @param kinds Other kinds a key may be minted as, each with the spelling
+   *   that kind has — a Claude link's `gho_` and GitHub's alphabet, the
+   *   shape claude.ai expects from a GitHub host. Same key, same table, same
+   *   revocation; the KIND is stored on the row and is what tells such keys
+   *   apart (a label is the person's to edit), the spelling is only what the
+   *   outside world sees and what routes the bearer back here.
    */
   constructor(
     private readonly db: Database,
     private readonly keyPrefix: string,
-  ) {}
-
-  /** True if a bearer string carries this tenant's external-API-key prefix. */
-  looksLikeExternalApiKey(token: string): boolean {
-    return typeof token === 'string' && token.startsWith(this.keyPrefix);
+    private readonly kinds: Readonly<Record<string, KeyKindSpec>> = {},
+  ) {
+    this.prefixes = [keyPrefix, ...Object.values(kinds).map((k) => k.prefix)];
   }
 
-  async mint(userId: string, label: string): Promise<MintedExternalApiKey> {
+  /** True if a bearer string carries one of this service's key prefixes. */
+  looksLikeExternalApiKey(token: string): boolean {
+    return typeof token === 'string' && this.prefixes.some((p) => token.startsWith(p));
+  }
+
+  async mint(userId: string, label: string, options: MintOptions = {}): Promise<MintedExternalApiKey> {
+    const kind = options.kind ?? DEFAULT_KEY_KIND;
+    const spec: KeyKindSpec | undefined = kind === DEFAULT_KEY_KIND ? { prefix: this.keyPrefix } : this.kinds[kind];
+    if (!spec) throw new Error(`Unknown key kind "${kind}"`);
     const trimmed = (label ?? '').trim();
     if (trimmed.length === 0) {
       throw new InvalidTokenLabelError('Label cannot be empty');
@@ -48,12 +70,16 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
       );
     }
 
-    const plaintext = this.keyPrefix + randomBytes(TOKEN_BYTES).toString('base64url');
+    const random =
+      spec.shape === 'github-token'
+        ? randomBytes(GITHUB_TOKEN_BYTES).toString('hex')
+        : randomBytes(TOKEN_BYTES).toString('base64url');
+    const plaintext = spec.prefix + random;
     const tokenHash = hashToken(plaintext);
 
     const [row] = await this.db
       .insert(externalApiKeys)
-      .values({ userId, tokenHash, label: trimmed })
+      .values({ userId, tokenHash, label: trimmed, kind })
       .returning();
 
     return {
@@ -122,31 +148,60 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return rows.map(toSummary);
   }
 
+  async listForDeployment(): Promise<AdminExternalApiKeySummary[]> {
+    // Owner joined in so the admin overview is one round-trip; ordered by
+    // owner email so per-account grouping is a linear pass, newest key
+    // first within an account (same order the owner sees on their own page).
+    const rows = await this.db
+      .select({
+        key: externalApiKeys,
+        userId: users.id,
+        email: users.email,
+        name: users.name,
+      })
+      .from(externalApiKeys)
+      .innerJoin(users, eq(externalApiKeys.userId, users.id))
+      .orderBy(asc(users.email), desc(externalApiKeys.createdAt));
+    return rows.map((row) => ({
+      ...toSummary(row.key),
+      user: { id: row.userId, email: row.email, name: row.name },
+    }));
+  }
+
   async revoke(id: string, userId: string): Promise<void> {
-    // Scope the WHERE by userId so a user can never revoke another user's
-    // token even if they learn the id. Idempotent on already-revoked rows
-    // because we only set `revokedAt` when it's currently null — re-revoking
-    // returns 0 rows changed but no error.
+    // Scope by userId so a user can never revoke another user's token even
+    // if they learn the id.
+    await this.markRevoked(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId))!);
+  }
+
+  async revokeAny(id: string): Promise<void> {
+    // No owner scope: the caller is an admin acting across the deployment.
+    // The route that exposes this is admin-gated; nothing user-facing may
+    // reach it.
+    await this.markRevoked(eq(externalApiKeys.id, id));
+  }
+
+  /**
+   * Set `revokedAt` on the rows matching `scope`. Idempotent on
+   * already-revoked rows because we only set `revokedAt` when it's currently
+   * null — re-revoking returns 0 rows changed but no error. Throws
+   * TokenNotFoundError when `scope` matches nothing at all.
+   */
+  private async markRevoked(scope: SQL): Promise<void> {
     const result = await this.db
       .update(externalApiKeys)
       .set({ revokedAt: new Date() })
-      .where(
-        and(
-          eq(externalApiKeys.id, id),
-          eq(externalApiKeys.userId, userId),
-          isNull(externalApiKeys.revokedAt),
-        ),
-      )
+      .where(and(scope, isNull(externalApiKeys.revokedAt)))
       .returning({ id: externalApiKeys.id });
 
     if (result.length === 0) {
-      // Distinguish "doesn't exist / not yours" from "already revoked".
+      // Distinguish "doesn't exist / out of scope" from "already revoked".
       // The latter must stay idempotent (return success); only the former
       // throws.
       const [existing] = await this.db
         .select({ id: externalApiKeys.id })
         .from(externalApiKeys)
-        .where(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId)))
+        .where(scope)
         .limit(1);
       if (!existing) {
         throw new TokenNotFoundError();
@@ -202,6 +257,7 @@ function toSummary(row: typeof externalApiKeys.$inferSelect): ExternalApiKeySumm
   return {
     id: row.id,
     label: row.label,
+    kind: row.kind,
     createdAt: row.createdAt.getTime(),
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.getTime() : null,
     revokedAt: row.revokedAt ? row.revokedAt.getTime() : null,

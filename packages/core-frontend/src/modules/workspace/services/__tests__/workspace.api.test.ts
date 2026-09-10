@@ -6,7 +6,7 @@ vi.mock('../../../../lib/api', () => ({
   authFetch: vi.fn(),
 }));
 
-import { uploadFile, createDirectory, WorkspaceApiError } from '../workspace.api';
+import { uploadFile, createDirectory, rawFileUrl, WorkspaceApiError } from '../workspace.api';
 import { authFetch } from '../../../../lib/api';
 
 const mockedFetch = vi.mocked(authFetch);
@@ -68,5 +68,29 @@ describe('workspace.api write surface error handling', () => {
       status: 403,
       message: 'You don\'t have permission to write to "GTM/sub". Eligible: Admin.',
     });
+  });
+});
+
+/** The one builder every raw-route consumer shares, so its shape is pinned once. */
+describe('rawFileUrl', () => {
+  it('encodes the path as one query value, so spaces, # and ? in a name round-trip', () => {
+    expect(rawFileUrl('ws-1', 'Knowledge/Some File #1?.png')).toBe(
+      '/api/workspace/ws-1/file/raw?path=Knowledge%2FSome%20File%20%231%3F.png',
+    );
+  });
+
+  it('uses the workspace id verbatim: it is already the encoded branch', () => {
+    expect(rawFileUrl('alice%2Fdraft', 'a.png')).toBe('/api/workspace/alice%2Fdraft/file/raw?path=a.png');
+  });
+
+  it('adds the download flag on request', () => {
+    expect(rawFileUrl('ws-1', 'a.png', { download: true })).toBe(
+      '/api/workspace/ws-1/file/raw?path=a.png&download=1',
+    );
+  });
+
+  it('adds a version only once there is one, so an unchanged file keeps a cacheable URL', () => {
+    expect(rawFileUrl('ws-1', 'a.png', { version: 0 })).toBe('/api/workspace/ws-1/file/raw?path=a.png');
+    expect(rawFileUrl('ws-1', 'a.png', { version: 3 })).toBe('/api/workspace/ws-1/file/raw?path=a.png&v=3');
   });
 });

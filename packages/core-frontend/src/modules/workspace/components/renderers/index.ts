@@ -81,7 +81,16 @@ const renderersByExtension: Record<string, ComponentType<FileRendererProps>> = {
 
 const fallbackRenderer = TextRenderer;
 
+/**
+ * The access rules file is YAML with `#` explanations, not a document: the
+ * markdown renderer turned every comment line into a heading and hid the
+ * rules it explains. Shown as the text it is — the same text an agent reads.
+ */
+const ACCESS_RULES_FILE = 'access.md';
+
 export function getFileRenderer(filePath: string): ComponentType<FileRendererProps> {
+  const name = filePath.slice(filePath.lastIndexOf('/') + 1).toLowerCase();
+  if (name === ACCESS_RULES_FILE) return TextRenderer;
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   return renderersByExtension[ext] ?? fallbackRenderer;
 }

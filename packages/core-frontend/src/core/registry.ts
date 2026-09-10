@@ -75,7 +75,7 @@ export interface AdminMenuItemHelpers {
 
 /**
  * One row of the profile menu. Core rows (External agent access, Secrets,
- * Browse available tools, Account, Roles & Members, User accounts) are built
+ * Browse available tools, Account, App roles, User accounts) are built
  * into ProfileMenu and navigate to standalone routed pages; enterprise rows
  * are contributed here. A row opens a dialog (`dialog` — mounted persistently
  * by ProfileMenu, driven by an open flag, so existing dialog components need

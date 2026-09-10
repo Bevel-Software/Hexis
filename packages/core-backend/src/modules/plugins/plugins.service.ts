@@ -103,11 +103,12 @@ export class PluginIndexService implements IPluginIndexService {
       const wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
       const kbRoot = path.join(await this.workspaceService.getWorkspacePath(wsId), this.kbDirName);
 
-      const folders = await this.scanFolders(kbRoot);
-      if (folders.size === 0) return [];
+      const scanned = await this.scanFolders(kbRoot);
+      if (scanned.size === 0) return [];
+      const folders = new Map([...scanned].map(([name, p]) => [name, p.folders]));
 
-      const [skillCounts, toolCounts] = await Promise.all([
-        this.countSkills(folders),
+      const [{ skillCounts, brokenLinkCounts }, toolCounts] = await Promise.all([
+        this.countThroughLinks(folders),
         this.countTools(folders),
       ]);
 
@@ -122,9 +123,12 @@ export class PluginIndexService implements IPluginIndexService {
         ]);
         entries.push({
           name,
+          displayName: scanned.get(name)?.displayName ?? name,
           folders: pluginFolders,
+          linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
           toolCount: toolCounts.get(name) ?? 0,
+          brokenLinks: brokenLinkCounts.get(name) ?? 0,
           owners,
           writers,
           readers,
@@ -147,29 +151,59 @@ export class PluginIndexService implements IPluginIndexService {
    * source's existence rule (see `DiscoveredPlugin`) — for native plugins,
    * the `access.md` the class doc describes.
    */
-  private async scanFolders(kbRoot: string): Promise<Map<string, string[]>> {
-    const byName = new Map<string, string[]>();
+  private async scanFolders(
+    kbRoot: string,
+  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>> {
+    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>();
     const discovered = await this.source.discover(kbRoot);
     for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
     for (const plugin of discovered.plugins) {
       if (plugin.personal || !plugin.exists) continue;
-      byName.set(plugin.name, [plugin.folder]);
+      byName.set(plugin.name, {
+        folders: [plugin.folder],
+        linksAreManaged: plugin.linksAreManaged,
+        displayName: plugin.displayName,
+      });
     }
     return byName;
   }
 
-  private async countSkills(folders: Map<string, string[]>): Promise<Map<string, number>> {
-    // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
-    // property of the plugin, not of who is asking.
-    if (!this.links) return bucketByFolder(await this.skillService.listSkills(undefined), folders);
-    // With links, a skill counts for EVERY plugin that holds it — inline in
-    // its folder, or linked from a manifest. Personal folders are already
-    // absent from the membership (they are places, not plugins).
-    const counts = new Map<string, number>();
-    for (const memberships of (await this.links.membership()).bySkill.values()) {
-      for (const m of memberships) counts.set(m.name, (counts.get(m.name) ?? 0) + 1);
+  /**
+   * Two counts from ONE read of the link index — the membership is built
+   * once per cold catalog, not once per count: `TtlCache` has no
+   * single-flight, so two concurrent readers of an empty cache would each
+   * discover the tree and resolve every linked skill's access.
+   *
+   *  - `skillCounts`: with links, a skill counts for EVERY plugin that holds
+   *    it — inline in its folder, or linked from a manifest. Personal folders
+   *    are already absent from the membership (they are places, not plugins).
+   *  - `brokenLinkCounts`: how many linked skills each plugin's members
+   *    cannot read — memberships reported as linked but not granted. From the
+   *    UNFILTERED index, so the count reaches the plugin's managers even when
+   *    the missing grant locks them out of the skill too.
+   *
+   * Without a link index: skills bucket by folder, and no link can be broken.
+   */
+  private async countThroughLinks(
+    folders: Map<string, string[]>,
+  ): Promise<{ skillCounts: Map<string, number>; brokenLinkCounts: Map<string, number> }> {
+    const skillCounts = new Map<string, number>();
+    const brokenLinkCounts = new Map<string, number>();
+    if (!this.links) {
+      // `undefined` is the documented GLOBAL, unfiltered mode — counts are a
+      // property of the plugin, not of who is asking.
+      return {
+        skillCounts: bucketByFolder(await this.skillService.listSkills(undefined), folders),
+        brokenLinkCounts,
+      };
     }
-    return counts;
+    for (const memberships of (await this.links.membership()).bySkill.values()) {
+      for (const m of memberships) {
+        skillCounts.set(m.name, (skillCounts.get(m.name) ?? 0) + 1);
+        if (m.linked && !m.granted) brokenLinkCounts.set(m.name, (brokenLinkCounts.get(m.name) ?? 0) + 1);
+      }
+    }
+    return { skillCounts, brokenLinkCounts };
   }
 
   /**

@@ -151,4 +151,24 @@ describe('FileHistoryPanel', () => {
     expect(await screen.findByText(/No file changes in this save/i)).toBeInTheDocument();
   });
 
+  // A past save's images are not the checked-out tree's: the panel passes no
+  // resolver, so both sides name the file rather than show today's bytes.
+  it('names the images in a past save instead of showing the checked-out copies', async () => {
+    const history = [makeAttr({ sha: 'aaaaaaa0000000000', subject: 'edit' })];
+    const { container } = renderWith(
+      makeGit({
+        fetchFileHistory: async () => history,
+        fetchFileAtChange: async () => ({
+          baseline: '![Old](./assets/old.png)\n',
+          current: '![New](./assets/new.png)\n',
+        }),
+      }),
+    );
+    fireEvent.click(await screen.findByText('edit'));
+    expect(
+      await screen.findByRole('img', { name: /Baseline image not shown: \.\/assets\/old.png/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /Image not shown: \.\/assets\/new.png/ })).toBeInTheDocument();
+    expect(container.querySelector('img')).toBeNull();
+  });
 });

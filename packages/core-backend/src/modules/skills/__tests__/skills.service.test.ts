@@ -201,6 +201,35 @@ describe('SkillService', () => {
     expect(trav).toEqual({ ok: false, error: 'invalid_file' });
   });
 
+  test('an ignored SKILL.md suppresses the skill and NEVER promotes its assets to skills', async () => {
+    const rfi = join(root, wsId, KB_DIR, 'Plugins', 'rfi');
+    await writeFile(join(rfi, '.bevelignore'), 'SKILL.md\n');
+    await mkdir(join(rfi, 'examples'), { recursive: true });
+    await writeFile(join(rfi, 'examples', 'SKILL.md'), '---\ndescription: An example, not a skill.\n---\n');
+    const names = (await svc().listSkills()).map((s) => s.name);
+    expect(names).not.toContain('rfi');
+    expect(names).not.toContain('examples');
+  });
+
+  test('ignore rules reach a skill\'s bundled files: hidden from the listing and refused when asked for', async () => {
+    const rfi = join(root, wsId, KB_DIR, 'Plugins', 'rfi');
+    await writeFile(join(rfi, '.bevelignore'), 'scripts/\n');
+    const res = await svc().getSkill('user@x.eu', 'rfi');
+    expect(res.ok && res.kind === 'skill' ? res.skill.files : null).toEqual([]);
+    expect(await svc().getSkill('user@x.eu', 'rfi', 'scripts/build_xlsx.py')).toEqual({
+      ok: false,
+      error: 'not_found',
+    });
+  });
+
+  test('a skill that exists inline AND under the shared root resolves to the shared copy', async () => {
+    const shared = join(root, wsId, KB_DIR, 'Skills', 'Ops', 'rfi');
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(shared, 'SKILL.md'), '---\ndescription: The canonical one.\n---\n');
+    const rfi = (await svc().listSkills()).find((s) => s.name === 'rfi');
+    expect(rfi?.path).toBe('Skills/Ops/rfi');
+  });
+
   test('listSkills filters by canRead for a given user', async () => {
     const denyRfi: IAccessControl = {
       canRead: async () => false,

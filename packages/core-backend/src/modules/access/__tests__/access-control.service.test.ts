@@ -953,7 +953,7 @@ describe('AccessControlService', () => {
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
-        expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [] });
+        expect(e).toEqual({ restricted: true, principals: [], roles: [], users: [], publicVia: [] });
       });
 
       it('reports restricted=false when read: everyone applies', async () => {
@@ -963,7 +963,17 @@ describe('AccessControlService', () => {
 
         const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Foo.md');
-        expect(e).toEqual({ restricted: false, principals: [], roles: [], users: [] });
+        // The flag says public; the lists still name the grants (write folds into read).
+        expect(e).toEqual({
+          restricted: false,
+          principals: [
+            { name: 'Admin', kind: 'role' },
+            { name: 'everyone', kind: 'role' },
+          ],
+          roles: ['Admin', 'everyone'],
+          users: [],
+          publicVia: [], // public by a literal line, through no plugin
+        });
       });
 
       it('restricted=false when a closer everyone grant shadows a farther by-name deny', async () => {
@@ -978,7 +988,13 @@ describe('AccessControlService', () => {
         // node really is readable by everyone — not restricted.
         expect(await svc.canRead(workspaceId, 'felix@example.com', 'Knowledge/Open/Foo.md')).toBe(true);
         const e = await svc.eligibleReaders(workspaceId, 'Knowledge/Open/Foo.md');
-        expect(e).toEqual({ restricted: false, principals: [], roles: [], users: [] });
+        expect(e).toEqual({
+          restricted: false,
+          principals: [{ name: 'everyone', kind: 'role' }],
+          roles: ['everyone'],
+          users: [],
+          publicVia: [],
+        });
       });
 
       it('restricted=true when a same-scope by-name deny carves someone out of read: everyone', async () => {

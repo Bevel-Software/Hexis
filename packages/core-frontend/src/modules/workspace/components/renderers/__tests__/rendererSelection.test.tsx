@@ -60,6 +60,14 @@ describe('getFileRenderer: document routing', () => {
     expect(getFileRenderer('notes/scratch.unknown')).toBe(TextRenderer);
     expect(getFileRenderer('pics/logo.png')).toBe(ImageRenderer);
   });
+
+  it('shows an access.md as the YAML it is — its `#` explanations are comments, not headings', () => {
+    expect(getFileRenderer('access.md')).toBe(TextRenderer);
+    expect(getFileRenderer('Plugins/GTM/access.md')).toBe(TextRenderer);
+    expect(getFileRenderer('Plugins/GTM/ACCESS.MD')).toBe(TextRenderer);
+    // Only the rules file: any other markdown stays a document.
+    expect(rendererName(getFileRenderer('Plugins/GTM/README.md'))).toBe('MarkdownRenderer');
+  });
 });
 
 describe('LegacyOfficeRenderer', () => {

@@ -57,8 +57,22 @@ export function withConnectionKey(key: string): string {
 
 /** The marketplace's registered name — what `plugin@<name>` refers to in Claude Code. */
 export const MARKETPLACE_NAME = 'hexis';
-/** The one-install bundle plugin every compiled marketplace carries. */
+/**
+ * The one-install plugin every compiled marketplace carries: every skill the
+ * person may read plus the knowledge base's MCP endpoint, as content — the
+ * same plugin on Claude Code, Cowork and claude.ai.
+ */
 export const BUNDLE_PLUGIN = 'hexis-all';
+
+/**
+ * The KIND stored on a connection key minted when a person connects an
+ * account on a product that treats this deployment as a GitHub Enterprise
+ * host (claude.ai, Cowork) — the backend's `GITHUB_LINK_KEY_KIND`, spelled
+ * once more here so the key list can tell those links from keys people
+ * created by hand. The kind, never the label: a label is free text anyone
+ * can type.
+ */
+export const GITHUB_LINK_KIND = 'github-link';
 
 /**
  * The three one-liners the settings page shows, with the key in the URL —

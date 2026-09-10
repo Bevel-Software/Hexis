@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
 import { readBodyCapped } from './readBodyCapped';
 import type { FileRendererProps } from './types';
@@ -113,7 +114,7 @@ export function XlsxRenderer({ filePath }: FileRendererProps) {
     (async () => {
       try {
         const res = await authFetch(
-          `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
+          rawFileUrl(workspaceId, filePath),
           { signal: controller.signal },
         );
         if (cancelled) return;

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
-import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
+import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
 
 /**
  * The Connect page's contract, and the reason this file exists at all: every
@@ -22,10 +22,28 @@ import { configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
  * regression cases below name all six.
  */
 
-const { listMock, createMock, instructionsMock } = vi.hoisted(() => ({
+const { listMock, createMock, instructionsMock, facadeMock, adminState } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
   instructionsMock: vi.fn(),
+  facadeMock: vi.fn(),
+  // Mutable so one file can mount the page as both roles: the Cowork drawer
+  // shows two different sets of steps depending on this.
+  adminState: { isAdmin: false },
+}));
+
+// Only the hook is replaced. `AdminContext` itself stays real, because the
+// instructions card below reads the context directly rather than through the
+// hook; a whole-module mock left it undefined and every case here threw.
+vi.mock('../../../admin/state/admin.context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../admin/state/admin.context')>()),
+  useAdmin: () => ({ isAdmin: adminState.isAdmin }),
+}));
+
+// The registration credentials the admin branch shows inline. Mocked, or the
+// component reaches for the real admin endpoint over the network.
+vi.mock('../../../settings/services/github-facade.api', () => ({
+  fetchGitHubFacade: facadeMock,
 }));
 
 vi.mock('../../services/external-api-keys.api', () => ({
@@ -50,7 +68,23 @@ const LOCALHOST_URL = 'http://localhost:3001/api/mcp';
 
 const KEY = 'bvl_live_s3cret';
 
+const FACADE = {
+  host: 'kb.acme.com',
+  appId: '12345',
+  clientId: 'Iv1.abcdef',
+  clientSecret: 'ghs_secret',
+  webhookSecret: 'whsec_0123456789012345678',
+  privateKeyPem: '-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----',
+  marketplaceUrl: 'https://kb.acme.com/git/marketplace.git',
+  createdAt: Date.now(),
+  rotatedAt: null,
+};
+
 beforeEach(() => {
+  adminState.isAdmin = false;
+  // Cleared, not just re-stubbed: the count is an assertion of its own below.
+  facadeMock.mockClear();
+  facadeMock.mockResolvedValue(FACADE);
   listMock.mockResolvedValue([]);
   instructionsMock.mockResolvedValue({
     instructions: 'Search the knowledge base first.',
@@ -275,11 +309,14 @@ describe('the key-bearing snippets quote the deployment too', () => {
   });
 
   /**
-   * The placeholder on the keyless tab is a placeholder, not a percent-encoded
-   * one: `%3Cexternal-api-key%3E` looked like a secret to paste.
+   * The placeholder in the keyless marketplace commands is a placeholder, not
+   * a percent-encoded one: `%3Cexternal-api-key%3E` looked like a secret to
+   * paste. The commands live on the Marketplaces tab now.
    */
-  it('shows the marketplace placeholder verbatim on the keyless tab', () => {
+  it('shows the marketplace placeholder verbatim in the keyless commands', async () => {
+    const user = userEvent.setup();
     mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const marketplace = snippets().filter((v) => v.includes('marketplace.git'));
     expect(marketplace.length).toBeGreaterThan(0);
     for (const v of marketplace) expect(v).not.toContain('%3C');
@@ -301,6 +338,198 @@ describe('the key-bearing snippets quote the deployment too', () => {
       // local-server (hexis-mcp) snippets, and the three marketplace commands
       9,
     );
+  });
+});
+
+describe('the Marketplaces tab', () => {
+  it('is the third tab, and the interactive tab points at it instead of carrying the remote', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      'Your agent',
+      'Marketplaces',
+      'Autonomous agents',
+    ]);
+    // The remote no longer lives on the interactive tab.
+    expect(snippets().some((v) => v.includes('marketplace.git'))).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'Marketplaces' }));
+    expect(screen.getByRole('tab', { name: 'Marketplaces' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('leads with the Cowork route and follows with the git remote, both closed, one URL for both', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai');
+    const git = screen.getByText('Claude Code, Codex and the skills CLI');
+    expect(cowork.compareDocumentPosition(git) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    for (const drawer of [cowork, git]) {
+      expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
+    }
+    const remote = `${new URL(PUBLIC_URL).origin}/git/marketplace.git`;
+    // The same address in both drawers: what Cowork adds is what Claude Code clones.
+    expect(snippets().filter((v) => v === remote)).toHaveLength(2);
+    // The keyed commands point at the deployment's host.
+    const commands = snippets().filter((v) => v.includes('key:'));
+    expect(commands.length).toBeGreaterThan(0);
+    for (const v of commands) expect(v).toContain(new URL(PUBLIC_URL).host);
+  });
+
+  /**
+   * The registration steps live on pages inside Claude's ADMIN settings. A
+   * non-admin cannot open those, so showing them four screenshots of a door
+   * they have no key to is worse than showing them nothing: the two admin
+   * steps and their four shots are gated, and the three steps they can act
+   * on are not.
+   */
+  it('gives a non-admin only the steps they can act on, and none of the admin screenshots', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    expect(within(cowork).queryByText('Register this deployment with your Claude organization')).toBeNull();
+    expect(within(cowork).getByText('Connect your Claude account to this deployment')).toBeTruthy();
+    expect(within(cowork).getByText('Add the marketplace')).toBeTruthy();
+    expect(within(cowork).getByText('Install the plugins you want')).toBeTruthy();
+
+    // The four Cowork shots, and not one of the four from Claude's admin settings.
+    const alts = within(cowork).getAllByRole('img').map((el) => el.getAttribute('alt') ?? '');
+    expect(alts).toHaveLength(4);
+    expect(alts.some((a) => a.includes('admin settings'))).toBe(false);
+  });
+
+  it('gives an admin the registration steps as well, screenshots and all', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    expect(within(cowork).getByText('Register this deployment with your Claude organization')).toBeTruthy();
+    expect(within(cowork).getByText('Connect your own Claude account to it')).toBeTruthy();
+    expect(within(cowork).getAllByRole('img')).toHaveLength(8);
+  });
+
+  /**
+   * Step 1 asks the reader to paste six values into Claude's form, so the six
+   * values are IN step 1. Sending them to the Deployment page to fetch them
+   * and back again was friction with nothing on the other end of it.
+   */
+  it('puts the registration credentials in the step that asks for them', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    // Closed, the drawer holds no credentials at all: a client secret is not
+    // put in the DOM of something nobody opened.
+    expect(within(cowork).queryByDisplayValue(FACADE.clientSecret)).toBeNull();
+    expect(facadeMock).not.toHaveBeenCalled();
+
+    await user.click(within(cowork).getByText('Cowork and claude.ai'));
+
+    await within(cowork).findByDisplayValue(FACADE.clientSecret);
+    for (const value of [FACADE.host, FACADE.appId, FACADE.clientId, FACADE.webhookSecret]) {
+      expect(within(cowork).getByDisplayValue(value)).toBeTruthy();
+    }
+    // The key is multi-line, which the display-value matcher normalises away.
+    expect(snippets().some((v) => v === FACADE.privateKeyPem)).toBe(true);
+  });
+
+  /**
+   * The invariant, across the one event that used to break it: credentials are
+   * in the DOM if and only if the drawer holding them is open. This subtree
+   * unmounts on a tab switch, and a fresh <details> comes back closed, so a
+   * React state that merely WATCHED the element went stale and put the secrets
+   * back into a closed drawer. Binding `open` as well is what makes the two
+   * impossible to disagree.
+   */
+  it('keeps the credentials and the drawer in step across a tab switch', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const drawer = () => screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+
+    await user.click(within(drawer()).getByText('Cowork and claude.ai'));
+    await within(drawer()).findByDisplayValue(FACADE.clientSecret);
+    expect(drawer().open).toBe(true);
+
+    await user.click(screen.getByRole('tab', { name: 'Your agent' }));
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+
+    // The remount refetches, so settle on the credentials before reading the
+    // drawer: asserting both facts in the same tick would pass or fail on
+    // microtask timing rather than on the invariant. Once they are on screen,
+    // the drawer showing them must be open — that is the whole claim, and it
+    // fails when the element and the state can drift apart.
+    await within(drawer()).findByDisplayValue(FACADE.clientSecret);
+    expect(drawer().open).toBe(true);
+  });
+
+  it('never asks the admin endpoint for credentials a non-admin cannot have', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    await user.click(within(cowork).getByText('Cowork and claude.ai'));
+    expect(facadeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Every box is decoration: `aria-hidden`, and the control it frames is
+   * named in the image's own alt text. A screen reader that never sees a red
+   * rectangle still gets the instruction.
+   */
+  it('names the highlighted control in alt text rather than only boxing it', async () => {
+    adminState.isAdmin = true;
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+
+    for (const img of within(cowork).getAllByRole('img')) {
+      expect((img.getAttribute('alt') ?? '').length).toBeGreaterThan(40);
+    }
+    // The deployment's own host, never a hard-coded example.
+    expect(cowork).toHaveTextContent(new URL(PUBLIC_URL).host);
+  });
+
+  it('tells Claude connections from keys by their stored kind — never by the label', async () => {
+    listMock.mockResolvedValue([
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'My Cowork link', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+      // A hand-made key wearing the link's usual label is still a key.
+      { id: 'k1', kind: 'key', label: 'Claude (claude.ai and Cowork)', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+    ]);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    await screen.findByText('My Cowork link');
+    expect(cowork).toHaveTextContent('My Cowork link');
+    expect(cowork).not.toHaveTextContent('Claude (claude.ai and Cowork)');
+
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText('Claude (claude.ai and Cowork)');
+    expect(screen.queryByText('My Cowork link')).toBeNull();
+  });
+
+  it('says where the keys went when only Claude connections exist, and shows a load error on both tabs', async () => {
+    listMock.mockResolvedValue([
+      { id: 'c1', kind: GITHUB_LINK_KIND, label: 'Claude', createdAt: Date.now(), lastUsedAt: null, revokedAt: null },
+    ]);
+    const user = userEvent.setup();
+    const first = mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
+    await screen.findByText(/Your Claude connections are on the Marketplaces tab/);
+    first.unmount();
+
+    listMock.mockRejectedValue(new Error('keys are down'));
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    await screen.findByText('keys are down');
+    expect(screen.queryByText(/None yet/)).toBeNull();
   });
 });
 
@@ -379,7 +608,7 @@ describe('tabs', () => {
   it('starts on the interactive tab', () => {
     mount(PUBLIC_URL);
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Autonomous agents']);
+    expect(tabs.map((t) => t.textContent)).toEqual(['Your agent', 'Marketplaces', 'Autonomous agents']);
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
     expect(tabs[1]).toHaveAttribute('aria-selected', 'false');
   });

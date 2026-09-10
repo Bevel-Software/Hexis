@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isPersonalPluginFolder, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
+import { isPersonalPluginDir, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
+import { isAbsence } from '../../../../shared/fs-errors.js';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 
@@ -42,10 +43,10 @@ export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<
   try {
     text = await fs.readFile(path.join(kbRoot, DEFAULT_REGISTRY_PATH), 'utf-8');
   } catch (err) {
-    const code = (err as { code?: unknown } | null)?.code;
     // No registry is a valid state: bundles without a profile are still
     // plugins. A registry that exists but cannot be read is not.
-    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+    if (!isAbsence(err)) {
+      const code = (err as { code?: unknown } | null)?.code;
       warnings.push(`${DEFAULT_REGISTRY_PATH} could not be read (${String(code ?? err)}) — every mcpProfile is unresolved`);
     }
     return null;
@@ -61,10 +62,24 @@ export async function readBundlePlugin(
   relFolder: string,
   registry: McpRegistry | null,
   warnings: string[],
+  unreadable: string[],
 ): Promise<DiscoveredPlugin | null> {
+  // Reading and parsing are two failures with two meanings: a file that
+  // cannot be read is a plugin nobody could see (counted, so a writer can
+  // refuse); a file that is not a bundle is a plugin that is not there.
+  let text: string;
+  try {
+    text = await fs.readFile(path.join(dir, BUNDLE_FILE), 'utf-8');
+  } catch (err) {
+    if (!isAbsence(err)) {
+      warnings.push(`${folder}/${BUNDLE_FILE} could not be read — ${err instanceof Error ? err.message : String(err)}`);
+      unreadable.push(`${folder}/${BUNDLE_FILE}`);
+    }
+    return null;
+  }
   let bundle: Record<string, unknown>;
   try {
-    const parsed: unknown = JSON.parse(await fs.readFile(path.join(dir, BUNDLE_FILE), 'utf-8'));
+    const parsed: unknown = JSON.parse(text);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not an object');
     bundle = parsed as Record<string, unknown>;
   } catch {
@@ -106,11 +121,14 @@ export async function readBundlePlugin(
 
   return {
     name,
+    // The shared contract (`DiscoveredPlugin.displayName`): the declared
+    // display name, else the FOLDER — never the identity.
+    displayName: typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf,
     folder,
     relFolder,
     // The same rule as the native reader: a reserved personal folder directly
     // under the root is a place, not a plugin, whatever file it carries.
-    personal: !relFolder.includes('/') && isPersonalPluginFolder(leaf),
+    personal: isPersonalPluginDir(folder),
     exists: true,
     manifest,
     manifestText: null,

@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { Link2, Plus, Trash2, Users } from 'lucide-react';
+import { Link2, Plus, Trash2, Users, Pencil } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import {
   Button,
@@ -58,6 +58,11 @@ export interface PageActionsProps {
    * 404s for everyone but the owner is a broken promise, not a consistency.
    */
   onDelete?: () => void;
+  /**
+   * Opens the rename dialog. Present only for a MANAGER (the same write
+   * verdict that lets them link and answer join requests).
+   */
+  onRename?: () => void;
   /** Names the thing, for the `+` tooltip and the accessible names. */
   addLabel?: string;
 }
@@ -67,6 +72,7 @@ export function PageActions({
   onAdd,
   onCopyLink,
   onDelete,
+  onRename,
   addLabel = 'Add a skill or tool',
 }: PageActionsProps) {
   const [open, setOpen] = useState(false);
@@ -128,6 +134,20 @@ export function PageActions({
                   item that cannot do its job is worse than one that is not
                   there. The menu exists so it drops in without moving
                   anything. */}
+              {onRename && (
+                <MenuItem
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onRename();
+                  }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Pencil size={14} />
+                    Rename plugin
+                  </span>
+                </MenuItem>
+              )}
               {onDelete && (
                 <MenuItem
                   role="menuitem"

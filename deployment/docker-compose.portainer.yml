@@ -43,7 +43,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - SOURCE_COMMIT
       - GIT_TOKEN
       - GIT_USERNAME
       - JWT_SECRET=${JWT_SECRET}
@@ -63,7 +62,12 @@ services:
       - KB_DIR_NAME
       - DEFAULT_BRANCH
       - PROTECTED_BRANCHES
+      - KB_SYNC_SECRET
+      - KB_KNOWLEDGE_BASE_DIR
+      - KB_SKILLS_DIR
+      - KB_PLUGINS_DIR
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      - INTERNAL_TOKEN_SECRET
       - UPDATE_CHECK
       - PUBLIC_BACKEND_URL
       - PUBLIC_FRONTEND_URL

@@ -15,8 +15,11 @@ import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.co
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
+import { isAbsence } from '../../../../shared/fs-errors.js';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+import { withoutIgnoreLine } from './template-files.step.js';
+import { hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -217,22 +220,43 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
     );
   }
 
+  // Detail notes are held back until we know ops were declared: the subject
+  // line must describe a commit that will actually exist.
+  const details: string[] = [];
+  // On EVERY run and every branch, whatever roots it has: the two root
+  // rules are stale for one reason (the plugins root is drawn by the sidebar
+  // now), and a draft migrated by an earlier release carries the `Plugins/`
+  // line that release wrote — the template step, which retires it on the
+  // protected branches, never visits a draft. BEFORE the early returns: a
+  // branch with both roots (refused below) or neither (nothing to migrate)
+  // is no less stale. Idempotent: nothing to drop, nothing declared.
+  const changed = await retireIgnoreRootRules(repoDir, branch, details);
+  const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ ignore rules`;
+
   if (hasLegacy && hasPlugins) {
     // Both present: somebody is mid-migration by hand, or two branches merged
     // badly. Merging them here would guess at which copy of a same-named
     // plugin wins, so we refuse and say so — loudly, because the KB is in a
-    // state a human needs to look at. The branch contributes no ops, only a
-    // note (which surfaces in a commit only if a later step dirties it).
+    // state a human needs to look at. The branch contributes no migration
+    // ops, only a note (which surfaces in a commit only if the ignore
+    // retirement above, or a later step, dirties it).
     console.warn(
       `[groups-to-plugins] ${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
         `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
     );
+    if (changed) branch.note(retiredSubject);
     branch.note(
       `${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ both exist — merge by hand; nothing was migrated automatically`,
     );
+    for (const line of details) branch.note(line);
     return;
   }
-  if (!hasLegacy && !hasPlugins) return;
+  if (!hasLegacy && !hasPlugins) {
+    if (!changed) return;
+    branch.note(retiredSubject);
+    for (const line of details) branch.note(line);
+    return;
+  }
 
   // Every read below goes against the PRE-STEP tree: when the root rename is
   // declared this run it is NOT yet on disk, so the plugin folders are still
@@ -240,19 +264,15 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // `Plugins/…` paths — the root move is declared FIRST, so by the time the
   // per-folder ops apply, the tree is already under `Plugins/`.
   const rootOnDisk = hasLegacy ? legacyDir : pluginsDir;
-  // Detail notes are held back until we know ops were declared: the subject
-  // line must describe a commit that will actually exist.
-  const details: string[] = [];
-  let changed = false;
 
+  // Whether any MIGRATION op was declared — apart from the ignore retirement
+  // above, which is its own subject when it is all that happened.
+  let migrated = false;
   if (hasLegacy) {
     // The Groups→Plugins root rename is ONE declared op, directory and all.
     branch.move(LEGACY_GROUPS_DIR, PLUGINS_DIR);
     details.push(`${LEGACY_GROUPS_DIR}/ → ${PLUGINS_DIR}/`);
-    changed = true;
-    // Rides WITH the rename, not on every run: the rename is what turned the
-    // ignore rule stale, so the run that renames is the run that heals it.
-    changed = (await rewriteIgnoreRootRule(repoDir, branch, details)) || changed;
+    migrated = true;
   }
 
   // Runs whether or not the rename just happened, so a KB already on
@@ -267,51 +287,61 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
       details,
       refusals,
     );
-    changed = changed || folderChanged;
+    migrated = migrated || folderChanged;
   }
 
-  if (!changed) return;
+  if (!changed && !migrated) return;
   // First note becomes the commit subject — the same messages the lazy
-  // top-up committed under; the detail notes become its body.
+  // top-up committed under; the detail notes become its body. The subject
+  // names what happened: a branch that only lost its stale ignore rules
+  // was not reorganised.
   branch.note(
     hasLegacy
       ? `Move ${LEGACY_GROUPS_DIR}/ to ${PLUGINS_DIR}/ (Agent Plugins layout)`
-      : `Reorganise ${PLUGINS_DIR}/ to the Agent Plugins layout`,
+      : migrated
+        ? `Reorganise ${PLUGINS_DIR}/ to the Agent Plugins layout`
+        : retiredSubject,
   );
   for (const line of details) branch.note(line);
 }
 
 /**
- * Rewrite the KB's `.bevelignore` rule for the renamed root: the exact line
- * `Groups/` becomes `Plugins/`. Without this a migrated KB is left with a
- * stale rule for a folder that no longer exists and NO rule for the new one,
- * so plugin internals start showing up in the file tree and agent view.
+ * Retire the KB's `.bevelignore` rules for the plugins root, old name and
+ * new: every exact `Groups/` and `Plugins/` line goes. `Groups/` used to
+ * become `Plugins/` — the rename's companion edit, so plugin internals
+ * stayed out of the file tree and the agent view. The plugins root is no
+ * longer hidden at all (the Skills & Tools sidebar draws it as a file tree
+ * read from the workspace tree), so the old rule has nothing to become and
+ * the new one is as stale as it: a KB this step migrated under an earlier
+ * release carries the `Plugins/` line that release wrote, on every branch
+ * it visited — drafts included, which the template step never reaches.
  *
- * The file is the operator's — this touches ONE line, the one the platform's
- * own rename invalidated, and only when `Plugins/` is not already listed
- * (in which case the stale line is harmlessly dead and left alone).
+ * The file is the operator's — this touches only the lines the platform's
+ * own root rules put there. Every exact match goes, not just the first: a
+ * duplicate left behind would be found again on every boot and never
+ * touched, since the first pass is what makes the run a no-op. A `!…`
+ * negation is not the rule and stays.
  */
-async function rewriteIgnoreRootRule(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
+async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf-8');
-  } catch {
-    return false; // no ignore file — nothing went stale
+  } catch (err) {
+    // No ignore file — nothing went stale. Anything else (a directory in
+    // its place, a permission hole) is NOT "no file": a rule that may still
+    // be there would hide the tree while the run reports success, so the
+    // hole surfaces as the step's failure instead.
+    if (isAbsence(err)) return false;
+    throw err;
   }
-  const legacyRule = `${LEGACY_GROUPS_DIR}/`;
-  const newRule = `${PLUGINS_DIR}/`;
-  const lines = current.split('\n');
-  if (lines.some((l) => l.trim() === newRule)) return false;
-  const idx = lines.findIndex((l) => l.trim() === legacyRule);
-  if (idx === -1) return false;
-  // EVERY exact-match line follows the rename: the first becomes the new
-  // rule, any further duplicates are dropped — rewriting only the first would
-  // leave stale `Groups/` lines behind, and the already-has-Plugins guard
-  // above means a second pass would never touch them.
-  lines[idx] = newRule;
-  const rewritten = lines.filter((l, i) => i <= idx || l.trim() !== legacyRule);
-  branch.write(IGNORE_FILENAME, rewritten.join('\n'));
-  details.push(`${IGNORE_FILENAME}: ${legacyRule} → ${newRule}`);
+  const stale = [`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`];
+  const present = stale.filter((rule) => current.split('\n').some((l) => l.trim() === rule));
+  if (present.length === 0) return false;
+  // The same drop the template step makes, so a platform comment above a
+  // rule, and the blank line that opened an appended block, go with it.
+  const merged = present.reduce((text, rule) => withoutIgnoreLine(text, rule), current);
+  branch.write(IGNORE_FILENAME, merged);
+  details.push(`${IGNORE_FILENAME}: ${present.join(', ')} dropped`);
   return true;
 }
 
@@ -330,17 +360,25 @@ async function migratePluginFolder(
   const relPlugin = `${PLUGINS_DIR}/${folderName}`;
   let changed = false;
 
+  const entries = await fs.readdir(folderDir, { withFileTypes: true });
+
   // When the manifest is written this run its content is remembered: the
   // buffered write is not on disk yet, and the fold below must see it.
   let renderedManifest: string | null = null;
   if (!(await exists(path.join(folderDir, PLUGIN_MANIFEST_FILE)))) {
+    // A folder is made a plugin only when it IS one — by the same rule the
+    // manifests step applies: legacy plugin content inside it, and no
+    // plugin beneath it. A plain folder somebody made under the root (a
+    // `.gitkeep`), or a grouping folder holding plugins, is neither, and a
+    // manifest written there would turn a grouping folder into a plugin
+    // that hides everything beneath it.
+    if (!(await looksLikeLegacyPlugin(folderDir, entries)) || (await hasPluginBeneath(folderDir))) return false;
     renderedManifest = renderPluginManifest(folderName);
     branch.write(`${relPlugin}/${PLUGIN_MANIFEST_FILE}`, renderedManifest);
     details.push(`${folderName}: wrote ${PLUGIN_MANIFEST_FILE}`);
     changed = true;
   }
 
-  const entries = await fs.readdir(folderDir, { withFileTypes: true });
   const converted: ConvertedManual[] = [];
 
   const convertOrMove = async (abs: string, rel: string, note: string): Promise<void> => {

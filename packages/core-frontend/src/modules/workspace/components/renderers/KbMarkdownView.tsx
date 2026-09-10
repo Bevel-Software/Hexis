@@ -1,11 +1,12 @@
 import { useMemo, type Ref } from 'react';
-import Markdown from 'react-markdown';
+import Markdown, { defaultUrlTransform } from 'react-markdown';
 import { parseFrontmatter, labelFor } from '../../utils/frontmatter';
 import { escapeSpacesInLinkDestinations } from '../../../../shared/markdown/Markdown';
 import {
   KB_REMARK_PLUGINS,
   KB_REHYPE_PLUGINS,
   useKbMarkdownComponents,
+  type KbImageResolver,
 } from './kbMarkdownPipeline';
 
 // A frontmatter value that is a single markdown link, e.g.
@@ -20,6 +21,12 @@ const FRONTMATTER_LINK_RE = /^\[([^\]]+)\]\(<?([^)>]+)>?\)$/;
  * `nodeType`) renders as a clickable link; everything else is plain text.
  * `onOpenFile` receives the raw href — the caller decides how to resolve and
  * open it (in-workspace navigation, or a new tab for the embed).
+ *
+ * The panel never goes through the markdown pipeline, so it applies the
+ * pipeline's URL policy itself: a destination react-markdown would refuse in
+ * the body (`javascript:`, or a bare `Notes: today.md`, which reads as a
+ * scheme; `./Notes: today.md` does not) is refused here too and the value
+ * stays text. One rule for a link, wherever it sits in the file.
  */
 function FrontmatterValue({
   value,
@@ -29,8 +36,9 @@ function FrontmatterValue({
   onOpenFile: (href: string) => void;
 }) {
   const match = value.match(FRONTMATTER_LINK_RE);
-  if (match) {
-    const [, label, href] = match;
+  const href = match ? defaultUrlTransform(match[2]) : '';
+  if (match && href) {
+    const label = match[1];
     return (
       <a
         href={href}
@@ -100,6 +108,13 @@ interface KbMarkdownViewProps {
    * rehype-slug anchor id. Omit it (e.g. in the embed) to hide the buttons.
    */
   headingLink?: (slug: string) => string;
+  /**
+   * Resolves a workspace image `src` (`./assets/x.png`) to the URL that serves
+   * it, or to the reason it will not be shown. The caller knows the workspace
+   * and the file this document is; the view does not. Omit it (the embed) and
+   * images render as plain `<img>` tags. See `KbImage` in the pipeline.
+   */
+  resolveImage?: KbImageResolver;
   /** Optional container ref (used by the file viewer for deep-link scroll). */
   containerRef?: Ref<HTMLDivElement>;
   /**
@@ -124,14 +139,15 @@ interface KbMarkdownViewProps {
  * frontmatter panel, with navigation injected via `onOpenFile` so it carries no
  * dependency on workspace routing or context.
  */
-export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, containerRef, scroll = true, className }: KbMarkdownViewProps) {
+export function KbMarkdownView({ source, onOpenFile, onOpenNodeId, headingLink, resolveImage, containerRef, scroll = true, className }: KbMarkdownViewProps) {
   const { data: frontmatter, body } = useMemo(() => parseFrontmatter(source), [source]);
   // CommonMark rejects unescaped spaces in link destinations, so a KB link like
   // `[Foo](Some File.md)` would render as plain text. Wrap space-bearing
-  // destinations in `<...>` so links to files with spaces resolve.
+  // destinations in `<...>` so links to files with spaces resolve. The same
+  // rule covers an image's `![alt](Some Shot.png)` tail.
   const normalizedBody = useMemo(() => escapeSpacesInLinkDestinations(body), [body]);
 
-  const components = useKbMarkdownComponents({ onOpenFile, onOpenNodeId, headingLink });
+  const components = useKbMarkdownComponents({ onOpenFile, onOpenNodeId, headingLink, resolveImage });
 
   return (
     <div

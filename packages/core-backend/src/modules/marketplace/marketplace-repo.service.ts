@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { VirtualTree } from '../plugins/compile/compile-marketplace.js';
@@ -110,7 +110,14 @@ export class MarketplaceRepoService {
       const last = await this.readSidecar(namespace);
       const head = await this.headOf(namespace);
       let current = await this.compiler.sourceCommit();
-      if (last === current && head !== null) return { namespace, compiled: false, sourceCommit: current };
+      if (last === current && head !== null) {
+        // Unchanged source is still a served namespace: its HEAD is checked
+        // on every fetch (a read) and written only when it is missing, so a
+        // crash after an earlier branch update cannot leave a clone that sees
+        // no default branch — and the cache hit stays a read on a healthy repo.
+        await this.ensureHead(namespace);
+        return { namespace, compiled: false, sourceCommit: current };
+      }
 
       // The commit just read is the one the tree is stamped with: a second
       // read that failed would otherwise record a placeholder as the compiled
@@ -130,6 +137,76 @@ export class MarketplaceRepoService {
       const sha = await this.commitTree(namespace, tree, head);
       await this.writeSidecar(namespace, tree.sourceCommit);
       return { namespace, compiled: sha !== head, sourceCommit: tree.sourceCommit };
+    });
+  }
+
+  /**
+   * The caller's namespace and its head commit, compiled if stale — what the
+   * GitHub-shaped REST surface (the Cowork path) reads instead of cloning.
+   */
+  async headFor(user: { id: string; email: string }): Promise<{ namespace: string; sha: string }> {
+    const { namespace } = await this.ensureCompiled(user);
+    const sha = await this.headOf(namespace);
+    if (!sha) throw new Error(`namespace ${namespace} has no head after compiling`);
+    return { namespace, sha };
+  }
+
+  /** One commit as the REST surface describes it. */
+  async describeCommit(sha: string): Promise<{
+    sha: string;
+    tree: string;
+    message: string;
+    authorName: string;
+    authorEmail: string;
+    date: string;
+  }> {
+    assertObjectId(sha);
+    const { stdout } = await this.git(['-C', this.repoDir, 'log', '-1', '--format=%H%n%T%n%an%n%ae%n%aI%n%B', sha]);
+    const [full, tree, authorName, authorEmail, date, ...rest] = stdout.split('\n');
+    return {
+      sha: full ?? sha,
+      tree: tree ?? '',
+      message: rest.join('\n').trim(),
+      authorName: authorName ?? '',
+      authorEmail: authorEmail ?? '',
+      date: date ?? '',
+    };
+  }
+
+  /**
+   * Whether `sha` is the namespace's head or one of its ancestors — the only
+   * commits a caller may read as that namespace. The object store is shared
+   * across everyone, so a sha alone is never enough.
+   */
+  async contains(namespace: string, sha: string): Promise<boolean> {
+    if (!looksLikeObjectId(sha)) return false;
+    const head = await this.headOf(namespace);
+    if (!head) return false;
+    // Two questions with two answers each, and only "no" is ever silent:
+    // a commit git does not have is simply not contained; a commit it has
+    // is an ancestor (exit 0) or not (exit 1); anything else — a corrupt
+    // store, a lock, a bad ref — is a failure the caller must hear about,
+    // not a 404 wearing its clothes.
+    try {
+      await this.git(['-C', this.repoDir, 'rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+    } catch (err) {
+      if (exitCodeOf(err) === 1) return false;
+      throw err;
+    }
+    try {
+      await this.git(['-C', this.repoDir, 'merge-base', '--is-ancestor', sha, head]);
+      return true;
+    } catch (err) {
+      if (exitCodeOf(err) === 1) return false;
+      throw err;
+    }
+  }
+
+  /** The tree at `sha` as a zip stream, every path under `prefix/`. Check {@link contains} first. */
+  archiveZip(sha: string, prefix: string): ChildProcess {
+    assertObjectId(sha);
+    return spawn('git', ['-C', this.repoDir, 'archive', '--format=zip', `--prefix=${prefix}/`, sha], {
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
   }
 
@@ -194,13 +271,31 @@ export class MarketplaceRepoService {
       };
       const args = ['-C', this.repoDir, 'commit-tree', treeSha, '-m', message, ...(parent ? ['-p', parent] : [])];
       const sha = (await this.git(args, { env: commitEnv })).stdout.trim();
+      // HEAD FIRST, then the branch: a symbolic ref may dangle, a branch
+      // without a HEAD is a clone that checks out nothing. Ordered so that a
+      // crash between the two leaves the recoverable state.
+      await this.ensureHead(namespace);
       await this.git(['-C', this.repoDir, 'update-ref', this.refOf(namespace), sha, ...(parent ? [parent] : [])]);
-      await this.git(['-C', this.repoDir, 'symbolic-ref', `refs/namespaces/${namespace}/HEAD`, this.refOf(namespace)]);
       return sha;
     } finally {
       await fs.rm(scratch, { recursive: true, force: true });
       await fs.rm(indexDir, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Point the namespace's HEAD at its branch — valid before the branch
+   * exists. A read first: the symref is written only when absent or wrong,
+   * so the common path touches nothing.
+   */
+  private async ensureHead(namespace: string): Promise<void> {
+    const head = `refs/namespaces/${namespace}/HEAD`;
+    const current = await this.git(['-C', this.repoDir, 'symbolic-ref', '--quiet', head]).then(
+      (r) => r.stdout.trim(),
+      () => null,
+    );
+    if (current === this.refOf(namespace)) return;
+    await this.git(['-C', this.repoDir, 'symbolic-ref', head, this.refOf(namespace)]);
   }
 
   private sidecarDir(): string {
@@ -222,4 +317,21 @@ export class MarketplaceRepoService {
   private git(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
     return execFileAsync('git', args, { cwd: opts.cwd, env: opts.env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
   }
+}
+
+/** The exit code an execFile failure carries, or null when the process never ran. */
+function exitCodeOf(err: unknown): number | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'number' ? code : null;
+}
+
+function looksLikeObjectId(sha: string): boolean {
+  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha);
+}
+
+function assertObjectId(sha: string): void {
+  // An object id is the only thing these commands accept as a revision — a
+  // ref name, an option, anything git would interpret, is refused before it
+  // reaches the argument list.
+  if (!looksLikeObjectId(sha)) throw new Error(`not an object id: ${sha}`);
 }

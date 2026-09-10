@@ -131,6 +131,21 @@ describe('marketplace git endpoint', () => {
     expect(log).toEqual(['Compile marketplace from bbb222', 'Compile marketplace from aaa111']);
   });
 
+  it('restores a namespace HEAD lost between the branch update and the symref — on the unchanged path', async () => {
+    await repo.ensureCompiled({ id: 'user-alice', email: 'alice@x.io' });
+    const head = 'refs/namespaces/u-user-alice/HEAD';
+    await git(['-C', repo.repoDir, 'symbolic-ref', '--delete', head]);
+    await expect(git(['-C', repo.repoDir, 'symbolic-ref', head])).rejects.toThrow();
+    // Same source, same tree: nothing to compile — and still a served namespace.
+    expect((await repo.ensureCompiled({ id: 'user-alice', email: 'alice@x.io' })).compiled).toBe(false);
+    expect((await git(['-C', repo.repoDir, 'symbolic-ref', head])).stdout.trim()).toBe(
+      'refs/namespaces/u-user-alice/refs/heads/main',
+    );
+    const a = path.join(root, 'alice-again');
+    await clone('bevel_alice', a);
+    expect(await read(a, 'README.md')).toBe('alice v1\n');
+  });
+
   it('a moved source with an identical tree writes no new commit', async () => {
     const a = path.join(root, 'alice');
     await clone('bevel_alice', a);

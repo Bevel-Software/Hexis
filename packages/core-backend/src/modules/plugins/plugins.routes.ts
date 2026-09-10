@@ -14,6 +14,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { pluginsWorkspaceId } from './plugins.service.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
 import { PluginLinkError, type PluginLinksService } from './plugin-links.service.js';
+import { PluginRenameError, type PluginRenameService } from './plugin-rename.service.js';
 import type { JoinRequestsService } from './join-requests.service.js';
 import type {
   PluginCatalogEntry,
@@ -53,6 +54,88 @@ import type {
  * middleware change can never silently un-gate one. Nothing here is reachable
  * with an agent connection key or a manual-auth bearer.
  */
+/**
+ * The two doors through which plugin folders come to exist — ONE
+ * implementation each, for the app and for agents alike:
+ *
+ *  - `POST /plugins` `{ name, parent? }` — a shared plugin. Any authenticated
+ *    user may create one; that is the product model (making a plugin makes
+ *    you the one who runs it), and the seeded access.md immediately fences
+ *    the new folder off from everyone else. `parent` is a grouping folder
+ *    below the plugins root to make it in. See `PluginProvisionService` for
+ *    why this is an endpoint and not a write path.
+ *  - `POST /plugins/personal` — the caller's own space, ensured (idempotent).
+ *    The UI calls it lazily before the first personal-skill write; an agent
+ *    calls it to learn where to put a person's skills.
+ *
+ * Mounted apart from the other plugin routes, behind a gate that admits an
+ * agent's connection key as well as a session (see `keyOrSessionAuth`):
+ * the `create_plugin` and `my_plugin` tools are UTCP descriptions of these
+ * very endpoints, not a second set. `resolveUser` reads the identity either
+ * gate established.
+ */
+export function createPluginCreationRoutes(
+  provision: Pick<PluginProvisionService, 'createPlugin' | 'ensurePersonalPlugin'>,
+  resolveUser: (req: express.Request) => Promise<AuthUser | null>,
+): express.Router {
+  const router = express.Router();
+
+  router.post('/plugins', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    // `req.body` is undefined when no JSON body was sent at all — that is a
+    // 400, not a destructuring crash.
+    const { name, parent } = (req.body ?? {}) as { name?: string; parent?: unknown };
+    if (typeof name !== 'string') {
+      res.status(400).json({ error: 'name is required in body' });
+      return;
+    }
+    // `parent`: a grouping folder below the plugins root to create in
+    // (`Teams`, `Teams/EU`); absent or empty means the root. Validated by
+    // the service, which owns every rule about where a plugin may go.
+    if (parent !== undefined && typeof parent !== 'string') {
+      res.status(400).json({ error: 'parent must be a folder path below the plugins root' });
+      return;
+    }
+    try {
+      const result = await provision.createPlugin(user, name, parent);
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof PluginProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      console.error('[plugins] create failed:', err);
+      res.status(500).json({ error: 'Failed to create the plugin' });
+    }
+  });
+
+  router.post('/plugins/personal', async (req, res) => {
+    const user = await resolveUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    try {
+      res.json(await provision.ensurePersonalPlugin(user));
+    } catch (err) {
+      // The service's own refusals keep their status — a 503 for incomplete
+      // discovery tells the caller to try again, which a 500 would not.
+      if (err instanceof PluginProvisionError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      console.error('[plugins] personal-folder ensure failed:', err);
+      res.status(500).json({ error: 'Failed to prepare your personal folder' });
+    }
+  });
+
+  return router;
+}
+
 export function createPluginsRoutes(
   pluginIndex: IPluginIndexService,
   accessControl: IAccessControl,
@@ -64,8 +147,47 @@ export function createPluginsRoutes(
   resolveUser: (req: express.Request) => Promise<AuthUser | null>,
   /** Optional: a host without the link machinery simply has no link routes. */
   links?: PluginLinksService,
+  /** Optional: a host without it has no rename route. */
+  rename?: PluginRenameService,
 ): express.Router {
   const router = express.Router();
+
+  /**
+   * Rename a plugin — its identifier, its display name, or both. The
+   * MANAGER's verb (write on the folder's access.md, the gate linking uses).
+   * An identifier change rewrites every grant naming the old identifier in
+   * the same commit; see `PluginRenameService`.
+   *
+   *   PATCH /api/plugins/:name  { name?, displayName? }  → { name, displayName, rewritten }
+   */
+  if (rename) {
+    router.patch('/plugins/:name', async (req, res) => {
+      if (!req.userEmail) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      const user = await resolveUser(req);
+      if (!user) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      const body = (req.body ?? {}) as { name?: unknown; displayName?: unknown };
+      try {
+        res.json(await rename.rename(user, String(req.params.name), { name: body.name, displayName: body.displayName }));
+      } catch (err) {
+        if (err instanceof PluginRenameError) {
+          res.status(err.status).json({ error: err.message, ...err.payload });
+          return;
+        }
+        if (err instanceof WorkflowDomainError) {
+          res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+          return;
+        }
+        console.error('[plugins] rename failed:', err);
+        res.status(500).json({ error: 'Failed to rename the plugin' });
+      }
+    });
+  }
 
   /**
    * Linking shared skills — see `PluginLinksService` for the two-sided write.
@@ -84,6 +206,10 @@ export function createPluginsRoutes(
       op: (user: AuthUser, plugin: string, skillPath: string) => Promise<unknown>,
       skillPathOf: (req: express.Request) => unknown,
     ) => {
+      if (!req.userEmail) {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
       const user = await resolveUser(req);
       if (!user) {
         res.status(401).json({ error: 'Unauthenticated' });
@@ -123,6 +249,17 @@ export function createPluginsRoutes(
   const memberProbe = (folder: string) => folder;
   /** The FILE probe for discovery/management — the folder's access.md. */
   const accessMdOf = (folder: string) => `${folder}/access.md`;
+  /** A plugin folder's path BELOW the plugins root: `GTM`, or `teams/deep`. */
+  const folderBelowRoot = (folder: string) => folder.slice(folder.indexOf('/') + 1);
+  /**
+   * What a join request is keyed by: the plugin's primary FOLDER path below
+   * the root, not its identity. The request writes into that folder's rules;
+   * a top-level folder keys exactly as every join branch already on a remote
+   * was cut (its name), a nested one by its whole path, so two plugins whose
+   * folders share a basename never share a branch; and a rename of the
+   * identity moves no folder, so it orphans no open request.
+   */
+  const joinKeyOf = (g: PluginCatalogEntry) => folderBelowRoot(g.folders[0]);
 
   const probesFor = (plugins: PluginCatalogEntry[]): string[] => [
     ...new Set(plugins.flatMap((g) => g.folders.flatMap((f) => [memberProbe(f), accessMdOf(f)]))),
@@ -177,15 +314,18 @@ export function createPluginsRoutes(
         const owner = any(owned, g, memberProbe);
         const discoverable = member || any(readable, g, accessMdOf);
         if (!member && !manager && !discoverable) continue; // absent — fail closed
-        const joinCr = member ? null : openJoinCr(mine, email, g.name);
+        const joinCr = member ? null : openJoinCr(mine, email, joinKeyOf(g));
         plugins.push({
           name: g.name,
+          displayName: g.displayName,
           folders: g.folders,
           canRead: member,
           canWrite: manager,
           isOwner: owner,
+          linksAreManaged: g.linksAreManaged,
           skillCount: g.skillCount,
           toolCount: g.toolCount,
+          brokenLinks: g.brokenLinks,
           owners: g.owners,
           writers: g.writers,
           readers: g.readers,
@@ -209,57 +349,10 @@ export function createPluginsRoutes(
    * workflow's: draft branches are ungated, and the merge gate requires an
    * approver who can write the touched access.md.
    */
-  /**
-   * Create a plugin — the ONE door through which `Plugins/<name>/` folders come
-   * to exist. Any authenticated user may create one; that is the product
-   * model (making a plugin makes you the one who runs it), and the seeded
-   * access.md immediately fences the new folder off from everyone else. See
-   * `PluginProvisionService` for why this is an endpoint and not a write path.
-   */
-  router.post('/plugins', async (req, res) => {
-    const user = await resolveUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
-    // `req.body` is undefined when no JSON body was sent at all — that is a
-    // 400, not a destructuring crash.
-    const { name } = (req.body ?? {}) as { name?: string };
-    if (typeof name !== 'string') {
-      res.status(400).json({ error: 'name is required in body' });
-      return;
-    }
-    try {
-      const result = await provision.createPlugin(user, name);
-      res.status(201).json(result);
-    } catch (err) {
-      if (err instanceof PluginProvisionError) {
-        res.status(err.status).json({ error: err.message });
-        return;
-      }
-      console.error('[plugins] create failed:', err);
-      res.status(500).json({ error: 'Failed to create the plugin' });
-    }
-  });
-
-  /**
-   * Ensure the caller's personal folder (`Plugins/personal-<id>/`) exists —
-   * idempotent; the UI calls it lazily right before the first personal-skill
-   * write. Private by construction: its access.md names only the caller.
-   */
-  router.post('/plugins/personal', async (req, res) => {
-    const user = await resolveUser(req);
-    if (!user) {
-      res.status(401).json({ error: 'Unauthenticated' });
-      return;
-    }
-    try {
-      res.json(await provision.ensurePersonalPlugin(user));
-    } catch (err) {
-      console.error('[plugins] personal-folder ensure failed:', err);
-      res.status(500).json({ error: 'Failed to prepare your personal folder' });
-    }
-  });
+  // `POST /plugins` and `POST /plugins/personal` — the creation doors — live
+  // in `createPluginCreationRoutes` below, mounted behind a gate that admits
+  // an agent's connection key as well as a session, since the same two
+  // endpoints are what the `create_plugin` and `my_plugin` tools describe.
 
   /**
    * Delete a plugin — the OWNER's verb, and only theirs. Creating a plugin
@@ -285,7 +378,7 @@ export function createPluginsRoutes(
         res.status(401).json({ error: 'Unauthenticated' });
         return;
       }
-      // Case-sensitive, like `pluginOfPath` — the plugin name IS the folder name.
+      // By identity — the manifest name the catalog keys on.
       const plugin = (await pluginIndex.catalog()).find((g) => g.name === req.params.name);
       const wsId = pluginsWorkspaceId();
       const ownerVerdicts = plugin
@@ -297,7 +390,10 @@ export function createPluginsRoutes(
         res.status(404).json({ error: 'Unknown plugin', kind: 'unknown-plugin' });
         return;
       }
-      await provision.deletePlugin(user, plugin.name);
+      // Provisioning works on FOLDERS (it created one); the identity only
+      // found the plugin. The whole path below the root, so a nested plugin
+      // is deleted where it is.
+      await provision.deletePlugin(user, folderBelowRoot(plugin.folders[0]));
       pluginIndex.invalidate();
       res.json({ ok: true });
     } catch (err) {
@@ -323,7 +419,7 @@ export function createPluginsRoutes(
         return;
       }
       const catalog = await pluginIndex.catalog();
-      // Case-sensitive, like `pluginOfPath` — the plugin name IS the folder name.
+      // By identity — the manifest name the catalog keys on.
       const plugin = catalog.find((g) => g.name === req.params.name);
       const wsId = pluginsWorkspaceId();
       // Same ANY-folder shape `GET /plugins` resolves with, so a plugin can
@@ -353,8 +449,8 @@ export function createPluginsRoutes(
       // expects.
       const folder = plugin.folders[0];
 
-      const branch = joinBranchFor(email, plugin.name);
-      const existing = openJoinCr(await workflow.listChangeRequestsAuthoredBy(email), email, plugin.name);
+      const branch = joinBranchFor(email, joinKeyOf(plugin));
+      const existing = openJoinCr(await workflow.listChangeRequestsAuthoredBy(email), email, joinKeyOf(plugin));
       if (existing) {
         res.json({ ok: true, number: existing.number });
         return;
@@ -378,14 +474,15 @@ export function createPluginsRoutes(
       );
       if (spliced.changed) {
         await workspaceService.writeFile(ws.id, accessPath, spliced.text);
-        await workflow.commitChanges(ws.id, user, `Request access to ${plugin.name}`);
+        await workflow.commitChanges(ws.id, user, `Request access to ${plugin.displayName}`);
       }
       const detail = await workflow.openChangeRequest(ws.id, user, {
         sourceBranch: branch,
         targetBranch: DEFAULT_BRANCH,
-        title: `Join request: ${plugin.name}`,
+        // People read these: the display name, not the identifier.
+        title: `Join request: ${plugin.displayName}`,
         description:
-          `${user.name} asked to join ${plugin.name}. A manager of the plugin accepts by ` +
+          `${user.name} asked to join ${plugin.displayName}. A manager of the plugin accepts by ` +
           `granting the access this branch proposes; the request closes itself once ` +
           `every proposal has landed.`,
       });
@@ -447,7 +544,7 @@ export function createPluginsRoutes(
       if (!ctx) return;
       const crs = await workflow.listChangeRequests();
       res.json({
-        requests: await joinRequests.list(ctx.plugin.name, ctx.folder, crs, ctx.user),
+        requests: await joinRequests.list(joinKeyOf(ctx.plugin), ctx.folder, crs, ctx.user),
       });
     } catch (err) {
       console.error('[plugins] failed to list join requests:', err);
@@ -477,7 +574,7 @@ export function createPluginsRoutes(
         res.status(404).json({ error: 'Not found' });
         return;
       }
-      res.json({ closed: await joinRequests.reconcile(ctx.plugin.name, ctx.folder, cr, ctx.user) });
+      res.json({ closed: await joinRequests.reconcile(joinKeyOf(ctx.plugin), ctx.folder, cr, ctx.user) });
     } catch (err) {
       console.error('[plugins] failed to reconcile a join request:', err);
       res.status(500).json({ error: 'Failed to update the request' });

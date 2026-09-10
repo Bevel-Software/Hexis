@@ -12,6 +12,7 @@ import {
   reservedRootDirNames,
   validateKbLayout,
   validateKbRootName,
+  normalizeSkillRoot,
 } from '@bevel-software/platform-shared';
 
 /**
@@ -37,7 +38,23 @@ describe('KB layout — validation', () => {
     expect(validateKbRootName('.git')).not.toBeNull();
     expect(validateKbRootName('.hidden')).not.toBeNull();
     expect(validateKbRootName('bad\nname')).not.toBeNull();
+    // The same rule every file and folder name passes: reserved Windows
+    // names, forbidden characters, trailing dots and spaces.
+    expect(validateKbRootName('CON')).not.toBeNull();
+    expect(validateKbRootName('a\u007fb')).not.toBeNull();
+    expect(validateKbRootName('a:b')).not.toBeNull();
+    expect(validateKbRootName('name.')).not.toBeNull();
+    expect(validateKbRootName('x'.repeat(300))).not.toBeNull();
     expect(validateKbRootName('Skills')).toBeNull();
+    expect(validateKbRootName('My Skills')).toBeNull();
+  });
+
+  test('a skill root forgives trailing slashes only — an empty segment inside is malformed', () => {
+    expect(normalizeSkillRoot('Skills/Eng/deploy/')).toBe('Skills/Eng/deploy');
+    expect(normalizeSkillRoot('Skills/Eng/deploy//')).toBe('Skills/Eng/deploy');
+    expect(normalizeSkillRoot('Skills//deploy')).toBeNull();
+    expect(normalizeSkillRoot('Skills/./deploy')).toBeNull();
+    expect(normalizeSkillRoot('/Skills/deploy')).toBeNull();
   });
 
   test('refuses a configurable root that takes a fixed reserved name', () => {

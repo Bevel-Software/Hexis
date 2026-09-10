@@ -4,6 +4,8 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
+import { isAbsence } from '../../shared/fs-errors.js';
+import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -13,7 +15,9 @@ import type {
   GrantSources,
   ResolvedPrincipal,
 } from './access-control.interface.js';
-import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginFolder } from '@bevel-software/platform-shared';
+import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
+  pluginIdentityOf,
+} from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
@@ -156,15 +160,9 @@ function roleKnown(roles: RolesIndex, canonicalRole: string): boolean {
  * nothing, bare grant tokens fall through to roles, and group-backed denies
  * drop (the owner's explicit degrade-loudly decision, NOT fail-closed). The
  * marker is carried on the loaded model and surfaced by the groups admin
- * endpoints so the Groups page can banner it.
+ * endpoints so the Groups & Members page can banner it.
  */
 export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: string };
-
-/** True for the errno codes that mean "the file genuinely is not there". */
-function isAbsenceError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException | null)?.code;
-  return code === 'ENOENT' || code === 'ENOTDIR';
-}
 
 /**
  * Load the ACTIVE group source through `read` (working tree or at-ref — the
@@ -203,7 +201,7 @@ export async function loadActiveGroups(
     // subprocess. roles.yaml and access.md already fail the build closed on
     // the same error; groups cannot be the one input that does not.
     if (err instanceof AccessUnreadableError) throw err;
-    if (isAbsenceError(err)) {
+    if (isAbsence(err)) {
       syncedText = null;
     } else {
       // A non-absence read error on the SYNCED source must NOT fall back to
@@ -222,7 +220,7 @@ export async function loadActiveGroups(
       text = await read(GROUPS_YAML);
     } catch (err) {
       if (err instanceof AccessUnreadableError) throw err; // see above
-      if (isAbsenceError(err)) text = null;
+      if (isAbsence(err)) text = null;
       else return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
     }
   }
@@ -255,12 +253,22 @@ export type ScopeSource = { kind: 'own' } | { kind: 'access-md'; path: string };
  * already folded in (grant-only — see `buildScope`), so `byRole`/`byEmail`
  * hold the *effective* verdict each named principal gets at this one scope.
  *
+ * `byRole` and `byEmail` hold FILE-BACKED entries only — every key is a
+ * token some line in the file spells, which is what makes them the source
+ * of "what can be removed here" (`grantSources`). `everyone` is the one
+ * DERIVED verdict: what an unnamed signed-in caller gets at this scope. It
+ * is the literal `everyone` entry's state, promoted to a grant when the
+ * scope grants a PUBLIC plugin principal (one whose plugin admits everyone,
+ * so everyone holds it). Kept apart from `byRole` on purpose: a synthetic
+ * `everyone` key there would read as a line to revoke that no file has.
+ *
  * `source` identifies the file the scope's rules come from (see `ScopeSource`),
  * so a caller can map a per-scope verdict back to the editable file.
  */
 interface AccessScope {
   byRole: Map<string, GrantState>;
   byEmail: Map<string, GrantState>;
+  everyone: GrantState | undefined;
   source: ScopeSource;
 }
 
@@ -275,6 +283,67 @@ interface AccessScope {
  * `hasPermissionResolved`). `collapseScopes` flattens this into the
  * closest-wins-per-principal view the display helpers use.
  */
+/**
+ * The rules listener on the one walk of the checkout: every `access.md` at
+ * any depth (the access tree is structure-agnostic — the root's included),
+ * plus every plugin manifest under the plugins root, for principal
+ * synthesis. A reader: a folder the walk could not list is simply not in
+ * the model (a writer that needs completeness asks the walk for its holes).
+ *
+ * Per-file failures (malformed YAML, bad role refs, unknown verbs) are
+ * logged and the offending file is dropped from the model — they do NOT
+ * throw. A typo in one nested access.md must not 500 the entire editor;
+ * admins can still write `access.md` / `roles.yaml` because
+ * `hasPermissionResolved` admin-rescues those paths, so the bad config
+ * remains fixable from inside the app.
+ */
+function accessFileListener(
+  repoDir: string,
+  out: Map<string, AccessFile>,
+  pluginDirs: Map<string, string>,
+): KbWalkListener {
+  return {
+    async onFile(dir, name) {
+      const rel = dir ? `${dir}/${name}` : name;
+      if (name === PLUGIN_MANIFEST_FILE && dir.startsWith(`${PLUGINS_DIR}/`)) {
+        const text = await fs.readFile(path.join(repoDir, rel), 'utf-8').catch(() => null);
+        pluginDirs.set(dir, pluginIdentityOf(parseManifestText(text), path.posix.basename(dir)));
+        return;
+      }
+      if (name !== 'access.md') return;
+      const text = await fs.readFile(path.join(repoDir, rel), 'utf-8');
+      const parsed = parseAccessFile(text, rel);
+      if (!parsed.ok) {
+        // Treat as if the file didn't exist for resolution purposes.
+        // Admin-rescue on access.md paths still lets an admin fix it.
+        for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
+        return;
+      }
+      for (const w of parsed.warnings) console.warn(`[access] ${w}`);
+      if (out.has(parsed.file.dir)) {
+        console.warn(
+          `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
+        );
+        return;
+      }
+      out.set(parsed.file.dir, parsed.file);
+    },
+  };
+}
+
+/** A manifest's parsed object, or null for absent, unparsable or not-an-object text. */
+function parseManifestText(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveScopes(
   model: AccessModel,
   verb: Verb,
@@ -313,7 +382,29 @@ function resolveScopes(
         set(entry, 'grant');
       }
     }
-    return { byRole, byEmail, source };
+    // The anonymous caller's verdict at this scope — what someone who holds
+    // exactly the PUBLIC keys (a plugin principal whose plugin admits
+    // everyone, so everyone holds it) resolves to, by the same tiers a named
+    // caller gets: a grant via any public key wins, else a denial via one
+    // denies, else the built-in `everyone` entry decides. Derived HERE, where
+    // a scope's verdicts are built, so every reader of it — the permission
+    // check, the eligible lists, the `restricted` flag, the compiler's
+    // everyone audience — sees one truth; and derived into its own field,
+    // never into `byRole`, so the entries a person can remove stay exactly
+    // the lines the files hold.
+    let publicGrant = false;
+    let publicDeny = false;
+    for (const [key, state] of byRole) {
+      if (!model.roles.publicKeys?.has(key)) continue;
+      if (state === 'grant') publicGrant = true;
+      else if (state === 'denied') publicDeny = true;
+    }
+    const everyone: GrantState | undefined = publicGrant
+      ? 'grant'
+      : publicDeny
+        ? 'denied'
+        : byRole.get(EVERYONE_CANONICAL);
+    return { byRole, byEmail, everyone, source };
   };
 
   const scopes: AccessScope[] = [];
@@ -330,7 +421,7 @@ function resolveScopes(
 
 /** The collapsed closest-wins view: per-principal verdicts with no single
  * source (it's a flattening across scopes). */
-type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail'>;
+type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail' | 'everyone'>;
 
 /**
  * Flatten ordered scopes (closest→farthest) into a single closest-wins
@@ -341,11 +432,13 @@ type CollapsedScope = Pick<AccessScope, 'byRole' | 'byEmail'>;
 function collapseScopes(scopes: AccessScope[]): CollapsedScope {
   const byRole = new Map<string, GrantState>();
   const byEmail = new Map<string, GrantState>();
+  let everyone: GrantState | undefined;
   for (let i = scopes.length - 1; i >= 0; i--) {
     for (const [k, v] of scopes[i].byRole) byRole.set(k, v);
     for (const [k, v] of scopes[i].byEmail) byEmail.set(k, v);
+    if (scopes[i].everyone !== undefined) everyone = scopes[i].everyone;
   }
-  return { byRole, byEmail };
+  return { byRole, byEmail, everyone };
 }
 
 function resolveAtPath(
@@ -368,6 +461,69 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
   const pub = model.roles.publicKeys;
   if (!pub?.size) return own;
   return new Set([...(own ?? []), ...pub]);
+}
+
+/**
+ * Every principal key that being in `group` confers — the group's OWN key,
+ * the roles that list the group (`group:<Name>` in roles.yaml), the plugin
+ * principals whose roster admits the group directly or through one of those
+ * roles, and the public keys every caller holds. This is the group-shaped
+ * twin of `principalKeysOf`: a member's key set minus everything they hold
+ * for reasons of their own. `null` when no group of that name exists.
+ *
+ * Groups are keyed by their bare canonical name (`mergeGroupsIntoRoles`);
+ * roles by `role/<name>`. A bare key whose record is a ROLE is not a group,
+ * however it was spelled.
+ */
+function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | null {
+  const canonical = canonicalRoleName(group);
+  const record = model.roles.byCanonical.get(canonical);
+  if (!record || record.kind !== 'group') return null;
+  const keys = new Set<string>([canonical]);
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind === 'role' && principal.groupRefs?.has(canonical)) keys.add(key);
+  }
+  // Plugin principals were expanded from role/group entries; a plugin that
+  // admits the group, or a role the group is folded into, admits the group.
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (keys.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
+/**
+ * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
+ * of principal KEYS with no person behind them — no direct-email tier, no
+ * admin rescue, no machine-owned rule. Closest scope first; within a scope a
+ * grant to any key wins over a denial to another, exactly as for a person.
+ */
+function hasPermissionForKeys(
+  model: AccessModel,
+  verb: Verb,
+  keys: ReadonlySet<string>,
+  relativePath: string,
+  fileOwn?: OwnEntries | null,
+): boolean {
+  for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
+    let grant = false;
+    let deny = false;
+    for (const key of keys) {
+      const state = scope.byRole.get(key);
+      if (state === 'denied') deny = true;
+      else if (state === 'grant') grant = true;
+    }
+    if (grant) return true;
+    if (deny) return false;
+    if (scope.everyone) return scope.everyone === 'grant';
+  }
+  return false;
 }
 
 function isAdminEmail(model: AccessModel, email: string): boolean {
@@ -449,9 +605,9 @@ function hasPermissionResolved(
       if (deny) return false;
     }
 
-    // Tier 3 — the built-in `everyone` role.
-    const everyone = scope.byRole.get(EVERYONE_CANONICAL);
-    if (everyone) return everyone === 'grant';
+    // Tier 3 — the built-in `everyone` role (derived: a public plugin
+    // principal granted here counts, see `AccessScope.everyone`).
+    if (scope.everyone) return scope.everyone === 'grant';
 
     // No verdict at this scope — fall through to the next (farther) one.
   }
@@ -615,11 +771,11 @@ function canEveryoneReadResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
-  const { byRole, byEmail } = resolveAtPath(model, 'read', relativePath, fileOwn);
+  const { byEmail, everyone } = resolveAtPath(model, 'read', relativePath, fileOwn);
   // Baseline: an unnamed signed-in user (no email/role entries) reads only via
   // `everyone`. As a single principal, its collapsed verdict is its closest —
   // exactly what that user resolves to.
-  if (byRole.get(EVERYONE_CANONICAL) !== 'grant') return false;
+  if (everyone !== 'grant') return false;
   // Every *named* principal must also still read. A collapsed deny may have
   // been shadowed by a closer-scope `everyone` grant, so re-resolve each
   // candidate through the closeness-first gate rather than trusting the
@@ -660,7 +816,7 @@ function eligibleHoldersResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): { principals: ResolvedPrincipal[]; roles: string[]; users: { name: string; email: string }[] } {
-  const { byRole, byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
+  const { byRole, byEmail, everyone } = resolveAtPath(model, verb, relativePath, fileOwn);
 
   // (kind, display name) → one entry. The `byRole` keys are the merged
   // index's canonical tokens exactly as granted (bare, or the
@@ -683,6 +839,11 @@ function eligibleHoldersResolved(
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
   }
+  // The derived everyone verdict: a public plugin principal granted here
+  // means anyone signed in holds the verb, and a list that counts holders (an
+  // approval gate, a "restricted to" banner) must say so — as `everyone`, the
+  // same row a literal grant produces.
+  if (everyone === 'grant') addPrincipal(EVERYONE_CANONICAL, 'role');
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
   // `roles.yaml` and on any `access.md` is granted to Admin even if the
@@ -886,7 +1047,30 @@ export class AccessControlService implements IAccessControl {
   invalidate(workspaceId: string): void {
     this.cache.delete(workspaceId);
     this.ownEntriesCache.delete(workspaceId);
+    this.generation++;
   }
+
+  /**
+   * Bumped by every `invalidate()`, for any workspace. A model load reads the
+   * tree across many awaits, and an invalidation fires exactly when that tree
+   * changes underneath it: the load that started on the old tree would
+   * otherwise store its model AFTER the drop, and every read for the next TTL
+   * would resolve against a tree that is already gone. `loadModel` takes the
+   * generation before its first read and refuses to store a model fetched
+   * under an older one — the caller that started it still gets its answer,
+   * as old as the moment it started, and the next caller reloads.
+   *
+   * ONE counter, not one per workspace: a per-workspace map would keep an
+   * entry for every branch workspace the process ever loaded, with nothing to
+   * tell it when a workspace is gone. The price of sharing is that a drop on
+   * some other workspace, landing mid-load, costs this one a single reload —
+   * a load is tens of milliseconds and a drop is a commit, so that is rare
+   * and cheap, and it never stores a wrong model. (The own-entries memo needs
+   * no token: it is keyed by the map object a reader took BEFORE its disk
+   * read, and `invalidate()` replaces the map, so a late store lands in an
+   * orphan nobody consults.)
+   */
+  private generation = 0;
 
   /** Memoized `readOwnEntries` for the batch paths; see `ownEntriesCache`. */
   private async cachedOwnEntries(
@@ -955,6 +1139,25 @@ export class AccessControlService implements IAccessControl {
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, canReadResolved(model, userEmail, p, owns[i]));
+    });
+    return result;
+  }
+
+  async canReadAsGroupBatch(
+    workspaceId: string,
+    group: string,
+    relativePaths: string[],
+  ): Promise<Map<string, boolean> | null> {
+    const model = await this.loadModel(workspaceId);
+    const keys = principalKeysOfGroup(model, group);
+    if (keys === null) return null;
+    const repoDir = await this.repoDir(workspaceId);
+    // The same per-path own-entries `canReadBatch` folds in: a file's own
+    // frontmatter rules are part of the walk for a group as for a person.
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      result.set(p, hasPermissionForKeys(model, 'read', keys, p, owns[i]));
     });
     return result;
   }
@@ -1046,17 +1249,30 @@ export class AccessControlService implements IAccessControl {
     principals: ResolvedPrincipal[];
     roles: string[];
     users: { name: string; email: string }[];
+    publicVia: string[];
   }> {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
-    // When `read: everyone` applies cleanly, the node is readable by all users
-    // and the role/user lists are meaningless. Otherwise return the explicit
-    // reader set; it may be empty for a default-denied path with no grants.
-    if (canEveryoneReadResolved(model, relativePath, own)) {
-      return { restricted: false, principals: [], roles: [], users: [] };
-    }
+    // `restricted` is the verdict — whether `read: everyone` applies cleanly —
+    // and the lists are the GRANTS that exist regardless: on a public node
+    // they name what makes it public (`everyone`, and a public plugin
+    // principal whose grant is the one to remove), so the share dialog can
+    // show that grant as a row. Consumers that only want to know whether the
+    // node is public read the flag; the lists may be empty for a
+    // default-denied path with no grants.
     const { principals, roles, users } = eligibleHoldersResolved(model, 'read', relativePath, own);
-    return { restricted: true, principals, roles, users };
+    // WHY it is public, when it is: the public plugin principals granted read
+    // here — the one thing the dialog cannot tell from the lists alone (a
+    // plugin principal in them may or may not be public), so the resolver,
+    // which knows, says it. A literal `everyone` line shows up as a source
+    // of the `everyone` row instead; together the two answer "what remains
+    // public after this grant is removed".
+    const collapsed = resolveAtPath(model, 'read', relativePath, own);
+    const publicVia = [...collapsed.byRole]
+      .filter(([key, state]) => state === 'grant' && model.roles.publicKeys?.has(key))
+      .map(([key]) => key)
+      .sort();
+    return { restricted: !canEveryoneReadResolved(model, relativePath, own), principals, roles, users, publicVia };
   }
 
   async eligibleDownloaders(
@@ -1143,20 +1359,21 @@ export class AccessControlService implements IAccessControl {
     // direct-access.md edit).
     const roles = [EVERYONE_DISPLAY];
     const groups: string[] = [];
-    // Plugins = the FOLDER names behind the synthesised `plugin/<Name>/<verb>`
-    // principals, once each (three keys share a folder). Personal folders are
-    // plugins to the resolver but not to a person picking a grantee.
+    // Plugins = the identities behind the synthesised `plugin/<name>/<verb>`
+    // principals, once each (three keys share a folder). Personal shelves are
+    // plugins to the resolver but not to a person picking a grantee — told
+    // apart by their FOLDER (the one structural rule), never by their name.
     const plugins = new Map<string, string>();
     for (const [key, principal] of model.roles.byCanonical) {
       if (key.startsWith(ROLE_TOKEN_PREFIX)) roles.push(principal.displayName);
       else if (principal.kind === 'group') groups.push(principal.displayName);
       else if (
         principal.kind === 'plugin' &&
-        principal.pluginFolder &&
+        principal.pluginName &&
         principal.pluginDir &&
-        !isPersonalPluginFolder(principal.pluginFolder)
+        !isPersonalPluginDir(principal.pluginDir)
       ) {
-        plugins.set(principal.pluginFolder, principal.pluginDir);
+        plugins.set(principal.pluginName, principal.pluginDir);
       }
     }
     // People = roles.yaml member emails (name-less) ∪ access.md `Name <email>`
@@ -1384,6 +1601,8 @@ export class AccessControlService implements IAccessControl {
     if (cached && Date.now() - cached.loadedAt < AccessControlService.CACHE_TTL_MS) {
       return cached.model;
     }
+    // Taken before the first read; see `generation`.
+    const generation = this.generation;
 
     const repoDir = await this.repoDir(workspaceId);
 
@@ -1441,8 +1660,8 @@ export class AccessControlService implements IAccessControl {
     // must not 500 the entire editor; admins can still write `access.md`
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
-    const pluginDirs = new Set<string>();
-    await this.collectAccessFiles(repoDir, '', accessFiles, pluginDirs);
+    const pluginDirs = new Map<string, string>();
+    await walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
     // folder's own access.md — a plugin being a folder with a manifest, at
@@ -1475,59 +1694,12 @@ export class AccessControlService implements IAccessControl {
       groupsHealth: activeGroups.health,
       deploymentOwners: this.deploymentOwners,
     };
-    this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+    // An invalidation landed mid-load: this model describes a tree that is
+    // already gone, so it is returned to this caller but never stored.
+    if (this.generation === generation) {
+      this.cache.set(workspaceId, { model, loadedAt: Date.now() });
+    }
     return model;
-  }
-
-  private async collectAccessFiles(
-    absDir: string,
-    relDir: string,
-    out: Map<string, AccessFile>,
-    /** Folders under the plugins root carrying a manifest — the plugins, for principal synthesis. */
-    pluginDirs?: Set<string>,
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      // Skip VCS metadata + vendored deps. Hidden dirs (`.git`, `.vscode`,
-      // etc.) and `node_modules` can't host KB rules and are often huge —
-      // walking them would slow every cache miss without benefit.
-      if (entry.name.startsWith('.')) continue;
-      if (entry.name === 'node_modules') continue;
-      const abs = path.join(absDir, entry.name);
-      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await this.collectAccessFiles(abs, rel, out, pluginDirs);
-      } else if (
-        pluginDirs &&
-        entry.isFile() &&
-        entry.name === PLUGIN_MANIFEST_FILE &&
-        relDir.startsWith(`${PLUGINS_DIR}/`)
-      ) {
-        pluginDirs.add(relDir);
-      } else if (entry.isFile() && entry.name === 'access.md') {
-        const text = await fs.readFile(abs, 'utf-8');
-        const parsed = parseAccessFile(text, rel);
-        if (!parsed.ok) {
-          // Treat as if the file didn't exist for resolution purposes.
-          // Admin-rescue on access.md paths still lets an admin fix it.
-          for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
-          continue;
-        }
-        for (const w of parsed.warnings) console.warn(`[access] ${w}`);
-        if (out.has(parsed.file.dir)) {
-          console.warn(
-            `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
-          );
-          continue;
-        }
-        out.set(parsed.file.dir, parsed.file);
-      }
-    }
   }
 
   private async repoDir(workspaceId: string): Promise<string> {
@@ -1854,9 +2026,15 @@ export class AccessControlService implements IAccessControl {
     }
 
     // Mirror `loadModel`: plugin principals from the plugins the ref carries,
-    // so a PR-time verdict on a skill granted to `plugin/<Name>/write` counts
-    // the plugin's writers exactly as the working tree would.
-    synthesizePluginPrincipals(rolesParsed.index, accessFiles, new Set(listed.pluginDirs));
+    // each under the identity its manifest AT THAT REF declares, so a PR-time
+    // verdict on a skill granted to `plugin/<name>/write` counts the plugin's
+    // writers exactly as the working tree would.
+    const pluginIdentities = new Map<string, string>();
+    for (const dir of listed.pluginDirs) {
+      const manifest = parseManifestText(await read(`${dir}/${PLUGIN_MANIFEST_FILE}`));
+      pluginIdentities.set(dir, pluginIdentityOf(manifest, path.posix.basename(dir)));
+    }
+    synthesizePluginPrincipals(rolesParsed.index, accessFiles, pluginIdentities);
 
     // Mirror `loadModel`: drop entries whose role ref is unknown to roles.yaml,
     // while preserving the built-in `everyone` role.

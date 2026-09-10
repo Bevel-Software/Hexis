@@ -17,7 +17,7 @@ import { readFileOnBranch } from '../services/change-requests.api';
 import { changeAuthorName } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
-import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
+import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
@@ -178,13 +178,60 @@ export function ChangeRequestDialog({
   }, [selected, selectedIsBinary, cr.branch]);
 
   const isAdded = addedFiles.includes(selected);
+
+  /**
+   * A MOVED file's other side lives under its OLD name.
+   *
+   * The selection is the path on the change request's branch. For a rename
+   * that is a path the default branch has never had, so reading it there 404s
+   * — and the pane, which could only tell a failed read from a slow one by
+   * waiting, sat on "Loading…" for as long as anyone cared to watch. The
+   * before-side of a move is the file at `previousPath`; diffing that against
+   * the new path is what makes a rename-with-edits read as the edit it is,
+   * and a pure move read as no change at all.
+   */
+  const move = useMemo(() => {
+    const f = (detail?.files ?? []).find((x) => x.path === selected);
+    if (f?.status !== 'renamed') return null;
+    // `previousPath` is what GitHub populates for a rename; a rename that
+    // arrives without one is a move whose before-side we simply cannot name.
+    return { from: f.previousPath && f.previousPath !== f.path ? f.previousPath : null };
+  }, [detail, selected]);
+  const movedFrom = move?.from ?? null;
+  /** A rename described without a `previousPath` — no before-side to read. */
+  const renameWithoutOldPath = move !== null && move.from === null;
+
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  const mainRaw = useDefaultBranchFile(
-    isAdded || !selected || selectedIsBinary ? null : selected,
+  const mainRead = useDefaultBranchFileRead(
+    isAdded || renameWithoutOldPath || !selected || selectedIsBinary
+      ? null
+      : (movedFrom ?? selected),
   );
+  const mainRaw = mainRead.content;
   const branchRaw = branchContents[selected] ?? null;
+
+  /**
+   * The default-branch side is definitively gone — the read settled as an
+   * error, or a rename arrived with no old path to read at all.
+   *
+   * Gated on `detail`, because until it lands we do not yet know whether the
+   * selection is an ADDED file (whose absence from the default branch is
+   * expected and correct) or a moved one (whose old path we would then read
+   * instead). Announcing a failure inside that window would flash a wrong
+   * sentence at every reader of every new file.
+   */
+  const mainMissing = detail !== null && (renameWithoutOldPath || mainRead.failed);
+  const isRename = move !== null;
+  /**
+   * A move we cannot show the before-side of. Review does not stop for it: the
+   * pane says the old path could not be read and shows the file's NEW content,
+   * unmarked and labelled as such, which is still the thing being proposed.
+   */
+  const oldPathUnreadable = isRename && mainMissing;
+  /** Any other file whose default-branch copy could not be read. */
+  const baseUnreadable = !isRename && mainMissing;
 
   /**
    * BOTH sides or nothing.
@@ -221,6 +268,17 @@ export function ChangeRequestDialog({
     [selectedIsMarkdown, bothSidesIn, selected, isAdded, mainRaw, branchRaw],
   );
   const touchesSelected = changedFiles.has(selected);
+
+  /**
+   * The unmarked reading — the file itself, when there is no honest diff.
+   *
+   * Two cases reach it: a file this request doesn't touch (nothing to mark),
+   * and a move whose before-side could not be read (nothing to mark it
+   * AGAINST, but the proposed content is still worth reading). Anything else
+   * gets `null` and falls through to the diff.
+   */
+  const readsUnmarked = !selectedIsMarkdown && detail !== null && !touchesSelected;
+  const rawFallback = oldPathUnreadable ? branchRaw : readsUnmarked ? (mainRaw ?? branchRaw) : null;
 
   /** Per-file approval verdicts, straight from the detail. */
   const approvalByPath = useMemo(
@@ -519,6 +577,22 @@ export function ChangeRequestDialog({
                     : ' · not touched by this request'}
               </span>
             </div>
+            {/* The move, named. A rename's diff is otherwise unexplainable —
+                either it reads as an ordinary edit to a file that isn't there
+                under that name, or (a pure move) as no change at all. Sits
+                above the pane so it covers the rendered-markdown reading and
+                the marked-source one alike. */}
+            {movedFrom && (
+              <p className="truncate pb-1 font-mono text-meta text-ink-faint">
+                Moved: {movedFrom} → {selected}
+              </p>
+            )}
+            {oldPathUnreadable && (
+              <p className="pb-1 text-meta text-ink-faint">
+                The old path couldn't be read, so there is nothing to mark this against —
+                showing the file's new content as it stands on the change request.
+              </p>
+            )}
             {verbError && (
               <Banner tone="danger" role="alert" className="mb-2">
                 {verbError}
@@ -553,16 +627,26 @@ export function ChangeRequestDialog({
                 // destinations) applies here as it does in the document view.
                 // Navigating away from a modal mid-review would also lose the
                 // review context, so inert is the better default regardless.
+                //
+                // Images are named, not fetched, for the same reason: the
+                // bytes on the checked-out tree are not the request's, and a
+                // screenshot the request adds is not there at all (`?ref=` in
+                // TODOS.md).
                 <MarkdownDiffViewer payload={mdPayload} />
               ) : (
               <MarkedFile
                 diff={diff}
-                raw={
-                  !selectedIsMarkdown && detail !== null && !touchesSelected
-                    ? (mainRaw ?? branchRaw)
-                    : null
+                raw={rawFallback}
+                unreadable={
+                  // A failure only gets the last word when there is nothing
+                  // left to show: a file this request doesn't touch reads
+                  // fine from whichever copy arrived.
+                  unreadable.has(selected)
+                    ? 'branch'
+                    : baseUnreadable && !readsUnmarked
+                      ? 'base'
+                      : undefined
                 }
-                unreadable={unreadable.has(selected)}
               />
               )}
             </div>
@@ -673,13 +757,14 @@ function MarkedFile({
 }: {
   diff: DiffLine[] | null;
   raw: string | null;
-  unreadable?: boolean;
+  /** Which side failed to read — the change request's copy, or the default branch's. */
+  unreadable?: 'branch' | 'base';
 }) {
   if (unreadable) {
     return (
       <p className="py-6 text-center text-detail text-ink-faint">
-        This file's copy on the change request couldn't be read, so there is no honest before and
-        after to show.
+        This file's copy on {unreadable === 'branch' ? 'the change request' : 'the current text'}{' '}
+        couldn't be read, so there is no honest before and after to show.
       </p>
     );
   }

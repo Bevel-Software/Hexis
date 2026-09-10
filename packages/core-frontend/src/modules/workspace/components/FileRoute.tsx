@@ -4,8 +4,10 @@ import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
 import { useGit } from '../../git/state/git.context';
 import { readPersistedTabs } from '../utils/tab-persistence';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   NODE_ID_LINK_RE,
+  kbFileUrl,
   kbNodeUrl,
   fetchNodeWorkspacePath,
   fetchNodeId,
@@ -16,11 +18,22 @@ import { FileViewer } from './FileViewer';
 type SyncError =
   | { kind: 'dirty'; current: string; target: string; dirtyFilenames: string[] }
   | { kind: 'file-missing'; path: string }
+  /** The branch itself is gone from the repository (deleted on the host). */
+  | { kind: 'branch-gone'; branch: string }
   | { kind: 'file-denied'; path: string }
   | { kind: 'file-load-failed'; path: string; message: string }
   | null;
 
-export function FileRoute() {
+/**
+ * `canonicalize` (default on): replace a path URL with the node's id URL once
+ * the file is open. OFF when this route is rendered inside the Library frame
+ * (`WorkspaceItemRoute`): an id URL (`/workspace/<branch>/<id>`) is not a
+ * library location, so the replacement would hand an id-bearing file — a
+ * `.tool` behind "Edit the tool file", a note with a frontmatter id — back to
+ * the Knowledge surface, which is exactly the switch that frame exists to
+ * avoid. The path URL stays; the file is the same.
+ */
+export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = {}) {
   const params = useParams<{ branch: string; '*': string }>();
   const navigate = useNavigate();
   const location = useLocation();
@@ -111,7 +124,7 @@ export function FileRoute() {
   // ping-pong; gated on `openFilePath === segment` so the subsequent id→path
   // load reuses the already-open tab instead of racing a second fetch.
   useEffect(() => {
-    if (segmentIsId || !segment || !branchFromUrl) return;
+    if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
     if (openFilePath !== segment) return;
     let cancelled = false;
     (async () => {
@@ -123,7 +136,7 @@ export function FileRoute() {
     return () => {
       cancelled = true;
     };
-  }, [segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 
@@ -201,6 +214,10 @@ export function FileRoute() {
           }
         } catch (err) {
           if (!cancelled) {
+            if (err instanceof WorkspaceApiError && err.status === 410) {
+              setError({ kind: 'branch-gone', branch: branchFromUrl });
+              return;
+            }
             const message = err instanceof Error ? err.message : 'Unknown error';
             setError({ kind: 'file-load-failed', path: pathFromUrl, message });
           }
@@ -221,6 +238,8 @@ export function FileRoute() {
               setError({ kind: 'file-missing', path: pathFromUrl });
             } else if (err instanceof WorkspaceApiError && err.status === 403) {
               setError({ kind: 'file-denied', path: pathFromUrl });
+            } else if (err instanceof WorkspaceApiError && err.status === 410) {
+              setError({ kind: 'branch-gone', branch: branchFromUrl });
             } else {
               const message = err instanceof Error ? err.message : 'Unknown error';
               setError({ kind: 'file-load-failed', path: pathFromUrl, message });
@@ -272,6 +291,8 @@ export function FileRoute() {
         setError({ kind: 'file-missing', path });
       } else if (err instanceof WorkspaceApiError && err.status === 403) {
         setError({ kind: 'file-denied', path });
+      } else if (err instanceof WorkspaceApiError && err.status === 410) {
+        setError({ kind: 'branch-gone', branch: branchFromUrl });
       } else {
         const message = err instanceof Error ? err.message : 'Unknown error';
         setError({ kind: 'file-load-failed', path, message });
@@ -314,6 +335,31 @@ export function FileRoute() {
             </ul>
           </Surface>
         )}
+      </ErrorScreen>
+    );
+  }
+
+  // The branch was deleted on the git host and its clone retired; there is
+  // nothing here to load or to retry. Two ways to learn it: a file read on a
+  // workspace we already had (410 from the read → `error`), or the bootstrap
+  // of the branch itself failing before there was a workspace at all (410
+  // from `GET /workspace` → `bootstrapError`, matched to THIS branch so a
+  // stale failure from a branch we left cannot paint over the current one).
+  const goneBranch =
+    error?.kind === 'branch-gone'
+      ? error.branch
+      : workspace.bootstrapError?.status === 410 && workspace.bootstrapError.branch === branchFromUrl
+        ? branchFromUrl
+        : null;
+  if (goneBranch !== null) {
+    return (
+      <ErrorScreen title="This branch no longer exists">
+        <p className="text-ui text-ink-muted">
+          <span className="font-mono text-ink">{goneBranch}</span> was deleted in the git
+          repository. Anything merged from it lives on{' '}
+          <span className="font-mono text-ink">{DEFAULT_BRANCH}</span>.
+        </p>
+        <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
       </ErrorScreen>
     );
   }

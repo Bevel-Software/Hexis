@@ -13,6 +13,7 @@ export function makeWorkspaceFixture(
     workspaceId: 'ws-1',
     kbDirName: 'knowledge-base',
     fileTree: null,
+    bootstrapError: null,
     openTabs: [],
     activeTab: null,
     dirtyTabFilenames: [],
