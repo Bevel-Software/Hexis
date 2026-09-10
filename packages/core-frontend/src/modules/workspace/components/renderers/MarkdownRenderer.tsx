@@ -6,12 +6,9 @@ import {
   useFileNav,
   useNodeIdNav,
   useCanonicalFileUrl,
-  resolveKbHref,
 } from '../../routing/kb-routes';
 import { useWorkspace } from '../../state/workspace.context';
-import { rawFileUrl } from '../../services/workspace.api';
-import { useImageRevision } from '../../hooks/useImageRevision';
-import type { KbImageResolver } from './kbMarkdownPipeline';
+import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
 
 /** Decode a URL hash (`#some%20slug`) to its bare slug, tolerating bad escapes. */
@@ -165,19 +162,8 @@ export function MarkdownRenderer({
   // bevel_token cookie), and the URL carries the workspace's image revision,
   // which changes when a teammate replaces a file, so an open tab shows the
   // new picture.
-  const { workspaceId, kbDirName } = useWorkspace();
-  const imageRevision = useImageRevision(workspaceId);
-  const resolveImage = useCallback<KbImageResolver>(
-    (src) => {
-      const target = resolveKbHref(src, { basePath: filePath, kbDirName });
-      if (!workspaceId || target?.kind !== 'workspace') return null;
-      return {
-        src: rawFileUrl(workspaceId, target.path, { version: imageRevision }),
-        path: target.path,
-      };
-    },
-    [filePath, kbDirName, workspaceId, imageRevision],
-  );
+  const { workspaceId } = useWorkspace();
+  const resolveImage = useWorkspaceImageResolver(workspaceId, filePath);
 
   const save = useCallback(async (): Promise<boolean> => {
     if (readOnly || value === savedValue) return true;

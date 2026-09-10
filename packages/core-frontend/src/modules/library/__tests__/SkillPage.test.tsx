@@ -247,6 +247,9 @@ function makeFakeBus() {
       };
     },
     setFocus() {},
+    watchWorkspace() {
+      return () => {};
+    },
     emit(e) {
       (handlers[e.kind] ?? []).forEach((h) => h(e));
     },

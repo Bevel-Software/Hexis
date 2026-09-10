@@ -20,13 +20,17 @@ import { useAuth } from '../../../auth/state/auth.context';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { useGit } from '../../../git/state/git.context';
 import { FileHistoryPanel } from '../../../git/components/FileHistoryPanel';
-import { kbFileUrl, resolveKbHref, useNodeIdNav } from '../../../workspace/routing/kb-routes';
-import { useImageRevision } from '../../../workspace/hooks/useImageRevision';
-import type { KbImageResolver } from '../../../workspace/components/renderers/kbMarkdownPipeline';
+import {
+  kbFileUrl,
+  openExternalHref,
+  resolveKbHref,
+  useNodeIdNav,
+} from '../../../workspace/routing/kb-routes';
+import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspaceImageResolver';
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
-import { getOrCreateWorkspace, writeFile, rawFileUrl } from '../../../workspace/services/workspace.api';
+import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
@@ -429,6 +433,12 @@ export function SkillPage({
     (href: string) => {
       if (!fileWorkspacePath) return;
       const target = resolveKbHref(href, { basePath: fileWorkspacePath, kbDirName });
+      // Same rule as `openLink`: the anchor's default was cancelled to get
+      // here, so an external destination has nobody left to open it.
+      if (target?.kind === 'external') {
+        openExternalHref(href);
+        return;
+      }
       if (target?.kind !== 'workspace') return;
       navigate(kbFileUrl(target.branch ?? DEFAULT_BRANCH, target.path) + target.hash);
     },
@@ -443,19 +453,7 @@ export function SkillPage({
    * current when a teammate replaces a screenshot under the same name.
    */
   const skillWorkspaceId = encodeURIComponent(DEFAULT_BRANCH);
-  const imageRevision = useImageRevision(skillWorkspaceId);
-  const resolveImage = useCallback<KbImageResolver>(
-    (src) => {
-      if (!fileWorkspacePath) return null;
-      const target = resolveKbHref(src, { basePath: fileWorkspacePath, kbDirName });
-      if (target?.kind !== 'workspace') return null;
-      return {
-        src: rawFileUrl(skillWorkspaceId, target.path, { version: imageRevision }),
-        path: target.path,
-      };
-    },
-    [fileWorkspacePath, kbDirName, skillWorkspaceId, imageRevision],
-  );
+  const resolveImage = useWorkspaceImageResolver(skillWorkspaceId, fileWorkspacePath);
 
   /**
    * A heading's citation deep-link — the file's KNOWLEDGE URL plus `#slug`,

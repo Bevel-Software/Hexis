@@ -6,12 +6,9 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import {
   useFileNav,
   useNodeIdNav,
-  resolveKbHref,
   stripJunkBeforeKbDir,
 } from '../../workspace/routing/kb-routes';
-import { rawFileUrl } from '../../workspace/services/workspace.api';
-import { useImageRevision } from '../../workspace/hooks/useImageRevision';
-import type { KbImageResolver } from '../../workspace/components/renderers/kbMarkdownPipeline';
+import { useWorkspaceImageResolver } from '../../workspace/hooks/useWorkspaceImageResolver';
 import { pluginOfPath, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
@@ -134,18 +131,7 @@ export function ReviewPanel({ onClose }: { onClose?: () => void }) {
   // unchanged and added sides only; a removed image is named, never fetched.
   // The revision keeps the panel current when the agent replaces a picture
   // while it is open.
-  const imageRevision = useImageRevision(workspaceId);
-  const resolveDiffImage = useCallback<KbImageResolver>(
-    (src) => {
-      const target = resolveKbHref(src, { basePath: diffPath, kbDirName });
-      if (!workspaceId || target?.kind !== 'workspace') return null;
-      return {
-        src: rawFileUrl(workspaceId, target.path, { version: imageRevision }),
-        path: target.path,
-      };
-    },
-    [diffPath, kbDirName, workspaceId, imageRevision],
-  );
+  const resolveDiffImage = useWorkspaceImageResolver(workspaceId, diffPath);
   const [busy, setBusy] = useState(false);
   // `busy` alone is not re-entrant-safe: two rapid clicks (or a click + a
   // keyboard activation of the same button) can both read `busy === false`
