@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -66,9 +66,29 @@ vi.mock('../../pr/services/pr-detail.api', () => ({ fetchPrDetail: apiMock.fetch
 vi.mock('../../pr/services/pr-approvals.api', () => ({ approvePrFile: apiMock.approvePrFile }));
 
 // Keep the markdown pipeline (mermaid etc.) out of this test — the stub renders
-// the raw source so assertions can see the body text.
+// the raw source so assertions can see the body text, plus two probes for the
+// wiring the page hands the view: a click on a percent-encoded link, and what
+// the image resolver answers for a picture beside the file.
 vi.mock('../../workspace/components/renderers/KbMarkdownView', () => ({
-  KbMarkdownView: ({ source }: { source: string }) => <div data-testid="md-view">{source}</div>,
+  KbMarkdownView: ({
+    source,
+    onOpenFile,
+    resolveImage,
+  }: {
+    source: string;
+    onOpenFile: (href: string) => void;
+    resolveImage?: (src: string) => unknown;
+  }) => (
+    <div data-testid="md-view">
+      {source}
+      <button type="button" onClick={() => onOpenFile('Some%20File.md')}>
+        link-probe
+      </button>
+      <span data-testid="image-probe">
+        {JSON.stringify(resolveImage ? resolveImage('./assets/shot.png') : 'no-resolver')}
+      </span>
+    </div>
+  ),
 }));
 
 // The file bar's Edit-or-Propose decision asks the per-file access resolver.
@@ -227,6 +247,9 @@ function makeFakeBus() {
       };
     },
     setFocus() {},
+    watchWorkspace() {
+      return () => {};
+    },
     emit(e) {
       (handlers[e.kind] ?? []).forEach((h) => h(e));
     },
@@ -246,9 +269,16 @@ function renderPage(
   pageProps?: { provisional?: boolean },
   /** Git state — overridden to test what the page does when there is no log. */
   gitValue: GitContextValue = git,
+  /** Workspace state — overridden to test the page before the KB dir is known. */
+  workspaceValue: WorkspaceContextValue = workspace,
 ) {
   libraryMock.value = { ...libraryValue(owned, crs, mine), ...library };
-  return render(harness(bus, gitValue, routerState, pageProps));
+  return render(harness(bus, gitValue, routerState, pageProps, workspaceValue));
+}
+
+/** Where a link out of the page took the router: the Knowledge app's path. */
+function NavigatedTo() {
+  return <div data-testid="navigated-to">{useLocation().pathname}</div>;
 }
 
 /**
@@ -286,6 +316,7 @@ function harness(
   gitValue: GitContextValue,
   routerState?: Record<string, unknown>,
   pageProps?: { provisional?: boolean },
+  workspaceValue: WorkspaceContextValue = workspace,
 ) {
   return (
     <MemoryRouter
@@ -294,7 +325,7 @@ function harness(
       ]}
     >
       <AuthContext.Provider value={auth}>
-        <WorkspaceContext.Provider value={workspace}>
+        <WorkspaceContext.Provider value={workspaceValue}>
           <GitContext.Provider value={gitValue}>
           <EventBusContext.Provider value={bus}>
             {/* The real toast provider: the success message IS the page's
@@ -306,6 +337,7 @@ function harness(
                   path="/skills-and-tools/skills/:name"
                   element={<SkillPage {...(pageProps ?? {})} />}
                 />
+                <Route path="/workspace/*" element={<NavigatedTo />} />
               </Routes>
             </LibraryToastProvider>
           </EventBusContext.Provider>
@@ -1310,5 +1342,44 @@ describe('SkillPage: deciding on a change', () => {
       expect(await screen.findByRole('heading', { name: 'newsletter' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Version history' })).toBeNull();
     });
+  });
+});
+
+/**
+ * Links and images in the rendered file. The view is stubbed above, so its
+ * probes stand in for a click on a link and for the pipeline's `<img>`; what
+ * is under test is what the PAGE hands the view.
+ */
+describe('SkillPage: links and images in the file', () => {
+  it('opens a percent-encoded link as the file it names, on the default branch', async () => {
+    // The drift this fixes: the page used to resolve the href undecoded, so a
+    // link written `Some File.md` opened `Some%20File.md`, a file that is not there.
+    renderPage(false);
+    await settled();
+    fireEvent.click(screen.getByRole('button', { name: 'link-probe' }));
+    const target = await screen.findByTestId('navigated-to');
+    expect(target.textContent).toMatch(
+      new RegExp(
+        `^/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/knowledge-base/Skills/newsletter/Some(%20| )File\\.md$`,
+      ),
+    );
+  });
+
+  it("serves a relative image from the default branch's workspace, under the skill folder", async () => {
+    renderPage(false);
+    await settled();
+    expect(JSON.parse(screen.getByTestId('image-probe').textContent ?? 'null')).toEqual({
+      src: `/api/workspace/${encodeURIComponent(DEFAULT_BRANCH)}/file/raw?path=knowledge-base%2FSkills%2Fnewsletter%2Fassets%2Fshot.png`,
+      path: 'knowledge-base/Skills/newsletter/assets/shot.png',
+    });
+  });
+
+  it('hands the view no resolver before the workspace has named its KB dir', async () => {
+    renderPage(false, [], [], makeFakeBus(), undefined, undefined, undefined, git, {
+      workspaceId: 'target-company-state',
+      kbDirName: null,
+    } as unknown as WorkspaceContextValue);
+    await settled();
+    expect(screen.getByTestId('image-probe').textContent).toBe('"no-resolver"');
   });
 });

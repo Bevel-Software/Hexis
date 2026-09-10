@@ -64,3 +64,15 @@ describe('DocxRenderer', () => {
     expect(container.querySelector('a')!.getAttribute('href')).toBe('https://example.com');
   });
 });
+
+/** The URL the viewer asks for is the raw file route, built by `rawFileUrl`. */
+describe('DocxRenderer fetch', () => {
+  it('asks the raw file route for exactly this file', async () => {
+    mammothMock.convertToHtml.mockResolvedValue({ value: '<p>body</p>' });
+    renderDocx();
+    await waitFor(() => expect(apiMock.authFetch).toHaveBeenCalled());
+    expect(apiMock.authFetch.mock.calls[0][0]).toBe(
+      '/api/workspace/ws-1/file/raw?path=Inbox%2Freport.docx',
+    );
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import {
@@ -241,5 +241,20 @@ describe('XlsxRenderer truncation', () => {
 
     expect(await screen.findByText('only cell')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Download/ })).toBeInTheDocument();
+  });
+});
+
+/** The URL the viewer asks for is the raw file route, built by `rawFileUrl`. */
+describe('XlsxRenderer fetch', () => {
+  it('asks the raw file route for exactly this file', async () => {
+    apiMock.authFetch.mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => workbookBytes([['id'], ['r1']]),
+    });
+    renderXlsx();
+    await waitFor(() => expect(apiMock.authFetch).toHaveBeenCalled());
+    expect(apiMock.authFetch.mock.calls[0][0]).toBe(
+      '/api/workspace/ws-1/file/raw?path=Data%2Fbook.xlsx',
+    );
   });
 });

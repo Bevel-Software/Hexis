@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useWorkspace } from '../../state/workspace.context';
 import { authFetch } from '../../../../lib/api';
+import { rawFileUrl } from '../../services/workspace.api';
 import type { FileRendererProps } from './types';
 
 export function ImageRenderer({ filePath }: FileRendererProps) {
@@ -12,9 +13,7 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
 
     let revoked = false;
     (async () => {
-      const res = await authFetch(
-        `/api/workspace/${workspaceId}/file/raw?path=${encodeURIComponent(filePath)}`,
-      );
+      const res = await authFetch(rawFileUrl(workspaceId, filePath));
       if (!res.ok || revoked) return;
       const blob = await res.blob();
       if (revoked) return;

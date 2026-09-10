@@ -107,8 +107,8 @@ describe('registerCatalogCacheInvalidation', () => {
         sessionId: 's1',
         userId: 'u1',
         // `fs-tree-changed` is workspace-scoped, so a session only receives
-        // it while focused on that workspace.
-        getFocusedWorkspaceId: () => 'ws',
+        // it while watching that workspace.
+        getFocusedWorkspaceIds: () => ['ws'],
         // The browser reloads the library off this event; if the caches were
         // still warm here, the reload would re-read the stale catalog.
         push: () => seenAtPush.push(drops()),

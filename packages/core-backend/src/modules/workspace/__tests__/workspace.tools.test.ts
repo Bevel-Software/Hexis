@@ -873,6 +873,17 @@ describe('office documents and PDFs', () => {
       expect(def!.description, name).toContain('uploading a new version');
     }
   });
+
+  it('the page-writing tools say where images go, so an agent writes the link a page will render', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'write_files']) {
+      const def = tools.find((t) => t.name === name);
+      expect(def, name).toBeDefined();
+      expect(def!.description, name).toContain('`assets/` folder next to the page');
+      expect(def!.description, name).toContain('![Approval screen](./assets/approval-screen.png)');
+    }
+  });
 });
 
 /**

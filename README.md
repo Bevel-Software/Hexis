@@ -51,6 +51,7 @@ mid-task can suggest the fix, and a person decides whether it lands.
 - [Try the live demo](#try-it-first-the-live-demo)
 - [Managed hosting](#want-a-managed-instance)
 - [Deploy with Docker](#deploy-it-in-5-minutes-docker)
+- [Links and images in knowledge pages](#links-and-images-in-knowledge-pages)
 - [Local development](#local-development-run-from-source)
 - [Configuration reference](docs/configuration.md)
 - [Skills in Cowork and claude.ai](docs/claude-cowork.md)
@@ -241,6 +242,29 @@ workspace. Head to **Skills & Tools** to make your first plugin and skill, and t
 Going to production? [Configuration reference](docs/configuration.md) covers
 single sign-on, the state you need to back up, health checks, and configuring
 by environment instead of the setup screen.
+
+## Links and images in knowledge pages
+
+Pages are markdown. A link to another page is a relative path, and Hexis opens
+it in the app:
+
+```md
+See the [approval process](../Processes/Approval.md#steps).
+```
+
+Images work the same way. Keep them in an `assets/` folder next to the pages
+that use them, and link them relatively:
+
+```md
+![Approval screen](./assets/approval-screen.png)
+```
+
+Access follows folders, so a person who may read the page may see its
+screenshots, and moving the folder keeps every link valid; one shared
+`Uploads/` folder gives up both. An export that arrives with a sibling
+`.assets/` folder (Microsoft Loop, for one) can be dropped into the knowledge
+base as it is, and the links resolve unchanged. Pasted base64 images are not
+supported: save the file and link it.
 
 ## Local development (run from source)
 

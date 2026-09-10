@@ -7,14 +7,13 @@ import { makeWorkspaceFixture } from '../../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../../git/state/git.context';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 
-// Capture navigation so we can assert link clicks resolve + open the right file.
-const navMock = vi.hoisted(() => ({ openFile: vi.fn() }));
-vi.mock('../../../routing/kb-routes', async (importActual) => ({
-  // Keep the real `resolveRelativePath` (and any other pure helpers) so link
-  // resolution is exercised for real; only the navigation hook is stubbed.
-  ...(await importActual<typeof import('../../../routing/kb-routes')>()),
-  useFileNav: () => ({ openFile: navMock.openFile }),
-  KB_ROUTE_PREFIX: '/workspace',
+// Capture navigation so we can assert link clicks resolve + open the right
+// file. The router's `navigate` is stubbed rather than the nav hook, so the
+// real resolution (`resolveKbHref` → `kbFileUrl`) is exercised end to end.
+const navigateMock = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (importActual) => ({
+  ...(await importActual<typeof import('react-router-dom')>()),
+  useNavigate: () => navigateMock,
 }));
 
 function makeGit(): GitContextValue {
@@ -157,7 +156,7 @@ describe('MarkdownRenderer', () => {
   }
 
   it('renders a nodeType frontmatter value as a clickable link that navigates', async () => {
-    navMock.openFile.mockClear();
+    navigateMock.mockClear();
     const user = userEvent.setup();
     renderPreview(
       '---\nnodeType: "[Process](../NodeTypes/Process.md)"\n---\n\n# Body',
@@ -165,25 +164,53 @@ describe('MarkdownRenderer', () => {
     );
     const link = screen.getByRole('link', { name: 'Process' });
     await user.click(link);
-    expect(navMock.openFile).toHaveBeenCalledWith('Knowledge/NodeTypes/Process.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/NodeTypes/Process.md');
   });
 
   it('renders a bare body link whose path contains spaces as a working link', async () => {
-    navMock.openFile.mockClear();
+    navigateMock.mockClear();
     const user = userEvent.setup();
     renderPreview('[Open](Some File.md)', 'Knowledge/Foo.md');
     const link = screen.getByRole('link', { name: 'Open' });
     await user.click(link);
-    expect(navMock.openFile).toHaveBeenCalledWith('Knowledge/Some File.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
   });
 
   it('renders an angle-bracketed body link with spaces as a working link', async () => {
-    navMock.openFile.mockClear();
+    navigateMock.mockClear();
     const user = userEvent.setup();
     renderPreview('[Open](<Some File.md>)', 'Knowledge/Foo.md');
     const link = screen.getByRole('link', { name: 'Open' });
     await user.click(link);
-    expect(navMock.openFile).toHaveBeenCalledWith('Knowledge/Some File.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
+  });
+
+  it('keeps the branch of an absolute citation URL instead of resolving it against the file', async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    renderPreview('[Cited](/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status)', 'Knowledge/Foo.md');
+    await user.click(screen.getByRole('link', { name: 'Cited' }));
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/target-company-state/knowledge-base/GTM/Bundle.md#status',
+    );
+  });
+
+  // --- Images in preview mode ---
+
+  it('serves a relative image from the raw file route of the current workspace, resolved against the file', () => {
+    renderPreview('![Shot](./assets/shot.png)', 'Knowledge/Sub/Foo.md');
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute(
+      'src',
+      '/api/workspace/ws-1/file/raw?path=Knowledge%2FSub%2Fassets%2Fshot.png',
+    );
+  });
+
+  it('serves an absolute workspace image URL by its path, from the current workspace (the branch rule)', () => {
+    renderPreview('![Shot](/workspace/other-branch/knowledge-base/assets/shot.png)', 'Knowledge/Foo.md');
+    expect(screen.getByRole('img', { name: 'Shot' })).toHaveAttribute(
+      'src',
+      '/api/workspace/ws-1/file/raw?path=knowledge-base%2Fassets%2Fshot.png',
+    );
   });
 
   // --- Background autosave must not disturb the editing UI (BEVA ticket) ---
