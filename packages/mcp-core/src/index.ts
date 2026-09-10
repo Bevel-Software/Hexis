@@ -60,6 +60,7 @@ export { registerManual, dispatchToolCall } from './dispatch.js';
 export {
   isSessionLoss,
   installSessionRecovery,
+  noteManualReregistered,
   type SessionRecoveryOptions,
 } from './session-recovery.js';
 

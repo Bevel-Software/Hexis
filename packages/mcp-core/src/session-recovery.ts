@@ -143,6 +143,12 @@ interface ReregisterOutcome {
   /** True only when the manual now holds a fresh session. */
   ok: boolean;
   /**
+   * True when the fresh session was somebody else's work — this call waited
+   * for a re-registration already under way and inherited its result rather
+   * than dialing a third session.
+   */
+  reused?: boolean;
+  /**
    * Abnormalities met on the way. Folded into the ONE line the recovered call
    * logs rather than printed as they happen: a recovery is a single event, and
    * two lines for one read as two recoveries — which is how a retry loop that
@@ -152,6 +158,28 @@ interface ReregisterOutcome {
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * Per-client re-registration counters, keyed by manual — the same maps the
+ * installed recovery reads, reachable from {@link noteManualReregistered} so a
+ * surface can report a re-registration of its own.
+ */
+const GENERATIONS = new WeakMap<object, Map<string, number>>();
+
+/**
+ * Tell recovery that `manualName`'s session was replaced by something OTHER
+ * than recovery. `hexis-mcp` re-registers the remote manual whenever a renewed
+ * connection key arrives; a call that lost its session around such a swap must
+ * then retry against THAT session instead of deregistering it and dialing a
+ * third one. Without this the two paths each replace a session the other just
+ * made — correct, but a round trip and a discovery pass wasted on every
+ * overlap. No-op when recovery is not installed on `client`.
+ */
+export function noteManualReregistered(client: CodeModeUtcpClient, manualName: string): void {
+  const generations = GENERATIONS.get(client as unknown as object);
+  if (!generations) return;
+  generations.set(manualName, (generations.get(manualName) ?? 0) + 1);
+}
 
 /**
  * Wrap `client`'s tool-call entry points with session recovery, in place.
@@ -185,13 +213,22 @@ export function installSessionRecovery(
    * hold for concurrent calls whether they fail together or in sequence.
    */
   const generations = new Map<string, number>();
+  GENERATIONS.set(client as unknown as object, generations);
   const inflight = new Map<string, Promise<ReregisterOutcome>>();
 
   const generationOf = (manualName: string): number => generations.get(manualName) ?? 0;
 
-  /** Deregister + register once. Reports what happened; the caller does the logging. */
-  async function reregisterNow(manualName: string): Promise<ReregisterOutcome> {
+  /**
+   * Deregister + register once. Reports what happened; the caller does the
+   * logging. `generation` is what the failing call saw before its attempt: if
+   * the counter has moved by the time this runs — a surface gate can hold a
+   * recovery while the surface's own credential swap re-registers the very
+   * same manual — the session has ALREADY been replaced, and replacing it
+   * again would throw away a live session to dial an identical one.
+   */
+  async function reregisterNow(manualName: string, generation: number): Promise<ReregisterOutcome> {
     const notes: string[] = [];
+    if (generationOf(manualName) !== generation) return { ok: true, reused: true, notes };
     const template = await options.manualTemplate(manualName);
     // Not ours to re-register — or not an MCP manual at all, in which case it
     // holds no session and the 404 came from somewhere we must not second-guess.
@@ -230,21 +267,28 @@ export function installSessionRecovery(
    * session-loss error with a recovery-internal one. The answer here is only
    * ever "may we retry?".
    */
-  async function reregister(manualName: string): Promise<ReregisterOutcome> {
+  async function reregister(manualName: string, generation: number): Promise<ReregisterOutcome> {
     try {
       return options.withReregister
-        ? await options.withReregister(manualName, () => reregisterNow(manualName))
-        : await reregisterNow(manualName);
+        ? await options.withReregister(manualName, () => reregisterNow(manualName, generation))
+        : await reregisterNow(manualName, generation);
     } catch (err) {
       return { ok: false, notes: [`re-registration threw: ${messageOf(err)}`] };
     }
   }
 
-  /** Single-flight {@link reregister}: concurrent losers share one attempt. */
-  function reregisterOnce(manualName: string): Promise<ReregisterOutcome> {
+  /**
+   * Single-flight {@link reregister}: concurrent losers share one attempt.
+   *
+   * The generation belongs to whoever started the attempt, and that is right
+   * for the joiners too — {@link recover} sends nobody here whose generation
+   * differs from the current one, so every sharer of this promise failed
+   * against the same session.
+   */
+  function reregisterOnce(manualName: string, generation: number): Promise<ReregisterOutcome> {
     const existing = inflight.get(manualName);
     if (existing) return existing;
-    const tracked = reregister(manualName).finally(() => {
+    const tracked = reregister(manualName, generation).finally(() => {
       if (inflight.get(manualName) === tracked) inflight.delete(manualName);
     });
     inflight.set(manualName, tracked);
@@ -259,13 +303,18 @@ export function installSessionRecovery(
     if (!isSessionLoss(err)) return false;
     const manualName = toolName.split('.')[0];
     if (!manualName) return false;
-    // Someone else re-registered while this call was in flight: the session it
-    // failed against is already gone, so retry against the new one directly.
-    if (generationOf(manualName) !== generation) {
+    /** The session was replaced by someone else — a concurrent call, or the surface. */
+    const alreadyReplaced = (): boolean => {
       log(`[mcp] session lost on '${manualName}' — re-registered by a concurrent call; retrying.`);
       return true;
-    }
-    const outcome = await reregisterOnce(manualName);
+    };
+    // Someone else re-registered while this call was in flight: the session it
+    // failed against is already gone, so retry against the new one directly.
+    if (generationOf(manualName) !== generation) return alreadyReplaced();
+    const outcome = await reregisterOnce(manualName, generation);
+    // The same finding, made too late to skip the queue: the re-registration
+    // landed while this call waited for the surface's gate.
+    if (outcome.reused) return alreadyReplaced();
     // One recovered call, one line — whatever went sideways on the way rides
     // along in it rather than arriving as a line of its own.
     const notes = outcome.notes.length > 0 ? ` (${outcome.notes.join('; ')})` : '';

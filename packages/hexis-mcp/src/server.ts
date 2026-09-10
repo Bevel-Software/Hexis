@@ -26,6 +26,7 @@ import {
   dispatchToolCall,
   registerManual,
   installSessionRecovery,
+  noteManualReregistered,
   flattenManualTool,
   toListedTool,
   toolError,
@@ -395,6 +396,11 @@ export async function createHexisMcpServer(
         return;
       }
       await removeRemoteMetaTools(client);
+      // The manual now holds a session this swap created. A call that lost its
+      // own session around the swap — the two often land together, a redeploy
+      // being exactly when a 401-triggered renewal happens — retries against
+      // THIS one instead of deregistering it to dial an identical third.
+      noteManualReregistered(client, REMOTE_MANUAL_NAME);
       console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
     });
   };
@@ -517,6 +523,11 @@ export async function createHexisMcpServer(
       // the manual between its deregister and its register, where a repository
       // lookup finds nothing.
       while (reregisterInProgress) await reregisterInProgress;
+      // Shutdown can land while a call waits here, and `shutdown` waits only
+      // for the re-registration, not for callers parked behind it. Dispatching
+      // now would run against a client being torn down, so the caller gets the
+      // real reason rather than whatever a half-closed transport throws.
+      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
       inflightCalls += 1;
       try {
         const name = request.params.name;

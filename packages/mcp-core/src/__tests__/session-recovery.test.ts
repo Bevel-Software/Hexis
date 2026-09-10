@@ -4,7 +4,11 @@ import { CodeModeUtcpClient } from '@utcp/code-mode';
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { installSessionRecovery, isSessionLoss } from '../session-recovery.js';
+import {
+  installSessionRecovery,
+  isSessionLoss,
+  noteManualReregistered,
+} from '../session-recovery.js';
 import { registerManual, dispatchToolCall } from '../dispatch.js';
 import { dispatchMetaTool } from '../meta-tools.js';
 import type { ProxiedTool } from '../proxied-tool.js';
@@ -412,6 +416,49 @@ describe('session recovery — invariants that only a stubbed client can force',
     // Nothing the surface has to serialize against — template resolution, the
     // deregister/register pair, the cleanup — may escape the gate.
     expect(order).toEqual(['gate:enter:platform', 'template', 'cleanup', 'gate:exit']);
+  });
+
+  it('reuses a session the surface re-registered while the recovery waited at its gate', async () => {
+    const { client, calls } = losesSessionOnce();
+    let registrations = 0;
+    let deregistrations = 0;
+    Object.assign(client, {
+      registerManual: async () => {
+        registrations += 1;
+        return { success: true };
+      },
+      deregisterManual: async () => {
+        deregistrations += 1;
+        return true;
+      },
+    });
+    const log: string[] = [];
+    installSessionRecovery(client, {
+      manualTemplate: () => manualTemplate('platform', 'http://127.0.0.1:1/mcp'),
+      // The surface's own re-registration — hexis-mcp's credential swap —
+      // completing while this recovery is queued behind it for the gate.
+      withReregister: async (_name, run) => {
+        noteManualReregistered(client, 'platform');
+        return run();
+      },
+      log: (m) => log.push(m),
+    });
+
+    expect(await client.callTool('platform.srv.echo', {})).toBe('ok');
+    // The swap's session is live and postdates the failure, so recovery must
+    // retry against it rather than tear it down to dial an identical third.
+    expect(registrations).toBe(0);
+    expect(deregistrations).toBe(0);
+    expect(calls()).toBe(2);
+    expect(log).toEqual([
+      `[mcp] session lost on 'platform' — re-registered by a concurrent call; retrying.`,
+    ]);
+  });
+
+  it('ignores a re-registration reported for a client that has no recovery installed', () => {
+    // The surface calls this unconditionally; a client without recovery (a
+    // test double, an embedding host that never installed it) is not an error.
+    expect(() => noteManualReregistered(stubClient({}), 'platform')).not.toThrow();
   });
 
   it('keeps one recovered call to one log line however much went sideways', async () => {
