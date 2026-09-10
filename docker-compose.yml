@@ -28,7 +28,7 @@ services:
 
   app:
     # The image CI publishes on every release — deploying does not compile
-    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.10.0`) so an
+    # anything. Pin the version in `.env` (`HEXIS_VERSION=0.15.1`) so an
     # upgrade is a deliberate act: bump the value, `docker compose pull app`,
     # `up -d`. Left unset it tracks `latest` (the newest release) — right for
     # a first install, a footgun after: an unplanned `pull` becomes an
@@ -141,9 +141,23 @@ services:
       # they are collected on the setup screen.
       - DEFAULT_BRANCH
       - PROTECTED_BRANCHES
+      # The rest of what the setup screen collects. Pass-throughs, so a value
+      # pinned in .env reaches the app and wins over the screen, as the
+      # configuration reference promises — without a line here the container
+      # never sees it. The sync secret lets a git host's webhook or a pipeline
+      # tell this deployment the repository changed (docs/git-sync.md); the
+      # three folder names read a repository laid out by someone else.
+      - KB_SYNC_SECRET
+      - KB_KNOWLEDGE_BASE_DIR
+      - KB_SKILLS_DIR
+      - KB_PLUGINS_DIR
       # 32-byte key (base64 or hex) encrypting secrets-vault values + MCP
       # OAuth client secrets/tokens.
       - SECRETS_ENC_KEY=${SECRETS_ENC_KEY}
+      # Optional dedicated HMAC key for internal (loopback) tool tokens; unset,
+      # one is derived from JWT_SECRET. Pass-through so a rotation set in .env
+      # takes effect.
+      - INTERNAL_TOKEN_SECRET
       # Update check (admins see a banner when a release is newer). Pass-through
       # so UPDATE_CHECK=false actually reaches the app — air-gapped and
       # opt-out deployments disable the one outbound request with it.
