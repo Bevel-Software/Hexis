@@ -917,6 +917,11 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       // A grouping folder with a plugin INSIDE: a manifest on the folder
       // would hide the plugin beneath it from every catalog.
       'Plugins/Teams/Agent Made/plugin.json': '{"name":"agent-made"}',
+      // A legacy plugin whose vendored dependency happens to ship a
+      // manifest: `node_modules` is nothing to the walk, so the folder is
+      // still the plugin it was.
+      'Plugins/Vendored/access.md': 'write:\n  - Admin\n',
+      'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
     });
     await migrate();
     const dir = await checkout(DEFAULT_BRANCH);
@@ -924,6 +929,7 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
     expect(await exists(dir, 'Plugins/TestFolder/plugin.json')).toBe(false);
     expect(await exists(dir, 'Plugins/Teams/plugin.json')).toBe(false);
     expect(await exists(dir, 'Plugins/Teams/Agent Made/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/Vendored/plugin.json')).toBe(true);
   });
 
   it('leaves a personal folder a valid plugin', async () => {

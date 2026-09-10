@@ -1,7 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
+
+// The node-id lookup behind the canonical-URL redirect, so a test can say a
+// file HAS an id without a backend.
+const routesMock = vi.hoisted(() => ({ fetchNodeId: vi.fn() }));
+vi.mock('../../routing/kb-routes', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../routing/kb-routes')>();
+  return { ...actual, fetchNodeId: routesMock.fetchNodeId };
+});
 import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
@@ -76,9 +84,14 @@ function makeHydrateResult(
   return { surviving: [], dropped: [], denied: [], ...overrides };
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div aria-label="pathname">{location.pathname}</div>;
+}
+
 function renderAt(
   url: string,
-  opts: { git?: GitContextValue; workspace?: WorkspaceContextValue } = {},
+  opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
 ): { workspace: WorkspaceContextValue; git: GitContextValue } {
   const workspace = opts.workspace ?? makeWorkspace();
   const git = opts.git ?? makeGit();
@@ -123,14 +136,49 @@ function renderAt(
     <MemoryRouter initialEntries={[url]}>
       <Tree>
         <Routes>
-          <Route path="/workspace/:branch/*" element={<FileRoute />} />
+          <Route path="/workspace/:branch/*" element={<FileRoute canonicalize={opts.canonicalize} />} />
         </Routes>
+        <LocationProbe />
       </Tree>
     </MemoryRouter>,
   );
 
   return { workspace, git };
 }
+
+beforeEach(() => {
+  routesMock.fetchNodeId.mockReset().mockResolvedValue(null);
+});
+
+describe('FileRoute: the canonical id URL', () => {
+  const PATH = 'Plugins/GTM/web-search.tool';
+  function openOn(): { workspace: WorkspaceContextValue; git: GitContextValue } {
+    const tab = makeTab({ path: PATH });
+    const workspace = makeWorkspace({
+      openTabs: [tab],
+      activeTab: tab,
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult({ surviving: [PATH] })),
+    });
+    return { workspace, git: makeGit({ status: makeStatus('main') }) };
+  }
+
+  it('replaces the path URL with the node-id URL once the file is the open tab', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    renderAt(`/workspace/main/${PATH}`, openOn());
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
+    );
+  });
+
+  it('keeps the path URL when canonicalising is off — the Library frame renders it there, and an id URL is no library location', async () => {
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    renderAt(`/workspace/main/${PATH}`, { ...openOn(), canonicalize: false });
+    // Give the (absent) redirect every chance to fire before asserting it did not.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByLabelText('pathname')).toHaveTextContent(`/workspace/main/${PATH}`);
+    expect(routesMock.fetchNodeId).not.toHaveBeenCalled();
+  });
+});
 
 describe('FileRoute', () => {
   it('hydrates tabs with the URL path when branch matches', async () => {

@@ -69,8 +69,16 @@ export function WorkspaceItemRoute() {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
 
+  /**
+   * The Knowledge file route, in this frame. `canonicalize` is OFF: its id
+   * redirect would send an id-bearing file (a `.tool`, a note with an `id`)
+   * to an id URL, which is no library location — and the surface would
+   * switch to Knowledge after all. The path URL is the one the tree gave.
+   */
+  const fileView = () => <FileRoute canonicalize={false} />;
+
   // Asked for the raw file by name: no resolution, the editor it is.
-  if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return <FileRoute />;
+  if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return fileView();
 
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the
@@ -88,7 +96,7 @@ export function WorkspaceItemRoute() {
    * opens as the plain file it is — the Knowledge file route, rendered right
    * here in the Library's column, same URL, same viewer, this app's frame.
    */
-  const rawFileView = () => <FileRoute />;
+  const rawFileView = fileView;
 
   if (kbRoot === SKILLS_DIR) {
     const rest = segments.slice(2);

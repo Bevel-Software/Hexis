@@ -40,7 +40,9 @@ vi.mock('../components/tool-page/ToolPage', () => ({
 // The Knowledge file route, rendered by the item route for a loose file:
 // its own behaviour lives with the workspace tests.
 vi.mock('../../workspace/components/FileRoute', () => ({
-  FileRoute: () => <div aria-label="file-view">file</div>,
+  FileRoute: ({ canonicalize }: { canonicalize?: boolean }) => (
+    <div aria-label="file-view">{`canonicalize:${String(canonicalize)}`}</div>
+  ),
 }));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
@@ -197,6 +199,9 @@ describe('WorkspaceItemRoute', () => {
     await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
     expect(screen.queryByLabelText('tool-page')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
+    // A `.tool` carries a frontmatter id — the very case the id redirect
+    // would have bounced back to Knowledge.
+    expect(screen.getByLabelText('file-view')).toHaveTextContent('canonicalize:false');
   });
 
   it("a plugin's own file — its access.md — opens as the plain file it is, INSIDE the library frame, not the plugin page", async () => {
@@ -210,6 +215,9 @@ describe('WorkspaceItemRoute', () => {
     await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
     expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Sales/access.md'));
     expect(screen.getByLabelText('raw-file')).toHaveTextContent('false');
+    // The file route must not replace the path with a node-id URL here: an id
+    // URL is no library location, and the surface would switch after all.
+    expect(screen.getByLabelText('file-view')).toHaveTextContent('canonicalize:false');
     expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
     expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
   });

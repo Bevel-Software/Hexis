@@ -10,6 +10,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { BUNDLE_FILE } from '../../../plugins/discovery/bundle-dialect/bundle.source.js';
 import { isAbsence } from '../../../../shared/fs-errors.js';
+import { isSkippedEntry } from '../../../../shared/kb-walk.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -109,6 +110,12 @@ export async function looksLikeLegacyPlugin(dir: string, entries: import('node:f
 /**
  * Whether a plugin (a folder carrying `plugin.json` or a bundle) sits anywhere
  * BELOW `dir` — which makes `dir` a grouping folder, never a plugin itself.
+ *
+ * Judged the way discovery judges it: a manifest is a REGULAR file entry
+ * (`Dirent.isFile()` — a symlink so named is not one, exactly as the walk
+ * behind the catalog sees it), and the entries the walk skips (dot-folders,
+ * `node_modules`) hold nothing here either. Anything looser would let an
+ * ignored or unsupported entry hide a legacy plugin from its manifest.
  */
 export async function hasPluginBeneath(dir: string): Promise<boolean> {
   let entries: import('node:fs').Dirent[];
@@ -119,9 +126,16 @@ export async function hasPluginBeneath(dir: string): Promise<boolean> {
     throw err;
   }
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    if (!entry.isDirectory() || isSkippedEntry(entry.name)) continue;
     const sub = path.join(dir, entry.name);
-    if ((await isFile(path.join(sub, PLUGIN_MANIFEST_FILE))) || (await isFile(path.join(sub, BUNDLE_FILE)))) return true;
+    let subEntries: import('node:fs').Dirent[];
+    try {
+      subEntries = await fs.readdir(sub, { withFileTypes: true });
+    } catch (err) {
+      if (isAbsence(err)) continue;
+      throw err;
+    }
+    if (subEntries.some((e) => e.isFile() && (e.name === PLUGIN_MANIFEST_FILE || e.name === BUNDLE_FILE))) return true;
     if (await hasPluginBeneath(sub)) return true;
   }
   return false;
