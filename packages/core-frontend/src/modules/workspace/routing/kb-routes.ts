@@ -265,7 +265,12 @@ export function resolveKbHref(
  */
 export function openExternalHref(href: string): boolean {
   if (!isOpenableExternalHref(href)) return false;
-  window.open(href, '_blank', 'noopener');
+  // `noreferrer` as well as `noopener`: the first severs `window.opener`, the
+  // second stops the workspace URL going out as the `Referer` header. A
+  // workspace path names a branch and a file, so it is worth not leaking. The
+  // markdown pipeline's body links already ship `rel="noopener noreferrer"`;
+  // this is the same policy on the scripted path.
+  window.open(href, '_blank', 'noopener,noreferrer');
   return true;
 }
 
@@ -315,19 +320,28 @@ export function useFileNav() {
    *
    * AN EXTERNAL LINK IS OPENED HERE TOO, in a new tab. It used to be dropped
    * on the floor — "not ours to open" — which is true of a link the browser
-   * still owns, and false of every link that reaches this function. The
-   * callers reach it by CANCELLING the browser's own navigation first: the
-   * HTML sandbox `preventDefault`s every non-`#` anchor and posts the href to
-   * the host, and the frontmatter panel does the same for a link-valued
-   * field. Once the default is cancelled, returning without navigating is not
-   * deference — it is a dead click. (A markdown BODY link never arrives here:
-   * the pipeline renders an external destination as a plain
-   * `target="_blank"` anchor and the browser handles it.)
+   * still owns, and false of every link that reaches this function. Callers
+   * reach it by CANCELLING the browser's own navigation first, and once the
+   * default is cancelled, returning without navigating is not deference, it
+   * is a dead click. Two surfaces do that:
    *
-   * `noopener` severs `window.opener` so the opened page cannot reach back
-   * into this one, and the scheme allowlist is what keeps the sandbox sealed
-   * — see {@link isOpenableExternalHref}. A destination that is external but
-   * not openable stays a no-op, as it was.
+   *   - The frontmatter panel, for a link-valued field.
+   *   - Agent HTML, via `bevel.navigate(href)` from its own inline script.
+   *     NOT via an anchor: `sanitizeAgentHtml` strips an `href` that
+   *     `isInternalNodeLink` rejects, which is every scheme-bearing URL, so
+   *     an external anchor loses its href before the nav bridge ever sees
+   *     it. The scripted call is the reachable path, and it is why the
+   *     allowlist below is load-bearing rather than belt-and-braces: that
+   *     argument is an arbitrary string no sanitizer inspected.
+   *
+   * (A markdown BODY link never arrives here: the pipeline renders an
+   * external destination as a plain `target="_blank"` anchor and the browser
+   * handles it.)
+   *
+   * `noopener,noreferrer` severs `window.opener` and withholds the workspace
+   * URL as a `Referer`, and the scheme allowlist is what keeps the sandbox
+   * sealed — see {@link isOpenableExternalHref}. A destination that is
+   * external but not openable stays a no-op, as it was.
    */
   const openLink = useCallback(
     (href: string, basePath: string) => {

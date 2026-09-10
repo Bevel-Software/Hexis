@@ -35,11 +35,12 @@ export function isExternalHref(href: string): boolean {
  * Protocol-relative (`//cdn.example.com/…`) has no scheme to check and resolves
  * against the page's own — always http(s) here — so it is allowed.
  *
- * An exotic app scheme (`x-devonthink-item:`) is NOT on the list and stays a
- * dead click, as it is today. Adding one is a deliberate decision, not a
- * default.
+ * The list mirrors the schemes `isExternalHref` names as ordinary external
+ * destinations. An exotic app scheme (`x-devonthink-item:`) is NOT on it and
+ * stays a dead click, as it is today. Adding one is a deliberate decision,
+ * not a default.
  */
-const OPENABLE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'sms:']);
+const OPENABLE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'sms:', 'geo:']);
 
 export function isOpenableExternalHref(href: string): boolean {
   if (href.startsWith('//')) return true;

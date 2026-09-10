@@ -94,6 +94,61 @@ describe('EventBusProvider watchWorkspace', () => {
     expect(focusBodies(fetchMock).at(-1)?.alsoWatch).toEqual([]);
   });
 
+  // These POSTs are not independent: each REPLACES the session's whole
+  // delivery list, so the last to reach the server wins. Fired concurrently,
+  // two can be processed out of order, leaving the server on the older list
+  // while this tab records the newer one as synced — after which nothing
+  // retries and the workspace that lost its watch is silent for the life of
+  // the tab.
+  it('sends one focus POST at a time, so a slow one cannot overwrite a newer list', async () => {
+    const releases: (() => void)[] = [];
+    fetchMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releases.push(() => resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200 })));
+        }),
+    );
+    let bus!: EventBusContextValue;
+    render(
+      <EventBusProvider>
+        <Harness onReady={(b) => (bus = b)} />
+      </EventBusProvider>,
+    );
+    await act(async () => bus.setFocus('alice%2Fdraft'));
+    // The first POST is in flight and unanswered; a watch lands on top of it.
+    await act(async () => bus.watchWorkspace('main'));
+    expect(releases).toHaveLength(1);
+
+    // Only once the first completes does the second go out, carrying the list
+    // as it stands now rather than the snapshot it was queued with.
+    await act(async () => releases[0]());
+    expect(releases).toHaveLength(2);
+    await act(async () => releases[1]());
+
+    const bodies = focusBodies(fetchMock);
+    expect(bodies.at(-1)?.alsoWatch).toEqual(['main']);
+  });
+
+  // A reconnect is a new server-side session record with an empty list, so the
+  // coalescing check must not mistake "we already sent this" for "the server
+  // still has it".
+  it('re-posts the same list after a reconnect rather than coalescing it away', async () => {
+    let bus!: EventBusContextValue;
+    render(
+      <EventBusProvider>
+        <Harness onReady={(b) => (bus = b)} />
+      </EventBusProvider>,
+    );
+    await act(async () => {
+      bus.watchWorkspace('main');
+      bus.setFocus('alice%2Fdraft');
+    });
+    const sentBefore = focusBodies(fetchMock).length;
+    // Asking for the identical list again is coalesced: the server has it.
+    await act(async () => bus.setFocus('alice%2Fdraft'));
+    expect(focusBodies(fetchMock)).toHaveLength(sentBefore);
+  });
+
   it('does not list the focused workspace twice when it is also watched', async () => {
     let bus!: EventBusContextValue;
     render(

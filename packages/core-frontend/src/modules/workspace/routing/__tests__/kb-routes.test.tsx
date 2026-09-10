@@ -287,7 +287,7 @@ describe('useFileNav.openLink', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     const { result } = renderNav('alice/draft');
     result.current.openLink('https://example.com/x.md', 'knowledge-base/Knowledge/Foo.md');
-    expect(open).toHaveBeenCalledWith('https://example.com/x.md', '_blank', 'noopener');
+    expect(open).toHaveBeenCalledWith('https://example.com/x.md', '_blank', 'noopener,noreferrer');
     expect(navigateMock).not.toHaveBeenCalled();
     open.mockRestore();
   });
@@ -296,7 +296,7 @@ describe('useFileNav.openLink', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     const { result } = renderNav('alice/draft');
     result.current.openLink('mailto:a@b.com', 'knowledge-base/Knowledge/Foo.md');
-    expect(open).toHaveBeenCalledWith('mailto:a@b.com', '_blank', 'noopener');
+    expect(open).toHaveBeenCalledWith('mailto:a@b.com', '_blank', 'noopener,noreferrer');
     open.mockRestore();
   });
 
