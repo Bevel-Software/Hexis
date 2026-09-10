@@ -25,7 +25,9 @@ function count(n: number, cap: number): string {
   return `${n.toLocaleString('en-US')} / ${cap.toLocaleString('en-US')} characters`;
 }
 
-const WARNING = 'text-meta text-wait bg-wait-soft border border-wait rounded-sm px-2 py-1.5';
+// `text-ink`, not `text-wait`: tokens.css marks `wait` too light for text on
+// its own soft ground (2.63:1). Same pairing as Banner's `wait` tone.
+const WARNING = 'text-meta text-ink bg-wait-soft border border-wait rounded-sm px-2 py-1.5';
 const BOX = 'text-xs bg-sunken border border-line rounded-sm px-2.5 py-2';
 /**
  * The description is a preview at the page's own size, not a document: the
