@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useGit } from '../../git/state/git.context';
 import { useWorkspace } from '../state/workspace.context';
 import { authFetch } from '../../../lib/api';
-import { isExternalHref } from '../../../shared/markdown/hrefs';
+import { isExternalHref, isOpenableExternalHref } from '../../../shared/markdown/hrefs';
 
 export const KB_ROUTE_PREFIX = '/workspace';
 
@@ -194,12 +194,22 @@ export type KbHref =
  *   /workspace/<b>                          workspace  <b>       ''
  *   ../NodeTypes/Process.md#goal            workspace  null      resolved vs basePath  #goal
  *   /KB/x.png  (root-relative)              workspace  null      KB/x.png
+ *   #overview  (same document)              workspace  null      basePath              #overview
  *   ''  (empty)                             null
  *
  * Percent-escapes are decoded (react-markdown encodes the spaces in a
  * destination; the file on disk has real spaces); a malformed escape is left
  * as-is, the tolerance `safeDecode` has always given the URL form. `branch` is
  * null for a relative link: the caller supplies the branch it is standing on.
+ *
+ * `repairMangledPath` runs {@link stripJunkBeforeKbDir} on the result. It is on
+ * for a LINK, which may have been written by a model that mangled the path,
+ * and off for an IMAGE, which was not: the repair rewrites any path whose
+ * later segment happens to equal `kbDirName`, so on an image source it
+ * truncates a correctly-authored `./assets/knowledge-base/shot.png` down to
+ * `knowledge-base/shot.png` and the reader gets a placeholder where a picture
+ * belongs. Same reasoning as `openWorkspacePath` below: a destination nobody
+ * garbled needs no repair, and applying one can only find the wrong file.
  *
  * THE BRANCH RULE. A link handler navigates with the URL's branch, as
  * `openFile` always has: an absolute citation URL names the branch the cited
@@ -210,13 +220,24 @@ export type KbHref =
  */
 export function resolveKbHref(
   href: string,
-  { basePath, kbDirName }: { basePath: string; kbDirName: string | null },
+  {
+    basePath,
+    kbDirName,
+    repairMangledPath = true,
+  }: { basePath: string; kbDirName: string | null; repairMangledPath?: boolean },
 ): KbHref | null {
   if (!href) return null;
   if (isExternalHref(href)) return { kind: 'external' };
   const hashIdx = href.indexOf('#');
   const hash = hashIdx >= 0 ? href.slice(hashIdx) : '';
   const location = hashIdx >= 0 ? href.slice(0, hashIdx) : href;
+  const repair = (path: string) => (repairMangledPath ? stripJunkBeforeKbDir(path, kbDirName) : path);
+  // Same document: `#overview` names a heading in the file the link sits in,
+  // not a destination to resolve. Without this row an empty location falls
+  // through to `resolveRelativePath`, which drops the file segment off
+  // `basePath` and hands the caller the PARENT DIRECTORY — a reader who
+  // clicked a section link lands on a folder listing.
+  if (!location) return { kind: 'workspace', branch: null, path: basePath, hash };
   if (location.startsWith(`${KB_ROUTE_PREFIX}/`)) {
     const rest = location.slice(KB_ROUTE_PREFIX.length + 1);
     const slashIdx = rest.indexOf('/');
@@ -224,16 +245,28 @@ export function resolveKbHref(
     return {
       kind: 'workspace',
       branch: safeDecode(rest.slice(0, slashIdx)),
-      path: stripJunkBeforeKbDir(safeDecode(rest.slice(slashIdx + 1)), kbDirName),
+      path: repair(safeDecode(rest.slice(slashIdx + 1))),
       hash,
     };
   }
   return {
     kind: 'workspace',
     branch: null,
-    path: stripJunkBeforeKbDir(resolveRelativePath(basePath, safeDecode(location)), kbDirName),
+    path: repair(resolveRelativePath(basePath, safeDecode(location))),
     hash,
   };
+}
+
+/**
+ * Open an external destination in a new tab, the one way this app does it.
+ * Returns whether it opened, so a caller that resolved a `{ kind: 'external' }`
+ * can hand the href over and stop. See {@link isOpenableExternalHref} for why
+ * this is an allowlist and not a straight `window.open`.
+ */
+export function openExternalHref(href: string): boolean {
+  if (!isOpenableExternalHref(href)) return false;
+  window.open(href, '_blank', 'noopener');
+  return true;
 }
 
 export function useFileNav() {
@@ -276,13 +309,33 @@ export function useFileNav() {
    * author wrote it (or as react-markdown encoded it), resolved against
    * `basePath`, the file the link sits in. The one entry for the markdown,
    * HTML and review-diff link handlers, which used to resolve by hand and had
-   * drifted (one decoded, one did not). An external link is not ours to open
-   * and is ignored; an absolute app URL keeps its own branch; a relative one
-   * opens on the branch you are standing on. See {@link resolveKbHref}.
+   * drifted (one decoded, one did not). An absolute app URL keeps its own
+   * branch; a relative one opens on the branch you are standing on. See
+   * {@link resolveKbHref}.
+   *
+   * AN EXTERNAL LINK IS OPENED HERE TOO, in a new tab. It used to be dropped
+   * on the floor — "not ours to open" — which is true of a link the browser
+   * still owns, and false of every link that reaches this function. The
+   * callers reach it by CANCELLING the browser's own navigation first: the
+   * HTML sandbox `preventDefault`s every non-`#` anchor and posts the href to
+   * the host, and the frontmatter panel does the same for a link-valued
+   * field. Once the default is cancelled, returning without navigating is not
+   * deference — it is a dead click. (A markdown BODY link never arrives here:
+   * the pipeline renders an external destination as a plain
+   * `target="_blank"` anchor and the browser handles it.)
+   *
+   * `noopener` severs `window.opener` so the opened page cannot reach back
+   * into this one, and the scheme allowlist is what keeps the sandbox sealed
+   * — see {@link isOpenableExternalHref}. A destination that is external but
+   * not openable stays a no-op, as it was.
    */
   const openLink = useCallback(
     (href: string, basePath: string) => {
       const target = resolveKbHref(href, { basePath, kbDirName });
+      if (target?.kind === 'external') {
+        openExternalHref(href);
+        return;
+      }
       if (target?.kind !== 'workspace') return;
       const onBranch = target.branch ?? branch;
       if (!onBranch) return;

@@ -205,6 +205,56 @@ describe('resolveKbHref', () => {
   it('returns null for an empty destination', () => {
     expect(resolveKbHref('', opts)).toBeNull();
   });
+
+  // Without a same-document row the empty location falls through to
+  // `resolveRelativePath`, which drops the file segment off the base path: a
+  // reader clicking a section link lands on the folder listing instead of
+  // scrolling down the page they are on.
+  it('resolves a bare anchor to the file it sits in, not to its parent folder', () => {
+    expect(resolveKbHref('#overview', opts)).toEqual({
+      kind: 'workspace',
+      branch: null,
+      path: 'knowledge-base/Knowledge/Sub/Foo.md',
+      hash: '#overview',
+    });
+  });
+
+  // The junk-segment repair exists for a LINK a model may have mangled. An
+  // image src is a path an author wrote, and the repair rewrites any path
+  // whose later segment happens to equal the KB dir — so on a correctly
+  // authored `./assets/knowledge-base/shot.png` it truncates a real path into
+  // a 404 and the reader gets a placeholder where a picture belongs.
+  it('leaves a path alone when the repair is off, even one with a kbDirName segment in it', () => {
+    // A skill's own file, holding a picture in a folder the author happened to
+    // name after the KB dir.
+    const inSkill = { basePath: 'Skills/deploy/SKILL.md', kbDirName: 'knowledge-base' };
+    const href = './assets/knowledge-base/shot.png';
+    expect(resolveKbHref(href, { ...inSkill, repairMangledPath: false })).toEqual({
+      kind: 'workspace',
+      branch: null,
+      path: 'Skills/deploy/assets/knowledge-base/shot.png',
+      hash: '',
+    });
+    // The SAME destination with the repair on: everything before the later
+    // `knowledge-base` segment is dropped and the picture 404s. Right for a
+    // citation link a model mangled, wrong for a path its author wrote.
+    expect(resolveKbHref(href, inSkill)).toEqual({
+      kind: 'workspace',
+      branch: null,
+      path: 'knowledge-base/shot.png',
+      hash: '',
+    });
+  });
+
+  it('leaves an absolute URL path alone when the repair is off', () => {
+    const href = '/workspace/main/assets/knowledge-base/shot.png';
+    expect(resolveKbHref(href, { ...opts, repairMangledPath: false })).toEqual({
+      kind: 'workspace',
+      branch: 'main',
+      path: 'assets/knowledge-base/shot.png',
+      hash: '',
+    });
+  });
 });
 
 describe('useFileNav.openLink', () => {
@@ -228,10 +278,57 @@ describe('useFileNav.openLink', () => {
     expect(navigateMock).toHaveBeenCalledWith('/workspace/target-company-state/knowledge-base/x.md');
   });
 
-  it("ignores an external link: that one is the browser's", () => {
+  // Every caller reaches `openLink` by CANCELLING the browser's navigation
+  // first — the HTML sandbox `preventDefault`s each anchor and posts the href
+  // up, the frontmatter panel does the same. So "leave it to the browser" is
+  // not deference here, it is a dead click.
+  it('opens an external link in a new tab rather than dropping it', () => {
     navigateMock.mockClear();
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
     const { result } = renderNav('alice/draft');
     result.current.openLink('https://example.com/x.md', 'knowledge-base/Knowledge/Foo.md');
+    expect(open).toHaveBeenCalledWith('https://example.com/x.md', '_blank', 'noopener');
     expect(navigateMock).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('opens a mailto: link, which is external and openable', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('mailto:a@b.com', 'knowledge-base/Knowledge/Foo.md');
+    expect(open).toHaveBeenCalledWith('mailto:a@b.com', '_blank', 'noopener');
+    open.mockRestore();
+  });
+
+  // `window.open('javascript:…')` runs the script in a document that inherits
+  // THIS page's origin. Agent HTML can call `bevel.navigate(anyString)`
+  // directly, so the bridge is reachable with a string no sanitizer saw — the
+  // allowlist is what keeps the sandbox a sandbox.
+  it('refuses to open a javascript: destination, so the HTML sandbox stays sealed', () => {
+    navigateMock.mockClear();
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('javascript:alert(1)', 'knowledge-base/Knowledge/Foo.md');
+    expect(open).not.toHaveBeenCalled();
+    expect(navigateMock).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  it('refuses a data: destination too', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('data:text/html,<script>x</script>', 'knowledge-base/Knowledge/Foo.md');
+    expect(open).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
+  // A section link is a scroll, not a navigation to somewhere else.
+  it('keeps a same-document anchor on the file it sits in', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft');
+    result.current.openLink('#overview', 'knowledge-base/Knowledge/Foo.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md#overview',
+    );
   });
 });

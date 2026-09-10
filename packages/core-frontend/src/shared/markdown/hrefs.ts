@@ -20,3 +20,30 @@
 export function isExternalHref(href: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//');
 }
+
+/**
+ * The schemes an external destination may be OPENED with. `isExternalHref`
+ * answers "does this leave the workspace"; this answers "may we hand it to
+ * `window.open`", and the two are not the same question.
+ *
+ * `window.open('javascript:…')` runs the script in a document that inherits
+ * the OPENER's origin — so an allowlist here is what keeps the HTML sandbox a
+ * sandbox. Agent HTML gets `globalThis.bevel.navigate(anyString)`, which posts
+ * straight to the host; sanitising the anchor hrefs in the document is not
+ * enough when a script can call the bridge directly.
+ *
+ * Protocol-relative (`//cdn.example.com/…`) has no scheme to check and resolves
+ * against the page's own — always http(s) here — so it is allowed.
+ *
+ * An exotic app scheme (`x-devonthink-item:`) is NOT on the list and stays a
+ * dead click, as it is today. Adding one is a deliberate decision, not a
+ * default.
+ */
+const OPENABLE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:', 'sms:']);
+
+export function isOpenableExternalHref(href: string): boolean {
+  if (href.startsWith('//')) return true;
+  const colon = href.indexOf(':');
+  if (colon < 0) return false;
+  return OPENABLE_SCHEMES.has(href.slice(0, colon + 1).toLowerCase());
+}
