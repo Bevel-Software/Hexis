@@ -334,7 +334,7 @@ export function createMcpRoutes(
     }
   });
 
-  // Hard-delete: permanently remove a *revoked* key and its audit row.
+  // Hard-delete: permanently remove a *disconnected* key and its audit row.
   // Separate path from revoke so the two lifecycle steps can't be conflated;
   // the service refuses to delete a still-active key (409).
   router.delete('/mcp/external-api-keys/:id/permanent', jwtAuthMiddleware, async (req, res) => {
