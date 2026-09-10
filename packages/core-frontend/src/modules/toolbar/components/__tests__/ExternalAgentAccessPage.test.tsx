@@ -22,16 +22,21 @@ import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared
  * regression cases below name all six.
  */
 
-const { listMock, createMock, facadeMock, adminState } = vi.hoisted(() => ({
+const { listMock, createMock, instructionsMock, facadeMock, adminState } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
+  instructionsMock: vi.fn(),
   facadeMock: vi.fn(),
   // Mutable so one file can mount the page as both roles: the Cowork drawer
   // shows two different sets of steps depending on this.
   adminState: { isAdmin: false },
 }));
 
-vi.mock('../../../admin/state/admin.context', () => ({
+// Only the hook is replaced. `AdminContext` itself stays real, because the
+// instructions card below reads the context directly rather than through the
+// hook; a whole-module mock left it undefined and every case here threw.
+vi.mock('../../../admin/state/admin.context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../admin/state/admin.context')>()),
   useAdmin: () => ({ isAdmin: adminState.isAdmin }),
 }));
 
@@ -46,6 +51,14 @@ vi.mock('../../services/external-api-keys.api', () => ({
   createExternalApiKey: createMock,
   disconnectExternalApiKey: vi.fn(async () => {}),
   deleteExternalApiKey: vi.fn(async () => {}),
+}));
+
+// The "What connected agents are told" card fetches on mount; its own cases
+// live in AgentInstructionsCard.test.tsx. Here it only has to stay out of the
+// way of the snippet assertions, which read every textbox on the page.
+vi.mock('../../services/agent-instructions.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/agent-instructions.api')>()),
+  fetchAgentInstructions: instructionsMock,
 }));
 
 /** A deployment configured the way a real one is: public, https, its own domain. */
@@ -73,6 +86,18 @@ beforeEach(() => {
   facadeMock.mockClear();
   facadeMock.mockResolvedValue(FACADE);
   listMock.mockResolvedValue([]);
+  instructionsMock.mockResolvedValue({
+    instructions: 'Search the knowledge base first.',
+    header: 'Search the knowledge base first.',
+    preamble: '',
+    toolPrefix: 'Search it before answering from memory.',
+    toolPrefixLine: 'Search it before answering from memory.',
+    truncated: false,
+    preambleChars: 0,
+    toolPrefixTruncated: false,
+    toolPrefixChars: 40,
+    unterminatedComment: false,
+  });
   createMock.mockResolvedValue({
     plaintext: KEY,
     summary: {

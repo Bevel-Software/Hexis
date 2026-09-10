@@ -15,6 +15,7 @@ import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
 import { DEFAULT_KB_LAYOUT, configureKbLayout, renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import { PLATFORM_HEADER, TOOL_PREFIX_LINE, composeAgentInstructions } from '../../../../agent-instructions/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -125,6 +126,7 @@ async function fullScaffold(): Promise<Record<string, string>> {
     'AGENTS.md': await template('AGENTS.md'),
     '.bevelignore': await template('.bevelignore'),
     '.gitignore': await template('gitignore.template'),
+    'mcp-description.md': await template('mcp-description.md'),
     'KnowledgeBase/.gitkeep': '',
     'Plugins/.gitkeep': '',
     'Skills/.gitkeep': '',
@@ -138,7 +140,7 @@ describe('TemplateFilesStep', () => {
 
     for (const b of PROTECTED) {
       const dir = await checkout(b);
-      for (const rel of ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore']) {
+      for (const rel of ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore', 'mcp-description.md']) {
         expect(await exists(dir, rel), `${b}: ${rel}`).toBe(true);
       }
       // The packaged template cannot ship a literal .gitignore (npm strips
@@ -413,6 +415,97 @@ describe('TemplateFilesStep', () => {
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
       '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n',
     );
+  });
+
+  it('seeds mcp-description.md on every protected branch, from the template, when it is missing', async () => {
+    const scaffold = await fullScaffold();
+    delete scaffold['mcp-description.md'];
+    await seedUpstream(scaffold);
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    for (const b of PROTECTED) {
+      const dir = await checkout(b);
+      expect(norm(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8'))).toBe(
+        norm(await template('mcp-description.md')),
+      );
+      const subject = (await git(dir, ['log', '--format=%s', '-1'])).trim();
+      expect(subject).toBe('Add missing KB scaffolding: mcp-description.md');
+    }
+  });
+
+  it('leaves an existing mcp-description.md untouched: seeded once, never refreshed', async () => {
+    const mine = 'Acme builds solar farms.\n\n## What is where\n\n- Projects/\n';
+    await seedUpstream({ ...(await fullScaffold()), 'mcp-description.md': mine });
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8'))).toBe(mine);
+    expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('1'); // init only
+  });
+
+  it('keeps a deliberately emptied mcp-description.md empty: the top-up restores only a MISSING file', async () => {
+    await seedUpstream({ ...(await fullScaffold()), 'mcp-description.md': '' });
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8')).toBe('');
+    expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('1');
+  });
+
+  it('ships a template that composes to the platform header alone: one comment, nothing broadcast', async () => {
+    const shipped = await template('mcp-description.md');
+    expect(shipped.trimStart().startsWith('<!--')).toBe(true);
+    expect(shipped.trimEnd().endsWith('-->')).toBe(true);
+    // The first line says how to turn the text on; the caps are stated inside.
+    expect(shipped.split('\n')[0]).toMatch(/Remove this comment wrapper/);
+    expect(shipped).toContain('6,000 characters');
+    expect(shipped).toContain('first paragraph under about 220');
+    expect(shipped).not.toContain('{{');
+    const composed = composeAgentInstructions(shipped);
+    expect(composed.instructions).toBe(PLATFORM_HEADER);
+    expect(composed.toolPrefix).toBe(TOOL_PREFIX_LINE);
+    expect(composed.unterminatedComment).toBe(false);
+    expect(composed.preambleChars).toBe(0);
+  });
+
+  it('seeds mcp-description.md from the packaged template when a custom template predates it, instead of failing the boot', async () => {
+    // A distribution's own KB_TEMPLATE_DIR forked before this file existed:
+    // the upgrade must not stop startup over a file whose content is one
+    // comment. The packaged copy stands in, and the log says so once.
+    const customTemplate = path.join(root, 'custom-template-old');
+    await fs.mkdir(customTemplate, { recursive: true });
+    await fs.writeFile(path.join(customTemplate, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    await fs.writeFile(path.join(customTemplate, 'access.md'), await template('access.md'), 'utf8');
+    const scaffold = await fullScaffold();
+    delete scaffold['mcp-description.md'];
+    await seedUpstream(scaffold);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await makeRunner([new TemplateFilesStep()], customTemplate).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, 'mcp-description.md'), 'utf8'))).toBe(
+      norm(await template('mcp-description.md')),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no "mcp-description.md"'));
+  });
+
+  it('gives the stand-in to that file only: a custom template missing access.md still fails loudly', async () => {
+    const stricter = path.join(root, 'custom-template-broken');
+    await fs.mkdir(stricter, { recursive: true });
+    await fs.writeFile(path.join(stricter, 'AGENTS.md'), await template('AGENTS.md'), 'utf8');
+    const scaffold = await fullScaffold();
+    delete scaffold['access.md'];
+    await seedUpstream(scaffold);
+    await expect(makeRunner([new TemplateFilesStep()], stricter).runAll()).rejects.toThrow(/ENOENT/);
+  });
+
+  it('points a clone at mcp-description.md from the managed AGENTS.md, before the platform mechanics', async () => {
+    const agents = await template('AGENTS.md');
+    const pointer = agents.indexOf('mcp-description.md');
+    expect(pointer).toBeGreaterThan(-1);
+    expect(pointer).toBeLessThan(agents.indexOf('## Directory Structure'));
+    expect(agents).toMatch(/default branch's copy inline/);
   });
 
   it('treats a CRLF checkout of identical AGENTS.md content as current — no churn commit', async () => {

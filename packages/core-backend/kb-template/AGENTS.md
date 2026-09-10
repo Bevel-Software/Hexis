@@ -16,6 +16,11 @@ maintaining it.
 > team-specific conventions belong in files of your own — anywhere under
 > `{{knowledgeBaseDir}}/`, linked from wherever they are needed.
 
+**Read `mcp-description.md` at the repository root first.** It says what this
+knowledge base contains and when to consult it. Agents connected over MCP
+receive the default branch's copy inline at the start of every session; a
+clone like this one reads the copy on its own branch.
+
 **There is no required format for knowledge.** Write markdown the way the
 subject wants to be written: prose, tables, checklists, diagrams, whatever
 serves the reader. Nothing here parses your files into a schema or rejects a
