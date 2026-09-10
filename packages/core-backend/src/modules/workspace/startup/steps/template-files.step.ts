@@ -12,6 +12,9 @@ import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
+/** Root-anchored so a knowledge folder may still contain an ordinary namesake. */
+const PREAMBLE_IGNORE_PATTERN = `/${PREAMBLE_FILE}`;
+
 /**
  * The **required scaffolding** — the minimum an operational KB needs. Any of
  * these missing from a protected branch are added at the startup phase; the
@@ -249,7 +252,7 @@ export class TemplateFilesStep implements OnServerStart {
       if (rel === IGNORE_FILENAME) {
         content = withoutIgnoreLine(
           withoutPlatformIgnorePattern(
-            withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), PREAMBLE_FILE),
+            withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), PREAMBLE_IGNORE_PATTERN),
             `${SKILLS_DIR}/`,
           ),
           `${PLUGINS_DIR}/`,
@@ -292,7 +295,7 @@ export class TemplateFilesStep implements OnServerStart {
     // a later declared write would lose an earlier one's.
     added.push(
       ...(await reconcileIgnoreRules(repoDir, branch, {
-        add: ['AGENTS.md', PREAMBLE_FILE],
+        add: ['AGENTS.md', PREAMBLE_IGNORE_PATTERN],
         drop: [`${SKILLS_DIR}/`],
         dropEvery: [`${PLUGINS_DIR}/`],
       })),
@@ -555,8 +558,11 @@ function withoutPlatformIgnorePattern(text: string, pattern: string): string {
  */
 function withIgnorePattern(text: string, pattern: string): string {
   const lines = text.split('\n').map((l) => l.trim());
-  if (lines.includes(pattern) || lines.includes(`!${pattern}`)) return text;
+  const legacyPreambleChoice =
+    pattern === PREAMBLE_IGNORE_PATTERN &&
+    (lines.includes(PREAMBLE_FILE) || lines.includes(`!${PREAMBLE_FILE}`));
+  if (lines.includes(pattern) || lines.includes(`!${pattern}`) || legacyPreambleChoice) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
-  const comment = pattern === PREAMBLE_FILE ? PREAMBLE_RULE_COMMENT : PLATFORM_RULE_COMMENT;
+  const comment = pattern === PREAMBLE_IGNORE_PATTERN ? PREAMBLE_RULE_COMMENT : PLATFORM_RULE_COMMENT;
   return `${text}${separator}\n${comment}\n${pattern}\n`;
 }

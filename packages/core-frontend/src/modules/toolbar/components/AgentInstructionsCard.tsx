@@ -163,16 +163,18 @@ export function AgentInstructionsCard() {
           {editError}
         </div>
       )}
-      {state.status === 'ready' && (
+      {(state.status === 'ready' || editor) && (
         <div className="space-y-3">
-          <details className="border border-line rounded-sm">
-            <summary className="cursor-pointer px-2.5 py-1.5 text-xs text-ink-muted">
-              Platform message (fixed, sent first)
-            </summary>
-            <p className="px-2.5 pb-2 text-xs text-ink-muted leading-snug whitespace-pre-wrap" data-testid="header-text">
-              {state.data.header}
-            </p>
-          </details>
+          {state.status === 'ready' && (
+            <details className="border border-line rounded-sm">
+              <summary className="cursor-pointer px-2.5 py-1.5 text-xs text-ink-muted">
+                Platform message (fixed, sent first)
+              </summary>
+              <p className="px-2.5 pb-2 text-xs text-ink-muted leading-snug whitespace-pre-wrap" data-testid="header-text">
+                {state.data.header}
+              </p>
+            </details>
+          )}
 
           <div className="space-y-1.5">
             <div className="flex items-baseline justify-between gap-2">
@@ -190,7 +192,7 @@ export function AgentInstructionsCard() {
                 the description.
               </p>
             )}
-            {state.data.unterminatedComment && (
+            {state.status === 'ready' && state.data.unterminatedComment && (
               <p role="alert" className={WARNING}>
                 A comment is left open: everything after the last <span className="font-mono">&lt;!--</span> is withheld
                 from agents. Close it with <span className="font-mono">--&gt;</span> in {PREAMBLE_FILE}.
@@ -229,7 +231,7 @@ export function AgentInstructionsCard() {
                   </Button>
                 </div>
               </div>
-            ) : state.data.preamble ? (
+            ) : state.status === 'ready' && state.data.preamble ? (
               <div className={`${BOX} max-h-56 overflow-y-auto overflow-x-hidden break-words`} data-testid="description-text">
                 <Markdown className={DESCRIPTION_MARKDOWN}>{state.data.preamble}</Markdown>
               </div>

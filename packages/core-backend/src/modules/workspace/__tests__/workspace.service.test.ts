@@ -208,8 +208,11 @@ describe('WorkspaceService.createDirectory', () => {
 
   it('hides mcp-description.md when the root .bevelignore declares the platform rule', async () => {
     const repoDir = path.join(workspaceDir, 'knowledge-base');
-    await fs.writeFile(path.join(repoDir, '.bevelignore'), 'mcp-description.md\n', 'utf-8');
+    const nestedDir = path.join(repoDir, 'KnowledgeBase');
+    await fs.mkdir(nestedDir, { recursive: true });
+    await fs.writeFile(path.join(repoDir, '.bevelignore'), '/mcp-description.md\n', 'utf-8');
     await fs.writeFile(path.join(repoDir, 'mcp-description.md'), 'Private deployment preamble', 'utf-8');
+    await fs.writeFile(path.join(nestedDir, 'mcp-description.md'), 'Ordinary nested knowledge', 'utf-8');
     await fs.writeFile(path.join(repoDir, 'visible.md'), 'Visible knowledge', 'utf-8');
 
     const tree = await svc.listFiles(workspaceId);
@@ -217,6 +220,8 @@ describe('WorkspaceService.createDirectory', () => {
     const names = repo?.children?.map((entry) => entry.name) ?? [];
 
     expect(names).toContain('visible.md');
+    expect(repo?.children?.find((entry) => entry.name === 'KnowledgeBase')?.children?.map((entry) => entry.name))
+      .toContain('mcp-description.md');
     expect(names).not.toContain('mcp-description.md');
   });
 });

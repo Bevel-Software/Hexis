@@ -177,6 +177,22 @@ describe('the Edit action', () => {
     expect(screen.getByRole('textbox', { name: 'Your description' })).toHaveValue('After.');
   });
 
+  it('still opens the editor when the composed preview could not load', async () => {
+    fetchMock.mockRejectedValue(new Error('Preview unavailable.'));
+    fetchEditableMock.mockResolvedValue({
+      workspaceId: 'target-company-state',
+      source: 'Editable source.',
+      description: 'Editable source.',
+    });
+    const user = userEvent.setup();
+    mount({ admin: asAdmin });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable.');
+    await user.click(screen.getByRole('button', { name: 'Edit description' }));
+
+    expect(await screen.findByRole('textbox', { name: 'Your description' })).toHaveValue('Editable source.');
+  });
+
   it('is withheld from non-admins without exposing repository implementation details', async () => {
     mount({ admin: nonAdmin });
     await screen.findByRole('heading', { name: 'Your description' });

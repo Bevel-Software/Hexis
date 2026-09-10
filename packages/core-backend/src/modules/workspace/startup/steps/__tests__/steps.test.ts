@@ -115,7 +115,7 @@ async function exists(dir: string, rel: string): Promise<boolean> {
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
 const PREAMBLE_IGNORE_BLOCK =
   '\n# Added by the platform: agent instructions are edited from External agent access.\n' +
-  'mcp-description.md\n';
+  '/mcp-description.md\n';
 
 /** The template as the step writes it under the default layout — placeholders rendered. */
 async function template(name: string): Promise<string> {
@@ -224,7 +224,7 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).toContain('MyStuff/'); // the operator's rules survive
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
-    expect(lines).toContain('mcp-description.md');
+    expect(lines).toContain('/mcp-description.md');
     expect(lines).not.toContain('Skills/'); // never the skills root — the Library's tree needs it
   });
 
