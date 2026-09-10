@@ -83,7 +83,13 @@ export function WorkspaceItemRoute() {
    */
   const fileView = () => (
     <>
-      <PluginFileNote plugin={pluginHolding(data.pluginSummaries, segments.slice(1).join('/'))} />
+      {/* Only from a SETTLED list: while it is (re)loading the summaries on
+          hand may be the previous list's, and a plugin whose identity just
+          changed would be linked by its old name. The file itself waits for
+          nothing. */}
+      <PluginFileNote
+        plugin={data.pluginsLoading ? null : pluginHolding(data.pluginSummaries, segments.slice(1).join('/'))}
+      />
       <FileRoute canonicalize={false} />
     </>
   );

@@ -265,6 +265,18 @@ describe('WorkspaceItemRoute', () => {
       expect(await screen.findByRole('link', { name: 'Open plugin' })).toHaveAttribute('href', '/skills-and-tools/plugins/sales');
     });
 
+    it('shows the file at once but the note only from a settled plugin list', async () => {
+      // A stale list could name the wrong plugin for a frame; the file waits
+      // for nothing, the note does.
+      let answer: (plugins: PluginSummary[]) => void = () => {};
+      vi.mocked(listPlugins).mockReturnValue(new Promise<PluginSummary[]>((r) => (answer = r)));
+      renderAt(itemUrl('Plugins/Sales/plugin.json'));
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
+      expect(screen.queryByRole('link', { name: 'Open plugin' })).not.toBeInTheDocument();
+      answer([SALES]);
+      expect(await screen.findByRole('link', { name: 'Open plugin' })).toHaveAttribute('href', '/skills-and-tools/plugins/sales');
+    });
+
     it('a file in a folder no listed plugin holds gets no note — the file alone', async () => {
       renderAt(itemUrl('Plugins/Nope/plugin.json'));
       await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
