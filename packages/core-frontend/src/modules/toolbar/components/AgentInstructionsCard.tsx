@@ -25,8 +25,8 @@ function count(n: number, cap: number): string {
   return `${n.toLocaleString('en-US')} / ${cap.toLocaleString('en-US')} characters`;
 }
 
-const WARNING = 'text-meta text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5';
-const BOX = 'text-xs bg-sunken border border-line rounded px-2.5 py-2';
+const WARNING = 'text-meta text-wait bg-wait-soft border border-wait rounded-sm px-2 py-1.5';
+const BOX = 'text-xs bg-sunken border border-line rounded-sm px-2.5 py-2';
 /**
  * The description is a preview at the page's own size, not a document: the
  * prose defaults would render a `##` twice the size of everything around it.
@@ -101,13 +101,13 @@ export function AgentInstructionsCard() {
 
       {state.status === 'loading' && <p className="text-meta text-ink-muted">Loading…</p>}
       {state.status === 'error' && (
-        <div role="alert" className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+        <div role="alert" className="text-xs text-danger bg-danger-soft border border-danger rounded-sm px-2 py-1.5">
           {state.message}
         </div>
       )}
       {state.status === 'ready' && (
         <div className="space-y-3">
-          <details className="border border-line rounded">
+          <details className="border border-line rounded-sm">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs text-ink-muted">
               Platform message (fixed, sent first)
             </summary>
@@ -120,7 +120,7 @@ export function AgentInstructionsCard() {
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="text-xs font-medium text-ink">Your description</h3>
               <span
-                className={`text-meta ${state.data.truncated ? 'text-amber-600' : 'text-ink-muted'}`}
+                className={`text-meta ${state.data.truncated ? 'text-wait' : 'text-ink-muted'}`}
                 data-testid="preamble-count"
               >
                 {count(state.data.preambleChars, PREAMBLE_CAP)}
@@ -163,7 +163,7 @@ export function AgentInstructionsCard() {
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="text-xs font-medium text-ink">Short version</h3>
               <span
-                className={`text-meta ${state.data.toolPrefixTruncated ? 'text-amber-600' : 'text-ink-muted'}`}
+                className={`text-meta ${state.data.toolPrefixTruncated ? 'text-wait' : 'text-ink-muted'}`}
                 data-testid="prefix-count"
               >
                 {count(state.data.toolPrefixChars, TOOL_PREFIX_CAP)}
