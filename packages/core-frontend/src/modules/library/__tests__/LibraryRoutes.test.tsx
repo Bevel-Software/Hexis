@@ -211,10 +211,9 @@ describe('LibraryRoutes', () => {
   it("/skills-and-tools/yours is the caller's own plugin, as a plugin page", async () => {
     renderAt('/skills-and-tools/yours');
     expect(await screen.findByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 })).toBeInTheDocument();
-    expect(within(nav()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    );
+    // Your own space is not a group: no nav row for it, and nothing else lights up.
+    expect(within(nav()).queryByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeNull();
+    expect(within(nav()).queryByRole('button', { current: true })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Skills', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
@@ -236,19 +235,21 @@ describe('LibraryRoutes', () => {
     expect(screen.queryByTestId('library-card-integration-slack')).toBeNull();
   });
 
-  it('Everyone leads the groups, right after your own space, and opens what is org-wide', async () => {
+  it('Everyone leads the groups, right after the lenses, and opens what is org-wide', async () => {
     renderAt('/skills-and-tools');
     // "Everyone Else" is a team in the fixture: the org-wide row is the one
     // whose whole label is the name plus its count.
     await within(nav()).findByRole('button', { name: /^Everyone \d+$/ });
     const rows = within(nav()).getAllByRole('button');
     const names = rows.map((r) => r.textContent ?? '');
-    const own = names.findIndex((n) => n.startsWith(TEST_PERSONAL_GROUP));
+    const owned = names.findIndex((n) => n.startsWith('Owned by me'));
     const everyone = names.findIndex((n) => /^Everyone\d+$/.test(n));
     const gtm = names.findIndex((n) => n.startsWith('GTM Team'));
-    expect(own).toBeGreaterThan(-1);
-    expect(everyone).toBe(own + 1);
+    expect(owned).toBeGreaterThan(-1);
+    expect(everyone).toBe(owned + 1);
     expect(gtm).toBeGreaterThan(everyone);
+    // Your own space is a plugin, not a group: no row for it here.
+    expect(names.some((n) => n.startsWith(TEST_PERSONAL_GROUP))).toBe(false);
 
     fireEvent.click(rows[everyone]!);
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools/teams/Everyone'));
@@ -478,7 +479,7 @@ describe('LibraryRoutes', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
     expect(screen.queryByText(/There's no team called/)).toBeNull();
     expect(await screen.findByRole('heading', { name: 'GTM Team', level: 1 })).toBeInTheDocument();
-    expect(within(nav()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
+    expect(within(nav()).getByRole('button', { name: /^Owned by me/ })).toBeInTheDocument();
     expect(within(nav()).queryByRole('button', { name: /^GTM Team/ })).toBeNull();
   });
 

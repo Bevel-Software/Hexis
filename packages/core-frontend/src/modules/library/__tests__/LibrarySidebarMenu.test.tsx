@@ -69,7 +69,7 @@ vi.mock('../services/teams.api', () => ({ listTeams: teamsMock.listTeams }));
 vi.mock('../../git/components/PullRequestsForMe', () => ({ PullRequestsForMe: () => null }));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
-import { withAuth, TEST_PERSONAL_GROUP } from './auth-harness';
+import { withAuth } from './auth-harness';
 
 const CATALOG: LibraryData = {
   loading: false,
@@ -206,7 +206,7 @@ describe('Library sidebar: right-click, end to end', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
 
-    await openMenuOn(new RegExp(`^${TEST_PERSONAL_GROUP}`));
+    await openMenuOn(/^Everything/);
     expect(menuItems()).toEqual(['New plugin', 'Copy link']);
   });
 

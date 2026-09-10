@@ -4,8 +4,8 @@ import { PluginsSidebar, type PluginsSidebarProps } from '../components/PluginsS
 import type { LibraryFilter } from '../utils/status';
 
 /**
- * The Library nav: two lenses, the caller's teams (their own space first),
- * the two roots as trees. A pure view of the URL — `filter` in, intents out.
+ * The Library nav: two lenses, the groups as the server lists them, the two
+ * roots as trees. A pure view of the URL — `filter` in, intents out.
  */
 
 function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
@@ -16,8 +16,6 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
     onSelect,
     ownedCount: 2,
     ownedAttention: 0,
-    personalPluginLabel: "Juan's Plugin",
-    ungroupedCount: 1,
     teams: [
       { name: 'Engineering', count: 4, urgent: 0 },
       { name: 'GTM', count: 3, urgent: 2 },
@@ -70,14 +68,16 @@ describe('PluginsSidebar', () => {
     expect(screen.queryByText('Library')).not.toBeInTheDocument();
   });
 
-  it("leads the Teams view with the caller's own space, and lists it even when empty", () => {
-    renderSidebar({ filter: { kind: 'ungrouped' }, ungroupedCount: 0 });
+  it("lists the groups in the server's order and nothing else — your own space is not a group", () => {
+    renderSidebar({ filter: { kind: 'ungrouped' } });
     const panel = screen.getByRole('tabpanel', { name: 'Groups' });
-    const own = within(panel).getByRole('button', { name: /^Juan's Plugin/ });
-    const first = within(panel).getByRole('button', { name: /^Engineering/ });
-    expect(own.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(own).toHaveAttribute('aria-current', 'true');
-    expect(own).toHaveAccessibleName("Juan's Plugin");
+    expect(within(panel).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Engineering4',
+      'GTM2',
+      'Product',
+    ]);
+    // The own-space page lights no row: it is reached from Everything, not from here.
+    expect(within(panel).queryByRole('button', { current: true })).toBeNull();
   });
 
   it('switches to the Advanced view, which holds the two trees — Skills before Plugins — and no team rows', () => {
@@ -99,7 +99,6 @@ describe('PluginsSidebar', () => {
     // No heading over the trees: the tab already names the view.
     expect(within(panel).queryByText('Files on disk')).toBeNull();
     expect(screen.queryByRole('button', { name: /^Engineering/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Juan's Plugin/ })).toBeNull();
     // The lenses belong to neither view and stay put.
     expect(row(/^Everything/)).toBeInTheDocument();
     expect(row(/^Owned by me/)).toBeInTheDocument();
@@ -180,7 +179,6 @@ describe('PluginsSidebar', () => {
     const expected: [RegExp, LibraryFilter][] = [
       [/^Everything/, { kind: 'all' }],
       [/^Owned by me/, { kind: 'owned' }],
-      [/^Juan's Plugin/, { kind: 'ungrouped' }],
       [/^GTM/, { kind: 'team', group: 'GTM' }],
     ];
     for (const [name, filter] of expected) {
