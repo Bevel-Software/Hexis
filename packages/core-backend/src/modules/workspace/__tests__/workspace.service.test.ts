@@ -288,6 +288,16 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Seeded since the editor opened.');
   });
 
+  it('refuses an absolute path rather than writing it inside the workspace', async () => {
+    // The property canonicalisation must not erode: `path.resolve` lets an
+    // absolute path win over the workspace dir, and the boundary check is what
+    // refuses it. A canonicaliser that dropped the empty leading segment would
+    // turn this into an ordinary write at `<workspace>/etc/passwd`.
+    await expect(
+      svc.writeFile(workspaceId, '/etc/passwd', 'pwned', { expectedContent: '' }),
+    ).rejects.toThrow('Path traversal detected');
+  });
+
   it('is not applied at all when the option is absent', async () => {
     const rel = 'knowledge-base/mcp-description.md';
     await fs.writeFile(path.join(workspaceDir, rel), 'Whatever.', 'utf-8');

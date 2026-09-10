@@ -111,6 +111,15 @@ export function validateRelativePath(relativePath: string): string | null {
  * production, which is a worse failure than the race it would close.
  */
 export function canonicalRelativePath(relativePath: string): string {
+  // Never LAUNDER a path. Dropping empty segments would turn the absolute
+  // `/etc/passwd` into the perfectly ordinary `etc/passwd`, and an absolute
+  // path is exactly what `path.resolve` lets win over the workspace directory
+  // — which is why the workspace-boundary check refuses it today. A path this
+  // cannot canonicalise is returned UNCHANGED, so every gate downstream sees
+  // what the caller actually sent and goes on refusing it.
+  if (relativePath.startsWith('/') || validateRelativePath(relativePath) !== null) {
+    return relativePath;
+  }
   return relativePath
     .replace(/^\.\//, '')
     .split('/')

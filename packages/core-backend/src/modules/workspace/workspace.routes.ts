@@ -907,8 +907,11 @@ export function createWorkspaceRoutes(
     // turn, the workflow lock row, and the bytes themselves. Two clients
     // spelling one file differently would otherwise take two different locks
     // and both pass their own precondition.
-    const rawPath = req.query.path as string;
-    if (!rawPath) {
+    // Typed, not cast: a repeated `?path=a&path=b` arrives as an ARRAY, and
+    // canonicalising it would throw out here, outside the try below, for a
+    // generic 500 on what is a client mistake.
+    const rawPath = req.query.path;
+    if (typeof rawPath !== 'string' || !rawPath) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }

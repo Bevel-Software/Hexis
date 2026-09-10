@@ -38,6 +38,8 @@ interface Harness {
   planForCreate: ReturnType<typeof vi.fn>;
   seedWrites: string[];
   lockedPaths: string[];
+  /** The paths turns were taken on, so the third coordinator is checked too. */
+  turnPaths: string[];
   /** What happened, in order, so the critical section can be asserted. */
   order: string[];
 }
@@ -70,7 +72,9 @@ async function makeHarness(): Promise<Harness> {
     stale.status = 409;
     throw stale;
   });
-  const withPathTurnMock = vi.fn(async (_id: string, _p: string, op: () => Promise<unknown>) => {
+  const turnPaths: string[] = [];
+  const withPathTurnMock = vi.fn(async (_id: string, p: string, op: () => Promise<unknown>) => {
+    turnPaths.push(p);
     order.push('turn:enter');
     try {
       return await op();
@@ -143,6 +147,7 @@ async function makeHarness(): Promise<Harness> {
     planForCreate,
     seedWrites,
     lockedPaths,
+    turnPaths,
     order,
   };
 }
@@ -235,12 +240,30 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
     );
 
     expect(res.status).toBe(200);
+    // All three coordinators, not two: the turn, the lock row and the bytes.
+    expect(h.turnPaths).toEqual([FILE]);
+    expect(h.lockedPaths).toEqual([FILE]);
     expect(h.assertContentMatchesMock).toHaveBeenCalledWith(WS, FILE, 'CONTENT');
     expect(h.writeFileMock).toHaveBeenCalledWith(WS, FILE, 'After.', {
       failIfExists: false,
       expectedContent: 'CONTENT',
     });
-    expect(h.lockedPaths).toEqual([FILE]);
+  });
+
+  it('refuses a repeated ?path as a client error, not a 500', async () => {
+    h = await makeHarness();
+
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(FILE)}&path=other.md`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: 'After.' }),
+      },
+    );
+
+    expect(res.status).toBe(400);
+    expect(h.writeFileMock).not.toHaveBeenCalled();
   });
 
   it('refuses a non-string precondition instead of dropping it', async () => {
