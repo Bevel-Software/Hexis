@@ -517,7 +517,10 @@ export function ExternalAgentAccessPage() {
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
                             Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
-                            {revoked && ' · Disconnected'}
+                            {/* A key an admin took is not one you can reconnect — say so,
+                                or people try. Your own disconnect keeps its word. */}
+                            {revoked &&
+                              (k.revokedBy === 'admin' ? ' · Revoked by an admin' : ' · Disconnected')}
                           </div>
                           {usage && (
                             <div className="mt-1 max-w-xs">

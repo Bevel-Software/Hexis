@@ -13,6 +13,8 @@ export interface AdminConnectionKey {
   createdAt: number;
   lastUsedAt: number | null;
   revokedAt: number | null;
+  /** Who ended it once revoked: the owner, or an admin. Null while live. */
+  revokedBy: 'owner' | 'admin' | null;
   user: {
     id: string;
     email: string;

@@ -28,6 +28,7 @@ const ALICE_CI: AdminConnectionKey = {
   createdAt: NOW - 10 * DAY,
   lastUsedAt: NOW - 2 * 60 * 60 * 1000,
   revokedAt: null,
+  revokedBy: null,
   user: ALICE,
 };
 const ALICE_LAPTOP: AdminConnectionKey = {
@@ -37,6 +38,7 @@ const ALICE_LAPTOP: AdminConnectionKey = {
   createdAt: NOW - 3 * DAY,
   lastUsedAt: null,
   revokedAt: null,
+  revokedBy: null,
   user: ALICE,
 };
 const BOB_OLD: AdminConnectionKey = {
@@ -46,6 +48,7 @@ const BOB_OLD: AdminConnectionKey = {
   createdAt: NOW - 40 * DAY,
   lastUsedAt: NOW - 30 * DAY,
   revokedAt: NOW - 20 * DAY,
+  revokedBy: 'owner',
   user: BOB,
 };
 const BOB_LINK: AdminConnectionKey = {
@@ -55,6 +58,7 @@ const BOB_LINK: AdminConnectionKey = {
   createdAt: NOW - 1 * DAY,
   lastUsedAt: NOW - 60 * 1000,
   revokedAt: null,
+  revokedBy: null,
   user: BOB,
 };
 
@@ -136,7 +140,7 @@ describe('ConnectionKeysPage', () => {
 
     const bob = screen.getByRole('region', { name: 'Keys for bob@example.com' });
     expect(within(bob).getByText('Old script')).toBeInTheDocument();
-    expect(within(bob).getByText(/Disconnected 2w ago/)).toBeInTheDocument();
+    expect(within(bob).getByText(/Disconnected by owner 2w ago/)).toBeInTheDocument();
     expect(
       within(bob).queryByRole('button', { name: 'Revoke Old script for bob@example.com' }),
     ).not.toBeInTheDocument();

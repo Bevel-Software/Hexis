@@ -85,7 +85,11 @@ export function ConnectionKeysPage() {
       // with a Revoke button — the agent holding this key is already cut off.
       setKeys((prev) =>
         prev
-          ? prev.map((k) => (k.id === id && k.revokedAt === null ? { ...k, revokedAt: Date.now() } : k))
+          ? prev.map((k) =>
+              k.id === id && k.revokedAt === null
+                ? { ...k, revokedAt: Date.now(), revokedBy: 'admin' as const }
+                : k,
+            )
           : prev,
       );
       setPendingRevoke(null);
@@ -196,7 +200,8 @@ export function ConnectionKeysPage() {
                                   <>
                                     {' · '}
                                     <span title={formatAbsolute(k.revokedAt)}>
-                                      Disconnected {formatRelative(k.revokedAt)}
+                                      {k.revokedBy === 'admin' ? 'Revoked by an admin' : 'Disconnected by owner'}{' '}
+                                      {formatRelative(k.revokedAt)}
                                     </span>
                                   </>
                                 )}

@@ -192,6 +192,15 @@ export const externalApiKeys = pgTable('api_tokens', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   lastUsedAt: timestamp('last_used_at'),
   revokedAt: timestamp('revoked_at'),
+  /**
+   * Who ended the key — `owner` (the person disconnected it themselves) or
+   * `admin` (an admin revoked it from the deployment overview). Null while
+   * the key is live, and on rows revoked before this column existed, which
+   * the UI reads as the owner's own doing. The owner's page uses it to say
+   * "revoked by an admin" rather than "disconnected", so nobody tries to
+   * reconnect a key that was taken from them.
+   */
+  revokedBy: text('revoked_by'),
 }, (t) => ({
   byUser: index('api_tokens_by_user').on(t.userId),
 }));
