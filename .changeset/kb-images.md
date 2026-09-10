@@ -10,4 +10,4 @@ Knowledge pages show their images. A markdown image with a relative path (`![App
 
 Raw file responses carry `Cache-Control: private, no-cache`, so a browser revalidates each image with the server and a shared cache never stores one person's authenticated file. A link written as `Some%20File.md` on a skill page now opens `Some File.md`, as it did everywhere else.
 
-An external link in a page's frontmatter opens in a new tab instead of doing nothing, and so does one an agent's HTML passes to `bevel.navigate`. A `#section` link scrolls the page it sits in instead of navigating to the parent folder. A skill page's images now refresh when a teammate replaces one, even while you are reading from your own suggestion branch.
+A web, mail, phone or map link in a page's frontmatter opens in a new tab instead of doing nothing, and so does one an agent's HTML passes to `bevel.navigate`. Links using any other scheme stay inert, as before. A `#section` link scrolls the page it sits in instead of navigating to the parent folder. A skill page's images now refresh when a teammate replaces one, even while you are reading from your own suggestion branch.

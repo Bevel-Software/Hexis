@@ -265,11 +265,12 @@ export function resolveKbHref(
  */
 export function openExternalHref(href: string): boolean {
   if (!isOpenableExternalHref(href)) return false;
-  // `noreferrer` as well as `noopener`: the first severs `window.opener`, the
-  // second stops the workspace URL going out as the `Referer` header. A
-  // workspace path names a branch and a file, so it is worth not leaking. The
-  // markdown pipeline's body links already ship `rel="noopener noreferrer"`;
-  // this is the same policy on the scripted path.
+  // Both flags, for different holes: `noopener` severs `window.opener` so the
+  // opened page cannot reach back into this one, and `noreferrer` withholds
+  // the `Referer` header, which would otherwise carry the workspace URL — a
+  // branch name and a file path — to the destination. The markdown pipeline's
+  // body links already ship `rel="noopener noreferrer"`; this is the same
+  // policy on the scripted path.
   window.open(href, '_blank', 'noopener,noreferrer');
   return true;
 }

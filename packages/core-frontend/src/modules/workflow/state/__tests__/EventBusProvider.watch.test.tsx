@@ -22,11 +22,39 @@ function Harness({ onReady }: { onReady: (bus: EventBusContextValue) => void }) 
   return null;
 }
 
+/**
+ * jsdom ships no EventSource, and the provider skips its connection effect
+ * without one — which also skips the `open` handler that re-syncs focus after
+ * a reconnect. This stub makes that path reachable and lets a test fire a
+ * second `open` the way a dropped-and-restored stream does.
+ */
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  listeners = new Map<string, ((e: Event) => void)[]>();
+  constructor() {
+    FakeEventSource.instances.push(this);
+  }
+  addEventListener(type: string, fn: (e: Event) => void) {
+    const bucket = this.listeners.get(type) ?? [];
+    bucket.push(fn);
+    this.listeners.set(type, bucket);
+  }
+  removeEventListener(type: string, fn: (e: Event) => void) {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((f) => f !== fn));
+  }
+  close() {}
+  fire(type: string) {
+    for (const fn of [...(this.listeners.get(type) ?? [])]) fn(new Event(type));
+  }
+}
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
   vi.stubGlobal('fetch', fetchMock);
+  FakeEventSource.instances = [];
+  vi.stubGlobal('EventSource', FakeEventSource);
   window.sessionStorage.setItem('bevel-event-bus-session-id', 'sess-1');
 });
 
@@ -129,10 +157,10 @@ describe('EventBusProvider watchWorkspace', () => {
     expect(bodies.at(-1)?.alsoWatch).toEqual(['main']);
   });
 
-  // A reconnect is a new server-side session record with an empty list, so the
-  // coalescing check must not mistake "we already sent this" for "the server
-  // still has it".
-  it('re-posts the same list after a reconnect rather than coalescing it away', async () => {
+  // Serialising the sends means a queued one can find the list already synced
+  // and skip its request. That is the point, but it must only skip when the
+  // SERVER still holds the list.
+  it('skips a redundant send when the server already holds that list', async () => {
     let bus!: EventBusContextValue;
     render(
       <EventBusProvider>
@@ -144,9 +172,32 @@ describe('EventBusProvider watchWorkspace', () => {
       bus.setFocus('alice%2Fdraft');
     });
     const sentBefore = focusBodies(fetchMock).length;
-    // Asking for the identical list again is coalesced: the server has it.
     await act(async () => bus.setFocus('alice%2Fdraft'));
     expect(focusBodies(fetchMock)).toHaveLength(sentBefore);
+  });
+
+  // ...and a reconnect is exactly when it no longer does: the server has a NEW
+  // session record with an empty delivery list, so a coalesced resync would
+  // leave the tab believing in watches nobody is honouring.
+  it('re-posts the whole list on reconnect, coalescing notwithstanding', async () => {
+    let bus!: EventBusContextValue;
+    render(
+      <EventBusProvider>
+        <Harness onReady={(b) => (bus = b)} />
+      </EventBusProvider>,
+    );
+    await act(async () => {
+      bus.watchWorkspace('main');
+      bus.setFocus('alice%2Fdraft');
+    });
+    const sentBefore = focusBodies(fetchMock).length;
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // The browser dropped the stream and reopened it. Same list, sent again.
+    await act(async () => FakeEventSource.instances[0].fire('open'));
+    const bodies = focusBodies(fetchMock);
+    expect(bodies.length).toBe(sentBefore + 1);
+    expect(bodies.at(-1)).toEqual({ workspaceId: 'alice%2Fdraft', alsoWatch: ['main'] });
   });
 
   it('does not list the focused workspace twice when it is also watched', async () => {
