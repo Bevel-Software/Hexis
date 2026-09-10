@@ -89,7 +89,14 @@ async function addManifests(branch: KbBranch): Promise<void> {
   for (const rel of added) branch.note(`${PLUGINS_DIR}/${rel}: ${PLUGIN_MANIFEST_FILE} written`);
 }
 
-async function looksLikeLegacyPlugin(dir: string, entries: import('node:fs').Dirent[]): Promise<boolean> {
+/**
+ * Whether a folder's own content is what the legacy layout put in a plugin —
+ * THE rule for "this folder was a plugin before manifests existed", shared
+ * with the Groups→Plugins migration so the two steps cannot disagree about
+ * which folders under the root are plugins. A folder with nothing of the
+ * kind (a `.gitkeep`, a grouping folder someone made in the tree) is not.
+ */
+export async function looksLikeLegacyPlugin(dir: string, entries: import('node:fs').Dirent[]): Promise<boolean> {
   for (const entry of entries) {
     if (entry.isFile() && (entry.name === 'access.md' || entry.name === PLUGIN_MCP_FILE || entry.name.toLowerCase().endsWith('.tool'))) {
       return true;
@@ -97,6 +104,27 @@ async function looksLikeLegacyPlugin(dir: string, entries: import('node:fs').Dir
     if (entry.isDirectory() && (entry.name === PLUGIN_SKILLS_DIR || entry.name === HEXIS_EXTENSION_NS)) return true;
   }
   return hasSkillBeneath(dir);
+}
+
+/**
+ * Whether a plugin (a folder carrying `plugin.json` or a bundle) sits anywhere
+ * BELOW `dir` — which makes `dir` a grouping folder, never a plugin itself.
+ */
+export async function hasPluginBeneath(dir: string): Promise<boolean> {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (isAbsence(err)) return false;
+    throw err;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const sub = path.join(dir, entry.name);
+    if ((await isFile(path.join(sub, PLUGIN_MANIFEST_FILE))) || (await isFile(path.join(sub, BUNDLE_FILE)))) return true;
+    if (await hasPluginBeneath(sub)) return true;
+  }
+  return false;
 }
 
 /** The pre-`skills/` shape: `Plugins/<Plugin>/<skill>/SKILL.md`, at any depth. */

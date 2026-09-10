@@ -3,6 +3,7 @@ import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@be
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
 import { useLibrary } from '../state/library-data';
+import { FileRoute } from '../../workspace/components/FileRoute';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
 import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
@@ -28,10 +29,19 @@ import { LIBRARY_ROOT, pathForPlugin } from './library-paths';
  * container belongs to its plugin page under `Plugins/`; under `Skills/` a
  * scope folder has no page (home). A loose FILE — a folder's `access.md`,
  * a plugin's `plugin.json`, a stray upload — opens as the plain file it is
- * under either root: the person clicked a file, and the plugin page was
- * never the file (it also keys on the plugin's identity, which a folder name
- * need not be — a personal space, a folder spelled unlike its manifest — so
- * that bounce landed on "doesn't exist" for a file plainly there).
+ * under either root, HERE, inside this app: the same `FileRoute` Knowledge
+ * renders, in the Library's own frame. Which app a file opens in follows
+ * the folder it is in — the two roots ARE the two apps — never the viewer it
+ * needs, so a person reading a plugin's manifest keeps the Skills & Tools nav
+ * and switcher around it. (The plugin page was never the file either: it
+ * keys on the plugin's identity, which a folder name need not be — a
+ * personal space, a folder spelled unlike its manifest — so the old bounce
+ * there landed on "doesn't exist" for a file plainly present.)
+ *
+ * Router state `rawFile` asks for that raw view OUTRIGHT, whatever the URL
+ * would otherwise resolve to — the tool page's "Edit the tool file", the
+ * plugin page's manifest button. State, not URL: a shared link never carries
+ * it, so nobody lands on the editor by accident.
  *
  * The catalog is consulted only to REFINE a tool's slug (a `.tool` may
  * declare an explicit id different from its filename); the filename is the
@@ -59,6 +69,9 @@ export function WorkspaceItemRoute() {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
 
+  // Asked for the raw file by name: no resolution, the editor it is.
+  if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return <FileRoute />;
+
   /**
    * `key={name}` is load-bearing. A provisional name gets CORRECTED once the
    * catalog lands (folder name → declared id), and without a remount the page
@@ -72,23 +85,10 @@ export function WorkspaceItemRoute() {
 
   /**
    * A loose file (a folder's access.md, a plugin's manifest, a stray note)
-   * opens as the plain file it is, in the pane workspace. Router STATE, not
-   * a different URL: the shell reads `rawFile` to step past the shape rule,
-   * and a shared link can never carry state — so nobody lands on the raw
-   * view by accident. Once asked, hold still: the shell is swapping surfaces
-   * on that state, and asking again from here would be a navigation loop.
+   * opens as the plain file it is — the Knowledge file route, rendered right
+   * here in the Library's column, same URL, same viewer, this app's frame.
    */
-  const rawFileView = () => {
-    const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-    if (rawRequested) return null;
-    return (
-      <Navigate
-        to={`${location.pathname}${location.search}${location.hash}`}
-        state={{ rawFile: true }}
-        replace
-      />
-    );
-  };
+  const rawFileView = () => <FileRoute />;
 
   if (kbRoot === SKILLS_DIR) {
     const rest = segments.slice(2);

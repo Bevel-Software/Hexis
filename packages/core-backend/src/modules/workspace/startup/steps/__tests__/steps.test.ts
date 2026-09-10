@@ -909,6 +909,23 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
     });
   });
 
+  it('leaves a plain folder under the root alone — a .gitkeep is not a plugin, and a grouping folder holding one is not either', async () => {
+    await seedUpstream({
+      'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+      // Made with "New folder" in the tree: nothing plugin-shaped in it.
+      'Plugins/TestFolder/.gitkeep': '',
+      // A grouping folder with a plugin INSIDE: a manifest on the folder
+      // would hide the plugin beneath it from every catalog.
+      'Plugins/Teams/Agent Made/plugin.json': '{"name":"agent-made"}',
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'Plugins/GTM/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/TestFolder/plugin.json')).toBe(false);
+    expect(await exists(dir, 'Plugins/Teams/plugin.json')).toBe(false);
+    expect(await exists(dir, 'Plugins/Teams/Agent Made/plugin.json')).toBe(true);
+  });
+
   it('leaves a personal folder a valid plugin', async () => {
     await seedUpstream({
       'Groups/personal-u-123/access.md': 'write:\n  - Ali <ali@x.com>\n',
