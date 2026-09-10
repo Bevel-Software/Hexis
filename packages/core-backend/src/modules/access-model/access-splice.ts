@@ -34,6 +34,7 @@ import {
   canonicalRoleName,
   accessMdDeclaresBodyRules,
 } from './access-grammar.js';
+import { freshAccessMd } from './access-template.js';
 
 /**
  * Which rule block a mutation edits.
@@ -383,8 +384,16 @@ export function spliceGrant(
   const f = splitFrontmatter(text);
 
   if (!f.hasFrontmatter) {
-    // Fresh file — synthesise a minimal frontmatter block, keep any body lines
-    // the caller passed (usually none for a new access.md).
+    // A fresh FOLDER access.md gets the platform's two-block shape, the grant
+    // in the body and the explanation of both blocks in place — the same
+    // file a person would find beside a plugin, so every generated
+    // access.md teaches the same rules. (Only for an EMPTY file: text
+    // without a frontmatter is the legacy single-block format, kept as it is.)
+    if (opts.target === 'folder' && text.trim() === '') {
+      return { text: freshAccessMd(`${verb}:${f.eol}  - ${renderEntry(principal, deny)}`, f.eol), changed: true };
+    }
+    // Fresh node frontmatter — synthesise a minimal block, keep any body
+    // lines the caller passed.
     const itemLine = opts.allowScalar
       ? `${verb}: ${renderEntry(principal, deny)}`
       : `${verb}:${f.eol}  - ${renderEntry(principal, deny)}`;
