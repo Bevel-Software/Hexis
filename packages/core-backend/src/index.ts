@@ -49,6 +49,7 @@ export {
 export type {
   IExternalApiKeyService,
   ExternalApiKeySummary,
+  AdminExternalApiKeySummary,
 } from './modules/tool-auth/external-api-key.interface.js';
 
 // Key port/seam types an overlay implements.

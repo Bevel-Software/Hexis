@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { externalApiKeys, users } from '../database/schema.js';
@@ -10,6 +10,7 @@ import {
 } from './external-api-key.errors.js';
 import {
   DEFAULT_KEY_KIND,
+  type AdminExternalApiKeySummary,
   type ExternalApiKeySummary,
   type IExternalApiKeyService,
   type KeyKindSpec,
@@ -147,31 +148,60 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     return rows.map(toSummary);
   }
 
+  async listForDeployment(): Promise<AdminExternalApiKeySummary[]> {
+    // Owner joined in so the admin overview is one round-trip; ordered by
+    // owner email so per-account grouping is a linear pass, newest key
+    // first within an account (same order the owner sees on their own page).
+    const rows = await this.db
+      .select({
+        key: externalApiKeys,
+        userId: users.id,
+        email: users.email,
+        name: users.name,
+      })
+      .from(externalApiKeys)
+      .innerJoin(users, eq(externalApiKeys.userId, users.id))
+      .orderBy(asc(users.email), desc(externalApiKeys.createdAt));
+    return rows.map((row) => ({
+      ...toSummary(row.key),
+      user: { id: row.userId, email: row.email, name: row.name },
+    }));
+  }
+
   async revoke(id: string, userId: string): Promise<void> {
-    // Scope the WHERE by userId so a user can never revoke another user's
-    // token even if they learn the id. Idempotent on already-revoked rows
-    // because we only set `revokedAt` when it's currently null — re-revoking
-    // returns 0 rows changed but no error.
+    // Scope by userId so a user can never revoke another user's token even
+    // if they learn the id.
+    await this.markRevoked(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId))!);
+  }
+
+  async revokeAny(id: string): Promise<void> {
+    // No owner scope: the caller is an admin acting across the deployment.
+    // The route that exposes this is admin-gated; nothing user-facing may
+    // reach it.
+    await this.markRevoked(eq(externalApiKeys.id, id));
+  }
+
+  /**
+   * Set `revokedAt` on the rows matching `scope`. Idempotent on
+   * already-revoked rows because we only set `revokedAt` when it's currently
+   * null — re-revoking returns 0 rows changed but no error. Throws
+   * TokenNotFoundError when `scope` matches nothing at all.
+   */
+  private async markRevoked(scope: SQL): Promise<void> {
     const result = await this.db
       .update(externalApiKeys)
       .set({ revokedAt: new Date() })
-      .where(
-        and(
-          eq(externalApiKeys.id, id),
-          eq(externalApiKeys.userId, userId),
-          isNull(externalApiKeys.revokedAt),
-        ),
-      )
+      .where(and(scope, isNull(externalApiKeys.revokedAt)))
       .returning({ id: externalApiKeys.id });
 
     if (result.length === 0) {
-      // Distinguish "doesn't exist / not yours" from "already revoked".
+      // Distinguish "doesn't exist / out of scope" from "already revoked".
       // The latter must stay idempotent (return success); only the former
       // throws.
       const [existing] = await this.db
         .select({ id: externalApiKeys.id })
         .from(externalApiKeys)
-        .where(and(eq(externalApiKeys.id, id), eq(externalApiKeys.userId, userId)))
+        .where(scope)
         .limit(1);
       if (!existing) {
         throw new TokenNotFoundError();
