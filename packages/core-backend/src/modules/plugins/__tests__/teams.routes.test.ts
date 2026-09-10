@@ -55,8 +55,13 @@ interface HarnessOpts {
   caller?: string[];
   /** What each group reads; a group absent here is "not a group" (null). */
   team?: Record<string, string[]>;
+  /** What the org-wide `everyone` principal reads. */
+  everyone?: string[];
   email?: string | null;
 }
+
+/** The org-wide entry every answer opens with — empty unless `everyone` says otherwise. */
+const NOTHING_ORG_WIDE = { name: 'Everyone', plugins: [], skills: [], tools: [] };
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -72,6 +77,7 @@ async function harness(opts: HarnessOpts = {}) {
     canReadAsGroupBatch: vi.fn(async (_w: string, group: string, paths: string[]) =>
       opts.team && group in opts.team ? tableVerdict(opts.team[group], paths) : null,
     ),
+    canReadAsEveryoneBatch: vi.fn(async (_w: string, paths: string[]) => tableVerdict(opts.everyone, paths)),
   } as unknown as IAccessControl;
   const index = { catalog: async () => CATALOG, invalidate: () => undefined } as IPluginIndexService;
   const skills = { listSkills: async () => SKILLS } as unknown as ISkillService;
@@ -119,10 +125,38 @@ describe('GET /api/teams', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       teams: [
+        NOTHING_ORG_WIDE,
         { name: 'Sales Team', plugins: ['gtm'], skills: ['outreach'], tools: ['hubspot'] },
         { name: 'Finance Team', plugins: ['finance'], skills: ['ledger'], tools: ['books'] },
       ],
     });
+  });
+
+  it('opens with Everyone — what the org-wide principal reads, cut to what the caller sees, ahead of every group', async () => {
+    const h = await harness({
+      groups: ['Sales Team'],
+      caller: ['Plugins/GTM', 'Plugins/Finance/access.md', 'Skills/Sales/outreach/SKILL.md', 'Plugins/GTM/mcp.json'],
+      everyone: [
+        'Plugins/GTM',
+        'Plugins/Finance',
+        'Skills/Sales/outreach/SKILL.md',
+        'Skills/Finance/ledger/SKILL.md', // the caller cannot read it — withheld
+        'Plugins/GTM/mcp.json',
+      ],
+      team: { 'Sales Team': ['Plugins/GTM'] },
+    });
+    expect(await (await h.get()).json()).toEqual({
+      teams: [
+        // Finance is org-wide readable and the caller can discover it: listed, like any team's.
+        { name: 'Everyone', plugins: ['gtm', 'finance'], skills: ['outreach'], tools: ['hubspot'] },
+        { name: 'Sales Team', plugins: ['gtm'], skills: [], tools: [] },
+      ],
+    });
+  });
+
+  it('lists Everyone even when nothing is org-wide, and when there are no groups at all', async () => {
+    const h = await harness({ groups: [], caller: EVERYTHING });
+    expect(await (await h.get()).json()).toEqual({ teams: [NOTHING_ORG_WIDE] });
   });
 
   it('withholds what the caller cannot read, whatever the team can', async () => {
@@ -139,7 +173,7 @@ describe('GET /api/teams', () => {
       },
     });
     expect(await (await h.get()).json()).toEqual({
-      teams: [{ name: 'Sales Team', plugins: ['gtm'], skills: ['outreach'], tools: [] }],
+      teams: [NOTHING_ORG_WIDE, { name: 'Sales Team', plugins: ['gtm'], skills: ['outreach'], tools: [] }],
     });
   });
 
@@ -149,36 +183,44 @@ describe('GET /api/teams', () => {
       team: { 'Sales Team': ['Plugins/Finance'] },
     });
     expect(await (await h.get()).json()).toEqual({
-      teams: [{ name: 'Sales Team', plugins: ['finance'], skills: [], tools: [] }],
+      teams: [NOTHING_ORG_WIDE, { name: 'Sales Team', plugins: ['finance'], skills: [], tools: [] }],
     });
   });
 
   it("never offers a personal plugin, or what lives in it, as a team's — whatever the resolver says", async () => {
     // The stub grants EVERYTHING to the team, the personal skill and tool
     // included (a hand-written grant inside a personal folder could): the
-    // route withholds them by where they live, not by the verdict.
+    // route withholds them by where they live, not by the verdict. The same
+    // holds for the org-wide entry.
     const h = await harness({
       caller: EVERYTHING,
+      everyone: EVERYTHING,
       team: { 'Sales Team': EVERYTHING },
     });
+    const all = { plugins: ['gtm', 'finance'], skills: ['outreach', 'ledger'], tools: ['hubspot', 'books'] };
     expect(await (await h.get()).json()).toEqual({
-      teams: [{ name: 'Sales Team', plugins: ['gtm', 'finance'], skills: ['outreach', 'ledger'], tools: ['hubspot', 'books'] }],
+      teams: [
+        { name: 'Everyone', ...all },
+        { name: 'Sales Team', ...all },
+      ],
     });
   });
 
   it('skips a group the resolver no longer knows', async () => {
     const h = await harness({ groups: ['Sales Team', 'Gone'], caller: EVERYTHING, team: { 'Sales Team': [] } });
     expect(await (await h.get()).json()).toEqual({
-      teams: [{ name: 'Sales Team', plugins: [], skills: [], tools: [] }],
+      teams: [NOTHING_ORG_WIDE, { name: 'Sales Team', plugins: [], skills: [], tools: [] }],
     });
   });
 
-  it('asks the resolver once for the caller and once per group, over one probe set', async () => {
+  it('asks the resolver once for the caller, once for everyone and once per group, over one probe set', async () => {
     const h = await harness({ groups: ['A', 'B'], caller: EVERYTHING, team: { A: [], B: [] } });
     await h.get();
     expect(h.accessControl.canReadBatch).toHaveBeenCalledTimes(1);
+    expect(h.accessControl.canReadAsEveryoneBatch).toHaveBeenCalledTimes(1);
     expect(h.accessControl.canReadAsGroupBatch).toHaveBeenCalledTimes(2);
     const [, , probes] = vi.mocked(h.accessControl.canReadBatch).mock.calls[0]!;
+    expect(vi.mocked(h.accessControl.canReadAsEveryoneBatch).mock.calls[0]![1]).toBe(probes);
     // Personal folders are not probed at all — not as plugins, not for what
     // they hold; everything else is, once: every plugin folder and its
     // access.md, every skill's SKILL.md, every tool's file.

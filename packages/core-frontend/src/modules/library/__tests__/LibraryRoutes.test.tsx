@@ -110,6 +110,8 @@ const PLUGINS: PluginSummary[] = [
 ];
 
 const TEAMS = [
+  // The server opens with the org-wide entry: Product admits everyone here.
+  { name: 'Everyone', plugins: ['Product'], skills: ['roadmap'], tools: ['slack'] },
   { name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: ['heyreach'] },
   { name: 'Everyone Else', plugins: [], skills: ['scratch'], tools: [] },
 ];
@@ -232,6 +234,38 @@ describe('LibraryRoutes', () => {
     expect(screen.getByTestId('library-card-integration-heyreach')).toBeInTheDocument();
     expect(screen.queryByTestId('library-card-skill-roadmap')).toBeNull();
     expect(screen.queryByTestId('library-card-integration-slack')).toBeNull();
+  });
+
+  it('Everyone leads the groups, right after your own space, and opens what is org-wide', async () => {
+    renderAt('/skills-and-tools');
+    // "Everyone Else" is a team in the fixture: the org-wide row is the one
+    // whose whole label is the name plus its count.
+    await within(nav()).findByRole('button', { name: /^Everyone \d+$/ });
+    const rows = within(nav()).getAllByRole('button');
+    const names = rows.map((r) => r.textContent ?? '');
+    const own = names.findIndex((n) => n.startsWith(TEST_PERSONAL_GROUP));
+    const everyone = names.findIndex((n) => /^Everyone\d+$/.test(n));
+    const gtm = names.findIndex((n) => n.startsWith('GTM Team'));
+    expect(own).toBeGreaterThan(-1);
+    expect(everyone).toBe(own + 1);
+    expect(gtm).toBeGreaterThan(everyone);
+
+    fireEvent.click(rows[everyone]!);
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/teams/Everyone'));
+    expect(await screen.findByRole('heading', { name: 'Everyone', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/^Org-wide: what every signed-in person/)).toBeInTheDocument();
+    // The server's slice: Product's row, roadmap and slack — nothing of GTM's.
+    expect(await within(main()).findByRole('button', { name: /^Product/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: /^GTM/ })).toBeNull();
+    expect(screen.getByTestId('library-card-skill-roadmap')).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-integration-slack')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-card-skill-outreach')).toBeNull();
+  });
+
+  it('says so when nothing is shared with everyone yet', async () => {
+    teamsMock.listTeams.mockResolvedValue([{ name: 'Everyone', plugins: [], skills: [], tools: [] }]);
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByText('Nothing is shared with everyone yet.')).toBeInTheDocument();
   });
 
   it('a team deep link with a URL-hostile name lands, and an unknown team says so', async () => {

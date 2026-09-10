@@ -5,7 +5,7 @@ import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { urlForLibraryItem } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
+import { EVERYONE_TEAM, emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { pluginEntriesFor } from '../utils/plugin-entries';
 import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
@@ -105,6 +105,13 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           <p className="mt-0.5 text-ui text-ink-muted">
             {data.loading ? '…' : `${count} ${count === 1 ? 'item' : 'items'}`}
           </p>
+          {/* Everyone is not a group but the organisation: say what the page
+              holds, because the name alone reads like one more team. */}
+          {filter.kind === 'team' && filter.group === EVERYONE_TEAM && (
+            <p className="mt-2 max-w-prose text-ui text-ink-muted">
+              Org-wide: what every signed-in person and their agents can use, with no group or role needed.
+            </p>
+          )}
         </div>
         <TextField
           className="ml-auto w-64"
