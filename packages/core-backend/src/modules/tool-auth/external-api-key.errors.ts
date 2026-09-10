@@ -18,7 +18,7 @@ export class TokenNotFoundError extends Error {
 }
 
 export class TokenStillActiveError extends Error {
-  constructor(message = 'Disconnect this key before deleting it') {
+  constructor(message = 'Revoke this key before deleting it') {
     super(message);
     this.name = 'TokenStillActiveError';
   }

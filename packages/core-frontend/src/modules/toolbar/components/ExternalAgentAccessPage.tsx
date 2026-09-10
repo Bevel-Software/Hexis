@@ -54,12 +54,13 @@ function formatRelative(ts: number | null): string {
  *    for what they may read. Their Claude links are listed here.
  *  - "Autonomous agents" — the external-API-key surface for pipelines/CI
  *    that can't open a browser: lists existing keys, mints new ones,
- *    disconnects revoked ones, permanently deletes disconnected ones. The
+ *    revokes live ones, permanently deletes revoked ones. The
  *    plaintext of a minted key is only shown once — there is no read-it-back
  *    endpoint.
  *
- * Glossary terms used in copy: "External API key", "Disconnect" (= revoke),
- * "External agent" (= MCP client). See docs/glossary.md.
+ * Glossary terms used in copy: "External API key", "Revoke" (a revoked key is
+ * gone for good — "Disconnect" is reserved for a Claude link, which can be
+ * connected again), "External agent" (= MCP client).
  */
 export function ExternalAgentAccessPage() {
   const labelInputId = useId();
@@ -100,7 +101,7 @@ export function ExternalAgentAccessPage() {
   const [reveal, setReveal] = useState<MintedExternalApiKey | null>(null);
   const { copied, copy } = useCopyFeedback();
 
-  // The disconnected key awaiting a permanent-delete confirmation. Non-null
+  // The revoked key awaiting a permanent-delete confirmation. Non-null
   // drives the themed confirm Dialog below; `deleting` keeps the request in
   // flight so the confirm can't be dismissed mid-delete.
   const [pendingDelete, setPendingDelete] = useState<{ id: string; label: string } | null>(null);
@@ -146,7 +147,7 @@ export function ExternalAgentAccessPage() {
       await disconnectExternalApiKey(id);
       await refresh();
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Couldn't disconnect this key.");
+      setLoadError(err instanceof Error ? err.message : "Couldn't revoke this key.");
     }
   }
 
@@ -169,13 +170,13 @@ export function ExternalAgentAccessPage() {
   const canSubmit = trimmed.length > 0 && trimmed.length <= MAX_LABEL_LEN && !creating;
 
   // Surface the keys that matter: active keys first (most-recently-used at the
-  // top, never-used ones last among the active), with disconnected keys sunk
+  // top, never-used ones last among the active), with revoked keys sunk
   // to the bottom. Non-destructive — nothing is hidden or deleted, just ordered
   // so a long list of stale/test keys doesn't bury the ones in use.
   // ONE list from the server, two views of it: live Claude links belong to
   // the Marketplaces tab (they were minted by a connection, not created
   // here), everything else — hand-made keys, and Claude links once
-  // disconnected, so they can be deleted — to the autonomous tab. Told
+  // revoked, so they can be deleted — to the autonomous tab. Told
   // apart by the stored kind, never the label.
   const isClaudeLink = (k: ExternalApiKeySummary) => k.kind === GITHUB_LINK_KIND;
   const claudeLinks = keys.filter((k) => isClaudeLink(k) && k.revokedAt === null);
@@ -517,7 +518,7 @@ export function ExternalAgentAccessPage() {
                           <div className="font-medium truncate">{k.label}</div>
                           <div className="text-[11px] text-ink-muted">
                             Created {formatRelative(k.createdAt)} · Last used {formatRelative(k.lastUsedAt)}
-                            {revoked && ' · Disconnected'}
+                            {revoked && ' · Revoked'}
                           </div>
                           {usage && (
                             <div className="mt-1 max-w-xs">
@@ -544,7 +545,7 @@ export function ExternalAgentAccessPage() {
                           <button
                             onClick={() => setPendingDelete({ id: k.id, label: k.label })}
                             className="text-xs px-2 py-1 rounded text-red-600 hover:bg-red-50 border border-line"
-                            title="Permanently delete this disconnected key and its usage history."
+                            title="Permanently delete this revoked key and its usage history."
                           >
                             Delete
                           </button>
@@ -552,9 +553,9 @@ export function ExternalAgentAccessPage() {
                           <button
                             onClick={() => handleDisconnect(k.id)}
                             className="text-xs px-2 py-1 rounded text-ink hover:bg-hover border border-line"
-                            title="Disconnect this external API key. The external agent using it will lose access."
+                            title="Revoke this external API key. The external agent using it will lose access."
                           >
-                            Disconnect
+                            Revoke
                           </button>
                         )}
                       </li>
@@ -614,7 +615,7 @@ export function ExternalAgentAccessPage() {
             </div>
             <div className="px-4 py-3 space-y-3">
               <p className="text-xs text-ink leading-snug">
-                This is the only time you'll see the full key. If you lose it, disconnect it and create a new one.
+                This is the only time you'll see the full key. If you lose it, revoke it and create a new one.
               </p>
               <div className="relative">
                 <textarea

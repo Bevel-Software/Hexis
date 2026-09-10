@@ -450,7 +450,7 @@ describe('ExternalApiKeyService', () => {
       expect((db as any).delete).toHaveBeenCalledWith(externalApiKeys);
     });
 
-    it('throws TokenStillActiveError when the token exists but was never disconnected', async () => {
+    it('throws TokenStillActiveError when the token exists but was never revoked', async () => {
       // SELECT finds the row with a null revokedAt → still active; no delete.
       const { db } = makeFakeDb([[{ revokedAt: null }]]);
       const service = new ExternalApiKeyService(db, 'bevel_');

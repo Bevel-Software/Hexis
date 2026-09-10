@@ -34,7 +34,7 @@ export async function listConnectionKeys(): Promise<AdminConnectionKey[]> {
 }
 
 /**
- * Revoke (disconnect) any account's key. The row is kept so its last-used
+ * Revoke any account's key. The row is kept so its last-used
  * time stays auditable; the agent holding the key loses access at once.
  */
 export async function revokeConnectionKey(id: string): Promise<void> {

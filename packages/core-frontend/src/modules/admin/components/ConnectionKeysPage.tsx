@@ -29,9 +29,9 @@ function formatAbsolute(ts: number | null): string | undefined {
  * connection key on the deployment, grouped per account, with when it was
  * created, when it was last used, and a revoke. It exists so a leaked or
  * forgotten key can be cut off without signing in as its owner. Revoking
- * keeps the row (dimmed, "Disconnected") so its last use stays visible;
+ * keeps the row (dimmed, "Revoked") so its last use stays visible;
  * only the owner can delete it for good, from their own External agent
- * access page. Disconnected keys are hidden by default — on a busy
+ * access page. Revoked keys are hidden by default — on a busy
  * deployment they outnumber the live ones — and a toggle brings them back.
  */
 export function ConnectionKeysPage() {
@@ -114,7 +114,7 @@ export function ConnectionKeysPage() {
         <div className="space-y-4">
           <p className="text-xs text-ink-muted leading-snug">
             Every connection key on this deployment, per account. Revoking a key cuts off the
-            external agent using it immediately; the key stays listed as disconnected so you can
+            external agent using it immediately; the key stays listed as revoked so you can
             still see when it was last used. Only its owner can delete it for good.
           </p>
 
@@ -131,7 +131,7 @@ export function ConnectionKeysPage() {
             <div className="flex items-center justify-between gap-3 text-xs text-ink-muted">
               <span>
                 {liveCount} live {liveCount === 1 ? 'key' : 'keys'}
-                {revokedCount > 0 && ` · ${revokedCount} disconnected`}
+                {revokedCount > 0 && ` · ${revokedCount} revoked`}
               </span>
               {revokedCount > 0 && (
                 <label className="flex items-center gap-1.5 cursor-pointer select-none">
@@ -140,7 +140,7 @@ export function ConnectionKeysPage() {
                     checked={showRevoked}
                     onChange={(e) => setShowRevoked(e.target.checked)}
                   />
-                  Show disconnected keys
+                  Show revoked keys
                 </label>
               )}
             </div>
@@ -196,7 +196,7 @@ export function ConnectionKeysPage() {
                                   <>
                                     {' · '}
                                     <span title={formatAbsolute(k.revokedAt)}>
-                                      Disconnected {formatRelative(k.revokedAt)}
+                                      Revoked {formatRelative(k.revokedAt)}
                                     </span>
                                   </>
                                 )}
@@ -254,7 +254,7 @@ export function ConnectionKeysPage() {
           <span className="font-medium">
             {pendingRevoke?.user.name} ({pendingRevoke?.user.email})
           </span>
-          ? Whatever is using it loses access immediately. The key stays listed as disconnected
+          ? Whatever is using it loses access immediately. The key stays listed as revoked
           so its last use remains visible; its owner can delete it for good from their External
           agent access page.
         </p>
