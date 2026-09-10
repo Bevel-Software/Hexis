@@ -91,6 +91,8 @@ export interface PluginSummary {
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;
+  /** The plugin's access.md says of itself that it is private — see `PluginCatalogEntry.isPrivate`. */
+  isPrivate: boolean;
   /**
    * The caller has an OPEN join change request for this plugin (their
    * deterministic join branch has an open CR). Always false for a member.
@@ -124,6 +126,14 @@ export interface PluginCatalogEntry {
   owners: ResolvedPrincipals;
   writers: ResolvedPrincipals;
   readers: ResolvedReaders;
+  /**
+   * The folder's access.md FRONTMATTER denies `everyone` read and names
+   * nobody but people (`isPrivateAccessMd`) — the shape a personal space is
+   * seeded with, and what a person writes to keep a plugin to a few named
+   * colleagues. The Library marks such a plugin "Private". A statement the
+   * file makes about itself, not a verdict: `readers` says who can use it.
+   */
+  isPrivate: boolean;
 }
 
 export interface IPluginIndexService {

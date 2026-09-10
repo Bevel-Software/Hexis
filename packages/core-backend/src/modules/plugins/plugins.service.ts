@@ -1,7 +1,9 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
+import { isPrivateAccessMd } from '../access-model/access-grammar.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -116,10 +118,11 @@ export class PluginIndexService implements IPluginIndexService {
       for (const [name, pluginFolders] of folders) {
         // One folder, one access boundary — the folder IS the plugin.
         const [primary] = pluginFolders;
-        const [owners, writers, readers] = await Promise.all([
+        const [owners, writers, readers, isPrivate] = await Promise.all([
           this.accessControl.eligibleOwners(wsId, primary),
           this.accessControl.eligibleWriters(wsId, primary),
           this.accessControl.eligibleReaders(wsId, primary),
+          this.readsAsPrivate(path.join(kbRoot, primary, 'access.md')),
         ]);
         entries.push({
           name,
@@ -132,6 +135,7 @@ export class PluginIndexService implements IPluginIndexService {
           owners,
           writers,
           readers,
+          isPrivate,
         });
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
@@ -221,6 +225,21 @@ export class PluginIndexService implements IPluginIndexService {
       counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
     }
     return counts;
+  }
+
+  /**
+   * What the plugin's own access.md says of itself — see
+   * `PluginCatalogEntry.isPrivate`. Read from disk rather than through the
+   * resolver: the mark reflects the file's frontmatter as written, and a
+   * file that cannot be read makes no statement (false, never a failure —
+   * the plugin still exists to the index).
+   */
+  private async readsAsPrivate(accessMdPath: string): Promise<boolean> {
+    try {
+      return isPrivateAccessMd(await fs.readFile(accessMdPath, 'utf8'));
+    } catch {
+      return false;
+    }
   }
 }
 

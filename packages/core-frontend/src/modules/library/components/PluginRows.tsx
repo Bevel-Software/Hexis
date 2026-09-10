@@ -86,13 +86,7 @@ export function PluginRows({
             <PluginIndexRow
               key={entry.name ?? ':yours'}
               label={entry.label}
-              badge={
-                entry.summary?.canWrite ? (
-                  <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-                    Owner
-                  </Badge>
-                ) : undefined
-              }
+              badge={badgesOf(entry)}
               {...describe(entry)}
               trailing={trailingOf(entry)}
               onOpen={() =>
@@ -114,6 +108,34 @@ export function PluginRows({
         />
       )}
     </section>
+  );
+}
+
+/**
+ * Beside the label: `Owner` for a plugin the caller manages, and `Private`
+ * for one whose access.md says of itself that it is — the file's own
+ * frontmatter denies everyone and names only people. A personal space is
+ * always the latter; it is also always the reader's, so its row carries the
+ * mark on its own. Nothing when neither applies, so the row stays plain text.
+ */
+function badgesOf(entry: PluginEntry): ReactNode {
+  const owner = entry.summary?.canWrite === true;
+  const isPrivate = entry.name === null || entry.summary?.isPrivate === true;
+  if (!owner && !isPrivate) return undefined;
+  return (
+    <>
+      {owner && (
+        <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+          Owner
+        </Badge>
+      )}
+      {isPrivate && (
+        <Badge tone="outline" size="xs" title="Private" className="shrink-0 uppercase">
+          <LockGlyph className="size-2.5 shrink-0" />
+          Private
+        </Badge>
+      )}
+    </>
   );
 }
 

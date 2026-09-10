@@ -136,16 +136,8 @@ describe('LibraryCard', () => {
 });
 
 describe('personalPluginName', () => {
-  it('uses the first name, as a colleague would say it out loud', () => {
-    expect(personalPluginName('Juan Viera')).toBe("Juan's Plugin");
-    expect(personalPluginName('juan')).toBe("Juan's Plugin");
-  });
-
-  it('still names the place when nobody is signed in', () => {
-    // The space exists either way and still needs a heading — and "Yours" is
-    // true for whoever is reading it.
-    expect(personalPluginName(null)).toBe('Yours');
-    expect(personalPluginName('   ')).toBe('Yours');
+  it('is one name for everyone — the page is always the reader\'s own', () => {
+    expect(personalPluginName()).toBe('Personal plugin');
   });
 });
 

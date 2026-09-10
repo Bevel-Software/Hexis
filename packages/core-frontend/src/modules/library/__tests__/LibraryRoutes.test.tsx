@@ -334,6 +334,23 @@ describe('LibraryRoutes', () => {
     }
   });
 
+  it('marks a plugin Private on its row when its access.md says so — and your own space always', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      ...PLUGINS,
+      { ...PLUGINS[0]!, name: 'Mine', folders: ['Plugins/Mine'], canWrite: false, isPrivate: true },
+    ]);
+    renderAt('/skills-and-tools');
+    const mine = await within(main()).findByRole('button', { name: /^Mine/ });
+    expect(within(mine).getByText('Private')).toBeInTheDocument();
+    // GTM's access.md makes no such statement: Owner, and nothing else.
+    const gtm = within(main()).getByRole('button', { name: /^GTM/ });
+    expect(within(gtm).getByText('Owner')).toBeInTheDocument();
+    expect(within(gtm).queryByText('Private')).toBeNull();
+    // The personal space is private by construction.
+    const own = within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) });
+    expect(within(own).getByText('Private')).toBeInTheDocument();
+  });
+
   it('sends the old /plugins index path home, where Everything lives now', async () => {
     renderAt('/skills-and-tools/plugins');
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));

@@ -17,7 +17,7 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 
 /**
  * Keep every personal space closed to everyone but its owner — Admin
- * included.
+ * included — and let its access.md say so in both blocks.
  *
  * A personal folder's access.md used to be seeded with the owner's grants
  * alone. That is private only while nothing above it grants read — and the
@@ -25,7 +25,9 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
  * at the repository root, which then reached into every person's private
  * space. Personal folders seeded since deny `everyone` read outright; this
  * step gives the ones seeded before the same rule, on every branch, on the
- * next start.
+ * next start. The file's own block gets the same statement (`deny
+ * everyone` and the people the folder admits) where it used to say nothing
+ * (`read: []`), so the file reads as what it is — see `isPrivateAccessMd`.
  *
  * A SPLICE, not a rewrite: the denial is added to the folder's read rules
  * (and, for the old seed's shape, the owner's grants are carried into
@@ -78,10 +80,10 @@ async function closePersonalSpaces(branch: KbBranch): Promise<void> {
 }
 
 /**
- * The access.md text with `deny everyone` under the folder's `read:` — or
- * null when the rules already deny `everyone` or cannot be parsed. Exported
- * so a resolver test can prove what the reconciled file means, not only what
- * it says.
+ * The access.md text with `deny everyone` under the folder's `read:`, and
+ * the same statement in the file's own block — or null when nothing needed
+ * closing or the file cannot be parsed. Exported so a resolver test can
+ * prove what the reconciled file means, not only what it says.
  *
  * The previous template put the owner's grants in the frontmatter over a
  * body of `read: []`. A body that declares a verb governs the folder, so
@@ -89,11 +91,20 @@ async function closePersonalSpaces(branch: KbBranch): Promise<void> {
  * file and nothing beneath it. Closing such a file therefore also carries
  * every person the frontmatter grants into the folder block, so the owner
  * (and anyone they added) keeps what the frontmatter was meant to give
- * them. The frontmatter itself stays as written.
+ * them.
  */
 export function closePersonalSpaceRules(text: string, relativePath: string): string | null {
   const parsed = parseAccessFile(text, relativePath);
   if (!parsed.ok) return null;
+  const folderClosed = closeFolderRules(text, parsed.file.entries);
+  const next = closeFileRules(folderClosed, relativePath);
+  return next === text ? null : next;
+}
+
+const everyone = (e: ParsedEntry) => e.kind === 'role' && e.role === EVERYONE_CANONICAL;
+
+/** The body — the folder's rules — with `deny everyone` under `read:`; unchanged when already settled. */
+function closeFolderRules(text: string, folder: Record<Verb, ParsedEntry[]>): string {
   // A file whose folder rules already settle `everyone`'s READ is left as it
   // is: an entry under `read` itself (a denial means the space is closed; a
   // grant means someone opened it on purpose), or a GRANT under a verb that
@@ -102,16 +113,50 @@ export function closePersonalSpaceRules(text: string, relativePath: string): str
   // wins) while making the file read as a contradiction. Anything else —
   // `deny everyone` under write alone, `download: everyone` — says nothing
   // about read, and the space is still open to an inherited `read: everyone`.
-  const everyone = (e: ParsedEntry) => e.kind === 'role' && e.role === EVERYONE_CANONICAL;
   const settled = sourceVerbsFor('read').some((verb) =>
-    parsed.file.entries[verb].some((e) => everyone(e) && (verb === 'read' || !e.deny)),
+    folder[verb].some((e) => everyone(e) && (verb === 'read' || !e.deny)),
   );
-  if (settled) return null;
+  if (settled) return text;
   let next = text;
-  for (const { verb, entry } of strandedFrontmatterGrants(text, parsed.file.entries)) {
+  for (const { verb, entry } of strandedFrontmatterGrants(text, folder)) {
     next = spliceGrant(next, verb, { kind: 'user', email: entry.email, displayName: entry.displayName }, { target: 'folder' }).text;
   }
   return spliceGrant(next, 'read', { kind: 'role', role: 'everyone' }, { deny: true, target: 'folder' }).text;
+}
+
+/**
+ * The frontmatter — the FILE's rules — saying what the folder's say: `deny
+ * everyone`, then the people the folder admits (its user grants under
+ * `read`, `write` and `owner`). Only for a file whose folder rules deny
+ * `everyone` read: a space its owner opened on purpose keeps the file open
+ * too. A frontmatter that already mentions `everyone` under `read` — a
+ * denial, or a grant that lists the file for all — is left as written; so
+ * is a legacy single-block file, whose frontmatter IS the folder's rules
+ * and was closed above.
+ */
+function closeFileRules(text: string, relativePath: string): string {
+  if (!accessMdDeclaresBodyRules(text)) return text;
+  const own = parseOwnAccessEntries(text);
+  if (own?.read.some(everyone)) return text;
+  const parsed = parseAccessFile(text, relativePath);
+  if (!parsed.ok) return text;
+  const folder = parsed.file.entries;
+  if (!folder.read.some((e) => everyone(e) && e.deny)) return text;
+  let next = spliceGrant(text, 'read', { kind: 'role', role: 'everyone' }, { deny: true, target: 'node', allowScalar: false }).text;
+  const named = new Set<string>();
+  for (const verb of sourceVerbsFor('read')) {
+    for (const entry of folder[verb]) {
+      if (entry.kind !== 'user' || entry.deny || named.has(entry.email)) continue;
+      named.add(entry.email);
+      next = spliceGrant(
+        next,
+        'read',
+        { kind: 'user', email: entry.email, displayName: entry.displayName },
+        { target: 'node', allowScalar: false },
+      ).text;
+    }
+  }
+  return next;
 }
 
 /**

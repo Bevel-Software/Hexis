@@ -976,6 +976,25 @@ function verbValuesNeedFullYaml(root: unknown): boolean {
 }
 
 /**
+ * Whether an access.md's FRONTMATTER says the file is private: its `read`
+ * denies `everyone` and names nobody but people — the shape the personal
+ * template seeds (`deny everyone` and the owner), and what a person writes
+ * to keep a plugin to a few named colleagues. A role or group beside the
+ * denial is a roster, not a private list; no frontmatter, or a `read` that
+ * never mentions `everyone`, is not a statement of privacy at all (what such
+ * a file admits is whatever the folder above it says). The frontmatter
+ * alone is read on purpose: it is the block a reader sees first and the one
+ * the Library's "Private" mark reflects, so the mark and the file agree.
+ */
+export function isPrivateAccessMd(text: string): boolean {
+  const own = parseOwnAccessEntries(text);
+  if (!own) return false;
+  const deniesEveryone = (e: ParsedEntry) => e.kind === 'role' && e.deny && e.role === EVERYONE_CANONICAL;
+  if (!own.read.some(deniesEveryone)) return false;
+  return own.read.every((e) => deniesEveryone(e) || (e.kind === 'user' && !e.deny));
+}
+
+/**
  * Parse the access verbs a node file declares in its own YAML frontmatter.
  * Returns the per-verb entry lists, or null when the file has no frontmatter
  * or declares no access verb at all.

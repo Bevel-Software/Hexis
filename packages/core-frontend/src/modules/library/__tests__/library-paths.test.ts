@@ -53,7 +53,7 @@ describe('libraryFilterForPath ↔ pathForLibraryFilter', () => {
 describe('libraryHomeForItemPath', () => {
   it('sends a personal item to Yours even though it has no plugin identity', () => {
     expect(libraryHomeForItemPath('Plugins/personal-u1/skills/notes', null)).toEqual({
-      label: 'Yours',
+      label: 'Personal plugin',
       path: `${LIBRARY_ROOT}/yours`,
     });
   });

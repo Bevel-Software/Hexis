@@ -178,6 +178,32 @@ describe('PluginIndexService', () => {
     expect((await svc().catalog()).every((g) => g.brokenLinks === 0)).toBe(true);
   });
 
+  test("marks a plugin private when its access.md's own block denies everyone and names only people", async () => {
+    await pluginDir('GTM'); // read: everyone — discoverable, not private
+    await pluginDir('Mine');
+    await writeFile(
+      join(kb(), 'Plugins', 'Mine', 'access.md'),
+      '---\n# the file\nread:\n  - deny everyone\n  - Ali Vega <ali@x.io>\n---\nread:\n  - deny everyone\n  - Ali Vega <ali@x.io>\n',
+    );
+    // A role beside the denial is a roster, not a private list.
+    await pluginDir('Team');
+    await writeFile(
+      join(kb(), 'Plugins', 'Team', 'access.md'),
+      '---\nread:\n  - deny everyone\n  - Sales Team\n---\nread:\n  - Sales Team\n',
+    );
+    // A frontmatter that never mentions everyone makes no statement.
+    await pluginDir('Quiet');
+    await writeFile(join(kb(), 'Plugins', 'Quiet', 'access.md'), '---\nread: []\n---\nread:\n  - Ali Vega <ali@x.io>\n');
+
+    const catalog = await svc().catalog();
+    expect(Object.fromEntries(catalog.map((g) => [g.name, g.isPrivate]))).toEqual({
+      gtm: false,
+      mine: true,
+      team: false,
+      quiet: false,
+    });
+  });
+
   test('resolves principals on the plugin folder', async () => {
     await pluginDir('GTM');
 

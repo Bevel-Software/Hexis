@@ -6,6 +6,7 @@ import { DEFAULT_BRANCH, personalPluginFolderName } from '@bevel-software/platfo
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { isPrivateAccessMd } from '../../access-model/access-grammar.js';
 import {
   PluginProvisionError,
   PluginProvisionService,
@@ -529,15 +530,15 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
       path.join(h.dir, KB, 'Plugins', folder, 'access.md'),
       'utf-8',
     );
-    // PRIVATE: the frontmatter grants nobody (the space is listed for no one
-    // else), and the body denies `everyone` — so a root-level `read: everyone`
-    // an admin adds later cannot open it — naming the owner and nobody else,
-    // Admin included.
+    // PRIVATE, in both blocks: the frontmatter denies `everyone` and names the
+    // owner (the space is listed for no one else, and the file says so), and
+    // the body denies `everyone` — so a root-level `read: everyone` an admin
+    // adds later cannot open it — naming the owner and nobody else, Admin
+    // included.
     const close = accessMd.indexOf('\n---\n', 4);
     const frontmatter = accessMd.slice(4, close);
     const body = accessMd.slice(close + 5);
-    expect(frontmatter).not.toContain('everyone');
-    expect(frontmatter).not.toContain('Ali Vega');
+    expect(frontmatter).toMatch(/read:\n(?:\s+#.*\n)*\s+- deny everyone\n\s+- Ali Vega <ali@example.com>$/);
     expect(body).toMatch(/read:\n(?:\s+#.*\n)*\s+- deny everyone\n/);
     expect(body).not.toMatch(/^\s+- Admin/m);
     for (const verb of ['read', 'write', 'owner'] as const) {
@@ -583,7 +584,7 @@ function verbBlock(region: string, verb: 'read' | 'write' | 'owner'): string {
 }
 
 describe('access.md templates', () => {
-  it('plugin template is discoverable, personal template denies everyone — same creator grants in both bodies', () => {
+  it('plugin template is discoverable, personal template denies everyone in both blocks — same creator grants in both bodies', () => {
     const plugin = pluginAccessMd(USER);
     const personal = personalAccessMd(USER);
     const split = (text: string) => {
@@ -591,14 +592,18 @@ describe('access.md templates', () => {
       return { frontmatter: text.slice(4, close), body: text.slice(close + 5) };
     };
     expect(split(plugin).frontmatter).toMatch(/read:\n\s+- everyone/);
-    expect(split(personal).frontmatter).not.toContain('everyone');
+    expect(split(plugin).frontmatter).not.toContain('Ali Vega');
+    // The personal file's own block is the private shape the Library marks:
+    // the denial, then the owner, nobody else.
+    expect(split(personal).frontmatter).toMatch(/read:\n(?:\s+#.*\n)*\s+- deny everyone\n\s+- Ali Vega <ali@example.com>$/);
+    expect(isPrivateAccessMd(personal)).toBe(true);
+    expect(isPrivateAccessMd(plugin)).toBe(false);
     expect(split(personal).body).toMatch(/- deny everyone\n/);
     expect(split(personal).body).not.toMatch(/^\s+- Admin/m);
     for (const text of [plugin, personal]) {
       for (const verb of ['read', 'write', 'owner'] as const) {
         expect(verbBlock(split(text).body, verb)).toContain('Ali Vega <ali@example.com>');
       }
-      expect(split(text).frontmatter).not.toContain('Ali Vega');
     }
   });
 });

@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
-import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { urlForLibraryItem } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
@@ -48,7 +47,7 @@ function headingFor(filter: LibraryFilter): string {
     case 'owned':
       return 'Owned by me';
     case 'ungrouped':
-      return 'Yours alone';
+      return personalPluginName();
     case 'team':
       return filter.group;
     case 'group':
@@ -60,7 +59,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
-  const { user } = useAuth();
   const [query, setQuery] = useState('');
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
@@ -69,7 +67,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     () => filterLibraryItems(data.items, filter, query, data.teams),
     [data.items, filter, query, data.teams],
   );
-  const personalLabel = personalPluginName(user?.name);
+  const personalLabel = personalPluginName();
   const plugins = useMemo(
     () => pluginEntriesFor(data.items, data.pluginSummaries, filter, data.teams, query, personalLabel),
     [data.items, data.pluginSummaries, filter, data.teams, query, personalLabel],

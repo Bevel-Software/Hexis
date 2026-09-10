@@ -311,6 +311,7 @@ describe('/api/plugins routes', () => {
       owners: { roles: [], users: [] },
       writers: { roles: [], users: [] },
       readers: { restricted: true, roles: [], users: [] },
+      isPrivate: false,
     };
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,

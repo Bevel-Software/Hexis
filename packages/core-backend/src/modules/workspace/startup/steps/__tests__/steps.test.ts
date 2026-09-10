@@ -669,9 +669,11 @@ describe('PersonalSpacesStep', () => {
       ...scaffold,
       'Plugins/personal-u1/plugin.json': '{"name":"personal-u1"}',
       'Plugins/personal-u1/access.md': LEGACY_PERSONAL,
-      // A space someone already closed, one its owner opened on purpose (a
-      // denial beside that grant would be overruled and read as a
-      // contradiction), and a shared plugin: all untouched.
+      // A space someone already closed (its folder rules stay; only the
+      // file's own block, which said nothing, gets the same statement), one
+      // its owner opened on purpose (a denial beside that grant would be
+      // overruled and read as a contradiction — and the file stays open
+      // with the folder), and a shared plugin: untouched.
       'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
       'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
       // Entries that say nothing about READ — a denial under write, a
@@ -695,22 +697,26 @@ describe('PersonalSpacesStep', () => {
     for (const branch of [...PROTECTED, 'ali/draft']) {
       const dir = await checkout(branch);
       const closed = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u1/access.md'), 'utf8'));
-      // The old seed's frontmatter grants stay as written; the body — which
-      // governs the folder — now denies everyone (Admin included: nobody is
-      // named) and carries the owner's grants so they can still read, write
-      // and own their space.
+      // The body — which governs the folder — now denies everyone (Admin
+      // included: nobody is named) and carries the owner's grants so they
+      // can still read, write and own their space; the old seed's
+      // frontmatter grants stay, joined by the same denial, so the file says
+      // of itself what the folder says.
       expect(closed).toBe(
-        '---\nread:\n  - Ali Vega <ali@x.io>\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\n' +
+        '---\nread:\n  - Ali Vega <ali@x.io>\n  - deny everyone\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>\n---\n' +
           'read:\n  - Ali Vega <ali@x.io>\n  - deny everyone\n\nwrite:\n  - Ali Vega <ali@x.io>\nowner:\n  - Ali Vega <ali@x.io>',
       );
+      // Already closed: the folder rules are untouched, the empty file block
+      // now states the same — the denial, then the people the folder admits.
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u2/access.md'), 'utf8'))).toBe(
-        '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
+        '---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
       );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u3/access.md'), 'utf8'))).toBe(
         '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
       );
       const u4 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u4/access.md'), 'utf8'));
-      expect(u4).toMatch(/read:\n  - deny everyone/);
+      expect(u4.slice(0, u4.indexOf('\n---\n', 4))).toBe('---\nread:\n  - deny everyone\n  - Di <di@x.io>');
+      expect(u4.trimEnd().endsWith('\nread:\n  - deny everyone')).toBe(true);
       expect(u4).toContain('write:\n  - deny everyone');
       expect(u4).toContain('download:\n  - everyone');
       expect(u4).toContain('owner:\n  - Di <di@x.io>');
@@ -720,14 +726,17 @@ describe('PersonalSpacesStep', () => {
       // beside it — while the owner grant, which the body said nothing about, is.
       expect(u5Body.match(/read:\n((?:  - [^\n]*\n)*)/)![1]).toBe('  - deny Ed <ed@x.io>\n  - deny everyone\n');
       expect(u5Body).toMatch(/owner:\n  - Ed <ed@x.io>/);
+      // The file block keeps Ed's grant as written and gains the denial.
+      expect(u5.slice(0, u5.indexOf('\n---\n', 4))).toBe('---\nread:\n  - Ed <ed@x.io>\n  - deny everyone\nowner:\n  - Ed <ed@x.io>');
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
       );
     }
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
-    expect(log).toContain('Keep 3 personal spaces private');
+    expect(log).toContain('Keep 4 personal spaces private');
     expect(log).toContain('Plugins/personal-u1/access.md: read denies everyone');
+    expect(log).toContain('Plugins/personal-u2/access.md: read denies everyone');
     expect(log).toContain('Plugins/personal-u4/access.md: read denies everyone');
     expect(log).toContain('Plugins/personal-u5/access.md: read denies everyone');
 

@@ -329,6 +329,7 @@ export function createPluginsRoutes(
           owners: g.owners,
           writers: g.writers,
           readers: g.readers,
+          isPrivate: g.isPrivate,
           hasRequested: joinCr !== null,
           requestNumber: joinCr?.number ?? null,
         });

@@ -63,6 +63,13 @@ export interface PluginSummary {
   owners: PluginPrincipals;
   writers: PluginPrincipals;
   readers: PluginReaders;
+  /**
+   * The plugin's access.md says of itself that it is private: its
+   * frontmatter denies `everyone` and names nobody but people — a personal
+   * space's shape, or a plugin kept to a few named colleagues. Shown as a
+   * "Private" mark on the row. Absent from an older server.
+   */
+  isPrivate?: boolean;
   /** The caller has an OPEN join change request for this plugin. */
   hasRequested: boolean;
   /** That CR's number when `hasRequested` (deep-links the review UI). */

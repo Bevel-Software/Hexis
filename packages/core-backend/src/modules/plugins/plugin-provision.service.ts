@@ -587,30 +587,32 @@ export function pluginAccessMd(creator: { name: string; email: string }): string
 }
 
 /**
- * A personal folder's access.md: PRIVATE. The frontmatter grants nobody, so
- * the file — and with it the folder's listing — is invisible to everyone but
- * those the folder admits; the body DENIES `everyone` read outright, so a
- * `read: everyone` an administrator later adds at the repo root (the usual
- * way to open the knowledge base up) cannot open every person's private
- * space with it. The owner is named directly, which outranks the denial.
- * Nobody else is — not even Admin: a private space is private from the
- * people who run the deployment too. (An administrator can still write this
- * file, through the resolver's access.md rescue, and so grant themselves in;
- * that is a visible act in the history, not a default.)
+ * A personal folder's access.md: PRIVATE, in both blocks. The body DENIES
+ * `everyone` read outright, so a `read: everyone` an administrator later
+ * adds at the repo root (the usual way to open the knowledge base up) cannot
+ * open every person's private space with it, and names the owner directly,
+ * which outranks the denial. The frontmatter says the same of the FILE — so
+ * the folder's listing is invisible to everyone but the owner, and so the
+ * file states its own privacy where a reader (and the Library's "Private"
+ * mark, see `isPrivateAccessMd`) looks for it, rather than leaving it to
+ * what an empty block happens to inherit. Nobody else is named — not even
+ * Admin: a private space is private from the people who run the deployment
+ * too. (An administrator can still write this file, through the resolver's
+ * access.md rescue, and so grant themselves in; that is a visible act in
+ * the history, not a default.)
  *
- * The frontmatter is there even though it grants nothing: it is what marks
- * the file as body-governed. Without it the splicer (and the resolver) read
- * the older single-block format, where the frontmatter IS the folder's
- * rules — and the creator's grant would land beside nothing, leaving the
- * body's denial to lock the owner out of their own space.
+ * The frontmatter is also what marks the file as body-governed. Without it
+ * the splicer (and the resolver) read the older single-block format, where
+ * the frontmatter IS the folder's rules.
  */
 export function personalAccessMd(creator: { name: string; email: string }): string {
-  return withCreatorGrants(
+  const seeded = withCreatorGrants(
     [
       '---',
-      '# THIS BLOCK (the frontmatter) governs this access.md FILE only. Nobody is',
-      '# granted here on purpose: a personal space is not listed for anyone else.',
-      'read: []',
+      '# THIS BLOCK (the frontmatter) governs this access.md FILE only. Only the',
+      '# owner is named: a personal space is not listed for anyone else.',
+      'read:',
+      '  - deny everyone',
       '---',
       '# THIS BLOCK (the body) governs the FOLDER — one person\'s private space.',
       '# `deny everyone` keeps it closed even when the repository root grants',
@@ -622,6 +624,7 @@ export function personalAccessMd(creator: { name: string; email: string }): stri
     ].join('\n'),
     creator,
   );
+  return spliceGrant(seeded, 'read', creatorPrincipal(creator), { allowScalar: false, target: 'node' }).text;
 }
 
 function withCreatorGrants(base: string, creator: { name: string; email: string }): string {

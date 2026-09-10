@@ -3,7 +3,6 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
-import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
@@ -44,7 +43,6 @@ export function LibraryLayout() {
   const { items, pluginSummaries, teams, reload, reloadPlugins } = lib;
   const location = useLocation();
   const navigate = useNavigate();
-  const { user } = useAuth();
   const { isAdmin } = useAdmin();
   const toast = useLibraryToast();
   /**
@@ -58,7 +56,7 @@ export function LibraryLayout() {
   const { collapsed } = useSidebar();
 
   const filter = libraryFilterForPath(location.pathname);
-  const personalLabel = personalPluginName(user?.name);
+  const personalLabel = personalPluginName();
 
   /**
    * One row per team: how much of the catalog the team can use, and — in
