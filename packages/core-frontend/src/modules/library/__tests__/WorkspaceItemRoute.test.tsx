@@ -37,6 +37,13 @@ vi.mock('../components/skill-page/SkillPage', () => ({
 vi.mock('../components/tool-page/ToolPage', () => ({
   ToolPage: ({ slug }: { slug?: string }) => <div aria-label="tool-page">{slug}</div>,
 }));
+// The Knowledge file route, rendered by the item route for a loose file:
+// its own behaviour lives with the workspace tests.
+vi.mock('../../workspace/components/FileRoute', () => ({
+  FileRoute: ({ canonicalize }: { canonicalize?: boolean }) => (
+    <div aria-label="file-view">{`canonicalize:${String(canonicalize)}`}</div>
+  ),
+}));
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { isLibraryLocation } from '../routes/library-paths';
@@ -174,20 +181,50 @@ describe('WorkspaceItemRoute', () => {
     expect(await screen.findByLabelText('tool-page')).toHaveTextContent('notion');
   });
 
-  it("a plugin's own file — its access.md — opens as the plain file it is, not the plugin page", async () => {
+  it('router state `rawFile` renders the file itself at a URL that would otherwise be a page — still inside the library', async () => {
+    // The tool page's "Edit the tool file" and the plugin page's manifest
+    // button ask for the raw editor by state; the app on screen does not
+    // change.
+    render(
+      <MemoryRouter initialEntries={[{ pathname: itemUrl('Plugins/Support/notion.tool'), state: { rawFile: true } }]}>
+        {wrap(
+          <Routes>
+            <Route path="/workspace/*" element={<LibraryRoutes />} />
+          </Routes>,
+          null,
+        )}
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
+    expect(screen.queryByLabelText('tool-page')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
+    // A `.tool` carries a frontmatter id — the very case the id redirect
+    // would have bounced back to Knowledge.
+    expect(screen.getByLabelText('file-view')).toHaveTextContent('canonicalize:false');
+  });
+
+  it("a plugin's own file — its access.md — opens as the plain file it is, INSIDE the library frame, not the plugin page", async () => {
     // The page keys on the plugin's IDENTITY, which the folder name need not
     // be (a personal space, a folder spelled unlike its manifest), so the old
-    // bounce landed on "doesn't exist" for a file plainly there. Same URL —
-    // the raw view is router state, never a different address.
+    // bounce landed on "doesn't exist" for a file plainly there. The file
+    // route renders here: same URL, no navigation, no router state, and the
+    // library's own nav still around it — which app a file opens in follows
+    // the folder it is in.
     renderAt(itemUrl('Plugins/Sales/access.md'));
-    await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+    await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
     expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Sales/access.md'));
+    expect(screen.getByLabelText('raw-file')).toHaveTextContent('false');
+    // The file route must not replace the path with a node-id URL here: an id
+    // URL is no library location, and the surface would switch after all.
+    expect(screen.getByLabelText('file-view')).toHaveTextContent('canonicalize:false');
+    expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
     expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
   });
 
   it("a personal space's access.md opens the same way — it has no listed plugin page at all", async () => {
     renderAt(itemUrl('Plugins/personal-u1/access.md'));
-    await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+    await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
     expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/personal-u1/access.md'));
   });
 
@@ -277,7 +314,7 @@ describe('WorkspaceItemRoute', () => {
       // The same answer a stray file at the plugin's top level gets. Before, it
       // fell through to a SkillPage named after the category.
       renderAt(itemUrl('Plugins/Engineering/coding/access.md'));
-      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
       expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Engineering/coding/access.md'));
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
     });
@@ -540,17 +577,18 @@ describe('WorkspaceItemRoute', () => {
       );
     });
 
-    it("opens a scope's own file as a plain file, in the pane workspace", async () => {
+    it("opens a scope's own file as a plain file, inside the library frame", async () => {
       renderAt(itemUrl('Skills/Sales/access.md'));
-      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
-      // Same URL — the raw view is router state, never a different address.
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
+      // Same URL — the file route renders in place, no navigation.
       expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Skills/Sales/access.md'));
+      expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
     });
 
     it("carries a scope file's #fragment into the raw view — a heading deep link still lands", async () => {
       renderAt(`${itemUrl('Skills/Sales/README.md')}#goal`);
-      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
       expect(screen.getByLabelText('hash')).toHaveTextContent('#goal');
     });
 
@@ -569,7 +607,7 @@ describe('WorkspaceItemRoute', () => {
         d(KB, [d(`${KB}/Skills`, [d(`${KB}/Skills/Sales`, [{ name: 'notes.md', relativePath: `${KB}/Skills/Sales/notes.md`, type: 'file' }])])]),
       ]);
       renderAt(itemUrl('Skills/Sales/notes.md'), tree);
-      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
     });
 
@@ -585,7 +623,7 @@ describe('WorkspaceItemRoute', () => {
         d(KB, [d(`${KB}/Skills`, [d(`${KB}/Skills/Sales`, [{ name: 'notes.md', relativePath: `${KB}/Skills/Sales/notes.md`, type: 'file' }])])]),
       ]);
       renderAt(itemUrl('Skills/Sales/SKILL.md'), tree);
-      await waitFor(() => expect(screen.getByLabelText('raw-file')).toHaveTextContent('true'));
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
       expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
     });
 

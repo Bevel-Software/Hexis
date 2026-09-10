@@ -9,11 +9,12 @@ import { kbFileUrl } from '../../workspace/routing/kb-routes';
 
 /**
  * The plugin page's two smallest sections, both pure REUSE of the Knowledge
- * surface: links are `kbFileUrl` + `rawFile` navigations into the same raw
- * editor the tool page's "Edit the tool file" uses — no new viewer, no new
- * backend. The one exception is a `.tool` file in a namespace listing, which
- * drops the `rawFile` state so the app gate renders its library tool page —
- * the same destination its card in the Tools band reaches.
+ * file viewer: links are `kbFileUrl` + `rawFile` navigations into the same
+ * raw editor the tool page's "Edit the tool file" uses — rendered inside
+ * this app by `WorkspaceItemRoute`; no new viewer, no new backend. The one
+ * exception is a `.tool` file in a namespace listing, which drops the
+ * `rawFile` state so the item route renders its library tool page — the
+ * same destination its card in the Tools band reaches.
  *
  * MANIFEST: writers get a button to `plugin.json`. It is a button to the FILE,
  * not a form, deliberately: the fields worth hand-editing (`version`,

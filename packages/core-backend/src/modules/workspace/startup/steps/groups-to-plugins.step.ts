@@ -19,6 +19,7 @@ import { isAbsence } from '../../../../shared/fs-errors.js';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { withoutIgnoreLine } from './template-files.step.js';
+import { hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -359,17 +360,25 @@ async function migratePluginFolder(
   const relPlugin = `${PLUGINS_DIR}/${folderName}`;
   let changed = false;
 
+  const entries = await fs.readdir(folderDir, { withFileTypes: true });
+
   // When the manifest is written this run its content is remembered: the
   // buffered write is not on disk yet, and the fold below must see it.
   let renderedManifest: string | null = null;
   if (!(await exists(path.join(folderDir, PLUGIN_MANIFEST_FILE)))) {
+    // A folder is made a plugin only when it IS one — by the same rule the
+    // manifests step applies: legacy plugin content inside it, and no
+    // plugin beneath it. A plain folder somebody made under the root (a
+    // `.gitkeep`), or a grouping folder holding plugins, is neither, and a
+    // manifest written there would turn a grouping folder into a plugin
+    // that hides everything beneath it.
+    if (!(await looksLikeLegacyPlugin(folderDir, entries)) || (await hasPluginBeneath(folderDir))) return false;
     renderedManifest = renderPluginManifest(folderName);
     branch.write(`${relPlugin}/${PLUGIN_MANIFEST_FILE}`, renderedManifest);
     details.push(`${folderName}: wrote ${PLUGIN_MANIFEST_FILE}`);
     changed = true;
   }
 
-  const entries = await fs.readdir(folderDir, { withFileTypes: true });
   const converted: ConvertedManual[] = [];
 
   const convertOrMove = async (abs: string, rel: string, note: string): Promise<void> => {

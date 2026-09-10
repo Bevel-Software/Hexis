@@ -530,23 +530,31 @@ describe('PluginManifestsStep', () => {
       'Plugins/functional/access.md': '---\n---\nread:\n  - everyone\n',
       // Nothing plugin-shaped at all.
       'Plugins/notes/README.md': 'just a folder',
+      // A legacy plugin whose vendored dependency ships a manifest: the walk
+      // does not enter node_modules, so the folder is the plugin, not a
+      // grouping folder over one.
+      'Plugins/Vendored/access.md': '---\n---\nread:\n  - everyone\n',
+      'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
+      // A plain folder whose only SKILL.md is vendored: not a plugin either.
+      'Plugins/deps/node_modules/some-pkg/SKILL.md': '---\ndescription: z\n---\n',
     });
 
     await makeRunner([new PluginManifestsStep()]).runAll();
 
     for (const branch of PROTECTED) {
       const dir = await checkout(branch);
-      for (const legacy of ['GTM', 'Servers', 'Bare']) {
+      for (const legacy of ['GTM', 'Servers', 'Bare', 'Vendored']) {
         const manifest = JSON.parse(await fs.readFile(path.join(dir, `Plugins/${legacy}/plugin.json`), 'utf8'));
         expect(manifest.name).toBe(legacy.toLowerCase());
       }
       expect(await exists(dir, 'Plugins/functional/plugin.json')).toBe(false);
       expect(await exists(dir, 'Plugins/notes/plugin.json')).toBe(false);
+      expect(await exists(dir, 'Plugins/deps/plugin.json')).toBe(false);
       expect(await fs.readFile(path.join(dir, 'Plugins/Modern/plugin.json'), 'utf8')).toBe('{"name":"modern"}');
     }
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
-    expect(log).toContain('Add plugin manifests to 3 legacy plugin folders');
+    expect(log).toContain('Add plugin manifests to 4 legacy plugin folders');
     expect(log).toContain('Plugins/GTM: plugin.json written');
 
     // Idempotent: nothing left to write on the next boot.
@@ -907,6 +915,29 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       Authorization: 'Bearer $VENDOR_KEY',
       'X-Price': '$5 per call',
     });
+  });
+
+  it('leaves a plain folder under the root alone — a .gitkeep is not a plugin, and a grouping folder holding one is not either', async () => {
+    await seedUpstream({
+      'Plugins/GTM/access.md': 'write:\n  - Admin\n',
+      // Made with "New folder" in the tree: nothing plugin-shaped in it.
+      'Plugins/TestFolder/.gitkeep': '',
+      // A grouping folder with a plugin INSIDE: a manifest on the folder
+      // would hide the plugin beneath it from every catalog.
+      'Plugins/Teams/Agent Made/plugin.json': '{"name":"agent-made"}',
+      // A legacy plugin whose vendored dependency happens to ship a
+      // manifest: `node_modules` is nothing to the walk, so the folder is
+      // still the plugin it was.
+      'Plugins/Vendored/access.md': 'write:\n  - Admin\n',
+      'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
+    });
+    await migrate();
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await exists(dir, 'Plugins/GTM/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/TestFolder/plugin.json')).toBe(false);
+    expect(await exists(dir, 'Plugins/Teams/plugin.json')).toBe(false);
+    expect(await exists(dir, 'Plugins/Teams/Agent Made/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/Vendored/plugin.json')).toBe(true);
   });
 
   it('leaves a personal folder a valid plugin', async () => {

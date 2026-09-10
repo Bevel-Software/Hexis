@@ -229,9 +229,12 @@ const CORE_APPS: AppDef[] = [
  * repo's two roots ARE the two apps — `KnowledgeBase/` paths get the pane
  * workspace, default-branch `Plugins/` paths get the library. The catalog is
  * never consulted for the surface, so a just-created skill routes correctly
- * before any reload. Router state `rawFile` steps past the shape rule to the
- * raw file view (the tool page's "Edit the tool file"); it is state, not URL,
- * so a shared link can never land there by accident.
+ * before any reload. The shape rule is the WHOLE rule: a file under one of
+ * the library's roots opens in the library whatever it is — a manifest, an
+ * access.md, a stray upload — with the same viewer Knowledge uses rendered
+ * inside the library's frame (see `WorkspaceItemRoute`). Router state
+ * `rawFile` asks that route for the raw view; it never changes which app is
+ * on screen.
  *
  * While the library renders under a `/workspace` URL it CLAIMS the Skills &
  * Tools app (see {@link AppClaimContext}), so the switcher and the toolbar's
@@ -240,8 +243,7 @@ const CORE_APPS: AppDef[] = [
 function CoreSurfaces() {
   const location = useLocation();
   const claim = useContext(AppClaimContext);
-  const rawRequested = (location.state as { rawFile?: boolean } | null)?.rawFile === true;
-  const library = !rawRequested && isLibraryLocation(location.pathname);
+  const library = isLibraryLocation(location.pathname);
   const claimsSkills = library && location.pathname.startsWith(KB_ROUTE_PREFIX);
   useEffect(() => {
     if (!claimsSkills) return;

@@ -24,7 +24,16 @@ type SyncError =
   | { kind: 'file-load-failed'; path: string; message: string }
   | null;
 
-export function FileRoute() {
+/**
+ * `canonicalize` (default on): replace a path URL with the node's id URL once
+ * the file is open. OFF when this route is rendered inside the Library frame
+ * (`WorkspaceItemRoute`): an id URL (`/workspace/<branch>/<id>`) is not a
+ * library location, so the replacement would hand an id-bearing file — a
+ * `.tool` behind "Edit the tool file", a note with a frontmatter id — back to
+ * the Knowledge surface, which is exactly the switch that frame exists to
+ * avoid. The path URL stays; the file is the same.
+ */
+export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = {}) {
   const params = useParams<{ branch: string; '*': string }>();
   const navigate = useNavigate();
   const location = useLocation();
@@ -115,7 +124,7 @@ export function FileRoute() {
   // ping-pong; gated on `openFilePath === segment` so the subsequent id→path
   // load reuses the already-open tab instead of racing a second fetch.
   useEffect(() => {
-    if (segmentIsId || !segment || !branchFromUrl) return;
+    if (!canonicalize || segmentIsId || !segment || !branchFromUrl) return;
     if (openFilePath !== segment) return;
     let cancelled = false;
     (async () => {
@@ -127,7 +136,7 @@ export function FileRoute() {
     return () => {
       cancelled = true;
     };
-  }, [segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate]);
+  }, [canonicalize, segmentIsId, segment, branchFromUrl, openFilePath, location.hash, navigate]);
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 

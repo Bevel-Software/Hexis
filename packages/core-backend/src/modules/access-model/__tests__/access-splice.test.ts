@@ -7,7 +7,13 @@ import {
   AccessSpliceError,
   type Principal,
 } from '../access-splice.js';
-import { parseAccessEntry, canonicalEmail } from '../access-grammar.js';
+import {
+  accessMdDeclaresBodyRules,
+  accessMdSelfEntries,
+  canonicalEmail,
+  parseAccessEntry,
+  parseAccessFile,
+} from '../access-grammar.js';
 
 const felix: Principal = { kind: 'user', email: 'felix.kissel@example.com', displayName: 'Felix' };
 const juan: Principal = { kind: 'user', email: 'juan@bevel.software', displayName: 'Juan V' };
@@ -92,6 +98,35 @@ describe('spliceGrant — idempotency + creation', () => {
     expect(r.changed).toBe(true);
     expect(r.text.startsWith('---\n')).toBe(true);
     expect(r.text).toContain('write:\n  - Felix <felix.kissel@example.com>');
+  });
+
+  it("a fresh FOLDER access.md is the platform's two-block file: the grant in the body, both blocks explained in place", () => {
+    const r = spliceGrant('', 'read', felix, { target: 'folder' });
+    expect(r.changed).toBe(true);
+    // Two blocks: a comment-only frontmatter, then the body with the verb.
+    const close = r.text.indexOf('\n---\n', 4);
+    const frontmatter = r.text.slice(4, close);
+    const body = r.text.slice(close + 5);
+    expect(frontmatter.split('\n').every((l) => l.startsWith('#'))).toBe(true);
+    expect(frontmatter).toContain('governs this access.md FILE only');
+    expect(body).toContain('governs the FOLDER');
+    expect(body).toContain('`everyone` — every signed-in person, the whole organisation');
+    expect(body.endsWith('\nread:\n  - Felix <felix.kissel@example.com>\n')).toBe(true);
+    // The file parses as body-governed: the grant rules the FOLDER, and the
+    // file declares nothing for itself (a comment-only frontmatter is "no
+    // own rules" — the file follows the folder's).
+    expect(accessMdDeclaresBodyRules(r.text)).toBe(true);
+    const parsed = parseAccessFile(r.text, 'KnowledgeBase/Finance/access.md');
+    expect(parsed.ok && parsed.file.entries.read.map((e) => (e.kind === 'user' ? e.email : e.role))).toEqual([
+      'felix.kissel@example.com',
+    ]);
+    expect(accessMdSelfEntries(r.text)).toBeNull();
+    // A second grant lands beside the first, in the body, with every comment kept.
+    const again = spliceGrant(r.text, 'read', productTeam, { target: 'folder' });
+    expect(again.text).toContain('read:\n  - Felix <felix.kissel@example.com>\n  - Product Team\n');
+    expect(again.text).toContain('governs the FOLDER');
+    // Text without a frontmatter is the legacy format and is not rewritten.
+    expect(spliceGrant('write:\n  - Admin\n', 'read', felix, { target: 'folder' }).text).not.toContain('governs');
   });
 });
 

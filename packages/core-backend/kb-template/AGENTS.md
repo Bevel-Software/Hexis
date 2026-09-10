@@ -165,8 +165,9 @@ each carries its own `README.md` describing what belongs in it.
 
 ## Access control
 
-Write access to any path is governed by `roles.yaml` (who has which role) and
-`access.md` files (which roles/users can write where).
+Access to any path — reading it as much as writing it — is governed by
+`roles.yaml` (who has which role), `groups.yaml` (who is in which group) and
+`access.md` files (who may do what, where).
 
 - **Roles** in `roles.yaml` map a role name to a list of emails. Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
@@ -183,12 +184,23 @@ Write access to any path is governed by `roles.yaml` (who has which role) and
   Adding or removing someone on the plugin changes what they can read
   everywhere the token is granted, with no copying.
 - **Access rules** live in `access.md` files, which carry **two blocks with two
-  scopes**: the body declares the rules for the folder the file sits in, and the
-  frontmatter declares who may read and write that `access.md` itself. Each
-  block names verbs (`read`, `write`, `download`, `owner`) whose entries are
-  either grants (bare principal — a role name or `Name <email>`) or denials
-  (the lowercase word `deny`, a space, then the principal). Capitalised forms
-  like `Deny` are *not* triggers; they are treated as part of a name.
+  scopes**: the BODY (below the closing `---`) declares the rules for the
+  folder the file sits in, and the FRONTMATTER declares who may read and
+  write that `access.md` itself. Each block names verbs (`read`, `write`,
+  `download`, `owner`) whose entries are either grants (a bare principal) or
+  denials (the lowercase word `deny`, a space, then the principal).
+  Capitalised forms like `Deny` are *not* triggers; they are treated as part
+  of a name.
+- **Principals** are a role name from `roles.yaml`, a group name from
+  `groups.yaml`, a person as `Name <email>`, a plugin token (above), or
+  **`everyone`** — the built-in org-wide principal: every signed-in person and
+  their agents. `read: everyone` in a folder's BODY opens that folder to the
+  whole organisation; it is how an organisation-wide skill or plugin is
+  shared. The same line in a file's FRONTMATTER only makes that one file
+  visible — a plugin's `access.md` ships with `read: everyone` in its
+  frontmatter so the plugin can be found and joined, and that admits nobody
+  to the plugin itself. A person's own space (`{{pluginsDir}}/personal-<id>/`)
+  denies `everyone` outright, so opening a parent folder never opens it.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
