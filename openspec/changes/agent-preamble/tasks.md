@@ -24,6 +24,7 @@
 - [x] 3.4 Regression (CRITICAL): add `mcp-description.md` to `fullScaffold()` and to the hard-coded list in `steps.test.ts` (lines 119 and 135), or the CRLF no-churn test at line 204 fails with a scaffolding commit
 - [x] 3.5 Extend `steps.test.ts`: seeded when missing on every protected branch; untouched when present; an emptied file stays empty; the shipped template composes to the header alone; the template `AGENTS.md` names `mcp-description.md`
 - [x] 3.6 Reconcile the root `.bevelignore` on existing protected branches so `mcp-description.md` is hidden by default, preserve an explicit `!mcp-description.md`, and cover the resulting workspace-tree filter
+- [x] 3.7 Respell the platform's OWN unanchored `mcp-description.md` rule as `/mcp-description.md` in `template-files.step.ts` (`withPlatformIgnorePatternRespelled`, provenance by the platform comment, applied to the declared template content and through `reconcileIgnoreRules`); keep an unanchored rule the operator wrote; tests in `steps.test.ts`
 
 ## 4. Local bridge (hexis-mcp)
 
@@ -41,7 +42,9 @@
 - [x] 5.4 Regression: mock the new API module in the hoisted `vi.mock` set of `ExternalAgentAccessPage.test.tsx` and keep the card tolerant of absent providers so the 20 existing cases still pass
 - [x] 5.5 Component tests: platform drawer and description count render; inline Edit only for admins and only once `kbDirName` is known; edit/save and save-error paths; preamble truncation and comment warnings; preview-fetch failure still permits editing; both tabs keep working
 - [x] 5.6 Source helpers strip private comments from the textbox, preserve them on save, close an unterminated private comment, and treat a missing backing file as an empty description
-- [x] 5.7 Filter the exact root `mcp-description.md` from merged workspace trees as defense in depth, without filtering nested files with the same basename
+- [x] 5.7 Filter the exact root `mcp-description.md` from merged workspace trees as defense in depth, without filtering nested files with the same basename; memoized in `useMergedWorkspaceTree.ts` on the tree and `kbDirName`, like every step beside it
+- [x] 5.8 `AgentInstructionsCard.tsx`: offer the Edit action on a non-empty `kbDirName` so it matches `beginEdit`'s guard, and ticket the composed-preview requests so only the newest lands (an initial load resolving after a post-save refresh must not restore the pre-save text)
+- [x] 5.9 `agent-instructions.api.ts` sends the loaded bytes as `ifMatch` on the save, so a file changed since the editor opened is refused instead of overwritten; `workspace.api.ts` `writeFile` grows the option; tests in `__tests__/agent-instructions.api.test.ts` and `__tests__/AgentInstructionsCard.test.tsx`
 
 ## 6. Docs and release
 
@@ -51,9 +54,16 @@
 - [x] 6.4 Fill `openspec/config.yaml` context so later changes start from the repository's conventions
 - [x] 6.5 `TODOS.md` created by the engineering review with the deferred follow-ups
 
-## 7. Verification
+## 7. Workspace file routes (core-backend)
 
-- [x] 7.1 `pnpm typecheck`, `pnpm lint`, `pnpm test` green
-- [ ] 7.2 Manual: connect Claude Code to a local deployment with `claude mcp add`, confirm the instructions appear in its MCP server instructions block, edit `mcp-description.md`, open a new session, confirm the edit is there
-- [ ] 7.3 Manual: connect through `hexis-mcp` and confirm the same text arrives; point `hexis-mcp` at a config stub without the flag and confirm it starts with the one log line
-- [ ] 7.4 Manual eval, recorded in the PR description: one fixed organisation-specific question asked in Claude Code, claude.ai web and Cline, with and without the preamble; note whether the first tool call is `start_session` or `grep`, and whether claude.ai shows the fixed line at the start of the four tool descriptions
+- [x] 7.1 `workspace.service.ts` `writeFile` takes `expectedContent`: read-compare-and-write in one step so the route's per-path lock covers it, a mismatch throwing a 409 that `sendError` maps; an absent file compares as the empty string
+- [x] 7.2 `workspace.routes.ts` `PUT /workspace/:id/file` accepts `ifMatch` (a string or nothing, 400 otherwise) and passes it as `expectedContent`
+- [x] 7.3 `workspace.routes.ts` `GET /workspace/:id/file` answers 404 for ENOENT, ENOTDIR and EISDIR only, and sends every other read failure through `sendError` (traversal 403, a malformed workspace id its domain status, an unreadable file 500), so a caller cannot read a read failure as a missing file
+- [x] 7.4 Tests: service-level conditional write in `__tests__/workspace.service.test.ts`; route-level `ifMatch` pass-through and read-error mapping in `__tests__/workspace.routes.file-writes.test.ts`
+
+## 8. Verification
+
+- [x] 8.1 `pnpm typecheck`, `pnpm lint`, `pnpm test` green
+- [ ] 8.2 Manual: connect Claude Code to a local deployment with `claude mcp add`, confirm the instructions appear in its MCP server instructions block, edit `mcp-description.md`, open a new session, confirm the edit is there
+- [ ] 8.3 Manual: connect through `hexis-mcp` and confirm the same text arrives; point `hexis-mcp` at a config stub without the flag and confirm it starts with the one log line
+- [ ] 8.4 Manual eval, recorded in the PR description: one fixed organisation-specific question asked in Claude Code, claude.ai web and Cline, with and without the preamble; note whether the first tool call is `start_session` or `grep`, and whether claude.ai shows the fixed line at the start of the four tool descriptions

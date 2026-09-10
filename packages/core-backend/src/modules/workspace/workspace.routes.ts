@@ -740,12 +740,22 @@ export function createWorkspaceRoutes(
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.json({ content });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      // 404 means ONE thing here: there is no file at this path. That is
+      // ENOENT, a parent that is not a directory (ENOTDIR), and a directory
+      // asked for as a file (EISDIR). Every other read failure keeps its own
+      // status, because callers act on the difference: the inline
+      // agent-description editor opens EMPTY on a 404 (a knowledge base older
+      // than the template has no such file yet), so dressing an unreadable
+      // file up as a missing one would offer an empty editor over content the
+      // save then overwrites.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
+        res.status(404).json({ error: 'File not found' });
         return;
       }
-      res.status(404).json({ error: 'File not found' });
+      // Traversal stays a 403, a malformed workspace id its domain status,
+      // and an unreadable file (EACCES, EIO) a 500 carrying the reason.
+      sendError(res, error);
     }
   });
 
@@ -896,9 +906,17 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const { content, ifAbsent } = req.body as { content?: string; ifAbsent?: boolean };
+    const { content, ifAbsent, ifMatch } = req.body as {
+      content?: string;
+      ifAbsent?: boolean;
+      ifMatch?: unknown;
+    };
     if (content === undefined) {
       res.status(400).json({ error: 'content is required in body' });
+      return;
+    }
+    if (ifMatch !== undefined && typeof ifMatch !== 'string') {
+      res.status(400).json({ error: 'ifMatch, if provided, must be a string' });
       return;
     }
     const user = await requireUser(req, res);
@@ -921,8 +939,16 @@ export function createWorkspaceRoutes(
       // concurrent or stale create against an existing file into a 409
       // instead of a silent replace. `withLock`'s failure arm releases
       // without committing, so the refusal leaves no trace.
+      //
+      // `ifMatch` = conditional write, the same 409 for a stale UPDATE: the
+      // file must still hold the text the caller last read. The compare
+      // happens inside the service, so it runs under the lock this acquires
+      // and no other save can land between the compare and the write.
       await withLock(id, user, filePath, () =>
-        workspaceService.writeFile(id, filePath, toWrite, { failIfExists: ifAbsent === true }),
+        workspaceService.writeFile(id, filePath, toWrite, {
+          failIfExists: ifAbsent === true,
+          expectedContent: ifMatch,
+        }),
       );
       res.json({ status: 'written' });
     } catch (err) {

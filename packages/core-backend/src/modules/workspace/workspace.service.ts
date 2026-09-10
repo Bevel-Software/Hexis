@@ -1004,17 +1004,49 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
+  /**
+   * Write one workspace file.
+   *
+   * - `failIfExists` is an exclusive create (see the `wx` note below).
+   * - `expectedContent` is a conditional write: the file must still hold
+   *   exactly that text, or the write is refused with a 409. It is what lets
+   *   an editor that composed its save from a snapshot (the inline agent
+   *   description merges the private comments it read minutes earlier) refuse
+   *   rather than erase whatever landed in between. The compare and the write
+   *   are one step here so the route's per-path lock covers both; a check in
+   *   the caller would leave a window between them. An absent file reads as
+   *   the empty string, so `expectedContent: ''` means "expect nothing there
+   *   yet" and creates it.
+   */
   async writeFile(
     workspaceId: string,
     relativePath: string,
     content: string,
-    options?: { failIfExists?: boolean },
+    options?: { failIfExists?: boolean; expectedContent?: string },
   ): Promise<void> {
     assertValidRelativePath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    if (options?.expectedContent !== undefined) {
+      let current = '';
+      try {
+        current = await fs.readFile(absolutePath, 'utf-8');
+      } catch (err) {
+        // Anything but "not there" is a real read failure: refuse the write
+        // rather than treat an unreadable file as an empty one.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      if (current !== options.expectedContent) {
+        const stale: Error & { status?: number } = new Error(
+          `"${relativePath}" changed since you opened it. Reload it and apply your edit again, ` +
+            'so the other change is not overwritten.',
+        );
+        stale.status = 409;
+        throw stale;
+      }
+    }
     try {
       // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
       // followed by a plain write would let two concurrent creators (or a

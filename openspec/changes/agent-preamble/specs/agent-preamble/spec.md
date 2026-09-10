@@ -27,7 +27,7 @@ The startup phase SHALL add `mcp-description.md` from the template to any protec
 - **THEN** the startup phase does not restore the template content
 
 ### Requirement: The backing file is hidden from workspace navigation
-The template root `.bevelignore` SHALL list the root-anchored `/mcp-description.md`. On existing protected branches, startup SHALL append that rule under a platform-owned comment when neither the anchored rule, a legacy unanchored rule, nor an explicit negation is present. The frontend merged-tree hook SHALL also omit the exact `${kbDirName}/mcp-description.md` path so cached server trees and optimistic overlays cannot expose the control file. A nested file with the same basename SHALL remain visible.
+The template root `.bevelignore` SHALL list the root-anchored `/mcp-description.md`. On existing protected branches, startup SHALL append that rule under a platform-owned comment when neither the anchored rule, an unanchored rule the operator wrote, nor an explicit negation is present. An unanchored rule the PLATFORM wrote, meaning one directly under a platform-owned comment, SHALL be respelled to the anchored form: the earlier spelling also hides an ordinary knowledge page of that name anywhere in the tree. The frontend merged-tree hook SHALL also omit the exact `${kbDirName}/mcp-description.md` path so cached server trees and optimistic overlays cannot expose the control file. A nested file with the same basename SHALL remain visible.
 
 #### Scenario: Existing knowledge base upgrades
 - **WHEN** startup finds a root `.bevelignore` with no rule for `mcp-description.md`
@@ -36,6 +36,14 @@ The template root `.bevelignore` SHALL list the root-anchored `/mcp-description.
 #### Scenario: Operator explicitly negated the rule
 - **WHEN** `.bevelignore` contains `!mcp-description.md`
 - **THEN** startup preserves the negation and does not append a positive rule
+
+#### Scenario: The platform's own unanchored rule is respelled
+- **WHEN** `.bevelignore` carries the unanchored `mcp-description.md` directly under a platform-owned comment, as the release that shipped that spelling wrote it
+- **THEN** startup rewrites that line as `/mcp-description.md`, leaves the comment where it is, appends nothing beside it, and a second startup makes no further change
+
+#### Scenario: The operator's own unanchored rule is kept
+- **WHEN** `.bevelignore` carries the unanchored `mcp-description.md` with no platform-owned comment above it
+- **THEN** startup leaves the line alone and appends no anchored rule beside it, because the file is already hidden
 
 #### Scenario: A stale or optimistic tree contains the control file
 - **WHEN** the merged workspace tree contains `${kbDirName}/mcp-description.md`
@@ -73,10 +81,10 @@ The External agent access page SHALL put its connection setup first in a card co
 
 #### Scenario: Fetch fails
 - **WHEN** the instructions request fails
-- **THEN** the section shows an inline error, the connection tabs keep working, and an admin can still open the source editor
+- **THEN** the section shows an inline error, the connection tabs keep working, and an admin can still open the inline description editor
 
 ### Requirement: Admins edit the public description inline
-When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirName}/mcp-description.md` from the default-branch workspace and show only its agent-visible text in an inline textarea. A missing file SHALL open as an empty description; other load errors SHALL remain inline. Saving SHALL use the normal workspace write route, retain all private HTML comments from the source, and refresh the composed preview. A save failure SHALL keep the editor and unsaved value open. Cancel SHALL discard the textarea value without writing. Non-admins SHALL have no inline edit action.
+When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirName}/mcp-description.md` from the default-branch workspace and show only its agent-visible text in an inline textarea. A missing file SHALL open as an empty description, and nothing else SHALL: the file route reports 404 for an absent file alone and gives any other read failure its own status, so an unreadable file SHALL surface as an inline error rather than an empty editor. Saving SHALL use the normal workspace write route, retain all private HTML comments from the source, and refresh the composed preview. The save SHALL carry the loaded bytes as a precondition so a file changed since it loaded is refused rather than overwritten. A save failure SHALL keep the editor and unsaved value open. Cancel SHALL discard the textarea value without writing. Non-admins SHALL have no inline edit action.
 
 #### Scenario: Admin saves an inline edit
 - **WHEN** an admin changes the inline description and selects Save description
@@ -93,6 +101,14 @@ When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirNam
 #### Scenario: Backing file is missing
 - **WHEN** the default-branch read answers 404 for `mcp-description.md`
 - **THEN** the editor opens empty and Save creates the file through the normal workspace route
+
+#### Scenario: Another admin saved while this editor was open
+- **WHEN** the backing file no longer holds the text this editor loaded and the admin selects Save description
+- **THEN** the write is refused, nothing is overwritten, and the card shows that the file changed and keeps the editor open with the unsaved value
+
+#### Scenario: The backing file cannot be read
+- **WHEN** the default-branch read fails for any reason other than the file being absent
+- **THEN** the card shows that error inline and offers no empty editor over text it could not read
 
 #### Scenario: Save fails
 - **WHEN** the workspace write is refused or fails

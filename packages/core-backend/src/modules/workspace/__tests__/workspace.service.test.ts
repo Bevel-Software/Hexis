@@ -226,6 +226,78 @@ describe('WorkspaceService.createDirectory', () => {
   });
 });
 
+/**
+ * `writeFile`'s conditional write: the caller states the bytes it last read
+ * and the write is refused if the file no longer holds them. The compare and
+ * the write are one call so the route's per-path lock covers both.
+ */
+describe('WorkspaceService.writeFile — expectedContent', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('writes when the file still holds the expected content', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    await svc.writeFile(workspaceId, rel, 'After.', { expectedContent: 'Before.' });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('After.');
+  });
+
+  it('refuses with a 409 and leaves the file alone when it changed underneath', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), "Another admin's text.", 'utf-8');
+
+    await expect(
+      svc.writeFile(workspaceId, rel, 'My stale merge.', { expectedContent: 'What I loaded.' }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe("Another admin's text.");
+  });
+
+  it("treats an absent file as the empty string, so expecting '' creates it", async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+
+    await svc.writeFile(workspaceId, rel, 'First write.', { expectedContent: '' });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('First write.');
+  });
+
+  it('refuses to create over a file the caller believed absent', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Seeded since the editor opened.', 'utf-8');
+
+    await expect(
+      svc.writeFile(workspaceId, rel, 'From an empty editor.', { expectedContent: '' }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Seeded since the editor opened.');
+  });
+
+  it('is not applied at all when the option is absent', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Whatever.', 'utf-8');
+
+    await svc.writeFile(workspaceId, rel, 'Replaced.');
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Replaced.');
+  });
+});
+
 describe('WorkspaceService.createFolderZip', () => {
   let root: string;
   let svc: WorkspaceService;

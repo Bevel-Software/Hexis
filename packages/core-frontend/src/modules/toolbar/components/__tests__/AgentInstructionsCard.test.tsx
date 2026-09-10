@@ -157,6 +157,37 @@ describe('the Edit action', () => {
     expect(screen.queryByRole('textbox', { name: 'Your description' })).toBeNull();
   });
 
+  it('keeps the post-save preview when the initial load answers after it', async () => {
+    // The initial request is still in flight while the admin edits and saves.
+    // Its response arrives last and must land nowhere: the page would
+    // otherwise show the pre-save text as though the save had not happened.
+    const before = composed({ preamble: 'Before.', preambleChars: 6 });
+    const after = composed({ preamble: 'After.', preambleChars: 5 });
+    let releaseInitialLoad: () => void = () => {};
+    const initialLoad = new Promise<AgentInstructions>((resolve) => {
+      releaseInitialLoad = () => resolve(before);
+    });
+    fetchMock.mockReturnValueOnce(initialLoad).mockResolvedValueOnce(after);
+    fetchEditableMock.mockResolvedValue({
+      workspaceId: 'target-company-state',
+      source: 'Before.',
+      description: 'Before.',
+    });
+    const user = userEvent.setup();
+    mount({ admin: asAdmin });
+
+    await user.click(await screen.findByRole('button', { name: 'Edit description' }));
+    const editor = await screen.findByRole('textbox', { name: 'Your description' });
+    await user.clear(editor);
+    await user.type(editor, 'After.');
+    await user.click(screen.getByRole('button', { name: 'Save description' }));
+
+    expect(await screen.findByTestId('description-text')).toHaveTextContent('After.');
+    releaseInitialLoad();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('description-text')).toHaveTextContent('After.');
+  });
+
   it('keeps the inline editor open and shows the save error', async () => {
     fetchEditableMock.mockResolvedValue({
       workspaceId: 'target-company-state',
@@ -202,6 +233,12 @@ describe('the Edit action', () => {
 
   it('waits for the KB dir name: no edit action with a missing save path, ever', async () => {
     mount({ admin: asAdmin, kbDirName: null });
+    await screen.findByRole('heading', { name: 'Your description' });
+    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+  });
+
+  it('offers no edit action for an empty KB dir name either — a button that could not save', async () => {
+    mount({ admin: asAdmin, kbDirName: '' });
     await screen.findByRole('heading', { name: 'Your description' });
     expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
   });

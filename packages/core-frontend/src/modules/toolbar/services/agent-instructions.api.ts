@@ -123,7 +123,10 @@ export async function fetchEditableAgentDescription(kbDirName: string): Promise<
     source = await readFile(workspace.id, path);
   } catch (err) {
     // A pre-template knowledge base may not have the file yet. Treat that as
-    // an empty editor; the normal write path creates it on Save.
+    // an empty editor; the normal write path creates it on Save. Only a 404
+    // means that: the file route answers 404 for a missing file alone and
+    // gives any other read failure its own status, so an unreadable file
+    // surfaces as an error here instead of an empty editor over live text.
     if (!(err instanceof WorkspaceApiError) || err.status !== 404) throw err;
   }
   return {
@@ -133,7 +136,14 @@ export async function fetchEditableAgentDescription(kbDirName: string): Promise<
   };
 }
 
-/** Save the public description without discarding private source comments. */
+/**
+ * Save the public description without discarding private source comments.
+ *
+ * `source` is both the snapshot the private comments are merged out of and
+ * the write's precondition: the file must still hold exactly it, or the
+ * backend refuses with a 409. Without that, an editor left open while
+ * another admin saves would put its stale comments back and drop theirs.
+ */
 export async function saveAgentDescription(
   workspaceId: string,
   kbDirName: string,
@@ -144,5 +154,6 @@ export async function saveAgentDescription(
     workspaceId,
     `${kbDirName}/${PREAMBLE_FILE}`,
     mergeEditableDescription(source, description),
+    { ifMatch: source },
   );
 }

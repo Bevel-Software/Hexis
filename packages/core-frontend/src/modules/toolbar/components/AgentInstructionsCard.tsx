@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pencil } from 'lucide-react';
 import { AdminContext } from '../../admin/state/admin.context';
 import { WorkspaceContext } from '../../workspace/state/workspace.context';
@@ -62,26 +62,40 @@ export function AgentInstructionsCard() {
   const [editBusy, setEditBusy] = useState<'loading' | 'saving' | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchAgentInstructions().then(
+  /**
+   * Only the NEWEST composed-preview request may land. Two are in flight
+   * together whenever an admin edits and saves before the first load
+   * answers, and the older one resolving last would put the pre-save text
+   * back on the page as though the save had not happened. The effect's
+   * cleanup takes a ticket too, so a response arriving after unmount lands
+   * nowhere.
+   */
+  const previewRequest = useRef(0);
+  const loadInstructions = useCallback((whenFailed: (err: unknown) => string): Promise<void> => {
+    const ticket = ++previewRequest.current;
+    return fetchAgentInstructions().then(
       (data) => {
-        if (!cancelled) setState({ status: 'ready', data });
+        if (ticket === previewRequest.current) setState({ status: 'ready', data });
       },
       (err: unknown) => {
-        if (!cancelled) {
-          setState({ status: 'error', message: err instanceof Error ? err.message : "Couldn't load what agents are told." });
-        }
+        if (ticket === previewRequest.current) setState({ status: 'error', message: whenFailed(err) });
       },
     );
-    return () => {
-      cancelled = true;
-    };
   }, []);
+
+  useEffect(() => {
+    void loadInstructions((err) =>
+      err instanceof Error ? err.message : "Couldn't load what agents are told.",
+    );
+    return () => {
+      previewRequest.current += 1;
+    };
+  }, [loadInstructions]);
 
   // The editor is offered only once the KB dir name is known: the save path
   // otherwise has a missing segment and cannot safely target the source file.
-  const canEdit = isAdmin && kbDirName !== null;
+  // Any falsy name, not just null, so the offer matches `beginEdit`'s guard.
+  const canEdit = isAdmin && Boolean(kbDirName);
 
   const beginEdit = async () => {
     if (!kbDirName || editBusy) return;
@@ -112,16 +126,11 @@ export function AgentInstructionsCard() {
     // The write has landed. Close the editor even if refreshing the composed
     // preview fails, so a successful save is never presented as unsaved work.
     setEditor(null);
-    try {
-      setState({ status: 'ready', data: await fetchAgentInstructions() });
-    } catch (err) {
-      setState({
-        status: 'error',
-        message: `Description saved, but the preview couldn't refresh: ${err instanceof Error ? err.message : 'unknown error'}`,
-      });
-    } finally {
-      setEditBusy(null);
-    }
+    await loadInstructions(
+      (err) =>
+        `Description saved, but the preview couldn't refresh: ${err instanceof Error ? err.message : 'unknown error'}`,
+    );
+    setEditBusy(null);
   };
 
   const displayedPreambleChars = editor ? editor.value.trim().length : state.status === 'ready' ? state.data.preambleChars : 0;

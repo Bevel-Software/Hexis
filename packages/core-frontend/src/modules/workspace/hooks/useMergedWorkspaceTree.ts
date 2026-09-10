@@ -69,7 +69,15 @@ export function useMergedWorkspaceTree(): {
   // mcp-description.md is edited from External agent access. Keep it out of
   // the navigation even when this tab still holds a pre-migration tree, or an
   // optimistic upload/change-request overlay tries to synthesize the row.
-  const tree = omitPathFromTree(treeWithSuggestions, `${kbDirName}/mcp-description.md`);
+  //
+  // Memoized like every other step above it: the omission walks the whole
+  // tree, and this hook feeds the FileExplorer and the Skills tree, which
+  // re-render on navigation and hover. Nothing to omit returns the same
+  // reference, so those re-renders stay cheap either way.
+  const tree = useMemo(
+    () => omitPathFromTree(treeWithSuggestions, `${kbDirName}/mcp-description.md`),
+    [treeWithSuggestions, kbDirName],
+  );
 
   return { tree, suggestionOnlyPaths };
 }

@@ -442,6 +442,42 @@ describe('TemplateFilesStep', () => {
     );
   });
 
+  it("respells the platform's OWN unanchored preamble rule instead of leaving it standing", async () => {
+    // What the release that shipped the unanchored spelling wrote. The bare
+    // name hides a nested `mcp-description.md` page too, so the platform's own
+    // line is corrected rather than treated as somebody's choice.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\nmcp-description.md\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\n/mcp-description.md\n',
+    );
+    // Idempotent: a second boot has nothing to change.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\n/mcp-description.md\n',
+    );
+  });
+
+  it("keeps an unanchored preamble rule the operator wrote themselves, and adds nothing beside it", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\n# I hide it everywhere on purpose\nmcp-description.md\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n# I hide it everywhere on purpose\nmcp-description.md\n',
+    );
+  });
+
   it('seeds mcp-description.md on every protected branch, from the template, when it is missing', async () => {
     const scaffold = await fullScaffold();
     delete scaffold['mcp-description.md'];
