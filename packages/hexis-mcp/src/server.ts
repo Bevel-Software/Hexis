@@ -323,26 +323,61 @@ export async function createHexisMcpServer(
    * template from the repository BY NAME at call time, so re-registration is
    * invisible to it (verified against @utcp/sdk's dispatch).
    *
+   * SESSION RECOVERY SHARES THIS GATE. Recovery (below) re-registers a manual
+   * too, so both go through `withReregisterGate`: one at a time, never
+   * interleaved, and never each waiting on the other. That last part is why
+   * `callsParkedForReregister` exists — a call queued at the gate still holds
+   * an `inflightCalls` slot, and a swap draining for it would wait out the
+   * full deadline for a call that is itself waiting for that swap.
+   *
    * Key mode sets no `renewConnectionKey`, so renewal.ts never renews, this
-   * listener is never called, and the gate below never engages.
+   * listener is never called, and the swap below never engages.
    */
   let closed = false;
   let remoteManualRegistered = false;
   let inflightCalls = 0;
-  let swapInProgress: Promise<void> | null = null;
+  /** The one re-registration allowed at a time: a credential swap or a recovery. */
+  let reregisterInProgress: Promise<void> | null = null;
+  /** In-flight calls parked at that gate, waiting for their turn to recover. */
+  let callsParkedForReregister = 0;
   const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  /**
+   * Run `body` as THE re-registration in flight. `parksACall` marks the waiter
+   * as a tool call whose own dispatch is blocked here, so a swap's drain does
+   * not count it. The published promise never rejects: it says "finished", not
+   * "succeeded".
+   */
+  const withReregisterGate = async <T>(body: () => Promise<T>, parksACall = false): Promise<T> => {
+    if (parksACall) callsParkedForReregister += 1;
+    try {
+      while (reregisterInProgress) await reregisterInProgress;
+    } finally {
+      if (parksACall) callsParkedForReregister -= 1;
+    }
+    // `body()` runs to its first await before the publish below, and nothing
+    // else can interleave in between — so anyone who observes this gate as
+    // free has genuinely not missed a re-registration that already began.
+    const run = body();
+    const published: Promise<void> = run.then(
+      () => {},
+      () => {},
+    ).finally(() => {
+      if (reregisterInProgress === published) reregisterInProgress = null;
+    });
+    reregisterInProgress = published;
+    return run;
+  };
   const swapRemoteCredential = async (token: string): Promise<void> => {
     // `client` (below) exists from the moment the manual is registered, so
     // the guard also keeps this closure off it before its declaration.
     if (closed || !remoteManualRegistered) return;
-    while (swapInProgress) await swapInProgress;
-    if (closed) return; // shutdown landed while awaiting the previous swap
-    const run = (async (): Promise<void> => {
+    await withReregisterGate(async (): Promise<void> => {
+      if (closed) return; // shutdown landed while awaiting the gate
       // Bounded drain: a wedged call must not hold the credential stale
       // forever — after the deadline the swap proceeds and the straggler
       // fails like any call racing a dying session would.
       const deadline = Date.now() + 15_000;
-      while (inflightCalls > 0 && Date.now() < deadline) await sleep(50);
+      while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
       try {
         // Closes the manual's MCP sessions and drops its repository entries.
         await client.deregisterManual(REMOTE_MANUAL_NAME);
@@ -361,11 +396,7 @@ export async function createHexisMcpServer(
       }
       await removeRemoteMetaTools(client);
       console.error('[hexis-mcp] remote manual re-registered with the renewed credential.');
-    })();
-    swapInProgress = run.finally(() => {
-      swapInProgress = null;
     });
-    await swapInProgress;
   };
   if (config.renewConnectionKey) {
     config.onConnectionKeyRenewed = swapRemoteCredential;
@@ -393,17 +424,19 @@ export async function createHexisMcpServer(
    * on one gets the spec's 404/`-32001`. Installed on the client, so the MCP
    * surface below and any `call_tool_chain` recover through the same mechanism.
    *
-   * The template is rebuilt HERE rather than captured, for two reasons: the
-   * remote manual must re-register with whatever connection key renewal has
-   * arrived at by now (a restart and a renewal often land together), and
-   * awaiting an in-flight credential swap first keeps the two re-registration
-   * paths off each other — a swap is already re-registering this manual, and
-   * its result is the session the retry should use.
+   * The template is rebuilt HERE rather than captured, so the remote manual
+   * re-registers with whatever connection key renewal has arrived at by now (a
+   * restart and a renewal often land together). Recovery runs under the SAME
+   * gate the credential swap uses, which is what keeps the two re-registration
+   * paths off each other, and it is `closed`-checked INSIDE that gate: once
+   * shutdown holds it, a recovery behind it registers nothing — and a recovery
+   * that got in first is awaited by `shutdown` before the client is closed, so
+   * a local manual can never be registered (spawning a child) after teardown.
    */
   const localByName = new Map(local.map((m) => [String(m.name), m]));
   installSessionRecovery(client, {
-    manualTemplate: async (name) => {
-      while (swapInProgress) await swapInProgress;
+    withReregister: (_name, run) => withReregisterGate(run, true),
+    manualTemplate: (name) => {
       if (closed) return undefined;
       return name === REMOTE_MANUAL_NAME
         ? remoteManualTemplate(mcpUrl, config.connectionKey)
@@ -433,13 +466,16 @@ export async function createHexisMcpServer(
     // starting after this point — a straggling 401-retry — is refused, not
     // merely de-fanged), the listener is unhooked (renewal.ts reads it at
     // notify time, so a renewal already in flight applies to nothing), and a
-    // swap that started before this point gets to finish before the client it
-    // operates on is closed out from under it.
+    // swap — or a session recovery — that started before this point gets to
+    // finish before the client it operates on is closed out from under it.
     closeRenewal(config);
     if (config.onConnectionKeyRenewed === swapRemoteCredential) {
       config.onConnectionKeyRenewed = undefined;
     }
-    if (swapInProgress) await swapInProgress.catch(() => {});
+    // One await, not a loop: whatever holds the gate finishes, and anything
+    // queued behind it now finds `closed` and registers nothing. The gate
+    // promise never rejects, so this cannot throw teardown off course.
+    if (reregisterInProgress) await reregisterInProgress;
     // The SDK server too, not only the client: embedding callers connect the
     // transport themselves, and this handle should fully tear down — closing
     // the server closes its transport (and with it any pending requests).
@@ -477,9 +513,10 @@ export async function createHexisMcpServer(
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools(tools) }));
 
     server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
-      // Never start a call mid-swap — the remote manual may be between its
-      // deregister and re-register, where a repository lookup finds nothing.
-      while (swapInProgress) await swapInProgress;
+      // Never start a call mid-re-registration — a swap or a recovery may have
+      // the manual between its deregister and its register, where a repository
+      // lookup finds nothing.
+      while (reregisterInProgress) await reregisterInProgress;
       inflightCalls += 1;
       try {
         const name = request.params.name;

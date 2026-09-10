@@ -122,9 +122,36 @@ export interface SessionRecoveryOptions {
    * code-mode meta-tools) has to prune it again here.
    */
   afterReregister?: (manualName: string) => Promise<void> | void;
+  /**
+   * Runs one whole re-registration — resolve the template, deregister,
+   * register, clean up — for a surface that has a re-registration path of its
+   * own. `hexis-mcp` renews its connection key by re-registering the remote
+   * manual and holds arriving calls while it does; handing that same gate in
+   * here makes the two ONE serialized operation instead of two that can
+   * interleave (the window between a deregister and its register finds no
+   * manual in the repository) or, worse, wait on each other. Whatever `run`
+   * settles to is what recovery uses; a hook that throws counts as a failed
+   * recovery, never as a failed call. Defaults to running `run` directly.
+   */
+  withReregister?: <T>(manualName: string, run: () => Promise<T>) => Promise<T>;
   /** Where the one-line-per-recovery log goes. Defaults to stderr. */
   log?: (message: string) => void;
 }
+
+/** What one re-registration produced: may we retry, and anything odd worth saying. */
+interface ReregisterOutcome {
+  /** True only when the manual now holds a fresh session. */
+  ok: boolean;
+  /**
+   * Abnormalities met on the way. Folded into the ONE line the recovered call
+   * logs rather than printed as they happen: a recovery is a single event, and
+   * two lines for one read as two recoveries — which is how a retry loop that
+   * never existed gets diagnosed.
+   */
+  notes: string[];
+}
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Wrap `client`'s tool-call entry points with session recovery, in place.
@@ -158,50 +185,63 @@ export function installSessionRecovery(
    * hold for concurrent calls whether they fail together or in sequence.
    */
   const generations = new Map<string, number>();
-  const inflight = new Map<string, Promise<boolean>>();
+  const inflight = new Map<string, Promise<ReregisterOutcome>>();
 
   const generationOf = (manualName: string): number => generations.get(manualName) ?? 0;
 
-  /** Deregister + register once. Never throws: the answer is "may we retry?". */
-  async function reregister(manualName: string): Promise<boolean> {
+  /** Deregister + register once. Reports what happened; the caller does the logging. */
+  async function reregisterNow(manualName: string): Promise<ReregisterOutcome> {
+    const notes: string[] = [];
     const template = await options.manualTemplate(manualName);
     // Not ours to re-register — or not an MCP manual at all, in which case it
     // holds no session and the 404 came from somewhere we must not second-guess.
-    if (!template || template.call_template_type !== 'mcp') return false;
+    // Silent on purpose: nothing happened, so there is nothing to report.
+    if (!template || template.call_template_type !== 'mcp') return { ok: false, notes };
     try {
       // Deregistering is what closes the manual's (now dead) session, so the
       // registration below dials a fresh one instead of reusing the cached
       // transport. Best effort: a manual already gone is not a failure here.
       await client.deregisterManual(manualName);
     } catch (err) {
-      log(
-        `[mcp] session lost on '${manualName}': deregistering before re-registration failed ` +
-          `(${err instanceof Error ? err.message : String(err)}); re-registering anyway.`,
-      );
+      notes.push(`deregistering first failed: ${messageOf(err)}`);
     }
     const result = await registerManual(client, template);
     if (!result.ok) {
       // The server is very likely still coming back up. The call fails as it
       // would have anyway; the NEXT one recovers once the server answers.
-      log(`[mcp] session lost on '${manualName}' — re-registration failed: ${result.error}`);
-      return false;
+      notes.push(`re-registration failed: ${result.error}`);
+      return { ok: false, notes };
     }
     generations.set(manualName, generationOf(manualName) + 1);
     if (options.afterReregister) {
       try {
         await options.afterReregister(manualName);
       } catch (err) {
-        log(
-          `[mcp] post-re-registration cleanup for '${manualName}' failed: ` +
-            `${err instanceof Error ? err.message : String(err)}`,
-        );
+        notes.push(`post-re-registration cleanup failed: ${messageOf(err)}`);
       }
     }
-    return true;
+    return { ok: true, notes };
+  }
+
+  /**
+   * {@link reregisterNow} under the surface's own gate, if it has one, and with
+   * every escape route closed. NEVER throws — and that is load-bearing: a
+   * throwing template resolver (or gate) must not replace the caller's real
+   * session-loss error with a recovery-internal one. The answer here is only
+   * ever "may we retry?".
+   */
+  async function reregister(manualName: string): Promise<ReregisterOutcome> {
+    try {
+      return options.withReregister
+        ? await options.withReregister(manualName, () => reregisterNow(manualName))
+        : await reregisterNow(manualName);
+    } catch (err) {
+      return { ok: false, notes: [`re-registration threw: ${messageOf(err)}`] };
+    }
   }
 
   /** Single-flight {@link reregister}: concurrent losers share one attempt. */
-  function reregisterOnce(manualName: string): Promise<boolean> {
+  function reregisterOnce(manualName: string): Promise<ReregisterOutcome> {
     const existing = inflight.get(manualName);
     if (existing) return existing;
     const tracked = reregister(manualName).finally(() => {
@@ -225,8 +265,19 @@ export function installSessionRecovery(
       log(`[mcp] session lost on '${manualName}' — re-registered by a concurrent call; retrying.`);
       return true;
     }
-    if (!(await reregisterOnce(manualName))) return false;
-    log(`[mcp] session lost on '${manualName}' — re-registered and retried.`);
+    const outcome = await reregisterOnce(manualName);
+    // One recovered call, one line — whatever went sideways on the way rides
+    // along in it rather than arriving as a line of its own.
+    const notes = outcome.notes.length > 0 ? ` (${outcome.notes.join('; ')})` : '';
+    if (!outcome.ok) {
+      if (notes) {
+        log(
+          `[mcp] session lost on '${manualName}' — not recovered${notes}; the original failure stands.`,
+        );
+      }
+      return false;
+    }
+    log(`[mcp] session lost on '${manualName}' — re-registered and retried.${notes}`);
     return true;
   }
 

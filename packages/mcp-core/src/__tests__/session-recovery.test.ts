@@ -338,4 +338,113 @@ describe('session recovery — invariants that only a stubbed client can force',
     expect(calls).toBe(2);
     expect(registrations).toBe(1);
   });
+
+  /** A stub whose `callTool` loses the session once, then answers 'ok'. */
+  function losesSessionOnce(): { client: CodeModeUtcpClient; calls: () => number } {
+    let calls = 0;
+    const client = stubClient({
+      async callTool() {
+        calls += 1;
+        if (calls === 1) throw sessionLost();
+        return 'ok';
+      },
+      callToolStreaming: () => {
+        throw new Error('not exercised by this test');
+      },
+    });
+    return { client, calls: () => calls };
+  }
+
+  it('surfaces the original session loss when the template resolver throws', async () => {
+    const { client, calls } = losesSessionOnce();
+    const log: string[] = [];
+    installSessionRecovery(client, {
+      manualTemplate: () => {
+        throw new Error('config store unreachable');
+      },
+      log: (m) => log.push(m),
+    });
+
+    // The caller's error is the one the CALL produced. A resolver blowing up
+    // means recovery did not happen — not that the failure changes shape.
+    await expect(client.callTool('platform.srv.echo', {})).rejects.toThrow(/Session not found/);
+    expect(calls()).toBe(1);
+    expect(log).toEqual([
+      `[mcp] session lost on 'platform' — not recovered (re-registration threw: config store unreachable); the original failure stands.`,
+    ]);
+  });
+
+  it('surfaces the original session loss when the surface gate throws', async () => {
+    const { client, calls } = losesSessionOnce();
+    installSessionRecovery(client, {
+      manualTemplate: () => manualTemplate('platform', 'http://127.0.0.1:1/mcp'),
+      withReregister: () => Promise.reject(new Error('shutting down')),
+      log: () => {},
+    });
+
+    await expect(client.callTool('platform.srv.echo', {})).rejects.toThrow(/Session not found/);
+    expect(calls()).toBe(1);
+  });
+
+  it('runs the whole re-registration inside the surface gate, once', async () => {
+    const { client } = losesSessionOnce();
+    const order: string[] = [];
+    installSessionRecovery(client, {
+      manualTemplate: () => {
+        order.push('template');
+        return manualTemplate('platform', 'http://127.0.0.1:1/mcp');
+      },
+      afterReregister: () => {
+        order.push('cleanup');
+      },
+      withReregister: async (name, run) => {
+        order.push(`gate:enter:${name}`);
+        try {
+          return await run();
+        } finally {
+          order.push('gate:exit');
+        }
+      },
+      log: () => {},
+    });
+
+    expect(await client.callTool('platform.srv.echo', {})).toBe('ok');
+    // Nothing the surface has to serialize against — template resolution, the
+    // deregister/register pair, the cleanup — may escape the gate.
+    expect(order).toEqual(['gate:enter:platform', 'template', 'cleanup', 'gate:exit']);
+  });
+
+  it('keeps one recovered call to one log line however much went sideways', async () => {
+    let calls = 0;
+    const client = stubClient({
+      deregisterManual: async () => {
+        throw new Error('manual already gone');
+      },
+      async callTool() {
+        calls += 1;
+        if (calls === 1) throw sessionLost();
+        return 'ok';
+      },
+      callToolStreaming: () => {
+        throw new Error('not exercised by this test');
+      },
+    });
+    const log: string[] = [];
+    installSessionRecovery(client, {
+      manualTemplate: () => manualTemplate('platform', 'http://127.0.0.1:1/mcp'),
+      afterReregister: () => {
+        throw new Error('purge failed');
+      },
+      log: (m) => log.push(m),
+    });
+
+    expect(await client.callTool('platform.srv.echo', {})).toBe('ok');
+    // One recovery is one event: the abnormalities ride in that line rather
+    // than arriving as lines of their own, which would read as three
+    // recoveries to anyone watching stderr.
+    expect(log).toEqual([
+      `[mcp] session lost on 'platform' — re-registered and retried. ` +
+        `(deregistering first failed: manual already gone; post-re-registration cleanup failed: purge failed)`,
+    ]);
+  });
 });
