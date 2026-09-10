@@ -7,7 +7,12 @@ import { useImageRevision, isImagePath } from '../useImageRevision';
 
 function makeFakeBus() {
   const handlers: Record<string, ((e: WorkflowEvent) => void)[]> = {};
-  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void } = {
+  // The workspaces the hook has ASKED to be delivered. Without a watch the
+  // real stream sends nothing for a workspace the session isn't focused on,
+  // so "did it subscribe" and "will anything arrive" are separate facts and
+  // the fake tracks both.
+  const watched: string[] = [];
+  const bus: EventBusContextValue & { emit(e: WorkflowEvent): void; watched: string[] } = {
     subscribe(kind, handler) {
       (handlers[kind] ??= []).push(handler as (e: WorkflowEvent) => void);
       return () => {
@@ -15,6 +20,14 @@ function makeFakeBus() {
       };
     },
     setFocus() {},
+    watchWorkspace(workspaceId) {
+      watched.push(workspaceId);
+      return () => {
+        const at = watched.indexOf(workspaceId);
+        if (at >= 0) watched.splice(at, 1);
+      };
+    },
+    watched,
     emit(e) {
       (handlers[e.kind] ?? []).forEach((h) => h(e));
     },
@@ -36,7 +49,7 @@ function treeChanged(workspaceId: string): WorkflowEvent {
   return { kind: 'fs-tree-changed', workspaceId, branch: workspaceId } as unknown as WorkflowEvent;
 }
 
-function renderRevision(bus: EventBusContextValue, workspaceId: string | null) {
+function renderRevision(bus: ReturnType<typeof makeFakeBus>, workspaceId: string | null) {
   return renderHook(({ ws }: { ws: string | null }) => useImageRevision(ws), {
     initialProps: { ws: workspaceId },
     wrapper: ({ children }: { children: ReactNode }) => (
@@ -99,8 +112,7 @@ describe('useImageRevision', () => {
     expect(result.current).toBe(1);
   });
 
-  // Events for a workspace only arrive while it is focused, so a count carried
-  // across a switch would be a number about a different tree.
+  // A count carried across a switch would be a number about a different tree.
   it('starts over on a workspace switch, in both directions', () => {
     const bus = makeFakeBus();
     const { result, rerender } = renderRevision(bus, 'ws-1');
@@ -121,6 +133,32 @@ describe('useImageRevision', () => {
     expect(result.current).toBe(0);
     const bare = renderHook(() => useImageRevision('ws-1'));
     expect(bare.result.current).toBe(0);
+  });
+
+  // The stream delivers workspace-scoped events only for the workspaces the
+  // session declared, and the focus binder declares one: the branch in the
+  // address bar. A hook counting events for ANY other workspace — the skill
+  // page renders the default branch's images from whatever branch you are
+  // standing on — counts an event that never arrives unless it asks.
+  it('watches the workspace it counts for, so events reach it off the focused branch', () => {
+    const bus = makeFakeBus();
+    const { unmount } = renderRevision(bus, 'main');
+    expect(bus.watched).toEqual(['main']);
+    unmount();
+    expect(bus.watched).toEqual([]);
+  });
+
+  it('moves the watch with the workspace, leaving nothing behind', () => {
+    const bus = makeFakeBus();
+    const { rerender } = renderRevision(bus, 'ws-1');
+    rerender({ ws: 'ws-2' });
+    expect(bus.watched).toEqual(['ws-2']);
+  });
+
+  it('watches nothing without a workspace', () => {
+    const bus = makeFakeBus();
+    renderRevision(bus, null);
+    expect(bus.watched).toEqual([]);
   });
 });
 

@@ -43,15 +43,39 @@ import '../auth/auth.middleware.js'; // Express Request augmentation
 const HEARTBEAT_INTERVAL_MS = 25_000;
 
 /**
+ * Ceiling on how many workspaces one session may watch. The list is walked on
+ * every workspace-scoped event for every session, so it is a fan-out cost, and
+ * a client bug that appends without ever releasing would otherwise grow it
+ * without bound. Real pages want two: the branch in the address bar, and the
+ * default branch a skill page reads from.
+ */
+const MAX_WATCHED_WORKSPACES = 8;
+
+/**
  * Per-session bookkeeping the route owns. The bus's `Subscriber` holds a
- * `getFocusedWorkspaceId()` getter pointing at `session.focusedWorkspaceId`,
+ * `getFocusedWorkspaceIds()` getter pointing at `session.focusedWorkspaceIds`,
  * so the focus POST mutates this object and the next event fan-out picks
  * up the new value with no re-subscribe.
  */
 interface ActiveSession {
   sessionId: string;
   userId: string;
-  focusedWorkspaceId: string | null;
+  /**
+   * Every workspace this session wants events for, primary first.
+   *
+   * A LIST, not one id, because "the workspace the user is looking at" and
+   * "the workspaces the open page reads from" are different questions. The
+   * skill page is the case that forced it: it renders the DEFAULT branch's
+   * tree whatever branch is checked out, so a reader standing on their own
+   * suggestion branch got no `file-changed` for the images on screen and kept
+   * showing a screenshot a teammate had already replaced.
+   *
+   * The client declares the list; this is a delivery filter, not an access
+   * check. It always was — a session could name any workspace as its focus —
+   * and the events it selects carry no file contents, only paths. Whether the
+   * reader may open what changed is settled by the routes that serve it.
+   */
+  focusedWorkspaceIds: string[];
   /** Set when the SSE connection closes. Used by the focus POST so a
    *  request that arrives after the connection drops 404s cleanly. */
   closed: boolean;
@@ -75,7 +99,7 @@ export function createEventsRoutes(
 
   /**
    * Process-wide session registry. The same map services the SSE open
-   * (creates the entry) and the focus POST (mutates `focusedWorkspaceId`).
+   * (creates the entry) and the focus POST (mutates `focusedWorkspaceIds`).
    * Entries clear when the SSE connection closes.
    */
   const sessions = new Map<string, ActiveSession>();
@@ -135,7 +159,7 @@ export function createEventsRoutes(
     const session: ActiveSession = {
       sessionId,
       userId,
-      focusedWorkspaceId: null,
+      focusedWorkspaceIds: [],
       closed: false,
       res,
       // Filled in below once `unsubscribe` + `heartbeat` exist.
@@ -151,7 +175,7 @@ export function createEventsRoutes(
     const unsubscribe = bus.subscribe({
       sessionId,
       userId,
-      getFocusedWorkspaceId: () => session.focusedWorkspaceId,
+      getFocusedWorkspaceIds: () => session.focusedWorkspaceIds,
       push,
     });
 
@@ -163,7 +187,7 @@ export function createEventsRoutes(
     if (Number.isFinite(lastSeenId) && lastSeenId > 0) {
       const replay = bus.replayAfter(lastSeenId, {
         userId,
-        getFocusedWorkspaceId: () => session.focusedWorkspaceId,
+        getFocusedWorkspaceIds: () => session.focusedWorkspaceIds,
       });
       if (replay === null) {
         // Buffer evicted past `lastSeenId` — client must refetch from
@@ -228,17 +252,31 @@ export function createEventsRoutes(
       res.status(403).json({ error: 'Session belongs to another user' });
       return;
     }
-    const { workspaceId } = (req.body ?? {}) as { workspaceId?: unknown };
+    const { workspaceId, alsoWatch } = (req.body ?? {}) as {
+      workspaceId?: unknown;
+      alsoWatch?: unknown;
+    };
     if (typeof workspaceId !== 'string' || workspaceId.length === 0) {
       res.status(400).json({ error: 'workspaceId is required in body' });
       return;
     }
-    const previous = session.focusedWorkspaceId;
-    session.focusedWorkspaceId = workspaceId;
+    // `alsoWatch` is optional and additive: the workspaces an open page reads
+    // from besides the one in the address bar. Non-string and empty entries
+    // are dropped rather than 400-ing the whole update — the primary focus is
+    // the part the user's navigation depends on, and it is well-formed here.
+    const extra = Array.isArray(alsoWatch)
+      ? alsoWatch.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+    // Primary first, de-duplicated: `matches` walks this list per event.
+    const next = [...new Set([workspaceId, ...extra])].slice(0, MAX_WATCHED_WORKSPACES);
+    const previous = session.focusedWorkspaceIds;
+    session.focusedWorkspaceIds = next;
     console.log(
-      `[events] FOCUS session=${sessionId} user=${userId} ${previous ?? '(none)'} → ${workspaceId}`,
+      `[events] FOCUS session=${sessionId} user=${userId} ${
+        previous.join(',') || '(none)'
+      } → ${next.join(',')}`,
     );
-    res.json({ status: 'ok', focusedWorkspaceId: workspaceId });
+    res.json({ status: 'ok', focusedWorkspaceId: workspaceId, focusedWorkspaceIds: next });
   });
 
   return router;

@@ -49,6 +49,10 @@ export function isImagePath(path: string): boolean {
  *
  * Views of another revision than the checked-out tree (the change-request
  * dialog, the file history) do not use it: they show no live image at all.
+ *
+ * The hook also WATCHES `workspaceId` on the bus for as long as it is mounted,
+ * so the events it counts are actually delivered even when that workspace is
+ * not the one the session is focused on. See `watchWorkspace`.
  */
 export function useImageRevision(workspaceId: string | null): number {
   const bus = useEventBus();
@@ -61,10 +65,21 @@ export function useImageRevision(workspaceId: string | null): number {
 
   useEffect(() => {
     if (!bus || !workspaceId) return;
+    // ASK FOR THE EVENTS, don't assume they arrive. The SSE stream delivers
+    // workspace-scoped events for the workspaces the session has declared, and
+    // the focus binder declares exactly one: the branch in the address bar.
+    // Every caller that resolves images from ANOTHER workspace — the skill
+    // page, which renders the default branch's files while the reader stands
+    // on their own suggestion branch — was therefore counting an event that
+    // could never arrive, and its images stayed stale for as long as the tab
+    // was open. Watching here rather than at the call site means a resolver
+    // cannot forget: the hook that needs the events is the one that requests
+    // them, and it releases on unmount.
+    const release = bus.watchWorkspace(workspaceId);
     // Canonicalise once: the event carries the decoded branch, local state the
     // encoded one. See `canonicalizeWorkspaceId`.
     const subscribedCanon = canonicalizeWorkspaceId(workspaceId);
-    return bus.subscribe('file-changed', (event) => {
+    const unsubscribe = bus.subscribe('file-changed', (event) => {
       if (canonicalizeWorkspaceId(event.workspaceId) !== subscribedCanon) return;
       // A text save must not revalidate every screenshot on the page.
       if (!isImagePath(event.path)) return;
@@ -73,6 +88,10 @@ export function useImageRevision(workspaceId: string | null): number {
         count: prev.workspaceId === workspaceId ? prev.count + 1 : 1,
       }));
     });
+    return () => {
+      unsubscribe();
+      release();
+    };
   }, [bus, workspaceId]);
 
   return revision.workspaceId === workspaceId ? revision.count : 0;

@@ -60,7 +60,7 @@ const BUFFER_CAPACITY = 500;
 export type SubscriberPush = (event: WorkflowEvent) => void;
 
 /**
- * Per-session subscription bookkeeping. `getFocusedWorkspaceId` is a getter
+ * Per-session subscription bookkeeping. `getFocusedWorkspaceIds` is a getter
  * (not a value) so the route layer can update the session's focus via a
  * separate POST without re-subscribing — the next `emit` sees the new focus
  * on the next call.
@@ -68,7 +68,13 @@ export type SubscriberPush = (event: WorkflowEvent) => void;
 export interface Subscriber {
   sessionId: string;
   userId: string;
-  getFocusedWorkspaceId: () => string | null;
+  /**
+   * Every workspace this session wants events for. A LIST because a page can
+   * read from more than one: the skill page renders default-branch content
+   * while the reader stands on a suggestion branch. Empty = no workspace
+   * events (the session has not declared a focus yet).
+   */
+  getFocusedWorkspaceIds: () => string[];
   push: SubscriberPush;
 }
 
@@ -157,7 +163,7 @@ export class WorkflowEventBus {
       // Best-effort per subscriber — one bad subscriber must not block
       // the rest of the fan-out OR propagate back to the caller. The
       // try/catch covers both the scope check (`matches` reaches into
-      // `sub.getFocusedWorkspaceId()`, which could throw if a bizarre
+      // `sub.getFocusedWorkspaceIds()`, which could throw if a bizarre
       // subscriber holds buggy state) and the dispatch itself, so
       // workflow mutations stay successful even if a listener throws.
       // Callers can rely on `emit` never throwing, so they don't need
@@ -221,7 +227,7 @@ export class WorkflowEventBus {
    * is greater than `lastSeenId + 1` (i.e. we evicted events the client
    * needs to see).
    */
-  replayAfter(lastSeenId: number, sub: Pick<Subscriber, 'userId' | 'getFocusedWorkspaceId'>): WorkflowEvent[] | null {
+  replayAfter(lastSeenId: number, sub: Pick<Subscriber, 'userId' | 'getFocusedWorkspaceIds'>): WorkflowEvent[] | null {
     // Empty buffer: a client that never saw anything (lastSeenId === 0) has
     // nothing to replay and the empty array is correct. A client that DID
     // see events (lastSeenId > 0) but reached an empty buffer means the
@@ -259,14 +265,14 @@ export class WorkflowEventBus {
    *   - User-scoped events: only sessions whose `userId` matches `forUserId`.
    *   - Global events (heartbeat, resync, change-request-*): everyone.
    *
-   * The focus check resolves through `getFocusedWorkspaceId()` so a session
+   * The focus check resolves through `getFocusedWorkspaceIds()` so a session
    * that hasn't yet POSTed its focus gets no workspace events (correct —
    * we don't know what it cares about).
    */
-  private matches(event: WorkflowEvent, sub: Pick<Subscriber, 'userId' | 'getFocusedWorkspaceId'>): boolean {
+  private matches(event: WorkflowEvent, sub: Pick<Subscriber, 'userId' | 'getFocusedWorkspaceIds'>): boolean {
     if (isWorkspaceScoped(event)) {
-      const focus = sub.getFocusedWorkspaceId();
-      if (focus === null) return false;
+      const watched = sub.getFocusedWorkspaceIds();
+      if (watched.length === 0) return false;
       // **Normalise URL encoding before comparing.** The frontend stores
       // `workspace.id` as `encodeURIComponent(branch)` (e.g.
       // `razvan-radulescu%2Fsc`) and sends that as the focus value via
@@ -277,7 +283,8 @@ export class WorkflowEventBus {
       // contains a `/`, silently dropping all live updates (lock state,
       // file-changed, fs-tree) on feature branches. Decoding both sides
       // collapses the two forms into the same canonical key.
-      return canonicalize(focus) === canonicalize(event.workspaceId);
+      const target = canonicalize(event.workspaceId);
+      return watched.some((id) => canonicalize(id) === target);
     }
     if (isUserScoped(event)) {
       return sub.userId === event.forUserId;
