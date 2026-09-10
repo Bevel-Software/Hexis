@@ -106,8 +106,10 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
             {data.loading ? '…' : `${count} ${count === 1 ? 'item' : 'items'}`}
           </p>
           {/* Everyone is not a group but the organisation: say what the page
-              holds, because the name alone reads like one more team. */}
-          {filter.kind === 'team' && filter.group === EVERYONE_TEAM && (
+              holds, because the name alone reads like one more team. Only
+              once the list has settled and names it — while it loads, or
+              when it failed, the state below is the whole story. */}
+          {filter.kind === 'team' && filter.group === EVERYONE_TEAM && teamsSettled && !unknownTeam && (
             <p className="mt-2 max-w-prose text-ui text-ink-muted">
               Org-wide: what every signed-in person and their agents can use, with no group or role needed.
             </p>

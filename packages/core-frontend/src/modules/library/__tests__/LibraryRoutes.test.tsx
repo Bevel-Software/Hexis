@@ -263,6 +263,23 @@ describe('LibraryRoutes', () => {
     expect(screen.queryByTestId('library-card-skill-outreach')).toBeNull();
   });
 
+  it('holds the org-wide line until the team list has settled and names Everyone', async () => {
+    let resolve: (teams: typeof TEAMS) => void = () => {};
+    teamsMock.listTeams.mockReturnValue(new Promise<typeof TEAMS>((r) => (resolve = r)));
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByText('Loading teams…')).toBeInTheDocument();
+    expect(screen.queryByText(/^Org-wide:/)).toBeNull();
+    resolve(TEAMS);
+    expect(await screen.findByText(/^Org-wide:/)).toBeInTheDocument();
+  });
+
+  it('keeps the org-wide line off a failed team list — the error is the whole story', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error("Couldn't load teams."));
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/^Org-wide:/)).toBeNull();
+  });
+
   it('says so when nothing is shared with everyone yet', async () => {
     teamsMock.listTeams.mockResolvedValue([{ name: 'Everyone', plugins: [], skills: [], tools: [] }]);
     renderAt('/skills-and-tools/teams/Everyone');
