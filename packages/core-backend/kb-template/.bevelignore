@@ -12,6 +12,8 @@
 .gitignore
 .gitattributes
 AGENTS.md
+# The deployment preamble is edited from External agent access, not as a KB page.
+mcp-description.md
 # The pre-rename name. Listed so a knowledge base carrying both files hides
 # both — top-up adds AGENTS.md but never deletes the CLAUDE.md beside it.
 CLAUDE.md
