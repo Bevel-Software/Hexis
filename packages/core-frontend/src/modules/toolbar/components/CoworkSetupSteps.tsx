@@ -8,6 +8,7 @@ import {
   fetchGitHubFacade,
   type GitHubFacadeCredentials,
 } from '../../settings/services/github-facade.api';
+import { ClaudeMarketplaceCarousel } from './ClaudeMarketplaceCarousel';
 import { ScreenshotStep } from './ScreenshotStep';
 import {
   addConfigurationShot,
@@ -128,7 +129,7 @@ function Prose({ children }: { children: ReactNode }) {
   return <p className="text-meta text-ink-muted leading-snug">{children}</p>;
 }
 
-/** Steps 3 and 4 for an admin, 2 and 3 for everyone else: the same two screens. */
+/** The final two steps in the admin route. Non-admins see these screens in the carousel. */
 function MarketplaceSteps() {
   return (
     <>
@@ -138,15 +139,20 @@ function MarketplaceSteps() {
       <Step title="Add the marketplace">
         <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
         <Prose>
-          Copy it, then in Cowork, or on <Out href={CLAUDE_WEB}>claude.ai</Out>, open Customize →
-          Plugins and choose <b>Add</b> → <b>Add marketplace</b>.
+          Copy it, then in Cowork, or on <Out href={CLAUDE_WEB}>claude.ai</Out>, open Customize.
         </Prose>
         <ScreenshotStep shot={pluginsAddShot} />
+        <Prose>
+          Open the <b>Plugins</b> tab, then choose <b>Add</b>.
+        </Prose>
         <ScreenshotStep shot={addMarketplaceShot} />
         <Prose>
-          Paste it into the URL field and choose <b>Sync</b>.
+          Choose <b>Add marketplace</b> from the menu.
         </Prose>
         <ScreenshotStep shot={pasteUrlShot} />
+        <Prose>
+          Paste the marketplace URL into the URL field and choose <b>Sync</b>.
+        </Prose>
       </Step>
 
       <Step title="Install the plugins you want">
@@ -168,8 +174,8 @@ function MarketplaceSteps() {
  *
  * Two versions of the same route, split on `isAdmin`, because the first two
  * steps happen on pages a non-admin cannot open. Showing them anyway would
- * be four screenshots of a door they have no key to, so they get the three
- * steps they can act on and one line naming what has to exist first.
+ * be four screenshots of a door they have no key to, so they get a focused
+ * five-slide walkthrough of only the actions they can take.
  *
  * `isAdmin` is admin HERE, which is not the same authority as Owner of the
  * Claude organization: the copy names the Claude side explicitly so an admin
@@ -178,19 +184,31 @@ function MarketplaceSteps() {
 export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened: boolean }) {
   const host = deploymentHost();
 
+  if (!isAdmin) {
+    return (
+      <div className="space-y-3">
+        <Prose>
+          Cowork and claude.ai install marketplaces only from GitHub, or from a GitHub Enterprise
+          Server your Claude organization has registered. This deployment answers as one. An admin
+          here registers it once. If the first step does not list this deployment, ask an admin to
+          register it.
+        </Prose>
+        <CopyBlock label="Marketplace URL" value={marketplaceGitUrl()} rows={2} />
+        <ClaudeMarketplaceCarousel host={host} />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3">
       <Prose>
         Cowork and claude.ai install marketplaces only from GitHub, or from a GitHub Enterprise
-        Server your Claude organization has registered. This deployment answers as one.{' '}
-        {isAdmin
-          ? 'Steps 1 and 2 are yours. Steps 3 and 4 are what every person here does.'
-          : 'An admin here registers it once. If step 1 does not list this deployment, ask an admin to register it.'}
+        Server your Claude organization has registered. This deployment answers as one. Steps 1 and
+        2 are yours. Steps 3 and 4 are what every person here does.
       </Prose>
 
       <ol className="list-decimal space-y-4 pl-4 marker:text-ink-faint marker:text-meta">
-        {isAdmin ? (
-          <>
+        <>
             <Step title="Register this deployment with your Claude organization">
               <Prose>
                 An Owner of your Claude organization does this once, on a Team or Enterprise
@@ -228,17 +246,7 @@ export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened
                 <Out href={CLAUDE_CODE_WEB}>claude.ai/code</Out>, which offers the same instance.
               </Prose>
             </Step>
-          </>
-        ) : (
-          <Step title="Connect your Claude account to this deployment">
-            <Prose>
-              Do this first: Claude never prompts for it. In the repository picker on{' '}
-              <Out href={CLAUDE_CODE_WEB}>claude.ai/code</Out>, use the connect option for {host}.
-              Claude's <b>Connect to GitHub</b> button is not it: that one signs you in to
-              github.com. You land on the sign-in here: approve, and you are back in Claude.
-            </Prose>
-          </Step>
-        )}
+        </>
 
         <MarketplaceSteps />
       </ol>
