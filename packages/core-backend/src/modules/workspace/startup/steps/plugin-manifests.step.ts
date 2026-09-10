@@ -158,7 +158,9 @@ async function hasSkillBeneath(dir: string): Promise<boolean> {
   }
   if (entries.some((e) => e.isFile() && e.name === 'SKILL.md')) return true;
   for (const entry of entries) {
-    if (entry.isDirectory() && !entry.name.startsWith('.') && (await hasSkillBeneath(path.join(dir, entry.name)))) {
+    // The same skip as every walk: a SKILL.md vendored under node_modules is
+    // nobody's skill and makes no folder a plugin.
+    if (entry.isDirectory() && !isSkippedEntry(entry.name) && (await hasSkillBeneath(path.join(dir, entry.name)))) {
       return true;
     }
   }

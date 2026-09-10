@@ -535,6 +535,8 @@ describe('PluginManifestsStep', () => {
       // grouping folder over one.
       'Plugins/Vendored/access.md': '---\n---\nread:\n  - everyone\n',
       'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
+      // A plain folder whose only SKILL.md is vendored: not a plugin either.
+      'Plugins/deps/node_modules/some-pkg/SKILL.md': '---\ndescription: z\n---\n',
     });
 
     await makeRunner([new PluginManifestsStep()]).runAll();
@@ -547,6 +549,7 @@ describe('PluginManifestsStep', () => {
       }
       expect(await exists(dir, 'Plugins/functional/plugin.json')).toBe(false);
       expect(await exists(dir, 'Plugins/notes/plugin.json')).toBe(false);
+      expect(await exists(dir, 'Plugins/deps/plugin.json')).toBe(false);
       expect(await fs.readFile(path.join(dir, 'Plugins/Modern/plugin.json'), 'utf8')).toBe('{"name":"modern"}');
     }
     const dir = await checkout(DEFAULT_BRANCH);
