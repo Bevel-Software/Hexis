@@ -205,6 +205,20 @@ describe('WorkspaceService.createDirectory', () => {
     expect(names).toContain('visible-empty');
     expect(names).toContain('real.md');
   });
+
+  it('hides mcp-description.md when the root .bevelignore declares the platform rule', async () => {
+    const repoDir = path.join(workspaceDir, 'knowledge-base');
+    await fs.writeFile(path.join(repoDir, '.bevelignore'), 'mcp-description.md\n', 'utf-8');
+    await fs.writeFile(path.join(repoDir, 'mcp-description.md'), 'Private deployment preamble', 'utf-8');
+    await fs.writeFile(path.join(repoDir, 'visible.md'), 'Visible knowledge', 'utf-8');
+
+    const tree = await svc.listFiles(workspaceId);
+    const repo = tree.children?.find((entry) => entry.name === 'knowledge-base');
+    const names = repo?.children?.map((entry) => entry.name) ?? [];
+
+    expect(names).toContain('visible.md');
+    expect(names).not.toContain('mcp-description.md');
+  });
 });
 
 describe('WorkspaceService.createFolderZip', () => {
