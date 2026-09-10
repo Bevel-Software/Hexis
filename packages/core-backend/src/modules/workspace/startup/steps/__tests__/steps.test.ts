@@ -530,13 +530,18 @@ describe('PluginManifestsStep', () => {
       'Plugins/functional/access.md': '---\n---\nread:\n  - everyone\n',
       // Nothing plugin-shaped at all.
       'Plugins/notes/README.md': 'just a folder',
+      // A legacy plugin whose vendored dependency ships a manifest: the walk
+      // does not enter node_modules, so the folder is the plugin, not a
+      // grouping folder over one.
+      'Plugins/Vendored/access.md': '---\n---\nread:\n  - everyone\n',
+      'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
     });
 
     await makeRunner([new PluginManifestsStep()]).runAll();
 
     for (const branch of PROTECTED) {
       const dir = await checkout(branch);
-      for (const legacy of ['GTM', 'Servers', 'Bare']) {
+      for (const legacy of ['GTM', 'Servers', 'Bare', 'Vendored']) {
         const manifest = JSON.parse(await fs.readFile(path.join(dir, `Plugins/${legacy}/plugin.json`), 'utf8'));
         expect(manifest.name).toBe(legacy.toLowerCase());
       }
@@ -546,7 +551,7 @@ describe('PluginManifestsStep', () => {
     }
     const dir = await checkout(DEFAULT_BRANCH);
     const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
-    expect(log).toContain('Add plugin manifests to 3 legacy plugin folders');
+    expect(log).toContain('Add plugin manifests to 4 legacy plugin folders');
     expect(log).toContain('Plugins/GTM: plugin.json written');
 
     // Idempotent: nothing left to write on the next boot.

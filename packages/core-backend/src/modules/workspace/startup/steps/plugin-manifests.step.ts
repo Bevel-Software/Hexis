@@ -60,9 +60,6 @@ async function addManifests(branch: KbBranch): Promise<void> {
 
   /** Resolves to how many plugins sit at or beneath `dir`. */
   const visit = async (dir: string, rel: string): Promise<number> => {
-    if (rel && ((await isFile(path.join(dir, PLUGIN_MANIFEST_FILE))) || (await isFile(path.join(dir, BUNDLE_FILE))))) {
-      return 1;
-    }
     let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -72,8 +69,12 @@ async function addManifests(branch: KbBranch): Promise<void> {
       if (isAbsence(err)) return 0;
       throw err;
     }
+    // A plugin is a folder whose OWN listing holds a manifest as a regular
+    // file — the judgement discovery makes, entry for entry (a symlink so
+    // named is none); and the entries the walk skips are not entered.
+    if (rel && hasManifestEntry(entries)) return 1;
     let beneath = 0;
-    for (const entry of entries.filter((e) => e.isDirectory() && !e.name.startsWith('.'))) {
+    for (const entry of entries.filter((e) => e.isDirectory() && !isSkippedEntry(e.name))) {
       beneath += await visit(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
     }
     if (beneath > 0 || !rel || rel.includes('/')) return beneath;
@@ -135,10 +136,15 @@ export async function hasPluginBeneath(dir: string): Promise<boolean> {
       if (isAbsence(err)) continue;
       throw err;
     }
-    if (subEntries.some((e) => e.isFile() && (e.name === PLUGIN_MANIFEST_FILE || e.name === BUNDLE_FILE))) return true;
+    if (hasManifestEntry(subEntries)) return true;
     if (await hasPluginBeneath(sub)) return true;
   }
   return false;
+}
+
+/** Whether a folder's listing carries a plugin manifest or a bundle as a regular file. */
+function hasManifestEntry(entries: import('node:fs').Dirent[]): boolean {
+  return entries.some((e) => e.isFile() && (e.name === PLUGIN_MANIFEST_FILE || e.name === BUNDLE_FILE));
 }
 
 /** The pre-`skills/` shape: `Plugins/<Plugin>/<skill>/SKILL.md`, at any depth. */
@@ -157,15 +163,5 @@ async function hasSkillBeneath(dir: string): Promise<boolean> {
     }
   }
   return false;
-}
-
-async function isFile(abs: string): Promise<boolean> {
-  return fs.stat(abs).then(
-    (s) => s.isFile(),
-    (err: unknown) => {
-      if (isAbsence(err)) return false;
-      throw err; // a probe that fails for another reason is not "no manifest"
-    },
-  );
 }
 
