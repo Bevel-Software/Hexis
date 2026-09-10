@@ -433,6 +433,54 @@ describe('the Marketplaces tab', () => {
     );
   });
 
+  /**
+   * Changing slide moves no focus, so nothing would be announced: the reader
+   * is left on the control they pressed while everything under it changes.
+   * The slide group is the live region, and the counter is not, so the step
+   * is announced once rather than twice.
+   */
+  it('announces the slide that replaced it, and only once', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+
+    expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
+    expect(within(carousel).getByText('1 / 5')).not.toHaveAttribute('aria-live');
+  });
+
+  /**
+   * The footer control is ONE button that changes its label, so reaching the
+   * last slide cannot unmount the button the reader is focused on — focus
+   * would fall to the body and take the arrow keys with it, which this
+   * section handles. Node identity is asserted alongside focus because it is
+   * the property that actually guarantees this: it names the cause, so a
+   * `key` or a wrapper added later fails here rather than somewhere vague.
+   */
+  it('keeps focus on the footer control when the last slide relabels it', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+
+    const advance = within(carousel).getByRole('button', { name: 'Next' });
+    for (let step = 0; step < 4; step += 1) {
+      await user.click(within(carousel).getByRole('button', { name: 'Next' }));
+    }
+
+    const restart = within(carousel).getByRole('button', { name: 'Review again' });
+    expect(restart).toBe(advance);
+    expect(restart).toHaveFocus();
+
+    // And it still works as the control it now says it is.
+    await user.click(restart);
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 1 of 5: Select this deployment in Claude Code',
+    );
+  });
+
   it('gives an admin the registration steps as well, screenshots and all', async () => {
     adminState.isAdmin = true;
     const user = userEvent.setup();

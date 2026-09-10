@@ -208,45 +208,43 @@ export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened
       </Prose>
 
       <ol className="list-decimal space-y-4 pl-4 marker:text-ink-faint marker:text-meta">
-        <>
-            <Step title="Register this deployment with your Claude organization">
-              <Prose>
-                An Owner of your Claude organization does this once, on a Team or Enterprise
-                plan. Open{' '}
-                <Out href={CLAUDE_CODE_ADMIN}>Admin settings → Claude Code</Out>, scroll to
-                Self-hosted infrastructure, and choose <b>Add manually</b> beside GitHub
-                Enterprise.
-              </Prose>
-              <ScreenshotStep shot={addManuallyShot} />
-              <Prose>
-                Fill it from the fields below, which this deployment generated for exactly this
-                form. Any display name will do, the port is {deploymentPort()}, and read replicas
-                stay empty.
-                Choose <b>Add configuration</b>. The webhook URL Claude shows afterwards can be
-                ignored: nothing here sends webhooks yet, and the private key is required by the
-                form but unused by this flow.
-              </Prose>
-              {opened && <ClaudeConnection />}
-              <ScreenshotStep shot={addConfigurationShot} />
-            </Step>
+        <Step title="Register this deployment with your Claude organization">
+          <Prose>
+            An Owner of your Claude organization does this once, on a Team or Enterprise
+            plan. Open{' '}
+            <Out href={CLAUDE_CODE_ADMIN}>Admin settings → Claude Code</Out>, scroll to
+            Self-hosted infrastructure, and choose <b>Add manually</b> beside GitHub
+            Enterprise.
+          </Prose>
+          <ScreenshotStep shot={addManuallyShot} />
+          <Prose>
+            Fill it from the fields below, which this deployment generated for exactly this
+            form. Any display name will do, the port is {deploymentPort()}, and read replicas
+            stay empty.
+            Choose <b>Add configuration</b>. The webhook URL Claude shows afterwards can be
+            ignored: nothing here sends webhooks yet, and the private key is required by the
+            form but unused by this flow.
+          </Prose>
+          {opened && <ClaudeConnection />}
+          <ScreenshotStep shot={addConfigurationShot} />
+        </Step>
 
-            <Step title="Connect your own Claude account to it">
-              <Prose>
-                Registering the instance signs nobody in, and Claude never prompts for this. Open{' '}
-                <Out href={GITHUB_ADMIN}>Admin settings → GitHub</Out> and choose <b>Connect</b>.
-              </Prose>
-              <ScreenshotStep shot={connectAccountShot} />
-              <Prose>
-                Under GitHub instance, pick {host} instead of github.com, then continue. You land
-                on the sign-in here: approve, and you are back in Claude.
-              </Prose>
-              <ScreenshotStep shot={pickInstanceShot} />
-              <Prose>
-                Everyone else does the same from the repository picker on{' '}
-                <Out href={CLAUDE_CODE_WEB}>claude.ai/code</Out>, which offers the same instance.
-              </Prose>
-            </Step>
-        </>
+        <Step title="Connect your own Claude account to it">
+          <Prose>
+            Registering the instance signs nobody in, and Claude never prompts for this. Open{' '}
+            <Out href={GITHUB_ADMIN}>Admin settings → GitHub</Out> and choose <b>Connect</b>.
+          </Prose>
+          <ScreenshotStep shot={connectAccountShot} />
+          <Prose>
+            Under GitHub instance, pick {host} instead of github.com, then continue. You land
+            on the sign-in here: approve, and you are back in Claude.
+          </Prose>
+          <ScreenshotStep shot={pickInstanceShot} />
+          <Prose>
+            Everyone else does the same from the repository picker on{' '}
+            <Out href={CLAUDE_CODE_WEB}>claude.ai/code</Out>, which offers the same instance.
+          </Prose>
+        </Step>
 
         <MarketplaceSteps />
       </ol>

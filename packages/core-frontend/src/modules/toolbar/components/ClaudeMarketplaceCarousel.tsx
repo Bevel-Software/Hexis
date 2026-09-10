@@ -178,9 +178,14 @@ export function ClaudeMarketplaceCarousel({ host }: { host: string }) {
         })}
       </nav>
 
+      {/* Live, because moving between slides never moves focus: the reader
+          stays on Next or on a progress button while the title, instruction
+          and screenshot underneath them all change. The eyebrow inside names
+          the new position, so the footer counter does not repeat it. */}
       <div
         role="group"
         aria-roledescription="slide"
+        aria-live="polite"
         aria-label={`Step ${current + 1} of ${items.length}: ${active.title}`}
       >
         <div className="space-y-1.5 border-b border-line px-3 py-3 sm:px-4">
@@ -208,28 +213,25 @@ export function ClaudeMarketplaceCarousel({ host }: { host: string }) {
         >
           Back
         </Button>
-        <span className="text-meta text-ink-faint" aria-live="polite">
+        <span className="text-meta text-ink-faint">
           {current + 1} / {items.length}
         </span>
-        {atEnd ? (
-          <Button
-            variant="outline"
-            size="sm"
-            trailingIcon={<RotateCcw size={13} />}
-            onClick={() => setCurrent(0)}
-          >
-            Review again
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            size="sm"
-            trailingIcon={<ChevronRight size={14} />}
-            onClick={() => setCurrent((step) => Math.min(items.length - 1, step + 1))}
-          >
-            Next
-          </Button>
-        )}
+        {/* One control that relabels itself, rather than two behind a
+            ternary. Same rendered result — React reconciles same-type
+            siblings in place, so either way the reader who pressed Next to
+            reach the end keeps focus on it — but here that is the structure
+            rather than a property of the reconciler, and a later `key` or an
+            extra wrapper cannot quietly unmount the button under their
+            focus. Losing it would take the arrow keys with it: this section
+            is what handles them. */}
+        <Button
+          variant={atEnd ? 'outline' : 'primary'}
+          size="sm"
+          trailingIcon={atEnd ? <RotateCcw size={13} /> : <ChevronRight size={14} />}
+          onClick={() => setCurrent((step) => (step === items.length - 1 ? 0 : step + 1))}
+        >
+          {atEnd ? 'Review again' : 'Next'}
+        </Button>
       </div>
     </section>
   );
