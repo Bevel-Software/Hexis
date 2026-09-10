@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace, type PendingEntry } from '../state/workspace.context';
-import { mergePendingIntoTree, omitPathFromTree, pathExistsInTree } from '../utils/fileTree';
+import { mergePendingIntoTree, pathExistsInTree } from '../utils/fileTree';
 import { useOpenChangeRequests } from './useOpenChangeRequests';
 
 /**
@@ -55,7 +55,7 @@ export function useMergedWorkspaceTree(): {
     return map;
   }, [serverTree, openChangeRequests, kbDirName]);
 
-  const treeWithSuggestions = useMemo(() => {
+  const tree = useMemo(() => {
     if (!serverTree || suggestionOnlyPaths.size === 0) return serverTree;
     // Reuses the pending-upload synthesizer: same parent-directory creation,
     // same sort order, and a real entry always wins over a synthesized one.
@@ -65,11 +65,6 @@ export function useMergedWorkspaceTree(): {
     }
     return mergePendingIntoTree(serverTree, asEntries);
   }, [serverTree, suggestionOnlyPaths]);
-
-  // mcp-description.md is edited from External agent access. Keep it out of
-  // the navigation even when this tab still holds a pre-migration tree, or an
-  // optimistic upload/change-request overlay tries to synthesize the row.
-  const tree = omitPathFromTree(treeWithSuggestions, `${kbDirName}/mcp-description.md`);
 
   return { tree, suggestionOnlyPaths };
 }

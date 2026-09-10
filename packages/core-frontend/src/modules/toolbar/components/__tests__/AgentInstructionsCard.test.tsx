@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { configureBranchModel } from '@bevel-software/platform-shared';
 import { AgentInstructionsCard } from '../AgentInstructionsCard';
@@ -11,21 +10,17 @@ import type { AgentInstructions } from '../../services/agent-instructions.api';
 /**
  * The card shows what the server SENDS, organised around what the admin can
  * change: their description with its count, the fixed platform message
- * folded away, and no repository/file-format implementation copy. The Edit
- * action belongs to admins, and only once the KB dir name is known.
+ * folded away, and the short version with the fixed sentence set apart from
+ * the admin's paragraph. A warning for each way the text can be smaller than
+ * the admin thinks (either cap, an open comment). The Edit action belongs to
+ * admins, and only once the KB dir name is known.
  */
 
-const { fetchMock, fetchEditableMock, saveMock } = vi.hoisted(() => ({
-  fetchMock: vi.fn(),
-  fetchEditableMock: vi.fn(),
-  saveMock: vi.fn(),
-}));
+const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
 
 vi.mock('../../services/agent-instructions.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/agent-instructions.api')>()),
   fetchAgentInstructions: fetchMock,
-  fetchEditableAgentDescription: fetchEditableMock,
-  saveAgentDescription: saveMock,
 }));
 
 const nonAdmin: AdminContextValue = {
@@ -74,17 +69,9 @@ beforeEach(() => {
   configureBranchModel({ defaultBranch: 'target-company-state', protectedBranches: ['current-company-state', 'target-company-state'] });
   fetchMock.mockReset();
   fetchMock.mockResolvedValue(composed());
-  fetchEditableMock.mockReset();
-  fetchEditableMock.mockResolvedValue({
-    workspaceId: 'target-company-state',
-    source: '<!-- private starter notes -->\n',
-    description: '',
-  });
-  saveMock.mockReset();
-  saveMock.mockResolvedValue(undefined);
 });
 
-describe('the description', () => {
+describe('the description and the short version', () => {
   it('centres the admin\'s description, with its count, and folds the platform message away', async () => {
     mount();
     expect(await screen.findByRole('heading', { name: 'Your description' })).toBeInTheDocument();
@@ -102,98 +89,56 @@ describe('the description', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('shows the short version with the fixed sentence apart from the admin\'s paragraph, and its count', async () => {
+    mount();
+    await screen.findByRole('heading', { name: 'Short version' });
+    expect(screen.getByTestId('prefix-count')).toHaveTextContent('212 / 300 characters');
+    const prefix = screen.getByTestId('prefix-text');
+    expect(prefix).toHaveTextContent(`${LINE} Acme builds solar farms.`);
+    const [fixed, own] = Array.from(prefix.querySelectorAll('span'));
+    expect(fixed).toHaveTextContent(LINE);
+    expect(fixed.className).toContain('text-ink-muted');
+    expect(own).toHaveTextContent('Acme builds solar farms.');
+    // Names the clients this exists for.
+    expect(screen.getByText(/claude\.ai, Cline, the Agent SDK/)).toBeInTheDocument();
+  });
+
   it('explains an empty description instead of showing an empty box', async () => {
     fetchMock.mockResolvedValue(composed({ preamble: '', preambleChars: 0, toolPrefix: LINE, toolPrefixChars: LINE.length }));
     mount();
     expect(await screen.findByTestId('description-empty')).toHaveTextContent('platform message only');
     expect(screen.queryByTestId('description-text')).toBeNull();
     expect(screen.getByTestId('preamble-count')).toHaveTextContent('0 / 6,000 characters');
+    expect(screen.getByTestId('prefix-text')).toHaveTextContent(LINE);
   });
 });
 
 describe('the Edit action', () => {
-  it('is offered to admins as an inline action, not a link to another page', async () => {
+  it('is offered to admins, pointing at mcp-description.md on the default branch under the KB dir', async () => {
     mount({ admin: asAdmin });
-    const edit = await screen.findByRole('button', { name: /Edit description/ });
-    expect(edit.tagName).toBe('BUTTON');
-    expect(screen.queryByRole('link', { name: /Edit description/ })).toBeNull();
-    expect(screen.queryByText(/mcp-description\.md at the repository root/)).toBeNull();
-    expect(screen.queryByText(/first paragraph is automatically reused/)).toBeNull();
+    const link = await screen.findByRole('link', { name: /Edit description/ });
+    expect(link).toHaveAttribute('href', '/workspace/target-company-state/knowledge-base/mcp-description.md');
+    expect(screen.getByText(/Kept in mcp-description\.md at the repository root/)).toBeInTheDocument();
+    expect(screen.queryByText(/Admins edit it/)).toBeNull();
   });
 
-  it('edits and saves the description in place, then refreshes the preview', async () => {
-    const empty = composed({ preamble: '', preambleChars: 0, toolPrefix: LINE, toolPrefixChars: LINE.length });
-    const saved = composed({
-      preamble: 'Acme builds solar farms.',
-      preambleChars: 'Acme builds solar farms.'.length,
-      toolPrefix: `${LINE} Acme builds solar farms.`,
-      toolPrefixChars: `${LINE} Acme builds solar farms.`.length,
-    });
-    fetchMock.mockResolvedValueOnce(empty).mockResolvedValueOnce(saved);
-    const user = userEvent.setup();
-    mount({ admin: asAdmin });
-
-    await user.click(await screen.findByRole('button', { name: 'Edit description' }));
-    const editor = await screen.findByRole('textbox', { name: 'Your description' });
-    expect(editor).toHaveValue('');
-    expect(editor).toHaveAttribute('rows', '1');
-    expect(editor.className).toContain('[field-sizing:content]');
-    expect(editor.className).not.toContain('min-h-40');
-    expect(fetchEditableMock).toHaveBeenCalledWith('knowledge-base');
-
-    await user.type(editor, 'Acme builds solar farms.');
-    expect(screen.getByTestId('preamble-count')).toHaveTextContent('24 / 6,000 characters');
-    await user.click(screen.getByRole('button', { name: 'Save description' }));
-
-    await waitFor(() => {
-      expect(saveMock).toHaveBeenCalledWith(
-        'target-company-state',
-        'knowledge-base',
-        '<!-- private starter notes -->\n',
-        'Acme builds solar farms.',
-      );
-    });
-    expect(await screen.findByTestId('description-text')).toHaveTextContent('Acme builds solar farms.');
-    expect(screen.queryByRole('textbox', { name: 'Your description' })).toBeNull();
-  });
-
-  it('keeps the inline editor open and shows the save error', async () => {
-    fetchEditableMock.mockResolvedValue({
-      workspaceId: 'target-company-state',
-      source: 'Before.',
-      description: 'Before.',
-    });
-    saveMock.mockRejectedValue(new Error('File is locked by Ada.'));
-    const user = userEvent.setup();
-    mount({ admin: asAdmin });
-
-    await user.click(await screen.findByRole('button', { name: 'Edit description' }));
-    const editor = await screen.findByRole('textbox', { name: 'Your description' });
-    await user.clear(editor);
-    await user.type(editor, 'After.');
-    await user.click(screen.getByRole('button', { name: 'Save description' }));
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('File is locked by Ada.');
-    expect(screen.getByRole('textbox', { name: 'Your description' })).toHaveValue('After.');
-  });
-
-  it('is withheld from non-admins without exposing repository implementation details', async () => {
+  it('is withheld from non-admins, who are told where admins edit it', async () => {
     mount({ admin: nonAdmin });
     await screen.findByRole('heading', { name: 'Your description' });
-    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
-    expect(screen.queryByText(/mcp-description\.md at the repository root/)).toBeNull();
+    expect(screen.queryByRole('link', { name: /Edit/ })).toBeNull();
+    expect(screen.getByText(/Admins edit it in mcp-description\.md at the repository root/)).toBeInTheDocument();
   });
 
-  it('waits for the KB dir name: no edit action with a missing save path, ever', async () => {
+  it('waits for the KB dir name: no link with a missing segment, ever', async () => {
     mount({ admin: asAdmin, kbDirName: null });
     await screen.findByRole('heading', { name: 'Your description' });
-    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    expect(screen.queryByRole('link', { name: /Edit/ })).toBeNull();
   });
 
   it('tolerates absent providers: no admin context and no workspace context still render the card', async () => {
     mount({ admin: null, kbDirName: 'no-provider' });
     expect(await screen.findByRole('heading', { name: 'Your description' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Edit/ })).toBeNull();
+    expect(screen.queryByRole('link', { name: /Edit/ })).toBeNull();
   });
 });
 
@@ -206,6 +151,15 @@ describe('warnings', () => {
     expect(screen.getByTestId('preamble-count')).toHaveTextContent('7,350 / 6,000 characters');
   });
 
+  it('warns when the short version is over its cap, naming the first paragraph', async () => {
+    fetchMock.mockResolvedValue(composed({ toolPrefixTruncated: true, toolPrefixChars: 412 }));
+    mount();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('the four tools receive only the first 300 characters');
+    expect(alert).toHaveTextContent('first paragraph');
+    expect(screen.getByTestId('prefix-count')).toHaveTextContent('412 / 300 characters');
+  });
+
   it('warns about an open comment and names the fix', async () => {
     fetchMock.mockResolvedValue(composed({ unterminatedComment: true }));
     mount();
@@ -216,10 +170,10 @@ describe('warnings', () => {
   });
 
   it('shows each warning only when flagged', async () => {
-    fetchMock.mockResolvedValue(composed({ truncated: true, unterminatedComment: true }));
+    fetchMock.mockResolvedValue(composed({ truncated: true, toolPrefixTruncated: true, unterminatedComment: true }));
     mount();
     const alerts = await screen.findAllByRole('alert');
-    expect(alerts).toHaveLength(2);
+    expect(alerts).toHaveLength(3);
   });
 });
 

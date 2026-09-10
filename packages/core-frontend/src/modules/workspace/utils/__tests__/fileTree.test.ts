@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
-import { omitPathFromTree, pathExistsInTree, suggestedPages } from '../fileTree';
+import { suggestedPages } from '../fileTree';
 
 /**
  * The empty state's opening offer walks the tree the server already filtered
@@ -69,27 +69,5 @@ describe('suggestedPages', () => {
     expect(suggestedPages(TREE, 1).map((e) => e.name)).toEqual(['Onboarding.md']);
     expect(suggestedPages(dir('', [dir('knowledge-base', [dir('knowledge-base/KnowledgeBase', [])])]), 3)).toEqual([]);
     expect(suggestedPages(null, 3)).toEqual([]);
-  });
-});
-
-describe('omitPathFromTree', () => {
-  it('removes only the exact root control file and preserves a nested namesake', () => {
-    const tree = dir('', [
-      dir('knowledge-base', [
-        file('knowledge-base/mcp-description.md'),
-        dir('knowledge-base/KnowledgeBase', [
-          file('knowledge-base/KnowledgeBase/mcp-description.md'),
-        ]),
-      ]),
-    ]);
-
-    const visible = omitPathFromTree(tree, 'knowledge-base/mcp-description.md');
-
-    expect(pathExistsInTree(visible, 'knowledge-base/mcp-description.md')).toBe(false);
-    expect(pathExistsInTree(visible, 'knowledge-base/KnowledgeBase/mcp-description.md')).toBe(true);
-  });
-
-  it('returns the original tree when the path is already absent', () => {
-    expect(omitPathFromTree(TREE, 'knowledge-base/mcp-description.md')).toBe(TREE);
   });
 });

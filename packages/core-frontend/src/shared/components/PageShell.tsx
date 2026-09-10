@@ -16,14 +16,12 @@ export type PageShellWidth = keyof typeof WIDTH_CLASS;
  *
  * `padded` drops the card's default padding for pages that own their inner
  * layout (e.g. a tab strip flush against the card's top edge).
- * `card={false}` leaves surface ownership to pages with multiple peer cards.
  */
 export function PageShell({
   title,
   actions,
   width = '3xl',
   padded = true,
-  card = true,
   children,
 }: {
   title: string;
@@ -31,7 +29,6 @@ export function PageShell({
   actions?: ReactNode;
   width?: PageShellWidth;
   padded?: boolean;
-  card?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -44,15 +41,13 @@ export function PageShell({
           <h1 className="text-lg font-semibold text-ink">{title}</h1>
           {actions && <div className="flex items-center gap-2">{actions}</div>}
         </header>
-        {card ? (
-          <section
-            className={`bg-white border border-line rounded-lg ${
-              padded ? 'p-4' : 'overflow-hidden'
-            }`}
-          >
-            {children}
-          </section>
-        ) : children}
+        <section
+          className={`bg-white border border-line rounded-lg ${
+            padded ? 'p-4' : 'overflow-hidden'
+          }`}
+        >
+          {children}
+        </section>
       </div>
     </div>
   );

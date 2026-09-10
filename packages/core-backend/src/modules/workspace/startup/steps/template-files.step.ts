@@ -8,7 +8,6 @@ import {
   validateKbRootName,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
-import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -38,7 +37,7 @@ export const REQUIRED_FILES: readonly string[] = [
   // (see modules/agent-instructions). Seeded ONCE and never refreshed: the
   // content is the admin's, and the shipped template is one HTML comment, so
   // a never-edited file sends nothing of its own.
-  PREAMBLE_FILE,
+  'mcp-description.md',
 ];
 
 /**
@@ -50,7 +49,7 @@ export const REQUIRED_FILES: readonly string[] = [
  * every other required file keeps the strict contract (a custom template
  * missing `access.md` is a real mistake and should fail loudly).
  */
-export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set([PREAMBLE_FILE]);
+export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set(['mcp-description.md']);
 
 /**
  * Repo-root files the startup phase GENERATES rather than copies — today just
@@ -239,19 +238,14 @@ export class TemplateFilesStep implements OnServerStart {
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
-      // hidden from the file tree from the first boot either way. The same is
-      // true of the deployment preamble: it is edited through External agent
-      // access, not as an ordinary knowledge-base document.
+      // hidden from the file tree from the first boot either way.
       // …and a template still shipping the skills rule an earlier release
       // had (a distribution's copy, a stale packaged one) must not declare
       // it: the on-disk reconciliation below never sees a file that was
       // absent, so the declared content is reconciled here instead.
       if (rel === IGNORE_FILENAME) {
         content = withoutIgnoreLine(
-          withoutPlatformIgnorePattern(
-            withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), PREAMBLE_FILE),
-            `${SKILLS_DIR}/`,
-          ),
+          withoutPlatformIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`),
           `${PLUGINS_DIR}/`,
         );
       }
@@ -259,8 +253,7 @@ export class TemplateFilesStep implements OnServerStart {
       added.push(rel);
     }
 
-    // AGENTS.md or mcp-description.md left VISIBLE by a stale `.bevelignore`
-    // is closed here — and
+    // AGENTS.md left VISIBLE by a stale `.bevelignore` is closed here — and
     // UNCONDITIONALLY, not only when the file was just added: a KB whose
     // AGENTS.md predates the CLAUDE.md→AGENTS.md rename has an ignore file
     // that lists the old name and knows nothing of the new one, so the
@@ -292,7 +285,7 @@ export class TemplateFilesStep implements OnServerStart {
     // a later declared write would lose an earlier one's.
     added.push(
       ...(await reconcileIgnoreRules(repoDir, branch, {
-        add: ['AGENTS.md', PREAMBLE_FILE],
+        add: ['AGENTS.md'],
         drop: [`${SKILLS_DIR}/`],
         dropEvery: [`${PLUGINS_DIR}/`],
       })),
@@ -478,12 +471,8 @@ export function withoutIgnoreLine(text: string, pattern: string): string {
   return kept.join('\n');
 }
 
-/** The legacy comment `withIgnorePattern` wrote above AGENTS.md. */
+/** The comment `withIgnorePattern` writes above a line it appends. */
 const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
-
-/** The comment written above the preamble rule on an existing knowledge base. */
-const PREAMBLE_RULE_COMMENT =
-  '# Added by the platform: agent instructions are edited from External agent access.';
 
 /**
  * The template line an earlier release shipped above the shared-skills rule,
@@ -506,7 +495,7 @@ const LEGACY_SKILLS_RULE_COMMENT_CLOSING = '/.';
  */
 function isPlatformRuleComment(line: string): boolean {
   const trimmed = line.trim();
-  if (trimmed === PLATFORM_RULE_COMMENT || trimmed === PREAMBLE_RULE_COMMENT) return true;
+  if (trimmed === PLATFORM_RULE_COMMENT) return true;
   if (
     !trimmed.startsWith(LEGACY_SKILLS_RULE_COMMENT_OPENING) ||
     !trimmed.endsWith(LEGACY_SKILLS_RULE_COMMENT_CLOSING)
@@ -557,6 +546,5 @@ function withIgnorePattern(text: string, pattern: string): string {
   const lines = text.split('\n').map((l) => l.trim());
   if (lines.includes(pattern) || lines.includes(`!${pattern}`)) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
-  const comment = pattern === PREAMBLE_FILE ? PREAMBLE_RULE_COMMENT : PLATFORM_RULE_COMMENT;
-  return `${text}${separator}\n${comment}\n${pattern}\n`;
+  return `${text}${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`;
 }

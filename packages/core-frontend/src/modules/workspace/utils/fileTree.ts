@@ -116,28 +116,6 @@ export function pathExistsInTree(tree: FileTreeEntry | null, relativePath: strin
   return findEntryByPath(tree, relativePath) !== null;
 }
 
-/**
- * Return the tree without one exact workspace-relative path. Reuses untouched
- * branches so a caller can apply it on every render without cloning the whole
- * file tree when the server has already filtered the path.
- */
-export function omitPathFromTree(
-  tree: FileTreeEntry | null,
-  relativePath: string,
-): FileTreeEntry | null {
-  if (!tree || tree.relativePath === relativePath) return null;
-  if (!tree.children) return tree;
-
-  let changed = false;
-  const children: FileTreeEntry[] = [];
-  for (const child of tree.children) {
-    const visible = omitPathFromTree(child, relativePath);
-    if (visible !== child) changed = true;
-    if (visible) children.push(visible);
-  }
-  return changed ? { ...tree, children } : tree;
-}
-
 function collectFilesByBasename(tree: FileTreeEntry | null, basename: string, acc: string[]): void {
   if (!tree) return;
   if (tree.type === 'file' && tree.name === basename) acc.push(tree.relativePath);
