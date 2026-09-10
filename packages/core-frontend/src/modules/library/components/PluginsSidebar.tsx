@@ -95,9 +95,10 @@ export interface PluginsSidebarProps {
  * home) and Owned by me — then ONE switch between the two views of what is
  * below them:
  *
- *  - TEAMS — the caller's own space first (the one team they are always
- *    in), then every group from the access rules: a team's page is what
- *    being in that group lets a person use;
+ *  - TEAMS (shown as "Groups") — Everyone first, the org-wide entry the
+ *    server leads with, then every group from the access rules: a team's
+ *    page is what being in that group lets a person use. The caller's own
+ *    space is a plugin, not a group, and has no row here;
  *  - ADVANCED — `Skills/` and `Plugins/` as they are on disk.
  *
  * Plugins have no rows of their own here. They are reached through the
