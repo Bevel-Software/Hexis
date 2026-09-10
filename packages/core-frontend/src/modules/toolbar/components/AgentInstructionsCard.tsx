@@ -63,31 +63,40 @@ export function AgentInstructionsCard() {
   const [editError, setEditError] = useState<string | null>(null);
 
   /**
-   * Only the NEWEST composed-preview request may land. Two are in flight
-   * together whenever an admin edits and saves before the first load
-   * answers, and the older one resolving last would put the pre-save text
-   * back on the page as though the save had not happened. The effect's
-   * cleanup takes a ticket too, so a response arriving after unmount lands
-   * nowhere.
+   * Only the NEWEST composed-preview request may land, and only while the
+   * card is mounted. Two requests are in flight together whenever an admin
+   * edits and saves before the first load answers, and the older one
+   * resolving last would put the pre-save text back on the page as though
+   * the save had not happened.
+   *
+   * Mounted is tracked separately from the ticket rather than folded into it:
+   * a save in flight at unmount starts its own refresh AFTERWARDS, which
+   * takes a fresh ticket and would pass any ticket comparison. The flag is
+   * re-armed on the way in, so a remount (StrictMode's double-invoke among
+   * them) is a mounted card again.
    */
   const previewRequest = useRef(0);
+  const mounted = useRef(true);
   const loadInstructions = useCallback((whenFailed: (err: unknown) => string): Promise<void> => {
     const ticket = ++previewRequest.current;
+    const isCurrent = (): boolean => mounted.current && ticket === previewRequest.current;
     return fetchAgentInstructions().then(
       (data) => {
-        if (ticket === previewRequest.current) setState({ status: 'ready', data });
+        if (isCurrent()) setState({ status: 'ready', data });
       },
       (err: unknown) => {
-        if (ticket === previewRequest.current) setState({ status: 'error', message: whenFailed(err) });
+        if (isCurrent()) setState({ status: 'error', message: whenFailed(err) });
       },
     );
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void loadInstructions((err) =>
       err instanceof Error ? err.message : "Couldn't load what agents are told.",
     );
     return () => {
+      mounted.current = false;
       previewRequest.current += 1;
     };
   }, [loadInstructions]);

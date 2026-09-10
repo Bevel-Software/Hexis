@@ -97,6 +97,49 @@ function redactError(err: unknown): string {
 const FETCH_CACHE_TTL_MS = 30_000;
 
 /**
+ * The bytes a conditional write compares against. An absent file reads as the
+ * empty string, so `expectedContent: ''` means "expect nothing there yet".
+ *
+ * A directory at the path is a client error, not a 500 with a raw OS message:
+ * `GET /file` counts EISDIR as "no file at this path", so the editor that
+ * opened empty on that 404 would otherwise be told its save failed for an
+ * unexplained internal reason. Anything else (EACCES, EIO) is a real read
+ * failure and propagates: an unreadable file must not pass for an empty one.
+ */
+async function readForConditionalWrite(absolutePath: string, relativePath: string): Promise<string> {
+  try {
+    return await fs.readFile(absolutePath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return '';
+    if (code === 'EISDIR') {
+      const notAFile: Error & { status?: number } = new Error(
+        `"${relativePath}" is a directory, not a file.`,
+      );
+      notAFile.status = 400;
+      throw notAFile;
+    }
+    throw err;
+  }
+}
+
+/** Throw the conditional write's 409 unless the file still holds `expectedContent`. */
+async function assertConditionalWriteMatches(
+  absolutePath: string,
+  relativePath: string,
+  expectedContent: string,
+): Promise<void> {
+  const current = await readForConditionalWrite(absolutePath, relativePath);
+  if (current === expectedContent) return;
+  const stale: Error & { status?: number } = new Error(
+    `"${relativePath}" changed since you opened it. Reload it and apply your edit again, ` +
+      'so the other change is not overwritten.',
+  );
+  stale.status = 409;
+  throw stale;
+}
+
+/**
  * Per-directory read filter for the file tree. Given a batch of
  * workspace-relative entry paths (e.g. `staging-repo/Product/Knowledge/x.md`),
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
@@ -121,6 +164,17 @@ export class WorkspaceService implements IWorkspaceService {
   /** Whether the last fetch per repo SUCCEEDED — read by strict callers of `ensureRemotesFetched`. */
   private readonly lastFetchOk = new Map<string, boolean>();
   private readonly inFlightFetches = new Map<string, Promise<void>>();
+  /**
+   * One write at a time per `workspaceId` + path (see {@link writeFile}).
+   * A conditional write compares and then writes, two awaits apart, and the
+   * compare is a precondition only if nothing can land between them. The
+   * route's per-path lock does not establish that on its own: it deliberately
+   * runs the op WITHOUT acquiring when the caller already holds the lock, so
+   * two requests from that holder would interleave. Keyed per path, so
+   * unrelated writes never queue behind each other; per process, so across
+   * instances the workflow lock remains the coordinator.
+   */
+  private readonly writeTurns = new Map<string, Promise<void>>();
 
   /**
    * Late-bound by the composition root — DiffService depends on
@@ -1005,6 +1059,51 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * Refuse a conditional write, with the same 409 {@link writeFile} throws,
+   * without writing anything. The route calls this BEFORE the creator-access
+   * plan: that plan can commit a seeded `access.md` under its own lock, and a
+   * precondition failing after it would leave an authorization grant behind
+   * for a save that never landed. The write's own compare, under its write
+   * turn, stays the authoritative one; this only keeps the refusal free of
+   * side effects.
+   */
+  async assertContentMatches(
+    workspaceId: string,
+    relativePath: string,
+    expectedContent: string,
+  ): Promise<void> {
+    assertValidRelativePath(relativePath);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absolutePath = path.resolve(workspaceDir, relativePath);
+    this.assertWithinWorkspace(absolutePath, workspaceDir);
+    await assertConditionalWriteMatches(absolutePath, relativePath, expectedContent);
+  }
+
+  /**
+   * Run `op` after every write already queued for `key`, and register it as
+   * the one to wait for next.
+   *
+   * What is stored is the SETTLED tail, never the caller's promise: a write
+   * that throws must not wedge the queue behind it, and a stored rejection
+   * would also be an unhandled one. The entry is dropped once it is still the
+   * tail, so the map does not grow by an entry per file ever written. See
+   * {@link writeTurns} for why writes take turns at all.
+   */
+  private async withWriteTurn<T>(key: string, op: () => Promise<T>): Promise<T> {
+    const previous = this.writeTurns.get(key);
+    const turn = previous ? previous.then(op) : op();
+    const tail = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.writeTurns.set(key, tail);
+    void tail.then(() => {
+      if (this.writeTurns.get(key) === tail) this.writeTurns.delete(key);
+    });
+    return turn;
+  }
+
+  /**
    * Write one workspace file.
    *
    * - `failIfExists` is an exclusive create (see the `wx` note below).
@@ -1012,11 +1111,13 @@ export class WorkspaceService implements IWorkspaceService {
    *   exactly that text, or the write is refused with a 409. It is what lets
    *   an editor that composed its save from a snapshot (the inline agent
    *   description merges the private comments it read minutes earlier) refuse
-   *   rather than erase whatever landed in between. The compare and the write
-   *   are one step here so the route's per-path lock covers both; a check in
-   *   the caller would leave a window between them. An absent file reads as
+   *   rather than erase whatever landed in between. An absent file reads as
    *   the empty string, so `expectedContent: ''` means "expect nothing there
    *   yet" and creates it.
+   *
+   * The compare and the write run inside this path's write turn, so no other
+   * write through this service can land between them, whatever locking the
+   * caller did or skipped.
    */
   async writeFile(
     workspaceId: string,
@@ -1029,43 +1130,30 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    if (options?.expectedContent !== undefined) {
-      let current = '';
+    await this.withWriteTurn(`${workspaceId}\u0000${relativePath}`, async () => {
+      if (options?.expectedContent !== undefined) {
+        await assertConditionalWriteMatches(absolutePath, relativePath, options.expectedContent);
+      }
       try {
-        current = await fs.readFile(absolutePath, 'utf-8');
+        // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
+        // followed by a plain write would let two concurrent creators (or a
+        // stale client whose file list predates the file) both pass the check
+        // and silently replace each other's content.
+        await fs.writeFile(absolutePath, content, {
+          encoding: 'utf-8',
+          flag: options?.failIfExists ? 'wx' : 'w',
+        });
       } catch (err) {
-        // Anything but "not there" is a real read failure: refuse the write
-        // rather than treat an unreadable file as an empty one.
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+          const conflict: Error & { status?: number } = new Error(
+            `"${relativePath}" already exists.`,
+          );
+          conflict.status = 409;
+          throw conflict;
+        }
+        throw err;
       }
-      if (current !== options.expectedContent) {
-        const stale: Error & { status?: number } = new Error(
-          `"${relativePath}" changed since you opened it. Reload it and apply your edit again, ` +
-            'so the other change is not overwritten.',
-        );
-        stale.status = 409;
-        throw stale;
-      }
-    }
-    try {
-      // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
-      // followed by a plain write would let two concurrent creators (or a
-      // stale client whose file list predates the file) both pass the check
-      // and silently replace each other's content.
-      await fs.writeFile(absolutePath, content, {
-        encoding: 'utf-8',
-        flag: options?.failIfExists ? 'wx' : 'w',
-      });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        const conflict: Error & { status?: number } = new Error(
-          `"${relativePath}" already exists.`,
-        );
-        conflict.status = 409;
-        throw conflict;
-      }
-      throw err;
-    }
+    });
     await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 

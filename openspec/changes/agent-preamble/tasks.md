@@ -45,6 +45,7 @@
 - [x] 5.7 Filter the exact root `mcp-description.md` from merged workspace trees as defense in depth, without filtering nested files with the same basename; memoized in `useMergedWorkspaceTree.ts` on the tree and `kbDirName`, like every step beside it
 - [x] 5.8 `AgentInstructionsCard.tsx`: offer the Edit action on a non-empty `kbDirName` so it matches `beginEdit`'s guard, and ticket the composed-preview requests so only the newest lands (an initial load resolving after a post-save refresh must not restore the pre-save text)
 - [x] 5.9 `agent-instructions.api.ts` sends the loaded bytes as `ifMatch` on the save, so a file changed since the editor opened is refused instead of overwritten; `workspace.api.ts` `writeFile` grows the option; tests in `__tests__/agent-instructions.api.test.ts` and `__tests__/AgentInstructionsCard.test.tsx`
+- [x] 5.10 `AgentInstructionsCard.tsx` checks a mounted ref beside the ticket, re-armed on effect entry: a save in flight at unmount starts its own refresh afterwards, which takes a fresh ticket, and StrictMode's teardown-then-setup runs on the same card (covered by a StrictMode mount test)
 
 ## 6. Docs and release
 
@@ -60,6 +61,8 @@
 - [x] 7.2 `workspace.routes.ts` `PUT /workspace/:id/file` accepts `ifMatch` (a string or nothing, 400 otherwise) and passes it as `expectedContent`
 - [x] 7.3 `workspace.routes.ts` `GET /workspace/:id/file` answers 404 for ENOENT, ENOTDIR and EISDIR only, and sends every other read failure through `sendError` (traversal 403, a malformed workspace id its domain status, an unreadable file 500), so a caller cannot read a read failure as a missing file
 - [x] 7.4 Tests: service-level conditional write in `__tests__/workspace.service.test.ts`; route-level `ifMatch` pass-through and read-error mapping in `__tests__/workspace.routes.file-writes.test.ts`
+- [x] 7.5 `workspace.service.ts` takes a write turn per `workspaceId` + path (`writeTurns`, `withWriteTurn`), so the conditional compare and its write are exclusive even when `PUT /file` runs the op without acquiring the lock (a caller that already holds it); covered by two concurrent conditional saves where exactly one lands
+- [x] 7.6 `workspace.service.ts` exports `assertContentMatches` and `PUT /file` calls it BEFORE `planForCreate`, so a stale save is refused before a seeded `access.md` commits; a directory at the path is a 400 naming it, not a raw 500, matching the GET route's EISDIR reading
 
 ## 8. Verification
 

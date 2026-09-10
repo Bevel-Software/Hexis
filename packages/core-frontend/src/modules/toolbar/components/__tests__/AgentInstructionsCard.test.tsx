@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -57,7 +58,9 @@ const composed = (over: Partial<AgentInstructions> = {}): AgentInstructions => (
   ...over,
 });
 
-function mount(opts: { admin?: AdminContextValue | null; kbDirName?: string | null | 'no-provider' } = {}) {
+function mount(
+  opts: { admin?: AdminContextValue | null; kbDirName?: string | null | 'no-provider'; strict?: boolean } = {},
+) {
   const admin = opts.admin === undefined ? nonAdmin : opts.admin;
   const kb = opts.kbDirName === undefined ? 'knowledge-base' : opts.kbDirName;
   let tree = <AgentInstructionsCard />;
@@ -67,7 +70,11 @@ function mount(opts: { admin?: AdminContextValue | null; kbDirName?: string | nu
     );
   }
   if (admin !== null) tree = <AdminContext.Provider value={admin}>{tree}</AdminContext.Provider>;
-  return render(<MemoryRouter>{tree}</MemoryRouter>);
+  tree = <MemoryRouter>{tree}</MemoryRouter>;
+  // The app mounts under StrictMode, so the load effect is set up, torn down
+  // and set up again on the SAME card. Anything the teardown disarms has to
+  // be re-armed on the way back in.
+  return render(opts.strict ? <StrictMode>{tree}</StrictMode> : tree);
 }
 
 beforeEach(() => {
@@ -100,6 +107,11 @@ describe('the description', () => {
     // Says that access does not gate it.
     expect(screen.getByText(/whatever it may read/)).toBeInTheDocument();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('still lands under StrictMode, whose teardown and second setup run on the same card', async () => {
+    mount({ strict: true });
+    expect(await screen.findByTestId('description-text')).toHaveTextContent('Acme builds solar farms.');
   });
 
   it('explains an empty description instead of showing an empty box', async () => {

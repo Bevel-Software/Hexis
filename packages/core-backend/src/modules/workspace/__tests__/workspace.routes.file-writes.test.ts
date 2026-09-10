@@ -29,28 +29,50 @@ const WS = 'target-company-state';
 const KB = 'knowledge-base';
 const FILE = `${KB}/mcp-description.md`;
 
-const stubCreatorAccess: ICreatorAccess = {
-  planForCreate: async () => null,
-  grantInExtractedFile: async () => null,
-  noteAccessFileWritten: () => {},
-};
-
 interface Harness {
   server: Server;
   baseUrl: string;
   writeFileMock: ReturnType<typeof vi.fn>;
   readFileMock: ReturnType<typeof vi.fn>;
+  assertContentMatchesMock: ReturnType<typeof vi.fn>;
+  planForCreate: ReturnType<typeof vi.fn>;
+  seedWrites: string[];
   lockedPaths: string[];
 }
 
 async function makeHarness(): Promise<Harness> {
   const lockedPaths: string[] = [];
-  const writeFileMock = vi.fn(async () => undefined);
+  const seedWrites: string[] = [];
   const readFileMock = vi.fn(async () => 'CONTENT');
+  const writeFileMock = vi.fn(async (_id: string, p: string) => {
+    if (p.endsWith('/access.md')) seedWrites.push(p);
+  });
+  // Stands in for the real precondition check: same 409, same "an absent file
+  // reads as empty" rule, so the route's ordering is what this exercises.
+  const assertContentMatchesMock = vi.fn(async (_id: string, p: string, expected: string) => {
+    let current = '';
+    try {
+      current = (await readFileMock()) as unknown as string;
+    } catch {
+      current = '';
+    }
+    if (current === expected) return;
+    const stale: Error & { status?: number } = new Error(`"${p}" changed since you opened it.`);
+    stale.status = 409;
+    throw stale;
+  });
   const workspaceService = {
     readFile: readFileMock,
     writeFile: writeFileMock,
+    assertContentMatches: assertContentMatchesMock,
   } as unknown as WorkspaceService;
+
+  const planForCreate = vi.fn(async () => null);
+  const stubCreatorAccess = {
+    planForCreate,
+    grantInExtractedFile: async () => null,
+    noteAccessFileWritten: () => {},
+  } as unknown as ICreatorAccess;
 
   const workflowService = {
     getLock: vi.fn(async () => null),
@@ -91,7 +113,16 @@ async function makeHarness(): Promise<Harness> {
     const s = app.listen(0, () => resolve(s));
   });
   const addr = server.address() as AddressInfo;
-  return { server, baseUrl: `http://127.0.0.1:${addr.port}`, writeFileMock, readFileMock, lockedPaths };
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+    writeFileMock,
+    readFileMock,
+    assertContentMatchesMock,
+    planForCreate,
+    seedWrites,
+    lockedPaths,
+  };
 }
 
 function close(s: Server): Promise<void> {
@@ -127,14 +158,17 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
   it('passes the precondition to the service, under the path lock', async () => {
     h = await makeHarness();
 
-    const res = await put(h, { content: 'After.', ifMatch: 'Before.' });
+    // `CONTENT` is what the harness's file holds, so the precondition holds.
+    const res = await put(h, { content: 'After.', ifMatch: 'CONTENT' });
 
     expect(res.status).toBe(200);
     expect(h.writeFileMock).toHaveBeenCalledWith(WS, FILE, 'After.', {
       failIfExists: false,
-      expectedContent: 'Before.',
+      expectedContent: 'CONTENT',
     });
     expect(h.lockedPaths).toEqual([FILE]);
+    // The plan still runs on a save that is going ahead.
+    expect(h.planForCreate).toHaveBeenCalledTimes(1);
   });
 
   it('leaves the precondition unset when the caller sends none', async () => {
@@ -168,6 +202,26 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
 
     expect(res.status).toBe(400);
     expect(h.writeFileMock).not.toHaveBeenCalled();
+  });
+
+  it('checks the precondition BEFORE the creator-access plan, so a refusal seeds no access grant', async () => {
+    // The seed commits under its own lock. A precondition that failed after it
+    // would leave an authorization grant behind for a save that never landed.
+    h = await makeHarness();
+    h.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: `${KB}/access.md`,
+      apply: () => 'seed',
+    } as never);
+
+    const res = await put(h, { content: 'After.', ifMatch: 'Stale.' });
+
+    expect(res.status).toBe(409);
+    expect(h.assertContentMatchesMock).toHaveBeenCalledWith(WS, FILE, 'Stale.');
+    expect(h.planForCreate).not.toHaveBeenCalled();
+    expect(h.seedWrites).toEqual([]);
+    expect(h.writeFileMock).not.toHaveBeenCalled();
+    expect(h.lockedPaths).toEqual([]);
   });
 });
 

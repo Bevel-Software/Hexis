@@ -296,6 +296,79 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
 
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Replaced.');
   });
+
+  it('serializes writes per path, so two concurrent conditional saves cannot both pass', async () => {
+    // The compare and the write are two awaits apart. Without a turn per path
+    // both saves read the same bytes, both pass, and the loser's text is gone
+    // with no 409 to show for it.
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    const [first, second] = await Promise.allSettled([
+      svc.writeFile(workspaceId, rel, 'From A.', { expectedContent: 'Before.' }),
+      svc.writeFile(workspaceId, rel, 'From B.', { expectedContent: 'Before.' }),
+    ]);
+
+    const settled = [first, second];
+    expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = settled.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(rejected.reason).toMatchObject({ status: 409 });
+    // Whichever won, the file holds ITS text whole — never a mix, never the loser's.
+    const landed = await fs.readFile(path.join(workspaceDir, rel), 'utf-8');
+    expect(landed).toBe(first.status === 'fulfilled' ? 'From A.' : 'From B.');
+  });
+
+  it('refuses a conditional write against a directory as a client error, not a raw failure', async () => {
+    // `GET /file` counts EISDIR as "no file at this path" and the editor opens
+    // empty on that 404, so the save that follows must say what is wrong.
+    await fs.mkdir(path.join(workspaceDir, 'knowledge-base', 'a-folder'), { recursive: true });
+
+    await expect(
+      svc.writeFile(workspaceId, 'knowledge-base/a-folder', 'text', { expectedContent: '' }),
+    ).rejects.toMatchObject({ status: 400, message: expect.stringContaining('is a directory') });
+  });
+});
+
+describe('WorkspaceService.assertContentMatches', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('passes silently when the file still holds the expected content', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    await expect(svc.assertContentMatches(workspaceId, rel, 'Before.')).resolves.toBeUndefined();
+  });
+
+  it('refuses a stale precondition with the write path\'s own 409, and writes nothing', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), "Another admin's text.", 'utf-8');
+
+    await expect(svc.assertContentMatches(workspaceId, rel, 'What I loaded.')).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe("Another admin's text.");
+  });
+
+  it('reads an absent file as the empty string', async () => {
+    await expect(
+      svc.assertContentMatches(workspaceId, 'knowledge-base/mcp-description.md', ''),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe('WorkspaceService.createFolderZip', () => {

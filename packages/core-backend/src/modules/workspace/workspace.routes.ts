@@ -927,6 +927,12 @@ export function createWorkspaceRoutes(
       // (loadModel hard-throws). The dedicated App roles surface has its
       // own validate gate; this covers the raw-text editor path.
       if (isRolesYamlPath(filePath, kbDirName)) assertRolesYamlParsable(content);
+      // A stale `ifMatch` is refused HERE, before the plan below: that plan
+      // can commit a seeded access.md under its own lock, and a precondition
+      // failing after it would leave an authorization grant behind for a save
+      // that never landed. The write repeats the compare under its write
+      // turn, which is the one that decides; this is only about side effects.
+      if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
       // Creator read grant: a brand-new file at a spot whose access chain
       // doesn't grant the creator `read` would vanish from their own explorer
       // (read is default-deny). Plan BEFORE the write: a new subtree gets its
@@ -941,9 +947,10 @@ export function createWorkspaceRoutes(
       // without committing, so the refusal leaves no trace.
       //
       // `ifMatch` = conditional write, the same 409 for a stale UPDATE: the
-      // file must still hold the text the caller last read. The compare
-      // happens inside the service, so it runs under the lock this acquires
-      // and no other save can land between the compare and the write.
+      // file must still hold the text the caller last read. The service
+      // compares and writes inside one write turn for the path, so no other
+      // write can land between them even when this route runs without
+      // acquiring the lock (a caller that already holds it).
       await withLock(id, user, filePath, () =>
         workspaceService.writeFile(id, filePath, toWrite, {
           failIfExists: ifAbsent === true,
