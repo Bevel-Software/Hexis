@@ -455,6 +455,48 @@ describe('session recovery — invariants that only a stubbed client can force',
     ]);
   });
 
+  it('reuses a session the surface re-registered while the template resolver waited', async () => {
+    const { client, calls } = losesSessionOnce();
+    let registrations = 0;
+    let deregistrations = 0;
+    Object.assign(client, {
+      registerManual: async () => {
+        registrations += 1;
+        return { success: true };
+      },
+      deregisterManual: async () => {
+        deregistrations += 1;
+        return true;
+      },
+    });
+    let releaseResolver = (): void => {};
+    const resolverParked = new Promise<void>((enteredResolver) => {
+      installSessionRecovery(client, {
+        // The documented use of an ASYNC resolver: a surface parks here to
+        // wait out a re-registration of its own. The generation can move
+        // across that await, and this is the window under test.
+        manualTemplate: async () => {
+          enteredResolver();
+          await new Promise<void>((release) => (releaseResolver = release));
+          return manualTemplate('platform', 'http://127.0.0.1:1/mcp');
+        },
+        log: () => {},
+      });
+    });
+
+    const call = client.callTool('platform.srv.echo', {});
+    await resolverParked;
+    noteManualReregistered(client, 'platform');
+    releaseResolver();
+
+    expect(await call).toBe('ok');
+    // The session the surface just made is live: recovery must not tear it
+    // down on the strength of a generation it read before it waited.
+    expect(registrations).toBe(0);
+    expect(deregistrations).toBe(0);
+    expect(calls()).toBe(2);
+  });
+
   it('ignores a re-registration reported for a client that has no recovery installed', () => {
     // The surface calls this unconditionally; a client without recovery (a
     // test double, an embedding host that never installed it) is not an error.

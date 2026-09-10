@@ -221,19 +221,27 @@ export function installSessionRecovery(
   /**
    * Deregister + register once. Reports what happened; the caller does the
    * logging. `generation` is what the failing call saw before its attempt: if
-   * the counter has moved by the time this runs — a surface gate can hold a
-   * recovery while the surface's own credential swap re-registers the very
-   * same manual — the session has ALREADY been replaced, and replacing it
-   * again would throw away a live session to dial an identical one.
+   * the counter has moved, the session has ALREADY been replaced — by the
+   * surface's own credential swap, or by another call — and replacing it again
+   * would throw away a live session to dial an identical one.
+   *
+   * Tested TWICE, because this function has two places it can wait and either
+   * is long enough for a swap to land: the surface's gate (before the call
+   * arrives here) and `manualTemplate`, which a surface may deliberately park
+   * in. The check that matters is the one immediately before the deregister —
+   * the first is only there to skip work nobody needs.
    */
   async function reregisterNow(manualName: string, generation: number): Promise<ReregisterOutcome> {
     const notes: string[] = [];
-    if (generationOf(manualName) !== generation) return { ok: true, reused: true, notes };
+    const reused = { ok: true, reused: true, notes } as const;
+    if (generationOf(manualName) !== generation) return reused;
     const template = await options.manualTemplate(manualName);
     // Not ours to re-register — or not an MCP manual at all, in which case it
     // holds no session and the 404 came from somewhere we must not second-guess.
     // Silent on purpose: nothing happened, so there is nothing to report.
     if (!template || template.call_template_type !== 'mcp') return { ok: false, notes };
+    // Resolving the template is itself a place a surface waits.
+    if (generationOf(manualName) !== generation) return reused;
     try {
       // Deregistering is what closes the manual's (now dead) session, so the
       // registration below dials a fresh one instead of reusing the cached
