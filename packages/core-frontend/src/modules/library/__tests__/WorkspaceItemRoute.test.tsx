@@ -47,7 +47,27 @@ vi.mock('../../workspace/components/FileRoute', () => ({
 
 import { LibraryRoutes } from '../routes/LibraryRoutes';
 import { isLibraryLocation } from '../routes/library-paths';
+import { listPlugins, type PluginSummary } from '../services/plugins.api';
 import { withAuth } from './auth-harness';
+
+/** A listed plugin whose folder is `Plugins/Sales` and whose identity is `sales`. */
+const SALES: PluginSummary = {
+  name: 'sales',
+  displayName: 'Sales',
+  folders: ['Plugins/Sales'],
+  canRead: true,
+  canWrite: false,
+  isOwner: false,
+  linksAreManaged: true,
+  skillCount: 1,
+  toolCount: 0,
+  brokenLinks: 0,
+  owners: { roles: [], users: [] },
+  writers: { roles: [], users: [] },
+  readers: { restricted: true, roles: [], users: [] },
+  hasRequested: false,
+  requestNumber: null,
+};
 
 const CATALOG: LibraryData = {
   loading: false,
@@ -138,6 +158,7 @@ const itemUrl = (repoRel: string, branch = DEFAULT_BRANCH) =>
 
 beforeEach(() => {
   dataMock.useLibraryData.mockReturnValue(CATALOG);
+  vi.mocked(listPlugins).mockResolvedValue([]);
 });
 
 describe('WorkspaceItemRoute', () => {
@@ -220,6 +241,63 @@ describe('WorkspaceItemRoute', () => {
     expect(screen.getByLabelText('file-view')).toHaveTextContent('canonicalize:false');
     expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument();
     expect(screen.queryByLabelText('skill-page')).not.toBeInTheDocument();
+  });
+
+  describe("a plugin's manifest", () => {
+    it('opens the PLUGIN page, by the identity the listed plugin carries — not the file', async () => {
+      vi.mocked(listPlugins).mockResolvedValue([SALES]);
+      renderAt(itemUrl('Plugins/Sales/plugin.json'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/plugins/sales'),
+      );
+      expect(screen.queryByLabelText('file-view')).not.toBeInTheDocument();
+    });
+
+    it("the bundle dialect's manifest opens the plugin page the same way", async () => {
+      vi.mocked(listPlugins).mockResolvedValue([{ ...SALES, linksAreManaged: false }]);
+      renderAt(itemUrl('Plugins/Sales/plugin.bundle.json'));
+      await waitFor(() =>
+        expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/plugins/sales'),
+      );
+    });
+
+    it('waits for the plugin list rather than showing the file, then shows the file when no listed plugin holds it', async () => {
+      // No plugin lists this folder (locked to the caller, or a stray file):
+      // once the list has answered, the file is the honest fallback — and
+      // not one frame before, or a manifest would flash as a file on every
+      // page load.
+      let answer: (plugins: PluginSummary[]) => void = () => {};
+      vi.mocked(listPlugins).mockReturnValue(new Promise<PluginSummary[]>((r) => (answer = r)));
+      renderAt(itemUrl('Plugins/Nope/plugin.json'));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Everything/ })).toBeInTheDocument());
+      expect(screen.queryByLabelText('file-view')).not.toBeInTheDocument();
+      answer([]);
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Nope/plugin.json'));
+    });
+
+    it("a manifest bundled inside a SKILL stays that skill's file", async () => {
+      vi.mocked(listPlugins).mockResolvedValue([SALES]);
+      renderAt(itemUrl('Plugins/Sales/create-sales-deck/plugin.json'));
+      expect(await screen.findByLabelText('skill-page')).toHaveTextContent('create-sales-deck::plugin.json');
+    });
+
+    it('router state `rawFile` still opens the manifest as a file — the page’s Manifest button', async () => {
+      vi.mocked(listPlugins).mockResolvedValue([SALES]);
+      render(
+        <MemoryRouter initialEntries={[{ pathname: itemUrl('Plugins/Sales/plugin.json'), state: { rawFile: true } }]}>
+          {wrap(
+            <Routes>
+              <Route path="/workspace/*" element={<LibraryRoutes />} />
+            </Routes>,
+            null,
+          )}
+          <LocationProbe />
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(screen.getByLabelText('file-view')).toBeInTheDocument());
+      expect(screen.getByLabelText('pathname')).toHaveTextContent(itemUrl('Plugins/Sales/plugin.json'));
+    });
   });
 
   it("a personal space's access.md opens the same way — it has no listed plugin page at all", async () => {
