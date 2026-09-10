@@ -498,6 +498,9 @@ function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | 
   return keys;
 }
 
+/** The key set of a caller who holds nothing: `hasPermissionForKeys` then answers as `everyone`. */
+const NO_KEYS: ReadonlySet<string> = new Set();
+
 /**
  * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
  * of principal KEYS with no person behind them — no direct-email tier, no
@@ -1158,6 +1161,21 @@ export class AccessControlService implements IAccessControl {
     const result = new Map<string, boolean>();
     relativePaths.forEach((p, i) => {
       result.set(p, hasPermissionForKeys(model, 'read', keys, p, owns[i]));
+    });
+    return result;
+  }
+
+  async canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    const owns = await Promise.all(relativePaths.map((p) => this.cachedOwnEntries(workspaceId, repoDir, p)));
+    const result = new Map<string, boolean>();
+    relativePaths.forEach((p, i) => {
+      // No keys at all: the walk then falls through to each scope's derived
+      // `everyone` verdict — the built-in entry, or a public plugin's grant
+      // or denial, whichever the scope builder settled on — which is exactly
+      // what a caller holding nothing of their own resolves to.
+      result.set(p, hasPermissionForKeys(model, 'read', NO_KEYS, p, owns[i]));
     });
     return result;
   }

@@ -230,6 +230,8 @@ export type LibraryFilter =
 /**
  * What one team can use, by id — `GET /api/teams`, one entry per group.
  * Ids only: the names are the catalog's, and the slice is applied to it.
+ * The server opens the list with `EVERYONE_TEAM` — not a group but the
+ * built-in org-wide principal: what a person in no group at all can use.
  */
 export interface TeamAccess {
   name: string;
@@ -237,6 +239,13 @@ export interface TeamAccess {
   skills: string[];
   tools: string[];
 }
+
+/**
+ * The org-wide entry's name, as the server spells it. No group can take
+ * it — `everyone` is a reserved name in the access rules — so a team of
+ * this name IS the organisation, and the page says so.
+ */
+export const EVERYONE_TEAM = 'Everyone';
 
 /**
  * What an empty view says.
@@ -253,6 +262,7 @@ export interface TeamAccess {
 export function emptyMessageFor(filter: LibraryFilter, query: string): string {
   if (query.trim()) return 'Nothing here matches yet.';
   if (filter.kind === 'owned') return "You're not responsible for changes in any skills yet.";
+  if (filter.kind === 'team' && filter.group === EVERYONE_TEAM) return 'Nothing is shared with everyone yet.';
   if (filter.kind === 'team') return `${filter.group} can't use anything you can see yet.`;
   return 'Nothing here matches yet.';
 }

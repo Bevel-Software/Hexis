@@ -21,8 +21,6 @@ function renderSidebar(over: Partial<PluginsSidebarProps> = {}) {
     onSelect,
     ownedCount: 2,
     ownedAttention: 0,
-    personalPluginLabel: "Juan's Plugin",
-    ungroupedCount: 1,
     teams: [
       { name: 'Engineering', count: 4, urgent: 0 },
       { name: 'GTM', count: 3, urgent: 2 },
@@ -67,14 +65,8 @@ describe('PluginsSidebar: right-click', () => {
       label: 'Owned by me',
     });
 
-    rightClick(screen.getByRole('button', { name: /^Juan's Plugin/ }));
-    expect(onContextMenu.mock.calls[1][0]).toMatchObject({
-      filter: { kind: 'ungrouped' },
-      label: "Juan's Plugin",
-    });
-
     rightClick(screen.getByRole('button', { name: /^Everything/ }));
-    expect(onContextMenu.mock.calls[2][0]).toMatchObject({
+    expect(onContextMenu.mock.calls[1][0]).toMatchObject({
       filter: { kind: 'all' },
       label: 'Everything',
     });

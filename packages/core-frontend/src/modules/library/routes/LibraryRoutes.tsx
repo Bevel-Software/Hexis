@@ -53,9 +53,9 @@ export function LibraryRoutes() {
             <Route path="owned" element={<LibraryPage filter={{ kind: 'owned' }} />} />
 
             {/* `yours` is a PLUGIN page, not a gallery filter — the items in no
-                folder, given the same page the folders get. The sidebar still
-                lights it through the `ungrouped` filter, so the URL and the
-                selection stay the pair they were. */}
+                folder, given the same page the folders get. It has no nav row
+                (your own space is not a group); it is reached from its row on
+                Everything, the welcome page and by URL. */}
             <Route path="yours" element={<PersonalPluginPage />} />
 
             {/* A plugin is a PLACE: `plugins/:plugin` is a real page with a real

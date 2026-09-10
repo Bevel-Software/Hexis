@@ -129,6 +129,18 @@ export interface IAccessControl {
   ): Promise<Map<string, boolean> | null>;
 
   /**
+   * Batched read for EVERYONE — what a signed-in person who is in no group
+   * and holds no role reads on each path, through the same walk. This is
+   * the built-in `everyone` principal's own verdict: a `read: everyone`
+   * grant (or a public plugin's) at the closest scope that says anything,
+   * a `deny everyone` there withholds. Nothing person-shaped counts — no
+   * email entry, no role, no admin rescue — so the answer is what the
+   * organisation as a whole can use, which is what the "Everyone" lens
+   * lists.
+   */
+  canReadAsEveryoneBatch(workspaceId: string, relativePaths: string[]): Promise<Map<string, boolean>>;
+
+  /**
    * Batched canWrite for PR diffs and commit-time gating. Returns a map keyed
    * by the input paths, with `true` / `false` for each. Reuses one config
    * load per call.
