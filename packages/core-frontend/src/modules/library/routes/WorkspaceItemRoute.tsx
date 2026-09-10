@@ -4,6 +4,7 @@ import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
 import { useLibrary } from '../state/library-data';
 import type { PluginSummary } from '../services/plugins.api';
+import { pluginHoldingPath } from '../utils/plugin-summary';
 import { FileRoute } from '../../workspace/components/FileRoute';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
@@ -88,7 +89,7 @@ export function WorkspaceItemRoute() {
           changed would be linked by its old name. The file itself waits for
           nothing. */}
       <PluginFileNote
-        plugin={data.pluginsLoading ? null : pluginHolding(data.pluginSummaries, segments.slice(1).join('/'))}
+        plugin={data.pluginsLoading ? null : pluginHoldingPath(segments.slice(1).join('/'), data.pluginSummaries)}
       />
       <FileRoute canonicalize={false} />
     </>
@@ -301,23 +302,6 @@ function folderHasSkillMd(tree: FileTreeEntry | null, workspaceRel: string | nul
   const folder = find(tree);
   if (!folder || folder.type !== 'directory') return undefined;
   return (folder.children ?? []).some((c) => c.type === 'file' && c.name === 'SKILL.md');
-}
-
-/**
- * The listed plugin whose folder holds `repoRel`, deepest first — null when
- * no listed plugin does (a file outside every plugin, or inside one the
- * catalog does not list for this caller). Whole segments only, so a sibling
- * folder sharing a prefix never claims the file.
- */
-function pluginHolding(summaries: readonly PluginSummary[], repoRel: string): PluginSummary | null {
-  let best: { plugin: PluginSummary; depth: number } | null = null;
-  for (const plugin of summaries) {
-    for (const folder of plugin.folders) {
-      if (!repoRel.startsWith(`${folder}/`)) continue;
-      if (!best || folder.length > best.depth) best = { plugin, depth: folder.length };
-    }
-  }
-  return best?.plugin ?? null;
 }
 
 /** One line above a file that sits inside a plugin: which plugin, and the way to its page. */

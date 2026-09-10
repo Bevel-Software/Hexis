@@ -150,10 +150,11 @@ const LIST_ITEM_OR_QUOTE = /^([-*+]|\d{1,9}[.)])(\s|$)|^>/;
 
 /**
  * The first paragraph that is not a markdown heading, collapsed to one line.
- * Blocks are separated by blank lines and by fenced code blocks; a fence is
- * code rather than a paragraph, so it and everything inside it (blank lines
- * and rules included) are skipped, and a fence that never closes runs to the
- * end of the text, as in CommonMark. Inside a block, ATX heading lines and
+ * Blocks are separated by blank lines and by code, fenced or indented; code
+ * is never a paragraph, so a fence and everything inside it (blank lines
+ * and rules included) are skipped, a fence that never closes runs to the
+ * end of the text, and an indented block is skipped line by line — all as
+ * in CommonMark (see `paragraphBlocks`). Inside a block, ATX heading lines and
  * rules (a thematic break, or a bare `===` or `---` line) are never content,
  * and a setext heading (paragraph text with a `===` or `---` underline
  * directly beneath it) is dropped together with its underline, so
@@ -195,7 +196,16 @@ function lineKind(line: string): 'heading' | 'rule' | 'container' | 'text' {
   return 'text';
 }
 
-/** The text's blocks outside fenced code, each a list of trimmed non-blank lines. */
+/**
+ * The text's blocks outside code, each a list of trimmed non-blank lines.
+ *
+ * Indentation decides what is code, as in CommonMark: a fence opens or
+ * closes only when indented at most three columns, and a line indented
+ * four or more where a block begins is an indented code block — literal
+ * text, so a ``` in it is content, not a fence that would swallow the rest
+ * of the file. Inside a block the same indentation is a paragraph
+ * continuation, since indented code cannot interrupt a paragraph.
+ */
 function paragraphBlocks(text: string): string[][] {
   const blocks: string[][] = [];
   let block: string[] = [];
@@ -206,23 +216,37 @@ function paragraphBlocks(text: string): string[][] {
   };
   for (const raw of text.split('\n')) {
     const line = raw.trim();
+    const indent = indentColumns(raw);
     if (fence !== null) {
       // The closer: the opener's character only, at least as many of it, nothing else.
-      if (line.startsWith(fence) && /^(`+|~+)$/.test(line)) fence = null;
+      if (indent <= 3 && line.startsWith(fence) && /^(`+|~+)$/.test(line)) fence = null;
       continue;
     }
-    const opener = CODE_FENCE.exec(line);
+    const opener = indent <= 3 ? CODE_FENCE.exec(line) : null;
     if (opener) {
       flush();
       fence = opener[1];
     } else if (line.length === 0) {
       flush();
+    } else if (block.length === 0 && indent >= 4) {
+      continue; // indented code: skipped line by line, blank lines between flush nothing
     } else {
       block.push(line);
     }
   }
   flush();
   return blocks;
+}
+
+/** Leading indentation in columns, a tab reaching the next multiple of four. */
+function indentColumns(raw: string): number {
+  let columns = 0;
+  for (const ch of raw) {
+    if (ch === ' ') columns += 1;
+    else if (ch === '\t') columns += 4 - (columns % 4);
+    else break;
+  }
+  return columns;
 }
 
 /**

@@ -25,10 +25,10 @@
  *     reads `everyone` — anyone may open the FILE, see the plugin listed, and
  *     ask to join — while the BODY (the folder's actual rules) names only
  *     the creator under read, write and owner.
- *   - A PERSONAL folder (`personal-<user-id>`): private by design. No
- *     frontmatter grant at all, so nobody else can even see it exists; the
- *     body names its owner. Created lazily (ensure semantics) on the first
- *     personal skill.
+ *   - A PERSONAL folder (`personal-<user-id>`): private by design, in both
+ *     blocks. The frontmatter denies `everyone` and names only the owner,
+ *     so nobody else can even see it exists; the body says the same of the
+ *     folder. Created lazily (ensure semantics) on the first personal skill.
  */
 
 import { randomUUID } from 'node:crypto';

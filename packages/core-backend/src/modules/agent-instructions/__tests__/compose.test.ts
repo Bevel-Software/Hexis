@@ -176,6 +176,26 @@ describe('composeAgentInstructions: the tool prefix', () => {
     expect(composeAgentInstructions('```\nnever closed\n\nstill code').toolPrefix).toBe(TOOL_PREFIX_LINE);
   });
 
+  it('indentation decides what is a fence: three columns still open one, four make it indented code', () => {
+    // A ``` indented four columns is the content of an indented code block,
+    // not a fence — so it cannot swallow the prose after it as an unclosed
+    // one. (The text is trimmed as a whole first, so the block sits after a
+    // heading, as it would in a real file.)
+    expect(composeAgentInstructions('# Title\n\n    ```\n    looks like a fence\n\nProse after the code.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} Prose after the code.`,
+    );
+    // An indented code block is not a paragraph, whatever it says.
+    expect(composeAgentInstructions('# Title\n\n    code line\n\tanother\n\nProse.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} Prose.`,
+    );
+    // Up to three columns the fence is a fence, and so is its closer.
+    expect(composeAgentInstructions('   ```\n---\n   ```\nProse.').toolPrefix).toBe(`${TOOL_PREFIX_LINE} Prose.`);
+    // Inside a paragraph, indentation is a continuation, not code.
+    expect(composeAgentInstructions('First line\n    continued.\n\nNext.').toolPrefix).toBe(
+      `${TOOL_PREFIX_LINE} First line continued.`,
+    );
+  });
+
   it("a fence closes only on a line of the opener's character, at least as long", () => {
     // Mixed characters do not close it, so what follows stays code.
     expect(composeAgentInstructions('```\ncode\n```~\nmore code\n```\n\nProse.').toolPrefix).toBe(

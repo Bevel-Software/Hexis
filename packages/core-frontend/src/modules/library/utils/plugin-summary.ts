@@ -19,16 +19,32 @@ export function pluginNameForPath(
   // path names the plugin. Only a path no listed folder holds falls back to
   // the folder name — and a personal shelf, which the catalog never lists,
   // to null.
-  let best: { name: string; length: number } | null = null;
-  for (const s of summaries) {
-    for (const f of s.folders) {
-      if ((repoPath === f || repoPath.startsWith(`${f}/`)) && (!best || f.length > best.length)) {
-        best = { name: s.name, length: f.length };
-      }
+  const held = pluginHoldingPath(repoPath, summaries);
+  if (held) return held.name;
+  return isPersonalPluginFolder(folder) ? null : folder;
+}
+
+/**
+ * The listed plugin whose folder holds `repoPath` — the folder itself or
+ * anything beneath it, deepest first, so a nested plugin beats the scope
+ * around it. Whole segments only: a sibling folder sharing a prefix never
+ * claims the path. Null when no listed plugin holds it (a path outside
+ * every plugin, or inside one the catalog does not list for this caller).
+ * The one place the rule lives, for every surface that asks which plugin
+ * a path is in.
+ */
+export function pluginHoldingPath<S extends Pick<PluginSummary, 'folders'>>(
+  repoPath: string,
+  summaries: readonly S[],
+): S | null {
+  let best: { plugin: S; depth: number } | null = null;
+  for (const plugin of summaries) {
+    for (const folder of plugin.folders) {
+      if (repoPath !== folder && !repoPath.startsWith(`${folder}/`)) continue;
+      if (!best || folder.length > best.depth) best = { plugin, depth: folder.length };
     }
   }
-  if (best) return best.name;
-  return isPersonalPluginFolder(folder) ? null : folder;
+  return best?.plugin ?? null;
 }
 
 /** What a plugin is called on screen — its display name, else its identity. */

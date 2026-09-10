@@ -684,6 +684,10 @@ describe('PersonalSpacesStep', () => {
       // the body has no word on that person: a denial someone wrote there
       // stands, and is not overridden by the older grant.
       'Plugins/personal-u5/access.md': '---\nread:\n  - Ed <ed@x.io>\nowner:\n  - Ed <ed@x.io>\n---\nread:\n  - deny Ed <ed@x.io>\n',
+      // A folder whose read denial is overruled by `write: everyone` (a
+      // same-scope grant wins, and write folds into read) is OPEN: the file
+      // stays open with it, and nothing is written.
+      'Plugins/personal-u6/access.md': '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
@@ -728,6 +732,9 @@ describe('PersonalSpacesStep', () => {
       expect(u5Body).toMatch(/owner:\n  - Ed <ed@x.io>/);
       // The file block keeps Ed's grant as written and gains the denial.
       expect(u5.slice(0, u5.indexOf('\n---\n', 4))).toBe('---\nread:\n  - Ed <ed@x.io>\n  - deny everyone\nowner:\n  - Ed <ed@x.io>');
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u6/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
       );

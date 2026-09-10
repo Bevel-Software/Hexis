@@ -4,6 +4,7 @@ import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { isPrivateAccessMd } from '../access-model/access-grammar.js';
+import { isAbsence } from '../../shared/fs-errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -230,15 +231,18 @@ export class PluginIndexService implements IPluginIndexService {
   /**
    * What the plugin's own access.md says of itself — see
    * `PluginCatalogEntry.isPrivate`. Read from disk rather than through the
-   * resolver: the mark reflects the file's frontmatter as written, and a
-   * file that cannot be read makes no statement (false, never a failure —
-   * the plugin still exists to the index).
+   * resolver: the mark reflects the file's frontmatter as written. An
+   * ABSENT file makes no statement (false: a plugin discovered by its
+   * manifest may have no rules yet); any other failure to read it is a real
+   * one and propagates, so the catalog never claims a privacy verdict it
+   * could not inspect — `build` degrades the whole read, as for any fault.
    */
   private async readsAsPrivate(accessMdPath: string): Promise<boolean> {
     try {
       return isPrivateAccessMd(await fs.readFile(accessMdPath, 'utf8'));
-    } catch {
-      return false;
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
     }
   }
 }

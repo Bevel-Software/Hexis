@@ -4,7 +4,7 @@ An agent connected to Hexis over MCP is told how each tool works ("Read a worksp
 
 ## What Changes
 
-- Every MCP session Hexis serves, hosted and through the local `hexis-mcp` bridge, carries `instructions` on the initialize handshake. MCP clients inject that text into the model's system prompt without the model having to do anything.
+- Every MCP session Hexis serves, hosted and through the local `hexis-mcp` bridge, carries `instructions` on the initialize handshake. Clients that honour the handshake (Claude Code, Claude Desktop, Cursor among them) inject that text into the model's system prompt without the model having to do anything. Not every client does — claude.ai web, the Agent SDK and Cline drop `instructions` (design.md) — which is why the four knowledge-base tools also carry a short prefix in their descriptions, the one channel every client shows the model.
 - The instructions are composed server-side from two layers: a short fixed platform header owned by the code (what Hexis is, search the knowledge base before answering from memory, call `start_session` first), followed by a deployment preamble the admin writes.
 - The deployment preamble lives in the knowledge-base repository as `mcp-description.md` at the repo root, on the default branch. It is seeded from the template when missing and never rewritten by the platform. It is versioned, reviewable through change requests, and moves with the repository.
 - A new agent-facing endpoint returns the composed text so the local bridge and the admin page read one source of truth; the hosted proxy composes it in-process at session creation from the same composer.

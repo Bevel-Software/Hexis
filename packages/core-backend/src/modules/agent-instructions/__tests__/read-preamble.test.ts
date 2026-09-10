@@ -61,6 +61,25 @@ describe('readAgentPreamble', () => {
     await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/symlink, not a regular file/);
   });
 
+  it('refuses a repository folder reached through a link — the whole path must be its own, not only the file', async () => {
+    // The file is a regular file; the folder above it is a link elsewhere.
+    const elsewhere = path.join(root, 'elsewhere');
+    await fs.mkdir(elsewhere, { recursive: true });
+    await fs.writeFile(path.join(elsewhere, 'mcp-description.md'), 'Not the repository.', 'utf8');
+    await fs.rm(path.join(wsDir, KB), { recursive: true });
+    await fs.symlink(elsewhere, path.join(wsDir, KB), process.platform === 'win32' ? 'junction' : 'dir');
+    await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/through a symlink/);
+  });
+
+  it('reads through a link ABOVE the workspace — a mounted volume is the operator\'s, not the repository\'s', async () => {
+    await fs.writeFile(path.join(wsDir, KB, 'mcp-description.md'), 'Acme.\n', 'utf8');
+    const mount = path.join(root, 'mount');
+    await fs.symlink(wsDir, mount, process.platform === 'win32' ? 'junction' : 'dir');
+    const ws = workspace();
+    ws.getWorkspacePath.mockImplementation(async () => mount);
+    expect(await readAgentPreamble(ws, KB)).toBe('Acme.\n');
+  });
+
   it('refuses a directory squatting the name', async () => {
     await fs.mkdir(path.join(wsDir, KB, 'mcp-description.md'));
     await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/directory, not a regular file/);

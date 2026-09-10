@@ -27,6 +27,13 @@ export type PreambleWorkspace = Pick<WorkspaceService, 'getOrCreateForBranch' | 
  * link or any non-regular entry before the open, and the open itself uses
  * `O_NOFOLLOW` and reads through the handle it checked, so the bytes sent come
  * from the inode the check passed rather than from a path swapped in between.
+ * The rule covers the WHOLE path below the workspace, not only the final
+ * component: the repository folder resolved through a link would put a
+ * regular file at the name with the link a level up, so the path's realpath
+ * must equal the spelled path under the workspace's own — identity, as the
+ * archive demands it, not mere containment. (The workspace root may itself
+ * sit behind a link — a mounted volume — which is the operator's, not the
+ * repository's, and is allowed.)
  *
  * Inside the workspace the repository is the `<kbDirName>/` folder, so the
  * path is `<kbDirName>/mcp-description.md`, the same shape `SkillService` and
@@ -43,6 +50,16 @@ export async function readAgentPreamble(workspace: PreambleWorkspace, kbDirName:
   });
   if (found === null) return null;
   if (!found.isFile()) throw notRegular(found.isSymbolicLink() ? 'symlink' : found.isDirectory() ? 'directory' : 'special file');
+
+  const [realWorkspace, realFile] = await Promise.all([
+    fs.realpath(wsDir),
+    fs.realpath(abs).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null; // deleted since the lstat: an absence, not a failure
+      throw err;
+    }),
+  ]);
+  if (realFile === null) return null;
+  if (realFile !== path.join(realWorkspace, kbDirName, PREAMBLE_FILE)) throw notRegular('path through a symlink');
 
   const handle = await fs
     .open(abs, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
@@ -62,7 +79,7 @@ export async function readAgentPreamble(workspace: PreambleWorkspace, kbDirName:
 
 function notRegular(kind: string): Error {
   return new Error(
-    `${PREAMBLE_FILE} on branch "${DEFAULT_BRANCH}" is a ${kind}, not a regular file; ` +
-      'refusing to read it. Replace it with a plain markdown file.',
+    `${PREAMBLE_FILE} on branch "${DEFAULT_BRANCH}" is a ${kind}, not a regular file at its own place; ` +
+      'refusing to read it. Replace it with a plain markdown file in the repository folder.',
   );
 }

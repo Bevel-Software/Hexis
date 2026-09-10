@@ -127,12 +127,14 @@ function closeFolderRules(text: string, folder: Record<Verb, ParsedEntry[]>): st
 /**
  * The frontmatter — the FILE's rules — saying what the folder's say: `deny
  * everyone`, then the people the folder admits (its user grants under
- * `read`, `write` and `owner`). Only for a file whose folder rules deny
- * `everyone` read: a space its owner opened on purpose keeps the file open
- * too. A frontmatter that already mentions `everyone` under `read` — a
- * denial, or a grant that lists the file for all — is left as written; so
- * is a legacy single-block file, whose frontmatter IS the folder's rules
- * and was closed above.
+ * `read`, `write` and `owner`). Only for a file whose folder rules settle
+ * `everyone`'s read as DENIED — a denial under `read` with no grant under
+ * any verb that folds into read (`write: everyone` opens the folder to all
+ * despite the denial, a same-scope grant winning): a space its owner opened
+ * on purpose, either way, keeps the file open too. A frontmatter that
+ * already mentions `everyone` under `read` — a denial, or a grant that
+ * lists the file for all — is left as written; so is a legacy single-block
+ * file, whose frontmatter IS the folder's rules and was closed above.
  */
 function closeFileRules(text: string, relativePath: string): string {
   if (!accessMdDeclaresBodyRules(text)) return text;
@@ -141,7 +143,10 @@ function closeFileRules(text: string, relativePath: string): string {
   const parsed = parseAccessFile(text, relativePath);
   if (!parsed.ok) return text;
   const folder = parsed.file.entries;
-  if (!folder.read.some((e) => everyone(e) && e.deny)) return text;
+  const folderReadIsDenied =
+    folder.read.some((e) => everyone(e) && e.deny) &&
+    !sourceVerbsFor('read').some((verb) => folder[verb].some((e) => everyone(e) && !e.deny));
+  if (!folderReadIsDenied) return text;
   let next = spliceGrant(text, 'read', { kind: 'role', role: 'everyone' }, { deny: true, target: 'node', allowScalar: false }).text;
   const named = new Set<string>();
   for (const verb of sourceVerbsFor('read')) {

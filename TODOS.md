@@ -84,7 +84,7 @@
 
 **Why:** After agent-preamble the model gets the full text through the handshake and a 300-character prefix on four tools. A client that ignores the handshake sees only the prefix.
 
-**Context:** `start_session` is external-only at `packages/core-backend/src/modules/workspace/workspace.tools.ts:373`; the composer's result is available in-process in `McpService`. The earlier decision rejected this as the only channel because it arrives after the model decides to call; as a complement it is one field on an existing result. Build it only if the manual eval in the agent-preamble PR shows a client that needs it.
+**Context:** `start_session` is external-only at `packages/core-backend/src/modules/workspace/workspace.tools.ts:453`; the composer's result is available in-process in `McpService`. The earlier decision rejected this as the only channel because it arrives after the model decides to call; as a complement it is one field on an existing result. Build it only if the manual eval in the agent-preamble PR shows a client that needs it.
 
 **Effort:** S
 **Priority:** P3

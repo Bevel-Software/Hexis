@@ -89,7 +89,15 @@ async function connectClient(readAgentPreamble?: () => Promise<string | null>): 
   app.use('/api', createMcpRoutes(mcpService, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   app.use('/api', createManualRoutes(registry, fakeAuth));
 
-  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {
+  serverBaseUrl = baseUrl;
+  return openSession();
+}
+
+let serverBaseUrl = '';
+
+/** One more client session against the server `connectClient` started — same app, same `McpService`. */
+async function openSession(): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL(`${serverBaseUrl}/api/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${TEST_BEARER}` } },
   });
   const client = new Client({ name: 'e2e-client', version: '0.0.0' }, { capabilities: {} });
@@ -161,18 +169,20 @@ describe('agent instructions over the real transport', () => {
     expect(instructions).not.toContain('private');
   });
 
-  it('a second session after the file changed carries the new text, no restart needed', async () => {
+  it('a second session on the SAME server after the file changed carries the new text — read per session, never once at start', async () => {
     let content = 'Version one.';
     const read = async () => content;
     const first = await connectClient(read);
     expect(first.getInstructions()).toContain('Version one.');
-    for (const c of cleanups.splice(0)) await c().catch(() => {});
-    if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
-    httpServer = undefined;
 
+    // The server, its McpService and the reader stay exactly as they are;
+    // only what the reader returns changes. A service that read the file
+    // once at construction would hand the second session the old text.
     content = 'Version two.';
-    const second = await connectClient(read);
+    const second = await openSession();
     expect(second.getInstructions()).toContain('Version two.');
     expect(second.getInstructions()).not.toContain('Version one.');
+    // The first session keeps the instructions it was initialised with.
+    expect(first.getInstructions()).toContain('Version one.');
   });
 });

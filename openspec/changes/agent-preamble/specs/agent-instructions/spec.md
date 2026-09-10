@@ -24,14 +24,14 @@ Every MCP session Hexis serves SHALL include an `instructions` string in its ini
 - **THEN** the bridge logs the failure, starts without `instructions`, and otherwise serves the session as before
 
 ### Requirement: The four knowledge-base tools carry a purpose prefix
-The hosted `tools/list` SHALL prepend a prefix to the descriptions of exactly `start_session`, `grep`, `list_files` and `read_file`: the prefix, a blank line, then the tool's original description. The prefix SHALL be the fixed line "This organisation's knowledge base. Search it before answering from memory." followed, when the preamble has one, by the preamble's first paragraph that is not a markdown heading, the whole prefix capped at 300 characters on a code-point boundary. Every other listed tool's description SHALL be unchanged. The local bridge discovers its tools from the hosted listing and SHALL pass the prefixed descriptions through.
+The hosted `tools/list` SHALL prepend a prefix to the descriptions of exactly `start_session`, `grep`, `list_files` and `read_file`: the prefix, a blank line, then the tool's original description. The prefix SHALL be the fixed line "This organisation's knowledge base. Search it before answering from memory." followed, when the preamble has one, by the preamble's first paragraph that is not a markdown heading, the whole prefix capped at 300 characters on a code-point boundary. "First paragraph that is not a markdown heading" means the first block of prose, in CommonMark terms: code — fenced, or indented four columns — is never prose and is skipped whole; ATX headings, setext headings (the text together with its `===` or `---` underline) and rule lines (thematic breaks and bare `===` or `---` lines) are dropped from a block; what remains of the first block that keeps any line is collapsed to one line. A preamble made only of headings, rules and code therefore has no such paragraph, and the prefix is never a rule line. Every other listed tool's description SHALL be unchanged. The local bridge discovers its tools from the hosted listing and SHALL pass the prefixed descriptions through.
 
 #### Scenario: Preamble present
-- **WHEN** `mcp-description.md` has, after comment stripping, a first non-heading paragraph
-- **THEN** each of the four descriptions starts with the fixed line, then that paragraph, and the prefix is at most 300 characters
+- **WHEN** `mcp-description.md` has, after comment stripping, a first block with a line that is not a heading, a rule or code
+- **THEN** each of the four descriptions starts with the fixed line, then that block's remaining lines as one paragraph, and the prefix is at most 300 characters
 
-#### Scenario: Preamble absent or heading-only
-- **WHEN** the stripped preamble is empty or contains only headings
+#### Scenario: Preamble absent, or without a paragraph
+- **WHEN** the stripped preamble is empty or contains only headings, rules and code blocks
 - **THEN** each of the four descriptions starts with the fixed line alone
 
 #### Scenario: Other tools untouched
