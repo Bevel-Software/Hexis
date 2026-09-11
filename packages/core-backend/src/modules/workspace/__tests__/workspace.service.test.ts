@@ -886,6 +886,44 @@ describe('WorkspaceService — symbolic links', () => {
     expect(await fs.readdir(elsewhere)).toEqual(['note.md']);
   });
 
+  it('refuses a path through a DANGLING link — its absence is not leave to climb past it', async () => {
+    // A link to nothing resolves to nothing, like a missing folder would; a
+    // guard that then climbed to the parent would pass, and the write would
+    // land wherever the link is pointed at by the time it runs.
+    await fs.symlink(path.join(root, 'nowhere'), path.join(workspaceDir, 'knowledge-base', 'dangling'), linkType);
+    await expect(svc.writeFile(workspaceId, 'knowledge-base/dangling/note.md', 'x')).rejects.toThrow(
+      'Path traversal detected',
+    );
+    await expect(fs.access(path.join(root, 'nowhere'))).rejects.toThrow();
+  });
+
+  it('refuses a directory, a move and an extraction that would go through a link', async () => {
+    const elsewhere = path.join(root, 'elsewhere');
+    await fs.mkdir(elsewhere, { recursive: true });
+    await fs.symlink(elsewhere, path.join(workspaceDir, 'knowledge-base', 'linked'), linkType);
+    await svc.writeFile(workspaceId, 'knowledge-base/real.md', 'real');
+
+    await expect(svc.createDirectory(workspaceId, 'knowledge-base/linked/new-folder')).rejects.toThrow(
+      'Path traversal detected',
+    );
+    await expect(svc.moveEntry(workspaceId, 'knowledge-base/real.md', 'knowledge-base/linked/real.md')).rejects.toThrow(
+      'Path traversal detected',
+    );
+    expect(await fs.readFile(path.join(workspaceDir, 'knowledge-base', 'real.md'), 'utf-8')).toBe('real');
+
+    // An archive whose entry lands under the link: that entry is skipped and
+    // reported; the rest extracts.
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip();
+    zip.addFile('linked/escaped.md', Buffer.from('out'));
+    zip.addFile('kept.md', Buffer.from('in'));
+    await fs.writeFile(path.join(workspaceDir, 'knowledge-base', 'a.zip'), zip.toBuffer());
+    const res = await svc.unzipFile(workspaceId, 'knowledge-base/a.zip', 'knowledge-base');
+    expect(res.extracted).toEqual(['knowledge-base/kept.md']);
+    expect(res.skipped).toContainEqual({ path: 'linked/escaped.md', reason: 'Path traversal detected' });
+    expect(await fs.readdir(elsewhere)).toEqual([]);
+  });
+
   it('reads and writes as before when nothing on the path is a link, the workspace root behind one included', async () => {
     const rel = 'knowledge-base/Folder/new/page.md';
     await svc.writeFile(workspaceId, rel, 'Hello.');

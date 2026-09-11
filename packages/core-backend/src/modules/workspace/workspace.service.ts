@@ -853,10 +853,18 @@ export class WorkspaceService implements IWorkspaceService {
       throw err;
     });
     if (entry?.isSymbolicLink()) throw traversal();
-    // The deepest existing ancestor: a write creates the rest, under it.
+    // The deepest existing ancestor: a write creates the rest, under it. Each
+    // ancestor is lstat-ed BEFORE its absence is taken as leave to climb: a
+    // dangling link resolves to nothing too, and climbing past it would let
+    // a target created in the meantime receive the write.
     let ancestor = path.dirname(absolutePath);
     let realAncestor: string | null = null;
     while (realAncestor === null) {
+      const ancestorEntry = await fs.lstat(ancestor).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
+        throw err;
+      });
+      if (ancestorEntry?.isSymbolicLink()) throw traversal();
       realAncestor = await fs.realpath(ancestor).catch((err: unknown) => {
         if (isAbsence(err)) return null;
         throw err;
@@ -1133,6 +1141,10 @@ export class WorkspaceService implements IWorkspaceService {
     const newAbsolute = path.resolve(workspaceDir, newRelativePath);
     this.assertWithinWorkspace(oldAbsolute, workspaceDir);
     this.assertWithinWorkspace(newAbsolute, workspaceDir);
+    // Both ends: a link as the source would be moved as a link (harmless) but
+    // a link on the way to either end would carry the rename outside.
+    await this.assertNotThroughLink(oldAbsolute, workspaceDir);
+    await this.assertNotThroughLink(newAbsolute, workspaceDir);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });
     await fs.rename(oldAbsolute, newAbsolute);
     if (this.diffService) {
@@ -1306,6 +1318,7 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
     await fs.mkdir(absolutePath, { recursive: true });
     const entries = await fs.readdir(absolutePath);
     if (entries.length === 0) {
@@ -1363,6 +1376,10 @@ export class WorkspaceService implements IWorkspaceService {
     if (destRel) assertValidRelativePath(destRel);
     const destAbsolute = destRel ? path.resolve(workspaceDir, destRel) : workspaceDir;
     this.assertWithinWorkspace(destAbsolute, workspaceDir);
+    // Neither the archive nor the destination may sit behind a link; each
+    // entry's own target is checked again below, once it is known.
+    await this.assertNotThroughLink(zipAbsolute, workspaceDir);
+    if (destAbsolute !== workspaceDir) await this.assertNotThroughLink(destAbsolute, workspaceDir);
 
     let zip: AdmZip;
     try {
@@ -1445,6 +1462,19 @@ export class WorkspaceService implements IWorkspaceService {
           return false;
         }
       };
+
+      // The symbolic-link rule, per entry: a link already on disk under the
+      // destination must not redirect this entry's bytes. Reported like the
+      // other per-entry refusals, so one such entry does not fail the rest.
+      try {
+        await this.assertNotThroughLink(targetAbsolute, workspaceDir);
+      } catch (err) {
+        if (err instanceof Error && err.message === 'Path traversal detected') {
+          skipped.push({ path: rawName, reason: err.message });
+          continue;
+        }
+        throw err;
+      }
 
       if (entry.isDirectory) {
         if (!(await allowEntry())) continue;
