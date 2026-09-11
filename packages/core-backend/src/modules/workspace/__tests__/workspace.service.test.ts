@@ -205,6 +205,350 @@ describe('WorkspaceService.createDirectory', () => {
     expect(names).toContain('visible-empty');
     expect(names).toContain('real.md');
   });
+
+  it('hides mcp-description.md when the root .bevelignore declares the platform rule', async () => {
+    const repoDir = path.join(workspaceDir, 'knowledge-base');
+    const nestedDir = path.join(repoDir, 'KnowledgeBase');
+    await fs.mkdir(nestedDir, { recursive: true });
+    await fs.writeFile(path.join(repoDir, '.bevelignore'), '/mcp-description.md\n', 'utf-8');
+    await fs.writeFile(path.join(repoDir, 'mcp-description.md'), 'Private deployment preamble', 'utf-8');
+    await fs.writeFile(path.join(nestedDir, 'mcp-description.md'), 'Ordinary nested knowledge', 'utf-8');
+    await fs.writeFile(path.join(repoDir, 'visible.md'), 'Visible knowledge', 'utf-8');
+
+    const tree = await svc.listFiles(workspaceId);
+    const repo = tree.children?.find((entry) => entry.name === 'knowledge-base');
+    const names = repo?.children?.map((entry) => entry.name) ?? [];
+
+    expect(names).toContain('visible.md');
+    expect(repo?.children?.find((entry) => entry.name === 'KnowledgeBase')?.children?.map((entry) => entry.name))
+      .toContain('mcp-description.md');
+    expect(names).not.toContain('mcp-description.md');
+  });
+});
+
+/**
+ * `writeFile`'s conditional write: the caller states the bytes it last read
+ * and the write is refused if the file no longer holds them. The compare and
+ * the write are one call so the route's per-path lock covers both.
+ */
+describe('WorkspaceService.writeFile — expectedContent', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('writes when the file still holds the expected content', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    await svc.writeFile(workspaceId, rel, 'After.', { expectedContent: 'Before.' });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('After.');
+  });
+
+  it('refuses with a 409 and leaves the file alone when it changed underneath', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), "Another admin's text.", 'utf-8');
+
+    await expect(
+      svc.writeFile(workspaceId, rel, 'My stale merge.', { expectedContent: 'What I loaded.' }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe("Another admin's text.");
+  });
+
+  it("treats an absent file as the empty string, so expecting '' creates it", async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+
+    await svc.writeFile(workspaceId, rel, 'First write.', { expectedContent: '' });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('First write.');
+  });
+
+  it('refuses to create over a file the caller believed absent', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Seeded since the editor opened.', 'utf-8');
+
+    await expect(
+      svc.writeFile(workspaceId, rel, 'From an empty editor.', { expectedContent: '' }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Seeded since the editor opened.');
+  });
+
+  it('leaves no directory behind when it refuses', async () => {
+    // "A refused save leaves nothing behind" has to include the parent chain.
+    const rel = 'knowledge-base/new-folder/note.md';
+    await fs.writeFile(path.join(workspaceDir, 'knowledge-base', 'taken.md'), 'x', 'utf-8');
+
+    await expect(
+      svc.writeFile(workspaceId, rel, 'mine', { expectedContent: 'not what is there' }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    await expect(fs.stat(path.join(workspaceDir, 'knowledge-base', 'new-folder'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('still creates the parent chain for a save that goes ahead', async () => {
+    const rel = 'knowledge-base/new-folder/note.md';
+
+    await svc.writeFile(workspaceId, rel, 'mine', { expectedContent: '' });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('mine');
+  });
+
+  it('refuses an absolute path rather than writing it inside the workspace', async () => {
+    // The property canonicalisation must not erode: `path.resolve` lets an
+    // absolute path win over the workspace dir, and the boundary check is what
+    // refuses it. A canonicaliser that dropped the empty leading segment would
+    // turn this into an ordinary write at `<workspace>/etc/passwd`.
+    //
+    // The boundary check IS what answers here, and the message says so. Two
+    // exported functions in this repo are called `assertValidRelativePath`:
+    // `writeFile` calls the one in `@bevel-software/platform-shared`, which
+    // splits on `/` and drops empty segments, so `/etc/passwd` validates as
+    // `['etc','passwd']` and passes. The stricter one in
+    // `modules/kb-fs/branch-name.ts` would refuse it with 'path must be
+    // relative', but only `git.service.ts` uses that one, to guard a git
+    // pathspec. Reviewers have read this the other way round twice; renaming
+    // the strict one is recorded as a follow-up.
+    await expect(
+      svc.writeFile(workspaceId, '/etc/passwd', 'pwned', { expectedContent: '' }),
+    ).rejects.toThrow('Path traversal detected');
+  });
+
+  it('is not applied at all when the option is absent', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Whatever.', 'utf-8');
+
+    await svc.writeFile(workspaceId, rel, 'Replaced.');
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Replaced.');
+  });
+
+  it('serializes writes per path, so two concurrent conditional saves cannot both pass', async () => {
+    // The compare and the write are two awaits apart. Without a turn per path
+    // both saves read the same bytes, both pass, and the loser's text is gone
+    // with no 409 to show for it.
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    const [first, second] = await Promise.allSettled([
+      svc.writeFile(workspaceId, rel, 'From A.', { expectedContent: 'Before.' }),
+      svc.writeFile(workspaceId, rel, 'From B.', { expectedContent: 'Before.' }),
+    ]);
+
+    const settled = [first, second];
+    expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = settled.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(rejected.reason).toMatchObject({ status: 409 });
+    // Whichever won, the file holds ITS text whole — never a mix, never the loser's.
+    const landed = await fs.readFile(path.join(workspaceDir, rel), 'utf-8');
+    expect(landed).toBe(first.status === 'fulfilled' ? 'From A.' : 'From B.');
+  });
+
+  it('refuses a conditional write against a directory as a client error, not a raw failure', async () => {
+    // `GET /file` counts EISDIR as "no file at this path" and the editor opens
+    // empty on that 404, so the save that follows must say what is wrong.
+    await fs.mkdir(path.join(workspaceDir, 'knowledge-base', 'a-folder'), { recursive: true });
+
+    await expect(
+      svc.writeFile(workspaceId, 'knowledge-base/a-folder', 'text', { expectedContent: '' }),
+    ).rejects.toMatchObject({ status: 400, message: expect.stringContaining('is a directory') });
+  });
+});
+
+/**
+ * The per-path turn the conditional write rests on: what queues behind what,
+ * that two spellings of one file are one queue, and that a caller holding a
+ * turn can still call the ordinary write inside it.
+ */
+describe('WorkspaceService.withPathTurn', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  /** Yield to the microtask queue enough times that an unserialized body interleaves. */
+  const yieldTwice = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  it('runs one turn at a time, so two bodies never interleave', async () => {
+    const order: string[] = [];
+    const body = (name: string) => async (): Promise<void> => {
+      order.push(`${name}:enter`);
+      await yieldTwice();
+      order.push(`${name}:exit`);
+    };
+
+    await Promise.all([
+      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('a')),
+      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('b')),
+    ]);
+
+    expect(order).toEqual(['a:enter', 'a:exit', 'b:enter', 'b:exit']);
+  });
+
+  it('treats two spellings of one file as one queue', async () => {
+    const order: string[] = [];
+    const body = (name: string) => async (): Promise<void> => {
+      order.push(`${name}:enter`);
+      await yieldTwice();
+      order.push(`${name}:exit`);
+    };
+
+    await Promise.all([
+      svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('plain')),
+      svc.withPathTurn(workspaceId, './knowledge-base/mcp-description.md', body('dotted')),
+      svc.withPathTurn(workspaceId, 'knowledge-base//mcp-description.md', body('doubled')),
+    ]);
+
+    expect(order).toEqual([
+      'plain:enter', 'plain:exit', 'dotted:enter', 'dotted:exit', 'doubled:enter', 'doubled:exit',
+    ]);
+  });
+
+  it('lets another file run while one path is held: a turn is per file', async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = svc.withPathTurn(workspaceId, 'knowledge-base/one.md', () => held);
+
+    // Would hang if one file's turn queued another's.
+    await expect(
+      svc.withPathTurn(workspaceId, 'knowledge-base/two.md', async () => 'ran'),
+    ).resolves.toBe('ran');
+
+    release();
+    await holder;
+  });
+
+  it('is re-entrant: the write inside a held turn does not wait for itself', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    await svc.withPathTurn(workspaceId, rel, async () => {
+      // The same compare-and-write the route makes inside its own turn.
+      await svc.writeFile(workspaceId, rel, 'After.', { expectedContent: 'Before.' });
+    });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('After.');
+  });
+
+  it('a throwing turn does not wedge the ones queued behind it', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+
+    const failed = svc.withPathTurn(workspaceId, rel, async () => {
+      throw new Error('boom');
+    });
+    const after = svc.withPathTurn(workspaceId, rel, async () => 'ran');
+
+    await expect(failed).rejects.toThrow('boom');
+    await expect(after).resolves.toBe('ran');
+  });
+
+  it('holds a delete and an upload of the same path until the turn ends', async () => {
+    // The mutators cubic named: neither goes through writeFile, and either
+    // landing inside a conditional write's compare-then-write would defeat it.
+    const rel = 'knowledge-base/mcp-description.md';
+    const absolute = path.join(workspaceDir, rel);
+    await fs.writeFile(absolute, 'Held.', 'utf-8');
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holder = svc.withPathTurn(workspaceId, rel, () => held);
+
+    let deleted = false;
+    let uploaded = false;
+    const del = svc.deleteFile(workspaceId, rel).then(() => {
+      deleted = true;
+    });
+    const up = svc.writeFileBinary(workspaceId, rel, new Uint8Array([1, 2, 3])).then(() => {
+      uploaded = true;
+    });
+    // Real filesystem round trips, not setImmediate: an fs completion runs in
+    // the poll phase, which a check-phase callback can jump ahead of, so
+    // yielding by microtask would prove nothing about a free `fs.rm`.
+    for (let i = 0; i < 5; i += 1) await fs.stat(workspaceDir);
+
+    expect({ deleted, uploaded }).toEqual({ deleted: false, uploaded: false });
+    expect(await fs.readFile(absolute, 'utf-8')).toBe('Held.');
+
+    release();
+    await Promise.all([holder, del, up]);
+    expect({ deleted, uploaded }).toEqual({ deleted: true, uploaded: true });
+  });
+});
+
+describe('WorkspaceService.assertContentMatches', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'target-company-state');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('passes silently when the file still holds the expected content', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Before.', 'utf-8');
+
+    await expect(svc.assertContentMatches(workspaceId, rel, 'Before.')).resolves.toBeUndefined();
+  });
+
+  it('refuses a stale precondition with the write path\'s own 409, and writes nothing', async () => {
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.writeFile(path.join(workspaceDir, rel), "Another admin's text.", 'utf-8');
+
+    await expect(svc.assertContentMatches(workspaceId, rel, 'What I loaded.')).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe("Another admin's text.");
+  });
+
+  it('reads an absent file as the empty string', async () => {
+    await expect(
+      svc.assertContentMatches(workspaceId, 'knowledge-base/mcp-description.md', ''),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe('WorkspaceService.createFolderZip', () => {

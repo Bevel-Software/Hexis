@@ -708,6 +708,20 @@ describe('the one-click install link', () => {
 });
 
 describe('tabs', () => {
+  it('puts connection setup first and agent instructions in a separate card below it', () => {
+    mount(PUBLIC_URL);
+    const connections = screen.getByTestId('agent-connection-section');
+    const instructions = screen.getByTestId('agent-instructions-section');
+    expect(within(connections).getByRole('tablist')).toBeInTheDocument();
+    expect(within(instructions).getByRole('heading', {
+      name: 'What agents are told about this knowledge base',
+    })).toBeInTheDocument();
+    expect(connections.compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(connections.parentElement).toBe(instructions.parentElement);
+    expect(connections.className).toContain('rounded-lg');
+    expect(instructions.className).toContain('rounded-lg');
+  });
+
   it('starts on the interactive tab', () => {
     mount(PUBLIC_URL);
     const tabs = screen.getAllByRole('tab');

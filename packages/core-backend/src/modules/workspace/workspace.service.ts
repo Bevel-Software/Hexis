@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -97,6 +98,49 @@ function redactError(err: unknown): string {
 const FETCH_CACHE_TTL_MS = 30_000;
 
 /**
+ * The bytes a conditional write compares against. An absent file reads as the
+ * empty string, so `expectedContent: ''` means "expect nothing there yet".
+ *
+ * A directory at the path is a client error, not a 500 with a raw OS message:
+ * `GET /file` counts EISDIR as "no file at this path", so the editor that
+ * opened empty on that 404 would otherwise be told its save failed for an
+ * unexplained internal reason. Anything else (EACCES, EIO) is a real read
+ * failure and propagates: an unreadable file must not pass for an empty one.
+ */
+async function readForConditionalWrite(absolutePath: string, relativePath: string): Promise<string> {
+  try {
+    return await fs.readFile(absolutePath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return '';
+    if (code === 'EISDIR') {
+      const notAFile: Error & { status?: number } = new Error(
+        `"${relativePath}" is a directory, not a file.`,
+      );
+      notAFile.status = 400;
+      throw notAFile;
+    }
+    throw err;
+  }
+}
+
+/** Throw the conditional write's 409 unless the file still holds `expectedContent`. */
+async function assertConditionalWriteMatches(
+  absolutePath: string,
+  relativePath: string,
+  expectedContent: string,
+): Promise<void> {
+  const current = await readForConditionalWrite(absolutePath, relativePath);
+  if (current === expectedContent) return;
+  const stale: Error & { status?: number } = new Error(
+    `"${relativePath}" changed since you opened it. Reload it and apply your edit again, ` +
+      'so the other change is not overwritten.',
+  );
+  stale.status = 409;
+  throw stale;
+}
+
+/**
  * Per-directory read filter for the file tree. Given a batch of
  * workspace-relative entry paths (e.g. `staging-repo/Product/Knowledge/x.md`),
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
@@ -121,6 +165,19 @@ export class WorkspaceService implements IWorkspaceService {
   /** Whether the last fetch per repo SUCCEEDED — read by strict callers of `ensureRemotesFetched`. */
   private readonly lastFetchOk = new Map<string, boolean>();
   private readonly inFlightFetches = new Map<string, Promise<void>>();
+  /**
+   * One mutation at a time per file, keyed by RESOLVED absolute path — so
+   * `x/a.md`, `./x/a.md` and `x//a.md` are one queue and not three. See
+   * {@link withPathTurn} for what takes a turn and why.
+   */
+  private readonly writeTurns = new Map<string, Promise<void>>();
+  /**
+   * The turns the CURRENT async context already holds. Taking one it holds
+   * runs straight through instead of waiting for itself, which is what lets a
+   * caller wrap a whole read-decide-write sequence in a turn and still call
+   * the ordinary write inside it.
+   */
+  private readonly heldTurns = new AsyncLocalStorage<ReadonlySet<string>>();
 
   /**
    * Late-bound by the composition root — DiffService depends on
@@ -966,7 +1023,10 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await fs.rm(absolutePath, { recursive: true, force: true });
+    // Under the path's turn like every other single-file mutation: a delete
+    // landing between a conditional write's compare and its write would let
+    // that write recreate the file the delete had just removed.
+    await this.withResolvedPathTurn(absolutePath, () => fs.rm(absolutePath, { recursive: true, force: true }));
     await this.diffService?.markUserDeleted(workspaceId, relativePath);
   }
 
@@ -989,6 +1049,16 @@ export class WorkspaceService implements IWorkspaceService {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 
+  /**
+   * Rename or move one entry.
+   *
+   * Deliberately NOT under {@link withPathTurn}: a move mutates two paths, and
+   * holding both turns would introduce the one shape that can deadlock here
+   * (a move waiting on a target whose holder is waiting on the move's other
+   * path). A rename onto a path being conditionally written is therefore
+   * outside that guarantee; the workflow lock on the moved path is what
+   * serializes it against the app's own editors.
+   */
   async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
     assertValidRelativePath(newRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
@@ -1004,36 +1074,149 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
-  async writeFile(
+  /**
+   * Refuse a conditional write, with the same 409 {@link writeFile} throws,
+   * without writing anything. The route calls this BEFORE the creator-access
+   * plan: that plan can commit a seeded `access.md` under its own lock, and a
+   * precondition failing after it would leave an authorization grant behind
+   * for a save that never landed. The write's own compare, under its write
+   * turn, stays the authoritative one; this only keeps the refusal free of
+   * side effects.
+   */
+  async assertContentMatches(
     workspaceId: string,
     relativePath: string,
-    content: string,
-    options?: { failIfExists?: boolean },
+    expectedContent: string,
   ): Promise<void> {
     assertValidRelativePath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    try {
-      // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
-      // followed by a plain write would let two concurrent creators (or a
-      // stale client whose file list predates the file) both pass the check
-      // and silently replace each other's content.
-      await fs.writeFile(absolutePath, content, {
-        encoding: 'utf-8',
-        flag: options?.failIfExists ? 'wx' : 'w',
-      });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        const conflict: Error & { status?: number } = new Error(
-          `"${relativePath}" already exists.`,
-        );
-        conflict.status = 409;
-        throw conflict;
+    await assertConditionalWriteMatches(absolutePath, relativePath, expectedContent);
+  }
+
+  /**
+   * Run `op` as the only mutation in flight for `relativePath` in this
+   * process, so a read-then-decide-then-write sequence inside it cannot have
+   * another mutation land in the middle of it.
+   *
+   * The conditional write ({@link writeFile}'s `expectedContent`) needs that,
+   * and so does a caller whose decision spans more than one call: `PUT /file`
+   * checks the precondition, plans a creator-access grant that COMMITS, and
+   * only then writes, and a save that lands in between would leave that grant
+   * behind for a write about to be refused. Such a caller wraps the sequence
+   * in a turn and the write inside it takes the same one, re-entrantly.
+   *
+   * The route's own per-path lock does not establish this: it deliberately
+   * runs the op WITHOUT acquiring when the caller already holds the lock, so
+   * two requests from that holder would interleave.
+   *
+   * The reach of the guarantee, exactly: within this process, one mutation at
+   * a time per resolved path. ACROSS instances the workflow lock row is the
+   * coordinator, and it agrees with this queue only because `PUT /file`
+   * canonicalises the path before taking either (see `canonicalRelativePath`);
+   * a caller that reaches the service directly with an odd spelling gets the
+   * local queue and whatever lock it took itself. Case is not folded: on the
+   * Linux deployment target `Foo.md` and `foo.md` are two files, and treating
+   * them as one would be a worse bug than the race it would close.
+   */
+  async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
+    assertValidRelativePath(relativePath);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absolutePath = path.resolve(workspaceDir, relativePath);
+    this.assertWithinWorkspace(absolutePath, workspaceDir);
+    return this.withResolvedPathTurn(absolutePath, op);
+  }
+
+  /**
+   * {@link withPathTurn} on an already-resolved path.
+   *
+   * A turn this context holds runs through: waiting for itself would hang.
+   * What is stored is the SETTLED tail, never the caller's promise, so a
+   * throwing mutation cannot wedge the queue behind it and no rejection is
+   * left unhandled; the entry is dropped once it is still the tail, so the
+   * map does not grow by an entry per file ever touched.
+   *
+   * Nesting a DIFFERENT file's turn inside one is safe here because the only
+   * caller that does it is `PUT /file`, and the grant it seeds is always an
+   * `access.md` at or above its target: two such sequences cannot each hold
+   * what the other wants, since that would need each target to sit above the
+   * other. Every other holder takes one turn and nests nothing.
+   */
+  private async withResolvedPathTurn<T>(absolutePath: string, op: () => Promise<T>): Promise<T> {
+    const held = this.heldTurns.getStore();
+    if (held?.has(absolutePath)) return op();
+    const run = (): Promise<T> =>
+      this.heldTurns.run(new Set([...(held ?? []), absolutePath]), op);
+    const previous = this.writeTurns.get(absolutePath);
+    const turn = previous ? previous.then(run) : run();
+    const tail = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.writeTurns.set(absolutePath, tail);
+    void tail.then(() => {
+      if (this.writeTurns.get(absolutePath) === tail) this.writeTurns.delete(absolutePath);
+    });
+    return turn;
+  }
+
+  /**
+   * Write one workspace file.
+   *
+   * - `failIfExists` is an exclusive create (see the `wx` note below).
+   * - `expectedContent` is a conditional write: the file must still hold
+   *   exactly that text, or the write is refused with a 409. It is what lets
+   *   an editor that composed its save from a snapshot (the inline agent
+   *   description merges the private comments it read minutes earlier) refuse
+   *   rather than erase whatever landed in between. An absent file reads as
+   *   the empty string, so `expectedContent: ''` means "expect nothing there
+   *   yet" and creates it.
+   *
+   * The compare and the write run inside this path's write turn, so no other
+   * write through this service can land between them, whatever locking the
+   * caller did or skipped.
+   */
+  async writeFile(
+    workspaceId: string,
+    relativePath: string,
+    content: string,
+    options?: { failIfExists?: boolean; expectedContent?: string },
+  ): Promise<void> {
+    assertValidRelativePath(relativePath);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absolutePath = path.resolve(workspaceDir, relativePath);
+    this.assertWithinWorkspace(absolutePath, workspaceDir);
+    await this.withResolvedPathTurn(absolutePath, async () => {
+      // Compare BEFORE creating anything. The parent chain used to be made
+      // first, so a refused save at `x/new-folder/note.md` left an empty
+      // `x/new-folder/` behind in everyone's tree — for a write that never
+      // happened. The compare reads the file, and an absent file reads as
+      // empty whether or not its directory exists.
+      if (options?.expectedContent !== undefined) {
+        await assertConditionalWriteMatches(absolutePath, relativePath, options.expectedContent);
       }
-      throw err;
-    }
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      try {
+        // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
+        // followed by a plain write would let two concurrent creators (or a
+        // stale client whose file list predates the file) both pass the check
+        // and silently replace each other's content.
+        await fs.writeFile(absolutePath, content, {
+          encoding: 'utf-8',
+          flag: options?.failIfExists ? 'wx' : 'w',
+        });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+          const conflict: Error & { status?: number } = new Error(
+            `"${relativePath}" already exists.`,
+          );
+          conflict.status = 409;
+          throw conflict;
+        }
+        throw err;
+      }
+    });
     await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 
@@ -1055,7 +1238,9 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, data);
+    // An upload over a path is a mutation of that path, so it takes the same
+    // turn as a text write: see {@link withPathTurn}.
+    await this.withResolvedPathTurn(absolutePath, () => fs.writeFile(absolutePath, data));
     await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 

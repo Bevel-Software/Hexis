@@ -114,18 +114,6 @@
 **Priority:** P4
 **Depends on:** Per-plugin instructions scoped by access.
 
-### Inline editing form for the preamble
-
-**What:** A textarea on the "What connected agents are told" card that commits `mcp-description.md` as the admin, with live counts for both channels.
-
-**Why:** Tuning a 300-character purpose sentence against a live counter is a better loop than editor, save, return, read.
-
-**Context:** Precedent is the `roles.yaml` admin page. The Knowledge editor's commit path is the reference implementation; a second write path needs its own lock and conflict story. Build only on usage signal that admins tune the prefix often.
-
-**Effort:** M
-**Priority:** P4
-**Depends on:** The agent-preamble change.
-
 ## hexis-mcp
 
 ### Verify the local-token "too old" check answers 404, not 401

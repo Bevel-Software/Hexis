@@ -189,11 +189,13 @@ export function ExternalAgentAccessPage() {
 
   return (
     <>
-      <PageShell title="External agent access" padded={false}>
-        {/* Above the tab strip because it applies to BOTH tabs: whichever way
-            an agent connects, this is what it is told at session start. */}
-        <AgentInstructionsCard />
-        <div className="flex border-b border-line px-4 shrink-0" role="tablist">
+      <PageShell title="External agent access" padded={false} card={false}>
+        <div className="space-y-4">
+          <section
+            className="bg-white border border-line rounded-lg overflow-hidden"
+            data-testid="agent-connection-section"
+          >
+            <div className="flex border-b border-line px-4 shrink-0" role="tablist">
           {(
             [
               ['agent', 'Your agent'],
@@ -215,9 +217,9 @@ export function ExternalAgentAccessPage() {
               {name}
             </button>
           ))}
-        </div>
+            </div>
 
-        {tab === 'agent' && (
+            {tab === 'agent' && (
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               Pick where your agent runs. Everything it saves appears under your name.
@@ -331,7 +333,7 @@ export function ExternalAgentAccessPage() {
           </div>
         )}
 
-        {tab === 'marketplace' && (
+            {tab === 'marketplace' && (
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               Every skill you may read, compiled into a plugin marketplace. One address serves
@@ -447,7 +449,7 @@ export function ExternalAgentAccessPage() {
           </div>
         )}
 
-        {tab === 'autonomous' && (
+            {tab === 'autonomous' && (
           <div className="px-4 py-3 space-y-4">
             <p className="text-xs text-ink-muted leading-snug">
               For autonomous agents and pipelines (CI, scheduled jobs) that can't open a browser to
@@ -571,7 +573,11 @@ export function ExternalAgentAccessPage() {
               )}
             </div>
           </div>
-        )}
+            )}
+          </section>
+
+          <AgentInstructionsCard />
+        </div>
       </PageShell>
 
       <Dialog

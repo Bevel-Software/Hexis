@@ -113,6 +113,9 @@ async function exists(dir: string, rel: string): Promise<boolean> {
 }
 
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
+const PREAMBLE_IGNORE_BLOCK =
+  '\n# Added by the platform: agent instructions are edited from External agent access.\n' +
+  '/mcp-description.md\n';
 
 /** The template as the step writes it under the default layout — placeholders rendered. */
 async function template(name: string): Promise<string> {
@@ -203,7 +206,7 @@ describe('TemplateFilesStep', () => {
     }
   });
 
-  it('appends the AGENTS.md rule to a custom template\'s .bevelignore that lacks it, at declaration time', async () => {
+  it('appends the managed root-file rules to a custom template that lacks them', async () => {
     // A distribution's own template whose ignore file does not carry the rule
     // the on-disk merge assumes: the merge only runs against an EXISTING file,
     // so the declared content itself must arrive with the rule in it.
@@ -221,6 +224,7 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).toContain('MyStuff/'); // the operator's rules survive
     expect(lines).toContain('AGENTS.md'); // the platform's rule was appended
+    expect(lines).toContain('/mcp-description.md');
     expect(lines).not.toContain('Skills/'); // never the skills root — the Library's tree needs it
   });
 
@@ -239,7 +243,7 @@ describe('TemplateFilesStep', () => {
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
     // The plugins-root rule goes with it — the same sidebar draws that root now.
-    expect(text).toBe('# mine\n.git/\nAGENTS.md\n');
+    expect(text).toBe('# mine\n.git/\nAGENTS.md\n' + PREAMBLE_IGNORE_BLOCK);
     // Idempotent: a second boot has nothing to change.
     await makeRunner([new TemplateFilesStep()]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
@@ -258,7 +262,9 @@ describe('TemplateFilesStep', () => {
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n' + PREAMBLE_IGNORE_BLOCK,
+    );
   });
 
   it('recognises the legacy comment for a renamed plugins root with a space in its name', async () => {
@@ -273,7 +279,9 @@ describe('TemplateFilesStep', () => {
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n');
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n' + PREAMBLE_IGNORE_BLOCK,
+    );
   });
 
   it("keeps an operator's Skills/ rule whose own comment merely opens like the platform's", async () => {
@@ -288,7 +296,9 @@ describe('TemplateFilesStep', () => {
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(text);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      text + PREAMBLE_IGNORE_BLOCK,
+    );
   });
 
   it("keeps a Skills/ rule the operator wrote themselves — provenance is the platform's comment", async () => {
@@ -300,7 +310,7 @@ describe('TemplateFilesStep', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      'AGENTS.md\n# I hide skills on purpose\nSkills/\n',
+      'AGENTS.md\n# I hide skills on purpose\nSkills/\n' + PREAMBLE_IGNORE_BLOCK,
     );
   });
 
@@ -319,7 +329,7 @@ describe('TemplateFilesStep', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     const text = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'));
-    expect(text).toBe('# mine\nAGENTS.md\nMy-Own-Rule/\n!Plugins/\n');
+    expect(text).toBe('# mine\nAGENTS.md\nMy-Own-Rule/\n!Plugins/\n' + PREAMBLE_IGNORE_BLOCK);
     // Idempotent: a second boot has nothing to change.
     await makeRunner([new TemplateFilesStep()]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
@@ -399,7 +409,9 @@ describe('TemplateFilesStep', () => {
     await makeRunner([new TemplateFilesStep()]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
-    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe('AGENTS.md\n!Skills/\n');
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n!Skills/\n' + PREAMBLE_IGNORE_BLOCK,
+    );
   });
 
   it('respects an explicit !AGENTS.md negation — hiding the doc is a default, not a mandate', async () => {
@@ -413,7 +425,56 @@ describe('TemplateFilesStep', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
-      '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n',
+      '# operator wants the doc visible\n!AGENTS.md\nMyStuff/\n' + PREAMBLE_IGNORE_BLOCK,
+    );
+  });
+
+  it('respects an explicit !mcp-description.md negation', async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\n!mcp-description.md\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n!mcp-description.md\n',
+    );
+  });
+
+  it("respells the platform's OWN unanchored preamble rule instead of leaving it standing", async () => {
+    // What the release that shipped the unanchored spelling wrote. The bare
+    // name hides a nested `mcp-description.md` page too, so the platform's own
+    // line is corrected rather than treated as somebody's choice.
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] =
+      'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\nmcp-description.md\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\n/mcp-description.md\n',
+    );
+    // Idempotent: a second boot has nothing to change.
+    await makeRunner([new TemplateFilesStep()]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(again, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n# Added by the platform: agent instructions are edited from External agent access.\n/mcp-description.md\n',
+    );
+  });
+
+  it("keeps an unanchored preamble rule the operator wrote themselves, and adds nothing beside it", async () => {
+    const scaffold = await fullScaffold();
+    scaffold['.bevelignore'] = 'AGENTS.md\n# I hide it everywhere on purpose\nmcp-description.md\n';
+    await seedUpstream(scaffold);
+
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8'))).toBe(
+      'AGENTS.md\n# I hide it everywhere on purpose\nmcp-description.md\n',
     );
   });
 
