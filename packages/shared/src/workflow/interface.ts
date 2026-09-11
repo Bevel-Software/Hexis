@@ -225,6 +225,14 @@ export interface IWorkflowService {
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 
+  // Every lock method below coordinates on ONE canonical identity per file:
+  // `x/a.md`, `./x/a.md` and `x//a.md` name the same lock, so a lock acquired
+  // under any of them is contended, heartbeated, checkpointed, released and
+  // read under any other. A path that escapes the workspace, or that only
+  // becomes relative by being laundered, is refused with the same status the
+  // file verbs answer for that input: 400 for an unusable path, 403 for one
+  // that resolves outside the workspace.
+
   /**
    * Try to acquire an edit lock on `(branch, path)` for the caller. Returns
    * `{ acquired: true, lock }` on success; `{ acquired: false, lock }` if

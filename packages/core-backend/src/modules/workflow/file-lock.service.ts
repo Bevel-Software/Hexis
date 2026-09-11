@@ -11,6 +11,24 @@
  * is the source of truth and any cache would lose its purpose the moment
  * a different replica takes over.
  *
+ * Path identity: every method here canonicalises the path it was handed
+ * before it touches a row, so `./x//a.md` and `x/a.md` are ONE lock no
+ * matter which caller spelled which. It happens HERE rather than in the
+ * routes because the lock row is the coordination point: the routes are only
+ * today's callers, and a caller that reaches this service directly (the
+ * agent's lock-aware filesystem, a future route family) has to land on the
+ * same identity or it is not coordinating with anyone. Canonicalisation also
+ * REFUSES a path that escapes the workspace or that only looks relative, with
+ * the statuses the file verbs answer for the same input, so a lock row can
+ * never be keyed on a path no file verb would accept. See
+ * `canonicalFileIdentity`.
+ *
+ * There is no transition handling for rows written under a raw spelling
+ * before this landed: such a row is now unreachable by name and expires on
+ * its own TTL. For one deploy an in-flight edit's lock can linger up to the
+ * TTL below; nothing migrates and nothing dual-matches, because a dual match
+ * would be a second identity and the whole point is that there is one.
+ *
  * Stale-lock semantics: `get`, `acquire`, and `heartbeat` all treat a row
  * with `expires_at <= now()` as if the lock didn't exist. We purge it
  * lazily on next access rather than running a sweeper — the row count is
@@ -22,6 +40,7 @@ import type { Database } from '../database/connection.js';
 import { fileLocks } from '../database/schema.js';
 import type { AcquireLockResult, AuthUser, FileLock } from '@bevel-software/platform-shared';
 import { WorkflowValidationError } from '../../shared/domain-errors.js';
+import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 
 /**
  * Lock lifetime without a heartbeat. The client is expected to heartbeat
@@ -73,10 +92,11 @@ export class FileLockService {
   async acquire(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
+    const targetPath = canonicalFileIdentity(rawPath);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 
@@ -175,9 +195,10 @@ export class FileLockService {
   async heartbeat(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<FileLock> {
+    const targetPath = canonicalFileIdentity(rawPath);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
     // The expiry guard (`expiresAt > now`) matters because an expired
@@ -221,9 +242,10 @@ export class FileLockService {
   async release(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
+    const targetPath = canonicalFileIdentity(rawPath);
     await this.db
       .delete(fileLocks)
       .where(
@@ -244,8 +266,9 @@ export class FileLockService {
   async get(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
   ): Promise<FileLock | null> {
+    const targetPath = canonicalFileIdentity(rawPath);
     const rows = await this.db
       .select()
       .from(fileLocks)
