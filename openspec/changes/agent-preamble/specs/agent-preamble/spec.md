@@ -77,7 +77,7 @@ The External agent access page SHALL put its connection setup first in a card co
 
 #### Scenario: The tool-description channel is cutting the first paragraph
 - **WHEN** the composed result reports the tool prefix as truncated
-- **THEN** the section warns that the first paragraph is cut for clients that ignore the handshake, and names its cap and the length
+- **THEN** the section warns that the fixed line and the first paragraph are over that channel's cap TOGETHER, names the cap and the length, and names which clients are affected and which are not, so an admin can tell whether it matters to their deployment
 
 #### Scenario: A precondition on a file the caller cannot read
 - **WHEN** a save carries a precondition for a path the caller has no read permission on

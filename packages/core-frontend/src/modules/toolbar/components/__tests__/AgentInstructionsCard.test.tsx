@@ -302,6 +302,10 @@ describe('warnings', () => {
     expect(alert).toHaveTextContent('together they are over');
     expect(alert).toHaveTextContent('300-character');
     expect(alert).toHaveTextContent('415');
+    // Names WHO is affected, so an admin can tell whether this matters to
+    // their deployment rather than guessing what "ignores the handshake" means.
+    expect(alert).toHaveTextContent('claude.ai on the web, the Agent SDK and Cline');
+    expect(alert).toHaveTextContent('Claude Code, Claude Desktop and Cursor');
     expect(alert).toHaveTextContent('Shorten the first paragraph');
   });
 

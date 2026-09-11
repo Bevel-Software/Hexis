@@ -235,8 +235,10 @@ export function AgentInstructionsCard() {
                 The fixed line and your first paragraph are also sent together at the start of four knowledge-base tool
                 descriptions, and together they are over that channel's{' '}
                 {TOOL_PREFIX_CAP.toLocaleString('en-US')}-character cap
-                ({state.data.toolPrefixChars.toLocaleString('en-US')}): clients that ignore the handshake see the end
-                cut off. Shorten the first paragraph.
+                ({state.data.toolPrefixChars.toLocaleString('en-US')}): the end is cut off for the clients that read
+                only tool descriptions, claude.ai on the web, the Agent SDK and Cline among them. Clients that honour
+                the handshake, such as Claude Code, Claude Desktop and Cursor, get the whole description above instead
+                and are unaffected. Shorten the first paragraph.
               </p>
             )}
             {editor ? (
