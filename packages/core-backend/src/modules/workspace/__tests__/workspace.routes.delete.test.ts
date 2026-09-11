@@ -202,6 +202,7 @@ describe('DELETE /workspace/:id/file — one file identity', () => {
       expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, 'note.md');
     } finally {
       await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
     }
   });
 });

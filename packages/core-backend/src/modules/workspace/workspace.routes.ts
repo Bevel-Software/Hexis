@@ -900,6 +900,16 @@ export function createWorkspaceRoutes(
       res.status(400).json({ error: 'oldPath and newPath are required in body' });
       return;
     }
+    // Two spellings of one file are now ONE path, so a move can arrive with
+    // both ends equal. `withLock` below would survive it — the inner
+    // acquisition sees the lock the outer just took, held by this same user,
+    // and runs straight through — but the move itself is a rename onto
+    // itself that commits a change and tells the diff service the path was
+    // both deleted and rewritten. It is a client mistake, so it is a 400.
+    if (oldPath === newPath) {
+      res.status(400).json({ error: 'oldPath and newPath must differ' });
+      return;
+    }
     const user = await requireUser(req, res);
     if (!user) return;
     try {

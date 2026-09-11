@@ -296,7 +296,10 @@ describe('warnings', () => {
     fetchMock.mockResolvedValue(composed({ toolPrefixTruncated: true, toolPrefixChars: 415 }));
     mount();
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('four knowledge-base tool descriptions');
+    // The count is the FIXED LINE plus the paragraph, so the warning must not
+    // blame the paragraph alone: a 225-character paragraph trips a 300 cap.
+    expect(alert).toHaveTextContent('The fixed line and your first paragraph');
+    expect(alert).toHaveTextContent('together they are over');
     expect(alert).toHaveTextContent('300-character');
     expect(alert).toHaveTextContent('415');
     expect(alert).toHaveTextContent('Shorten the first paragraph');

@@ -367,6 +367,21 @@ describe('the mutating verbs share one file identity', () => {
     expect(h.lockedPaths.sort()).toEqual([`${KB}/new.md`, `${KB}/old.md`]);
   });
 
+  it('PATCH refuses a move whose two spellings are the same file', async () => {
+    h = await makeHarness();
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/note.md`, newPath: `./${KB}//note.md` }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain('must differ');
+    expect(h.moveEntryMock).not.toHaveBeenCalled();
+    expect(h.lockedPaths).toEqual([]);
+  });
+
   it('PATCH refuses a non-string path in the body', async () => {
     h = await makeHarness();
 

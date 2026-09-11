@@ -232,10 +232,11 @@ export function AgentInstructionsCard() {
             )}
             {state.status === 'ready' && state.data.toolPrefixTruncated && (
               <p role="alert" className={WARNING}>
-                The first paragraph is also sent at the start of four knowledge-base tool descriptions, and it is over
-                that {TOOL_PREFIX_CAP.toLocaleString('en-US')}-character channel's cap
-                ({state.data.toolPrefixChars.toLocaleString('en-US')}): clients that ignore the handshake see it cut.
-                Shorten the first paragraph.
+                The fixed line and your first paragraph are also sent together at the start of four knowledge-base tool
+                descriptions, and together they are over that channel's{' '}
+                {TOOL_PREFIX_CAP.toLocaleString('en-US')}-character cap
+                ({state.data.toolPrefixChars.toLocaleString('en-US')}): clients that ignore the handshake see the end
+                cut off. Shorten the first paragraph.
               </p>
             )}
             {editor ? (

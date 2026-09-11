@@ -315,6 +315,16 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
     // absolute path win over the workspace dir, and the boundary check is what
     // refuses it. A canonicaliser that dropped the empty leading segment would
     // turn this into an ordinary write at `<workspace>/etc/passwd`.
+    //
+    // The boundary check IS what answers here, and the message says so. Two
+    // exported functions in this repo are called `assertValidRelativePath`:
+    // `writeFile` calls the one in `@bevel-software/platform-shared`, which
+    // splits on `/` and drops empty segments, so `/etc/passwd` validates as
+    // `['etc','passwd']` and passes. The stricter one in
+    // `modules/kb-fs/branch-name.ts` would refuse it with 'path must be
+    // relative', but only `git.service.ts` uses that one, to guard a git
+    // pathspec. Reviewers have read this the other way round twice; renaming
+    // the strict one is recorded as a follow-up.
     await expect(
       svc.writeFile(workspaceId, '/etc/passwd', 'pwned', { expectedContent: '' }),
     ).rejects.toThrow('Path traversal detected');
