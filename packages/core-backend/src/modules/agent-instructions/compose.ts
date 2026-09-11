@@ -15,14 +15,19 @@
  * all read this one composer's output.
  */
 
-/** The repository-root file an admin edits. */
-export const PREAMBLE_FILE = 'mcp-description.md';
+// The file, the caps and the comment rule are shared with the frontend
+// editor: it shows what these strip and writes back what they allow, so a
+// hand-mirrored copy would let the admin's view and the agent's text drift
+// apart. Re-exported here because this module is where the backend reads them
+// from.
+import {
+  PREAMBLE_CAP,
+  PREAMBLE_FILE,
+  TOOL_PREFIX_CAP,
+  stripHtmlComments,
+} from '@bevel-software/platform-shared';
 
-/** UTF-16 units of preamble sent on the handshake before the marker replaces the rest. */
-export const PREAMBLE_CAP = 6_000;
-
-/** UTF-16 units of the whole tool prefix (fixed line included). */
-export const TOOL_PREFIX_CAP = 300;
+export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 
 /** The tools whose descriptions carry the prefix. Every other tool is untouched. */
 export const PREFIXED_TOOLS: ReadonlySet<string> = new Set(['start_session', 'grep', 'list_files', 'read_file']);
@@ -119,26 +124,6 @@ export function composeAgentInstructions(preamble: string | null): ComposedAgent
  */
 export function prefixToolDescription(toolPrefix: string, description: string | undefined): string {
   return description ? `${toolPrefix}\n\n${description}` : toolPrefix;
-}
-
-/**
- * Remove every `<!-- … -->` block. A `<!--` that is never closed takes the
- * rest of the text with it and is reported, so the card can warn.
- */
-function stripHtmlComments(text: string): { text: string; unterminated: boolean } {
-  let out = '';
-  let from = 0;
-  for (;;) {
-    const open = text.indexOf('<!--', from);
-    if (open === -1) {
-      out += text.slice(from);
-      return { text: out, unterminated: false };
-    }
-    out += text.slice(from, open);
-    const close = text.indexOf('-->', open + 4);
-    if (close === -1) return { text: out, unterminated: true };
-    from = close + 3;
-  }
 }
 
 /** An ATX heading line: `#` to `######`, then a space or the end. */

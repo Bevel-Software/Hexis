@@ -7,9 +7,11 @@ import { Markdown } from '../../../shared/markdown/Markdown';
 import {
   PREAMBLE_CAP,
   PREAMBLE_FILE,
+  TOOL_PREFIX_CAP,
   fetchEditableAgentDescription,
   fetchAgentInstructions,
   saveAgentDescription,
+  sourceHasUnterminatedComment,
   type AgentInstructions,
   type EditableAgentDescription,
 } from '../services/agent-instructions.api';
@@ -142,6 +144,15 @@ export function AgentInstructionsCard() {
     setEditBusy(null);
   };
 
+  // The open comment lives in the part the editor does not show, so the
+  // visible text can be identical while the file is still withholding
+  // everything after the `<!--`. Saving is what closes it
+  // (`mergeEditableDescription`), so Save has to be reachable with the text
+  // unchanged — otherwise the warning names a repair the admin cannot make,
+  // in a file this PR hides from the tree.
+  const openCommentInSource = editor !== null && sourceHasUnterminatedComment(editor.source);
+  const nothingToSave = editor !== null && editor.value === editor.description && !openCommentInSource;
+
   const displayedPreambleChars = editor ? editor.value.trim().length : state.status === 'ready' ? state.data.preambleChars : 0;
   const displayedPreambleTruncated = editor ? displayedPreambleChars > PREAMBLE_CAP : state.status === 'ready' && state.data.truncated;
   return (
@@ -213,7 +224,18 @@ export function AgentInstructionsCard() {
             {state.status === 'ready' && state.data.unterminatedComment && (
               <p role="alert" className={WARNING}>
                 A comment is left open: everything after the last <span className="font-mono">&lt;!--</span> is withheld
-                from agents. Close it with <span className="font-mono">--&gt;</span> in {PREAMBLE_FILE}.
+                from agents.{' '}
+                {canEdit
+                  ? 'Open the editor and save: the comment is closed for you, and the text below is sent as it stands.'
+                  : `An admin can close it from this page, or with --> in ${PREAMBLE_FILE} in the repository.`}
+              </p>
+            )}
+            {state.status === 'ready' && state.data.toolPrefixTruncated && (
+              <p role="alert" className={WARNING}>
+                The first paragraph is also sent at the start of four knowledge-base tool descriptions, and it is over
+                that {TOOL_PREFIX_CAP.toLocaleString('en-US')}-character channel's cap
+                ({state.data.toolPrefixChars.toLocaleString('en-US')}): clients that ignore the handshake see it cut.
+                Shorten the first paragraph.
               </p>
             )}
             {editor ? (
@@ -243,9 +265,13 @@ export function AgentInstructionsCard() {
                     size="sm"
                     variant="primary"
                     onClick={() => void saveEdit()}
-                    disabled={editBusy === 'saving' || editor.value === editor.description}
+                    disabled={editBusy === 'saving' || nothingToSave}
                   >
-                    {editBusy === 'saving' ? 'Saving…' : 'Save description'}
+                    {editBusy === 'saving'
+                      ? 'Saving…'
+                      : openCommentInSource && editor.value === editor.description
+                        ? 'Save and close the comment'
+                        : 'Save description'}
                   </Button>
                 </div>
               </div>

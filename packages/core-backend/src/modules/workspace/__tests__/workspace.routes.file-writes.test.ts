@@ -34,6 +34,7 @@ interface Harness {
   baseUrl: string;
   writeFileMock: ReturnType<typeof vi.fn>;
   readFileMock: ReturnType<typeof vi.fn>;
+  moveEntryMock: ReturnType<typeof vi.fn>;
   assertContentMatchesMock: ReturnType<typeof vi.fn>;
   planForCreate: ReturnType<typeof vi.fn>;
   seedWrites: string[];
@@ -44,7 +45,7 @@ interface Harness {
   order: string[];
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
   const lockedPaths: string[] = [];
   const seedWrites: string[] = [];
   const order: string[] = [];
@@ -82,11 +83,13 @@ async function makeHarness(): Promise<Harness> {
       order.push('turn:exit');
     }
   });
+  const moveEntryMock = vi.fn(async () => undefined);
   const workspaceService = {
     readFile: readFileMock,
     writeFile: writeFileMock,
     assertContentMatches: assertContentMatchesMock,
     withPathTurn: withPathTurnMock,
+    moveEntry: moveEntryMock,
   } as unknown as WorkspaceService;
 
   const planForCreate = vi.fn(async () => {
@@ -110,9 +113,12 @@ async function makeHarness(): Promise<Harness> {
   } as unknown as IWorkflowService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
+  const readable = opts.canRead !== false;
   const accessControl = {
-    canRead: vi.fn(async () => true),
-    canReadBatch: vi.fn(async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, true]))),
+    canRead: vi.fn(async () => readable),
+    canReadBatch: vi.fn(
+      async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, readable])),
+    ),
   } as unknown as IAccessControl;
 
   const app = express();
@@ -143,6 +149,7 @@ async function makeHarness(): Promise<Harness> {
     baseUrl: `http://127.0.0.1:${addr.port}`,
     writeFileMock,
     readFileMock,
+    moveEntryMock,
     assertContentMatchesMock,
     planForCreate,
     seedWrites,
@@ -266,6 +273,32 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
     expect(h.writeFileMock).not.toHaveBeenCalled();
   });
 
+  it('refuses the precondition to a caller who may not READ the file', async () => {
+    // The answer to a precondition is a fact about content. Write
+    // authorisation happens later, at the lock, so without a read gate the
+    // 409-versus-403 difference is a content-equality oracle on a file the
+    // caller cannot see.
+    h = await makeHarness({ canRead: false });
+
+    const res = await put(h, { content: 'After.', ifMatch: 'guess' });
+
+    expect(res.status).toBe(403);
+    expect(h.assertContentMatchesMock).not.toHaveBeenCalled();
+    expect(h.writeFileMock).not.toHaveBeenCalled();
+    expect(h.lockedPaths).toEqual([]);
+  });
+
+  it('still lets a caller who may write but not read save WITHOUT a precondition', async () => {
+    // The gate is on asking questions, not on writing: this route was never
+    // read-gated and must not become so.
+    h = await makeHarness({ canRead: false });
+
+    const res = await put(h, { content: 'After.' });
+
+    expect(res.status).toBe(200);
+    expect(h.writeFileMock).toHaveBeenCalled();
+  });
+
   it('refuses a non-string precondition instead of dropping it', async () => {
     h = await makeHarness();
 
@@ -313,6 +346,41 @@ describe('PUT /workspace/:id/file — ifMatch', () => {
   });
 });
 
+describe('the mutating verbs share one file identity', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  it('PATCH locks and moves the canonical paths, whichever spelling was sent', async () => {
+    h = await makeHarness();
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `./${KB}//old.md`, newPath: `${KB}///new.md` }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(h.moveEntryMock).toHaveBeenCalledWith(WS, `${KB}/old.md`, `${KB}/new.md`);
+    expect(h.lockedPaths.sort()).toEqual([`${KB}/new.md`, `${KB}/old.md`]);
+  });
+
+  it('PATCH refuses a non-string path in the body', async () => {
+    h = await makeHarness();
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: 42, newPath: `${KB}/new.md` }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(h.moveEntryMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /workspace/:id/file — read failures', () => {
   let h: Harness | null = null;
   afterEach(async () => {
@@ -329,14 +397,51 @@ describe('GET /workspace/:id/file — read failures', () => {
     expect(res.status).toBe(404);
   });
 
-  it('answers 500 for a file that exists but cannot be read', async () => {
+  it('answers 500 for a file that exists but cannot be read, without quoting itself', async () => {
+    // An errno message carries absolute workspace paths; a bootstrap failure
+    // carries git's stderr. The status makes the distinction this route
+    // exists to make; the body does not narrate it.
     h = await makeHarness();
-    h.readFileMock.mockRejectedValue(errno('EACCES', 'permission denied'));
+    h.readFileMock.mockRejectedValue(errno('EACCES', "permission denied, open '/srv/workspaces/x/secret.md'"));
 
     const res = await get(h);
 
     expect(res.status).toBe(500);
-    expect(((await res.json()) as { error: string }).error).toBe('permission denied');
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toBe("Couldn't read the file.");
+    expect(error).not.toContain('/srv/workspaces');
+  });
+
+  it('keeps a non-errno failure out of the body too', async () => {
+    h = await makeHarness();
+    h.readFileMock.mockRejectedValue(new Error('Invalid workspace ID "x": fatal: could not read from remote'));
+
+    const res = await get(h);
+
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe("Couldn't read the file.");
+  });
+
+  it('refuses a repeated ?path on the read route as well', async () => {
+    h = await makeHarness();
+
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(FILE)}&path=other.md`,
+    );
+
+    expect(res.status).toBe(400);
+    expect(h.readFileMock).not.toHaveBeenCalled();
+  });
+
+  it('reads the canonical path, whichever accepted spelling was sent', async () => {
+    h = await makeHarness();
+
+    const res = await fetch(
+      `${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(`./${KB}//mcp-description.md`)}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(h.readFileMock).toHaveBeenCalledWith(WS, FILE);
   });
 
   it('keeps a traversal refusal a 403', async () => {

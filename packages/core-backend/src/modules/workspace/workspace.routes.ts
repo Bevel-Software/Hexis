@@ -20,6 +20,26 @@ import '../auth/auth.middleware.js'; // Express Request augmentation
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
 /**
+ * One file identity from one request field, or `null` when the caller sent
+ * nothing usable.
+ *
+ * TYPED, not cast: a repeated `?path=a&path=b` arrives as an array and a JSON
+ * body can hold anything, so `as string` would hand a non-string to the
+ * canonicaliser and throw a 500 on what is a client mistake.
+ *
+ * CANONICAL, because the mutating verbs on this surface coordinate on the
+ * path: `PUT` takes an in-process write turn on it, all of them take the
+ * workflow lock row keyed by it, and the bytes live at it. A save spelled
+ * `x/a.md` and a delete spelled `./x//a.md` would otherwise take two
+ * different lock rows for one file and interleave. See
+ * `canonicalRelativePath` for what it refuses to touch.
+ */
+function requestPath(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return canonicalRelativePath(value);
+}
+
+/**
  * Workspaces are per-branch (PLAN §3). Any authenticated user can access
  * any branch's workspace; coordination of concurrent edits lives in the
  * file-lock service, not in giving each user their own clone. We therefore
@@ -726,8 +746,8 @@ export function createWorkspaceRoutes(
   router.get('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const filePath = requestPath(req.query.path);
+    if (filePath === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
@@ -753,17 +773,31 @@ export function createWorkspaceRoutes(
         res.status(404).json({ error: 'File not found' });
         return;
       }
-      // Traversal stays a 403, a malformed workspace id its domain status,
-      // and an unreadable file (EACCES, EIO) a 500 carrying the reason.
-      sendError(res, error);
+      // Traversal stays a 403 and a malformed workspace id its domain status:
+      // both carry messages written to be read by the caller.
+      if (error instanceof WorkflowDomainError || (error as Error)?.message === 'Path traversal detected') {
+        sendError(res, error);
+        return;
+      }
+      // Anything else is a real failure, and it says so WITHOUT quoting
+      // itself: an errno message carries absolute workspace paths and a
+      // bootstrap failure carries git's stderr, neither of which belongs in a
+      // response body. The distinction this route exists to make is still
+      // made — an unreadable file is not a missing one — it is just not
+      // narrated to the client.
+      console.warn(
+        `[workspace.routes] GET /file failed for "${filePath}" in "${id}":`,
+        error instanceof Error ? error.message : error,
+      );
+      res.status(500).json({ error: "Couldn't read the file." });
     }
   });
 
   router.delete('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const filePath = requestPath(req.query.path);
+    if (filePath === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
@@ -859,8 +893,10 @@ export function createWorkspaceRoutes(
   router.patch('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const { oldPath, newPath } = req.body as { oldPath?: string; newPath?: string };
-    if (!oldPath || !newPath) {
+    const body = (req.body ?? {}) as { oldPath?: unknown; newPath?: unknown };
+    const oldPath = requestPath(body.oldPath);
+    const newPath = requestPath(body.newPath);
+    if (oldPath === null || newPath === null) {
       res.status(400).json({ error: 'oldPath and newPath are required in body' });
       return;
     }
@@ -907,15 +943,11 @@ export function createWorkspaceRoutes(
     // turn, the workflow lock row, and the bytes themselves. Two clients
     // spelling one file differently would otherwise take two different locks
     // and both pass their own precondition.
-    // Typed, not cast: a repeated `?path=a&path=b` arrives as an ARRAY, and
-    // canonicalising it would throw out here, outside the try below, for a
-    // generic 500 on what is a client mistake.
-    const rawPath = req.query.path;
-    if (typeof rawPath !== 'string' || !rawPath) {
+    const filePath = requestPath(req.query.path);
+    if (filePath === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const filePath = canonicalRelativePath(rawPath);
     const { content, ifAbsent, ifMatch } = req.body as {
       content?: string;
       ifAbsent?: boolean;
@@ -931,6 +963,14 @@ export function createWorkspaceRoutes(
     }
     const user = await requireUser(req, res);
     if (!user) return;
+    // A precondition ANSWERS A QUESTION ABOUT CONTENT, so it is gated on
+    // READING, not writing. Write authorisation happens at `acquireLock`
+    // inside `withLock` below, which is after the compare: without this gate
+    // the 409-versus-403 difference is a content-equality oracle on a file the
+    // caller may not read, and the confirming case is a write. Same gate and
+    // same 403 as `GET /file`; a caller who may write but not read can still
+    // save, just not ask questions about what is there.
+    if (ifMatch !== undefined && !(await requireReadPermission(req, res, id, filePath))) return;
     try {
       // Refuse a hand-edit that would leave roles.yaml unparseable BEFORE any
       // byte hits disk — a broken roles.yaml is an app-wide admin lockout

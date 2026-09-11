@@ -1187,11 +1187,16 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await this.withResolvedPathTurn(absolutePath, async () => {
+      // Compare BEFORE creating anything. The parent chain used to be made
+      // first, so a refused save at `x/new-folder/note.md` left an empty
+      // `x/new-folder/` behind in everyone's tree — for a write that never
+      // happened. The compare reads the file, and an absent file reads as
+      // empty whether or not its directory exists.
       if (options?.expectedContent !== undefined) {
         await assertConditionalWriteMatches(absolutePath, relativePath, options.expectedContent);
       }
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       try {
         // `wx` makes create-if-absent ATOMIC at the fs level — an exists-check
         // followed by a plain write would let two concurrent creators (or a

@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { configureBranchModel } from '@bevel-software/platform-shared';
@@ -271,13 +271,77 @@ describe('warnings', () => {
     expect(screen.getByTestId('preamble-count')).toHaveTextContent('7,350 / 6,000 characters');
   });
 
-  it('warns about an open comment and names the fix', async () => {
+  it('warns about an open comment and, for an admin, names the action on THIS page', async () => {
+    // The file is hidden from the tree by this change, so "close it in
+    // mcp-description.md" would be a repair the admin cannot reach.
     fetchMock.mockResolvedValue(composed({ unterminatedComment: true }));
-    mount();
+    mount({ admin: asAdmin });
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('A comment is left open');
     expect(alert).toHaveTextContent('withheld from agents');
-    expect(within(alert).getByText('-->')).toBeInTheDocument();
+    expect(alert).toHaveTextContent('Open the editor and save');
+    expect(alert).not.toHaveTextContent('mcp-description.md');
+  });
+
+  it('tells a non-admin who can fix it', async () => {
+    fetchMock.mockResolvedValue(composed({ unterminatedComment: true }));
+    mount({ admin: nonAdmin });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('An admin can close it from this page');
+  });
+
+  it('warns when the tool-description channel is cutting the first paragraph', async () => {
+    // The composer still cuts the prefix at its own cap and still reports it;
+    // dropping the short-version preview must not drop the only signal.
+    fetchMock.mockResolvedValue(composed({ toolPrefixTruncated: true, toolPrefixChars: 415 }));
+    mount();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('four knowledge-base tool descriptions');
+    expect(alert).toHaveTextContent('300-character');
+    expect(alert).toHaveTextContent('415');
+    expect(alert).toHaveTextContent('Shorten the first paragraph');
+  });
+
+  it('lets an admin save a file whose only problem is the hidden open comment', async () => {
+    // Save used to be disabled while the VISIBLE text was unchanged, so the
+    // one repair for an open comment was unreachable.
+    fetchEditableMock.mockResolvedValue({
+      workspaceId: 'target-company-state',
+      source: 'Public text.\n<!-- a note that was never closed',
+      description: 'Public text.',
+    });
+    const user = userEvent.setup();
+    mount({ admin: asAdmin });
+
+    await user.click(await screen.findByRole('button', { name: 'Edit description' }));
+    await screen.findByRole('textbox', { name: 'Your description' });
+    const save = screen.getByRole('button', { name: 'Save and close the comment' });
+    expect(save).toBeEnabled();
+
+    await user.click(save);
+
+    await waitFor(() => {
+      expect(saveMock).toHaveBeenCalledWith(
+        'target-company-state',
+        'knowledge-base',
+        'Public text.\n<!-- a note that was never closed',
+        'Public text.',
+      );
+    });
+  });
+
+  it('keeps Save disabled when there is genuinely nothing to save', async () => {
+    fetchEditableMock.mockResolvedValue({
+      workspaceId: 'target-company-state',
+      source: 'Public text.',
+      description: 'Public text.',
+    });
+    const user = userEvent.setup();
+    mount({ admin: asAdmin });
+
+    await user.click(await screen.findByRole('button', { name: 'Edit description' }));
+    await screen.findByRole('textbox', { name: 'Your description' });
+    expect(screen.getByRole('button', { name: 'Save description' })).toBeDisabled();
   });
 
   it('shows each warning only when flagged', async () => {

@@ -288,6 +288,28 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Seeded since the editor opened.');
   });
 
+  it('leaves no directory behind when it refuses', async () => {
+    // "A refused save leaves nothing behind" has to include the parent chain.
+    const rel = 'knowledge-base/new-folder/note.md';
+    await fs.writeFile(path.join(workspaceDir, 'knowledge-base', 'taken.md'), 'x', 'utf-8');
+
+    await expect(
+      svc.writeFile(workspaceId, rel, 'mine', { expectedContent: 'not what is there' }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    await expect(fs.stat(path.join(workspaceDir, 'knowledge-base', 'new-folder'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('still creates the parent chain for a save that goes ahead', async () => {
+    const rel = 'knowledge-base/new-folder/note.md';
+
+    await svc.writeFile(workspaceId, rel, 'mine', { expectedContent: '' });
+
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('mine');
+  });
+
   it('refuses an absolute path rather than writing it inside the workspace', async () => {
     // The property canonicalisation must not erode: `path.resolve` lets an
     // absolute path win over the workspace dir, and the boundary check is what

@@ -73,7 +73,15 @@ The External agent access page SHALL put its connection setup first in a card co
 
 #### Scenario: Comment left open
 - **WHEN** the file contains an unterminated `<!--`
-- **THEN** the section warns that everything after it is withheld from agents and names the fix
+- **THEN** the section warns that everything after it is withheld from agents and names a fix the reader can reach: for an admin the editor on this page, which closes the comment on save even when the visible text is unchanged, and for a non-admin that an admin can do it here
+
+#### Scenario: The tool-description channel is cutting the first paragraph
+- **WHEN** the composed result reports the tool prefix as truncated
+- **THEN** the section warns that the first paragraph is cut for clients that ignore the handshake, and names its cap and the length
+
+#### Scenario: A precondition on a file the caller cannot read
+- **WHEN** a save carries a precondition for a path the caller has no read permission on
+- **THEN** the write route refuses with the same 403 the file route gives, before comparing anything, and a save WITHOUT a precondition is unaffected
 
 #### Scenario: Workspace still loading
 - **WHEN** an admin opens the page before the workspace has reported `kbDirName`
@@ -84,7 +92,7 @@ The External agent access page SHALL put its connection setup first in a card co
 - **THEN** the section shows an inline error, the connection tabs keep working, and an admin can still open the inline description editor
 
 ### Requirement: Admins edit the public description inline
-When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirName}/mcp-description.md` from the default-branch workspace and show only its agent-visible text in an inline textarea. A missing file SHALL open as an empty description, and nothing else SHALL: the file route reports 404 for an absent file alone and gives any other read failure its own status, so an unreadable file SHALL surface as an inline error rather than an empty editor. Saving SHALL use the normal workspace write route, retain all private HTML comments from the source, and refresh the composed preview. The save SHALL carry the loaded bytes as a precondition so a file changed since it loaded is refused rather than overwritten. A save failure SHALL keep the editor and unsaved value open. Cancel SHALL discard the textarea value without writing. Non-admins SHALL have no inline edit action.
+When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirName}/mcp-description.md` from the default-branch workspace and show only its agent-visible text in an inline textarea. A missing file SHALL open as an empty description, and nothing else SHALL: the file route reports 404 for an absent file alone and gives any other read failure its own status, so an unreadable file SHALL surface as an inline error rather than an empty editor. Saving SHALL use the normal workspace write route, retain all private HTML comments from the source, and refresh the composed preview. The save SHALL carry the loaded bytes as a precondition so a file changed since it loaded is refused rather than overwritten. The precondition SHALL be answered only to a caller who may READ the file, under the same gate the file route uses: its answer is a fact about content, write authorisation is checked later, and an ungated precondition would tell a caller whether a file they cannot see holds a guessed value. A save failure SHALL keep the editor and unsaved value open. Cancel SHALL discard the textarea value without writing. Non-admins SHALL have no inline edit action.
 
 #### Scenario: Admin saves an inline edit
 - **WHEN** an admin changes the inline description and selects Save description

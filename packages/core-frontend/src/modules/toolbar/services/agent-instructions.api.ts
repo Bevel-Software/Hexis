@@ -1,4 +1,10 @@
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  PREAMBLE_CAP,
+  PREAMBLE_FILE,
+  TOOL_PREFIX_CAP,
+  stripHtmlComments,
+} from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import {
   WorkspaceApiError,
@@ -7,11 +13,12 @@ import {
   writeFile,
 } from '../../workspace/services/workspace.api';
 
-/** Caps the backend composer applies; mirrored so the card can show `N / cap`. */
-export const PREAMBLE_CAP = 6_000;
-
-/** The file an admin edits, at the repository root on the default branch. */
-export const PREAMBLE_FILE = 'mcp-description.md';
+// The caps, the file name and the comment rule come from
+// `@bevel-software/platform-shared`, the same module the backend composer
+// reads them from: the card shows what the composer sends, and a mirrored
+// copy here would eventually show one thing while agents received another.
+// Re-exported so the card keeps importing them from its own service module.
+export { PREAMBLE_CAP, PREAMBLE_FILE, TOOL_PREFIX_CAP };
 
 /** What `GET /api/agent/instructions` answers: the composer's result. */
 export interface AgentInstructions {
@@ -47,25 +54,26 @@ export interface EditableAgentDescription {
 }
 
 /**
- * Split the repository file into its public description and private comments.
- * This deliberately mirrors the backend composer's fail-closed comment rule:
- * an unclosed comment hides the rest of the file.
+ * The public description inside the repository file: what agents receive, and
+ * so the only thing the editor shows. The comment rule is the composer's own
+ * (`stripHtmlComments`), not a copy of it, so an unclosed comment hides the
+ * rest of the file here exactly as it does for agents.
  */
 export function editableDescriptionFromSource(source: string): string {
-  let description = '';
-  let from = 0;
-  for (;;) {
-    const open = source.indexOf('<!--', from);
-    if (open === -1) {
-      description += source.slice(from);
-      break;
-    }
-    description += source.slice(from, open);
-    const close = source.indexOf('-->', open + 4);
-    if (close === -1) break;
-    from = close + 3;
-  }
-  return description.replace(/\r\n?/g, '\n').trim();
+  return stripHtmlComments(source).text.replace(/\r\n?/g, '\n').trim();
+}
+
+/**
+ * Whether the file holds a `<!--` that is never closed, which withholds
+ * everything after it from agents.
+ *
+ * The card needs this to offer a way OUT of that state: the broken comment is
+ * in the part the editor does not show, so the visible text can be unchanged
+ * while the file is still hiding content, and `mergeEditableDescription`
+ * closes the comment on save.
+ */
+export function sourceHasUnterminatedComment(source: string): boolean {
+  return stripHtmlComments(source).unterminated;
 }
 
 /**

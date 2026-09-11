@@ -6,6 +6,7 @@ export * from './chat/types.js';
 
 // Workspace
 export * from './workspace/types.js';
+export * from './workspace/agent-preamble.js';
 export * from './workspace/filename.js';
 export * from './workspace/kb-layout.js';
 export * from './workspace/join-request.js';
