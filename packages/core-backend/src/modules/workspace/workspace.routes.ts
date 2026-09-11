@@ -4,7 +4,7 @@ import { IGNORE_FILENAME } from './bevel-ignore.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import { DEFAULT_BRANCH, KNOWLEDGE_DIR, reservedRootDirNames } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, KNOWLEDGE_DIR, canonicalRelativePath, reservedRootDirNames } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -18,6 +18,26 @@ import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
+
+/**
+ * One file identity from one request field, or `null` when the caller sent
+ * nothing usable.
+ *
+ * TYPED, not cast: a repeated `?path=a&path=b` arrives as an array and a JSON
+ * body can hold anything, so `as string` would hand a non-string to the
+ * canonicaliser and throw a 500 on what is a client mistake.
+ *
+ * CANONICAL, because the mutating verbs on this surface coordinate on the
+ * path: `PUT` takes an in-process write turn on it, all of them take the
+ * workflow lock row keyed by it, and the bytes live at it. A save spelled
+ * `x/a.md` and a delete spelled `./x//a.md` would otherwise take two
+ * different lock rows for one file and interleave. See
+ * `canonicalRelativePath` for what it refuses to touch.
+ */
+function requestPath(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return canonicalRelativePath(value);
+}
 
 /**
  * Workspaces are per-branch (PLAN §3). Any authenticated user can access
@@ -726,8 +746,8 @@ export function createWorkspaceRoutes(
   router.get('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const filePath = requestPath(req.query.path);
+    if (filePath === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
@@ -740,20 +760,44 @@ export function createWorkspaceRoutes(
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.json({ content });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      // 404 means ONE thing here: there is no file at this path. That is
+      // ENOENT, a parent that is not a directory (ENOTDIR), and a directory
+      // asked for as a file (EISDIR). Every other read failure keeps its own
+      // status, because callers act on the difference: the inline
+      // agent-description editor opens EMPTY on a 404 (a knowledge base older
+      // than the template has no such file yet), so dressing an unreadable
+      // file up as a missing one would offer an empty editor over content the
+      // save then overwrites.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
+        res.status(404).json({ error: 'File not found' });
         return;
       }
-      res.status(404).json({ error: 'File not found' });
+      // Traversal stays a 403 and a malformed workspace id its domain status:
+      // both carry messages written to be read by the caller.
+      if (error instanceof WorkflowDomainError || (error as Error)?.message === 'Path traversal detected') {
+        sendError(res, error);
+        return;
+      }
+      // Anything else is a real failure, and it says so WITHOUT quoting
+      // itself: an errno message carries absolute workspace paths and a
+      // bootstrap failure carries git's stderr, neither of which belongs in a
+      // response body. The distinction this route exists to make is still
+      // made — an unreadable file is not a missing one — it is just not
+      // narrated to the client.
+      console.warn(
+        `[workspace.routes] GET /file failed for "${filePath}" in "${id}":`,
+        error instanceof Error ? error.message : error,
+      );
+      res.status(500).json({ error: "Couldn't read the file." });
     }
   });
 
   router.delete('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    const filePath = requestPath(req.query.path);
+    if (filePath === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
@@ -849,9 +893,21 @@ export function createWorkspaceRoutes(
   router.patch('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const { oldPath, newPath } = req.body as { oldPath?: string; newPath?: string };
-    if (!oldPath || !newPath) {
+    const body = (req.body ?? {}) as { oldPath?: unknown; newPath?: unknown };
+    const oldPath = requestPath(body.oldPath);
+    const newPath = requestPath(body.newPath);
+    if (oldPath === null || newPath === null) {
       res.status(400).json({ error: 'oldPath and newPath are required in body' });
+      return;
+    }
+    // Two spellings of one file are now ONE path, so a move can arrive with
+    // both ends equal. `withLock` below would survive it — the inner
+    // acquisition sees the lock the outer just took, held by this same user,
+    // and runs straight through — but the move itself is a rename onto
+    // itself that commits a change and tells the diff service the path was
+    // both deleted and rewritten. It is a client mistake, so it is a 400.
+    if (oldPath === newPath) {
+      res.status(400).json({ error: 'oldPath and newPath must differ' });
       return;
     }
     const user = await requireUser(req, res);
@@ -891,39 +947,82 @@ export function createWorkspaceRoutes(
   router.put('/workspace/:id/file', async (req, res) => {
     const id = authenticated(req, res);
     if (id === null) return;
-    const filePath = req.query.path as string;
-    if (!filePath) {
+    // ONE spelling of the target from here down. `x/a.md`, `./x/a.md` and
+    // `x//a.md` are the same file and all pass the path validator, and this
+    // route coordinates on that path three times over: the in-process write
+    // turn, the workflow lock row, and the bytes themselves. Two clients
+    // spelling one file differently would otherwise take two different locks
+    // and both pass their own precondition.
+    const filePath = requestPath(req.query.path);
+    if (filePath === null) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const { content, ifAbsent } = req.body as { content?: string; ifAbsent?: boolean };
+    const { content, ifAbsent, ifMatch } = req.body as {
+      content?: string;
+      ifAbsent?: boolean;
+      ifMatch?: unknown;
+    };
     if (content === undefined) {
       res.status(400).json({ error: 'content is required in body' });
       return;
     }
+    if (ifMatch !== undefined && typeof ifMatch !== 'string') {
+      res.status(400).json({ error: 'ifMatch, if provided, must be a string' });
+      return;
+    }
     const user = await requireUser(req, res);
     if (!user) return;
+    // A precondition ANSWERS A QUESTION ABOUT CONTENT, so it is gated on
+    // READING, not writing. Write authorisation happens at `acquireLock`
+    // inside `withLock` below, which is after the compare: without this gate
+    // the 409-versus-403 difference is a content-equality oracle on a file the
+    // caller may not read, and the confirming case is a write. Same gate and
+    // same 403 as `GET /file`; a caller who may write but not read can still
+    // save, just not ask questions about what is there.
+    if (ifMatch !== undefined && !(await requireReadPermission(req, res, id, filePath))) return;
     try {
       // Refuse a hand-edit that would leave roles.yaml unparseable BEFORE any
       // byte hits disk — a broken roles.yaml is an app-wide admin lockout
       // (loadModel hard-throws). The dedicated App roles surface has its
       // own validate gate; this covers the raw-text editor path.
       if (isRolesYamlPath(filePath, kbDirName)) assertRolesYamlParsable(content);
-      // Creator read grant: a brand-new file at a spot whose access chain
-      // doesn't grant the creator `read` would vanish from their own explorer
-      // (read is default-deny). Plan BEFORE the write: a new subtree gets its
-      // access.md seeded first; a loose .md carries the grant in its own
-      // frontmatter as part of this same single write.
-      const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
-      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
-      const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
-      // `ifAbsent` = exclusive create: the service's `wx` write turns a
-      // concurrent or stale create against an existing file into a 409
-      // instead of a silent replace. `withLock`'s failure arm releases
-      // without committing, so the refusal leaves no trace.
-      await withLock(id, user, filePath, () =>
-        workspaceService.writeFile(id, filePath, toWrite, { failIfExists: ifAbsent === true }),
-      );
+      // One turn for the whole sequence, because the DECISION spans three
+      // steps that must agree about the same file: check the precondition,
+      // plan a creator-access grant that COMMITS, then write. A save landing
+      // in between would leave that grant behind for a write about to be
+      // refused, so the check is made here, before the plan, and nothing else
+      // in this process may touch the path until the write is done. The write
+      // inside takes the same turn re-entrantly.
+      //
+      // Across instances the workflow lock below is still the coordinator;
+      // this only orders what this server is doing.
+      await workspaceService.withPathTurn(id, filePath, async () => {
+        // A stale `ifMatch` is refused before anything commits.
+        if (ifMatch !== undefined) await workspaceService.assertContentMatches(id, filePath, ifMatch);
+        // Creator read grant: a brand-new file at a spot whose access chain
+        // doesn't grant the creator `read` would vanish from their own explorer
+        // (read is default-deny). Plan BEFORE the write: a new subtree gets its
+        // access.md seeded first; a loose .md carries the grant in its own
+        // frontmatter as part of this same single write.
+        const plan = await creatorAccess.planForCreate(id, user, filePath, 'file');
+        if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
+        const toWrite = plan?.kind === 'frontmatter' ? plan.apply(content) : content;
+        // `ifAbsent` = exclusive create: the service's `wx` write turns a
+        // concurrent or stale create against an existing file into a 409
+        // instead of a silent replace. `withLock`'s failure arm releases
+        // without committing, so the refusal leaves no trace.
+        //
+        // `ifMatch` = conditional write, the same 409 for a stale UPDATE: the
+        // file must still hold the text the caller last read, re-checked at
+        // the write itself as the decision that counts.
+        await withLock(id, user, filePath, () =>
+          workspaceService.writeFile(id, filePath, toWrite, {
+            failIfExists: ifAbsent === true,
+            expectedContent: ifMatch,
+          }),
+        );
+      });
       res.json({ status: 'written' });
     } catch (err) {
       sendError(res, err);

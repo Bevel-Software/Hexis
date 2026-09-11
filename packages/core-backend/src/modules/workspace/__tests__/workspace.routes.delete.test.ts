@@ -39,6 +39,8 @@ interface Harness {
   server: Server;
   baseUrl: string;
   workspaceDir: string;
+  /** Exposed so a test can assert the PATH the route handed the service. */
+  deleteFileMock: ReturnType<typeof vi.fn>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -110,7 +112,12 @@ async function makeHarness(): Promise<Harness> {
     throw new Error(`Unexpected server.address() shape: ${JSON.stringify(addr)}`);
   }
   const port = (addr as AddressInfo).port;
-  return { server, baseUrl: `http://127.0.0.1:${port}`, workspaceDir };
+  return {
+    server,
+    baseUrl: `http://127.0.0.1:${port}`,
+    workspaceDir,
+    deleteFileMock: workspaceServiceMock.deleteFile as unknown as ReturnType<typeof vi.fn>,
+  };
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -175,5 +182,27 @@ describe('DELETE /workspace/:id/file — recursive folder delete (BEVA-132)', ()
     const body = (await res.json()) as { status: string; count: number };
     expect(body.count).toBe(0);
     expect(await exists(path.join(h.workspaceDir, 'parent'))).toBe(false);
+  });
+});
+
+describe('DELETE /workspace/:id/file — one file identity', () => {
+  it('deletes the canonical path, whichever accepted spelling was sent', async () => {
+    // The workflow lock row is keyed by this path, so a delete spelled
+    // `.//note.md` must not coordinate separately from a save on `note.md`.
+    const h = await makeHarness();
+    try {
+      await fs.writeFile(path.join(h.workspaceDir, 'note.md'), 'bye', 'utf-8');
+
+      const res = await fetch(
+        `${h.baseUrl}/api/workspace/${WORKSPACE_ID}/file?path=${encodeURIComponent('.//note.md')}`,
+        { method: 'DELETE' },
+      );
+
+      expect(res.status).toBe(200);
+      expect(h.deleteFileMock).toHaveBeenCalledWith(WORKSPACE_ID, 'note.md');
+    } finally {
+      await closeServer(h.server);
+      await fs.rm(h.workspaceDir, { recursive: true, force: true });
+    }
   });
 });

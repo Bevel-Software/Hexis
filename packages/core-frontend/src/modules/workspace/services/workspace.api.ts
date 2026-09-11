@@ -93,14 +93,20 @@ export async function writeFile(
   workspaceId: string,
   relativePath: string,
   content: string,
-  options?: { ifAbsent?: boolean },
+  options?: { ifAbsent?: boolean; ifMatch?: string },
 ): Promise<void> {
   const res = await authFetch(`/api/workspace/${workspaceId}/file?path=${encodeURIComponent(relativePath)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     // `ifAbsent` asks the backend for an exclusive create — a 409 instead of
-    // a silent replace when the target already exists.
-    body: JSON.stringify(options?.ifAbsent ? { content, ifAbsent: true } : { content }),
+    // a silent replace when the target already exists. `ifMatch` is the same
+    // 409 for an UPDATE: the bytes the caller last read, so a save composed
+    // from a stale snapshot is refused instead of erasing someone else's.
+    body: JSON.stringify({
+      content,
+      ...(options?.ifAbsent ? { ifAbsent: true } : {}),
+      ...(options?.ifMatch !== undefined ? { ifMatch: options.ifMatch } : {}),
+    }),
   });
   if (!res.ok) throw await toApiError(res);
 }

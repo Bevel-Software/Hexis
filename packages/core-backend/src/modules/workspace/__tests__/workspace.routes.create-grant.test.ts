@@ -52,6 +52,10 @@ async function makeHarness(opts: { extracted?: string[] } = {}): Promise<Harness
     }),
     createDirectory: vi.fn(async () => undefined),
     unzipFile: vi.fn(async () => ({ extracted: opts.extracted ?? [] })),
+    // `PUT /file` runs its precondition, plan and write inside one turn for
+    // the target path. Straight through here: what this file asserts is the
+    // ORDER of the plan's writes and locks, which the real turn preserves.
+    withPathTurn: vi.fn(async (_id: string, _p: string, op: () => Promise<unknown>) => op()),
   } as unknown as WorkspaceService;
 
   const workflowService = {

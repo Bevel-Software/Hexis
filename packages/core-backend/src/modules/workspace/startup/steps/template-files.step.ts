@@ -8,8 +8,12 @@ import {
   validateKbRootName,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
+import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
+
+/** Root-anchored so a knowledge folder may still contain an ordinary namesake. */
+const PREAMBLE_IGNORE_PATTERN = `/${PREAMBLE_FILE}`;
 
 /**
  * The **required scaffolding** — the minimum an operational KB needs. Any of
@@ -37,7 +41,7 @@ export const REQUIRED_FILES: readonly string[] = [
   // (see modules/agent-instructions). Seeded ONCE and never refreshed: the
   // content is the admin's, and the shipped template is one HTML comment, so
   // a never-edited file sends nothing of its own.
-  'mcp-description.md',
+  PREAMBLE_FILE,
 ];
 
 /**
@@ -49,7 +53,7 @@ export const REQUIRED_FILES: readonly string[] = [
  * every other required file keeps the strict contract (a custom template
  * missing `access.md` is a real mistake and should fail loudly).
  */
-export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set(['mcp-description.md']);
+export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set([PREAMBLE_FILE]);
 
 /**
  * Repo-root files the startup phase GENERATES rather than copies — today just
@@ -238,14 +242,23 @@ export class TemplateFilesStep implements OnServerStart {
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
       // custom one. Make it true here, so the managed conventions doc is
-      // hidden from the file tree from the first boot either way.
+      // hidden from the file tree from the first boot either way. The same is
+      // true of the deployment preamble: it is edited through External agent
+      // access, not as an ordinary knowledge-base document.
       // …and a template still shipping the skills rule an earlier release
       // had (a distribution's copy, a stale packaged one) must not declare
       // it: the on-disk reconciliation below never sees a file that was
       // absent, so the declared content is reconciled here instead.
       if (rel === IGNORE_FILENAME) {
+        // A template still shipping the unanchored preamble rule an earlier
+        // release had is respelled first, so the guarantee below adds nothing
+        // beside it.
+        content = withPlatformIgnorePatternRespelled(content, PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN);
         content = withoutIgnoreLine(
-          withoutPlatformIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), `${SKILLS_DIR}/`),
+          withoutPlatformIgnorePattern(
+            withIgnorePattern(withIgnorePattern(content, 'AGENTS.md'), PREAMBLE_IGNORE_PATTERN),
+            `${SKILLS_DIR}/`,
+          ),
           `${PLUGINS_DIR}/`,
         );
       }
@@ -253,7 +266,8 @@ export class TemplateFilesStep implements OnServerStart {
       added.push(rel);
     }
 
-    // AGENTS.md left VISIBLE by a stale `.bevelignore` is closed here — and
+    // AGENTS.md or mcp-description.md left VISIBLE by a stale `.bevelignore`
+    // is closed here — and
     // UNCONDITIONALLY, not only when the file was just added: a KB whose
     // AGENTS.md predates the CLAUDE.md→AGENTS.md rename has an ignore file
     // that lists the old name and knows nothing of the new one, so the
@@ -285,7 +299,11 @@ export class TemplateFilesStep implements OnServerStart {
     // a later declared write would lose an earlier one's.
     added.push(
       ...(await reconcileIgnoreRules(repoDir, branch, {
-        add: ['AGENTS.md'],
+        // The preamble rule is respelled before it is added: a knowledge base
+        // that booted the release shipping the unanchored spelling carries the
+        // platform's own line, and that line hides a nested namesake too.
+        respell: [[PREAMBLE_FILE, PREAMBLE_IGNORE_PATTERN]],
+        add: ['AGENTS.md', PREAMBLE_IGNORE_PATTERN],
         drop: [`${SKILLS_DIR}/`],
         dropEvery: [`${PLUGINS_DIR}/`],
       })),
@@ -400,9 +418,9 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
 }
 
 /**
- * Reconcile the platform's OWN rules in `.bevelignore`: every `add` pattern
- * guaranteed present as a line, every `drop` pattern taken out. Returns the
- * paths changed, for the note.
+ * Reconcile the platform's OWN rules in `.bevelignore`: every `respell` pair
+ * rewritten in place, every `add` pattern guaranteed present as a line, every
+ * `drop` pattern taken out. Returns the paths changed, for the note.
  *
  * Never rewrites the rest. The file is the operator's, and every rule already
  * in it is theirs to keep: adding puts one line under a comment saying where
@@ -418,7 +436,13 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
 async function reconcileIgnoreRules(
   repoDir: string,
   branch: KbBranch,
-  rules: { add: string[]; drop: string[]; dropEvery?: string[] },
+  rules: {
+    add: string[];
+    drop: string[];
+    dropEvery?: string[];
+    /** `[from, to]` pairs: a rule an earlier release wrote, and its spelling now. */
+    respell?: ReadonlyArray<readonly [string, string]>;
+  },
 ): Promise<string[]> {
   let current: string;
   try {
@@ -429,7 +453,11 @@ async function reconcileIgnoreRules(
     // required-files loop above).
     return [];
   }
-  const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), current);
+  const respelled = (rules.respell ?? []).reduce(
+    (text, [from, to]) => withPlatformIgnorePatternRespelled(text, from, to),
+    current,
+  );
+  const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), respelled);
   const merged = (rules.dropEvery ?? []).reduce(
     (text, pattern) => withoutIgnoreLine(text, pattern),
     rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
@@ -471,8 +499,21 @@ export function withoutIgnoreLine(text: string, pattern: string): string {
   return kept.join('\n');
 }
 
-/** The comment `withIgnorePattern` writes above a line it appends. */
+/** The legacy comment `withIgnorePattern` wrote above AGENTS.md. */
 const PLATFORM_RULE_COMMENT = '# Added by the platform: the conventions doc is not node content.';
+
+/** The comment written above the preamble rule on an existing knowledge base. */
+const PREAMBLE_RULE_COMMENT =
+  '# Added by the platform: agent instructions are edited from External agent access.';
+
+/**
+ * The line an earlier release shipped in the template above the UNANCHORED
+ * preamble rule. Recognised as the platform's own, on the same reasoning as
+ * the legacy skills line below: a rule under a comment the platform wrote is
+ * the platform's to respell, wherever the file came from.
+ */
+const LEGACY_PREAMBLE_TEMPLATE_COMMENT =
+  '# The deployment preamble is edited from External agent access, not as a KB page.';
 
 /**
  * The template line an earlier release shipped above the shared-skills rule,
@@ -495,7 +536,13 @@ const LEGACY_SKILLS_RULE_COMMENT_CLOSING = '/.';
  */
 function isPlatformRuleComment(line: string): boolean {
   const trimmed = line.trim();
-  if (trimmed === PLATFORM_RULE_COMMENT) return true;
+  if (
+    trimmed === PLATFORM_RULE_COMMENT ||
+    trimmed === PREAMBLE_RULE_COMMENT ||
+    trimmed === LEGACY_PREAMBLE_TEMPLATE_COMMENT
+  ) {
+    return true;
+  }
   if (
     !trimmed.startsWith(LEGACY_SKILLS_RULE_COMMENT_OPENING) ||
     !trimmed.endsWith(LEGACY_SKILLS_RULE_COMMENT_CLOSING)
@@ -533,6 +580,31 @@ function withoutPlatformIgnorePattern(text: string, pattern: string): string {
 }
 
 /**
+ * `text` with every `from` line THE PLATFORM WROTE respelled as `to`, its
+ * comment left where it is. Provenance is that comment, as everywhere else
+ * here: a bare rule the OPERATOR wrote is theirs and is not touched.
+ *
+ * This exists for one migration. An earlier release hid the preamble with the
+ * unanchored `mcp-description.md`, which also hides an ordinary knowledge
+ * page of that name anywhere in the tree; the rule the platform means is the
+ * root-anchored one. Respelling its own line is not the same as overruling an
+ * operator who chose the broad spelling, which is why the two are told apart.
+ */
+function withPlatformIgnorePatternRespelled(text: string, from: string, to: string): string {
+  const lines = text.split('\n');
+  return lines
+    .map((line, i) => {
+      if (line.trim() !== from) return line;
+      const above = lines[i - 1];
+      if (above === undefined || !isPlatformRuleComment(above)) return line;
+      // Function replacement: `to` is a pattern to `String.replace`, and a
+      // rule spelled with a `$` would otherwise be read as one.
+      return line.replace(from, () => to);
+    })
+    .join('\n');
+}
+
+/**
  * `text` with `pattern` guaranteed present as a LINE — appended under a
  * comment naming its origin when absent, returned unchanged when present.
  * Line-wise match, same rationale as {@link mergeIgnorePatterns}.
@@ -541,10 +613,20 @@ function withoutPlatformIgnorePattern(text: string, pattern: string): string {
  * operator choosing to SHOW the file, and ordered matching means a positive
  * line appended after it would win and silently defeat the choice. Hiding
  * the conventions doc is a default this provides, never a mandate.
+ *
+ * The preamble rule reads its unanchored spelling the same way. By the time
+ * this runs, the platform's OWN legacy line has been respelled (see
+ * {@link withPlatformIgnorePatternRespelled}), so a bare `mcp-description.md`
+ * still standing here is the operator's: it already hides the file, and
+ * appending the anchored rule beside it would say nothing they have not.
  */
 function withIgnorePattern(text: string, pattern: string): string {
   const lines = text.split('\n').map((l) => l.trim());
-  if (lines.includes(pattern) || lines.includes(`!${pattern}`)) return text;
+  const operatorPreambleRule =
+    pattern === PREAMBLE_IGNORE_PATTERN &&
+    (lines.includes(PREAMBLE_FILE) || lines.includes(`!${PREAMBLE_FILE}`));
+  if (lines.includes(pattern) || lines.includes(`!${pattern}`) || operatorPreambleRule) return text;
   const separator = text.endsWith('\n') ? '' : '\n';
-  return `${text}${separator}\n# Added by the platform: the conventions doc is not node content.\n${pattern}\n`;
+  const comment = pattern === PREAMBLE_IGNORE_PATTERN ? PREAMBLE_RULE_COMMENT : PLATFORM_RULE_COMMENT;
+  return `${text}${separator}\n${comment}\n${pattern}\n`;
 }

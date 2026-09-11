@@ -1,18 +1,19 @@
-import { useContext, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Pencil } from 'lucide-react';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AdminContext } from '../../admin/state/admin.context';
 import { WorkspaceContext } from '../../workspace/state/workspace.context';
-import { kbFileUrl } from '../../workspace/routing/kb-routes';
-import { buttonClasses } from '../../../shared/components';
+import { Button } from '../../../shared/components';
 import { Markdown } from '../../../shared/markdown/Markdown';
 import {
   PREAMBLE_CAP,
   PREAMBLE_FILE,
   TOOL_PREFIX_CAP,
+  fetchEditableAgentDescription,
   fetchAgentInstructions,
+  saveAgentDescription,
+  sourceHasUnterminatedComment,
   type AgentInstructions,
+  type EditableAgentDescription,
 } from '../services/agent-instructions.api';
 
 type State =
@@ -44,13 +45,11 @@ const DESCRIPTION_MARKDOWN =
  * session starts with, organised around the part the admin owns. The fixed
  * platform message sits in a closed drawer (it is sent first, and nobody here
  * can change it); the admin's description is the centrepiece, with its count
- * against the cap right beside it; and the short version shows what the
- * clients that ignore the connection message get instead, with the fixed
- * sentence muted so the admin's own paragraph stands out.
+ * against the cap right beside it.
  *
- * Sits above the tab strip of the External agent access page because it
- * applies to both tabs: an interactive agent and an autonomous one receive
- * the same text.
+ * Sits in its own card below connection setup: it applies to every connection
+ * type, but it is a separate administrative concern rather than part of the
+ * user's setup flow.
  *
  * Both contexts are read WITHOUT their hooks' provider guard: the page renders
  * in tests and in shells that mount no admin or workspace provider, and a
@@ -61,39 +60,120 @@ export function AgentInstructionsCard() {
   const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   const kbDirName = useContext(WorkspaceContext)?.kbDirName ?? null;
   const [state, setState] = useState<State>({ status: 'loading' });
+  const [editor, setEditor] = useState<(EditableAgentDescription & { value: string }) | null>(null);
+  const [editBusy, setEditBusy] = useState<'loading' | 'saving' | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchAgentInstructions().then(
+  /**
+   * Only the NEWEST composed-preview request may land, and only while the
+   * card is mounted. Two requests are in flight together whenever an admin
+   * edits and saves before the first load answers, and the older one
+   * resolving last would put the pre-save text back on the page as though
+   * the save had not happened.
+   *
+   * Mounted is tracked separately from the ticket rather than folded into it:
+   * a save in flight at unmount starts its own refresh AFTERWARDS, which
+   * takes a fresh ticket and would pass any ticket comparison. The flag is
+   * re-armed on the way in, so a remount (StrictMode's double-invoke among
+   * them) is a mounted card again.
+   */
+  const previewRequest = useRef(0);
+  const mounted = useRef(true);
+  const loadInstructions = useCallback((whenFailed: (err: unknown) => string): Promise<void> => {
+    const ticket = ++previewRequest.current;
+    const isCurrent = (): boolean => mounted.current && ticket === previewRequest.current;
+    return fetchAgentInstructions().then(
       (data) => {
-        if (!cancelled) setState({ status: 'ready', data });
+        if (isCurrent()) setState({ status: 'ready', data });
       },
       (err: unknown) => {
-        if (!cancelled) {
-          setState({ status: 'error', message: err instanceof Error ? err.message : "Couldn't load what agents are told." });
-        }
+        if (isCurrent()) setState({ status: 'error', message: whenFailed(err) });
       },
     );
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  // The link is rendered only once the KB dir name is known: a URL with a
-  // missing segment opens "File not found", which is worse than no link.
-  const editHref = isAdmin && kbDirName ? kbFileUrl(DEFAULT_BRANCH, `${kbDirName}/${PREAMBLE_FILE}`) : null;
+  useEffect(() => {
+    mounted.current = true;
+    void loadInstructions((err) =>
+      err instanceof Error ? err.message : "Couldn't load what agents are told.",
+    );
+    return () => {
+      mounted.current = false;
+      previewRequest.current += 1;
+    };
+  }, [loadInstructions]);
 
+  // The editor is offered only once the KB dir name is known: the save path
+  // otherwise has a missing segment and cannot safely target the source file.
+  // Any falsy name, not just null, so the offer matches `beginEdit`'s guard.
+  const canEdit = isAdmin && Boolean(kbDirName);
+
+  const beginEdit = async () => {
+    if (!kbDirName || editBusy) return;
+    setEditError(null);
+    setEditBusy('loading');
+    try {
+      const editable = await fetchEditableAgentDescription(kbDirName);
+      setEditor({ ...editable, value: editable.description });
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "Couldn't load the description editor.");
+    } finally {
+      setEditBusy(null);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!kbDirName || !editor || editBusy) return;
+    setEditError(null);
+    setEditBusy('saving');
+    try {
+      await saveAgentDescription(editor.workspaceId, kbDirName, editor.source, editor.value);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "Couldn't save the description.");
+      setEditBusy(null);
+      return;
+    }
+
+    // The write has landed. Close the editor even if refreshing the composed
+    // preview fails, so a successful save is never presented as unsaved work.
+    setEditor(null);
+    await loadInstructions(
+      (err) =>
+        `Description saved, but the preview couldn't refresh: ${err instanceof Error ? err.message : 'unknown error'}`,
+    );
+    setEditBusy(null);
+  };
+
+  // The open comment lives in the part the editor does not show, so the
+  // visible text can be identical while the file is still withholding
+  // everything after the `<!--`. Saving is what closes it
+  // (`mergeEditableDescription`), so Save has to be reachable with the text
+  // unchanged — otherwise the warning names a repair the admin cannot make,
+  // in a file this PR hides from the tree.
+  const openCommentInSource = editor !== null && sourceHasUnterminatedComment(editor.source);
+  const nothingToSave = editor !== null && editor.value === editor.description && !openCommentInSource;
+
+  const displayedPreambleChars = editor ? editor.value.trim().length : state.status === 'ready' ? state.data.preambleChars : 0;
+  const displayedPreambleTruncated = editor ? displayedPreambleChars > PREAMBLE_CAP : state.status === 'ready' && state.data.truncated;
   return (
-    <section className="px-4 py-3 border-b border-line space-y-3" aria-labelledby="agent-instructions-title">
+    <section
+      className="bg-white border border-line rounded-lg px-4 py-3 space-y-3"
+      aria-labelledby="agent-instructions-title"
+      data-testid="agent-instructions-section"
+    >
       <div className="flex items-center justify-between gap-3">
         <h2 id="agent-instructions-title" className="text-xs font-medium text-ink">
           What agents are told about this knowledge base
         </h2>
-        {editHref && (
-          <Link to={editHref} className={buttonClasses({ variant: 'outline', size: 'sm' })}>
-            <Pencil size={12} />
-            Edit description
-          </Link>
+        {canEdit && !editor && (
+          <Button
+            size="sm"
+            leadingIcon={<Pencil size={12} />}
+            onClick={() => void beginEdit()}
+            disabled={editBusy !== null}
+          >
+            {editBusy === 'loading' ? 'Loading editor…' : 'Edit description'}
+          </Button>
         )}
       </div>
       <p className="text-meta text-ink-muted leading-snug">
@@ -107,85 +187,107 @@ export function AgentInstructionsCard() {
           {state.message}
         </div>
       )}
-      {state.status === 'ready' && (
+      {editError && (
+        <div role="alert" className="text-xs text-danger bg-danger-soft border border-danger rounded-sm px-2 py-1.5">
+          {editError}
+        </div>
+      )}
+      {(state.status === 'ready' || editor) && (
         <div className="space-y-3">
-          <details className="border border-line rounded-sm">
-            <summary className="cursor-pointer px-2.5 py-1.5 text-xs text-ink-muted">
-              Platform message (fixed, sent first)
-            </summary>
-            <p className="px-2.5 pb-2 text-xs text-ink-muted leading-snug whitespace-pre-wrap" data-testid="header-text">
-              {state.data.header}
-            </p>
-          </details>
+          {state.status === 'ready' && (
+            <details className="border border-line rounded-sm">
+              <summary className="cursor-pointer px-2.5 py-1.5 text-xs text-ink-muted">
+                Platform message (fixed, sent first)
+              </summary>
+              <p className="px-2.5 pb-2 text-xs text-ink-muted leading-snug whitespace-pre-wrap" data-testid="header-text">
+                {state.data.header}
+              </p>
+            </details>
+          )}
 
           <div className="space-y-1.5">
             <div className="flex items-baseline justify-between gap-2">
               <h3 className="text-xs font-medium text-ink">Your description</h3>
               <span
-                className={`text-meta ${state.data.truncated ? 'text-wait' : 'text-ink-muted'}`}
+                className={`text-meta ${displayedPreambleTruncated ? 'text-wait' : 'text-ink-muted'}`}
                 data-testid="preamble-count"
               >
-                {count(state.data.preambleChars, PREAMBLE_CAP)}
+                {count(displayedPreambleChars, PREAMBLE_CAP)}
               </span>
             </div>
-            {state.data.truncated && (
+            {displayedPreambleTruncated && (
               <p role="alert" className={WARNING}>
-                Over the cap: agents receive only the first {PREAMBLE_CAP.toLocaleString('en-US')} characters. Shorten{' '}
-                {PREAMBLE_FILE}.
+                Over the cap: agents receive only the first {PREAMBLE_CAP.toLocaleString('en-US')} characters. Shorten
+                the description.
               </p>
             )}
-            {state.data.unterminatedComment && (
+            {state.status === 'ready' && state.data.unterminatedComment && (
               <p role="alert" className={WARNING}>
                 A comment is left open: everything after the last <span className="font-mono">&lt;!--</span> is withheld
-                from agents. Close it with <span className="font-mono">--&gt;</span> in {PREAMBLE_FILE}.
+                from agents.{' '}
+                {canEdit
+                  ? 'Open the editor and save: the comment is closed for you, and the text below is sent as it stands.'
+                  : `An admin can close it from this page, or with --> in ${PREAMBLE_FILE} in the repository.`}
               </p>
             )}
-            {state.data.preamble ? (
+            {state.status === 'ready' && state.data.toolPrefixTruncated && (
+              <p role="alert" className={WARNING}>
+                The fixed line and your first paragraph are also sent together at the start of four knowledge-base tool
+                descriptions, and together they are over that channel's{' '}
+                {TOOL_PREFIX_CAP.toLocaleString('en-US')}-character cap
+                ({state.data.toolPrefixChars.toLocaleString('en-US')}): the end is cut off for the clients that read
+                only tool descriptions, claude.ai on the web, the Agent SDK and Cline among them. Clients that honour
+                the handshake, such as Claude Code, Claude Desktop and Cursor, get the whole description above instead
+                and are unaffected. Shorten the first paragraph.
+              </p>
+            )}
+            {editor ? (
+              <div className="space-y-2">
+                <textarea
+                  aria-label="Your description"
+                  className={`${BOX} block w-full min-h-[44px] max-h-56 [field-sizing:content] resize-y leading-snug text-ink focus:outline-2 focus:outline-offset-1 focus:outline-ink-muted`}
+                  rows={1}
+                  value={editor.value}
+                  onChange={(event) => setEditor({ ...editor, value: event.target.value })}
+                  placeholder="Describe what this knowledge base holds, what is where, and when agents should look here first."
+                  autoFocus
+                />
+                <div className="flex items-center justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="quiet"
+                    onClick={() => {
+                      setEditor(null);
+                      setEditError(null);
+                    }}
+                    disabled={editBusy === 'saving'}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => void saveEdit()}
+                    disabled={editBusy === 'saving' || nothingToSave}
+                  >
+                    {editBusy === 'saving'
+                      ? 'Saving…'
+                      : openCommentInSource && editor.value === editor.description
+                        ? 'Save and close the comment'
+                        : 'Save description'}
+                  </Button>
+                </div>
+              </div>
+            ) : state.status === 'ready' && state.data.preamble ? (
               <div className={`${BOX} max-h-56 overflow-y-auto overflow-x-hidden break-words`} data-testid="description-text">
                 <Markdown className={DESCRIPTION_MARKDOWN}>{state.data.preamble}</Markdown>
               </div>
             ) : (
               <p className={`${BOX} text-ink-muted leading-snug`} data-testid="description-empty">
                 Nothing written yet, so agents get the platform message only. Describe what this knowledge base holds,
-                what is where, and when to look here first. The first paragraph doubles as the short version below.
+                what is where, and when to look here first.
               </p>
             )}
-            <p className="text-meta text-ink-muted leading-snug">
-              {isAdmin ? (
-                <>
-                  Kept in {PREAMBLE_FILE} at the repository root. Text inside an HTML comment stays private.
-                </>
-              ) : (
-                <>Admins edit it in {PREAMBLE_FILE} at the repository root.</>
-              )}
-            </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="flex items-baseline justify-between gap-2">
-              <h3 className="text-xs font-medium text-ink">Short version</h3>
-              <span
-                className={`text-meta ${state.data.toolPrefixTruncated ? 'text-wait' : 'text-ink-muted'}`}
-                data-testid="prefix-count"
-              >
-                {count(state.data.toolPrefixChars, TOOL_PREFIX_CAP)}
-              </span>
-            </div>
-            <p className="text-meta text-ink-muted leading-snug">
-              Some clients (claude.ai, Cline, the Agent SDK) ignore the connection message and only read tool
-              descriptions, so this goes at the top of the four search tools instead: a fixed sentence, then your
-              first paragraph.
-            </p>
-            {state.data.toolPrefixTruncated && (
-              <p role="alert" className={WARNING}>
-                Over the cap: the four tools receive only the first {TOOL_PREFIX_CAP} characters. Shorten the first
-                paragraph of {PREAMBLE_FILE}.
-              </p>
-            )}
-            <p className={`${BOX} whitespace-pre-wrap break-words leading-snug`} data-testid="prefix-text">
-              <span className="text-ink-muted">{state.data.toolPrefixLine}</span>
-              <span className="text-ink">{state.data.toolPrefix.slice(state.data.toolPrefixLine.length)}</span>
-            </p>
           </div>
         </div>
       )}
