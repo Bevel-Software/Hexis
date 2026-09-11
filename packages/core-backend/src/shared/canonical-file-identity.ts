@@ -31,6 +31,15 @@
  *
  * Case is left alone, for the reason `canonicalRelativePath` documents: the
  * deployment target is Linux, where `Foo.md` and `foo.md` are two files.
+ *
+ * What this deliberately does NOT answer is whether the path reaches its file
+ * through a symbolic link. That question is about what is on disk, not about
+ * how the path is spelled, and it is answered where the disk is:
+ * `WorkspaceService.assertNotThroughLink`, on the verbs that read and write
+ * bytes. A lock row is a coordination key and the lock service holds no
+ * workspace directory to resolve against, so a link can only change which
+ * bytes a WRITE touches, and that write is refused by the verb that performs
+ * it while the lock is merely held.
  */
 
 import path from 'node:path';
