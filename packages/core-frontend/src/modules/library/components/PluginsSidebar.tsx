@@ -1,7 +1,6 @@
 import { useState, type MouseEvent, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
 import type { LibraryFilter } from '../utils/status';
-import { ChalkArrow } from './plugin-page-parts';
 
 /**
  * Where a right-click landed in the nav, and everything the layout needs to
@@ -53,9 +52,9 @@ export interface PluginsSidebarProps {
   /** Start a new plugin. The layout owns the dialog; this is only the intent. */
   onCreatePlugin(): void;
   /**
-   * Whether to spell the first plugin out in words, with the chalk arrow. The
-   * hover-revealed `+` is unchanged for everyone; this is only the teaching
-   * mark, and it is an administrator's — see the row itself below.
+   * Whether to spell the first plugin out in words, as a row above the trees.
+   * The hover-revealed `+` is unchanged for everyone; this is only the
+   * teaching mark, and it is an administrator's — see the row itself below.
    *
    * The caller passes a SETTLED verdict, not just a role: the layout derives
    * it from `workspaceHasNoPlugins`, which stays false while plugin discovery
@@ -330,27 +329,25 @@ export function PluginsSidebar({
                 empty space, or on a folder in the Plugins tree — and a person
                 with no plugins yet is exactly the person who has not learned
                 either. While the workspace holds no plugins AT ALL, the way to
-                the first one is said in words, as a row above the trees —
-                with a chalk arrow from the empty space beneath, the same
-                margin-note voice as the empty plugin page. Administrators
-                only: on an untouched workspace the first plugin is theirs to
-                make, and telling everyone else to make it points them at a
-                decision that is not theirs. (Everything says the same in its
-                plugin band, for whoever never opens this view.) */}
+                the first one is said in words, as a row above the trees.
+                Words only, no chalk arrow: the `Skills/` and `Plugins/` roots
+                render directly beneath this row even when both are empty, so
+                there is no empty space for an arrow to come from — it drew
+                across the two root rows. (The empty plugin page keeps its
+                arrow; it has the room.) Administrators only: on an untouched
+                workspace the first plugin is theirs to make, and telling
+                everyone else to make it points them at a decision that is not
+                theirs. (Everything says the same in its plugin band, for
+                whoever never opens this view.) */}
             {canCreatePlugin && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={onCreatePlugin}
-                  className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
-                >
-                  <span aria-hidden="true">+</span>
-                  <span className="truncate">Create a plugin</span>
-                </button>
-                {/* Mirrored, so the tip points up-left at the row's words from
-                    the room beneath it. */}
-                <ChalkArrow className="pointer-events-none absolute left-[22px] top-[30px] h-[52px] w-[64px] -scale-x-100 text-ink-faint" />
-              </div>
+              <button
+                type="button"
+                onClick={onCreatePlugin}
+                className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
+              >
+                <span aria-hidden="true">+</span>
+                <span className="truncate">Create a plugin</span>
+              </button>
             )}
             {skillsTree}
             {pluginsTree}
