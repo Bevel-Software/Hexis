@@ -864,7 +864,10 @@ export class WorkspaceService implements IWorkspaceService {
         if (isAbsence(err)) return null;
         throw err;
       });
-      if (ancestorEntry?.isSymbolicLink()) throw traversal();
+      // The workspace directory itself may be a link of the operator's (one
+      // workspace mounted elsewhere), like the root above it; the identity
+      // check below still holds everything beneath it to its own spelling.
+      if (ancestorEntry?.isSymbolicLink() && path.resolve(ancestor) !== path.resolve(workspaceDir)) throw traversal();
       realAncestor = await fs.realpath(ancestor).catch((err: unknown) => {
         if (isAbsence(err)) return null;
         throw err;
@@ -1141,8 +1144,9 @@ export class WorkspaceService implements IWorkspaceService {
     const newAbsolute = path.resolve(workspaceDir, newRelativePath);
     this.assertWithinWorkspace(oldAbsolute, workspaceDir);
     this.assertWithinWorkspace(newAbsolute, workspaceDir);
-    // Both ends: a link as the source would be moved as a link (harmless) but
-    // a link on the way to either end would carry the rename outside.
+    // Both ends: a link on the way to either end would carry the rename
+    // outside. A link used AS the source is refused too — a committed link
+    // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });

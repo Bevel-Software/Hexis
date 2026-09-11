@@ -890,7 +890,13 @@ describe('WorkspaceService — symbolic links', () => {
     // A link to nothing resolves to nothing, like a missing folder would; a
     // guard that then climbed to the parent would pass, and the write would
     // land wherever the link is pointed at by the time it runs.
-    await fs.symlink(path.join(root, 'nowhere'), path.join(workspaceDir, 'knowledge-base', 'dangling'), linkType);
+    // A junction needs an existing target, so on Windows the dangling link is
+    // a file link — it may point at nothing, and lstat still reports a link.
+    await fs.symlink(
+      path.join(root, 'nowhere'),
+      path.join(workspaceDir, 'knowledge-base', 'dangling'),
+      process.platform === 'win32' ? 'file' : 'dir',
+    );
     await expect(svc.writeFile(workspaceId, 'knowledge-base/dangling/note.md', 'x')).rejects.toThrow(
       'Path traversal detected',
     );
@@ -936,6 +942,15 @@ describe('WorkspaceService — symbolic links', () => {
     expect(await viaMount.readFile(workspaceId, rel)).toBe('Hello.');
     await viaMount.writeFile(workspaceId, rel, 'Hello again.');
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Hello again.');
+
+    // One workspace directory mounted elsewhere: the directory itself is a
+    // link of the operator's, and everything beneath it is its own.
+    const elsewhere = path.join(root, 'elsewhere-ws');
+    await fs.rename(workspaceDir, elsewhere);
+    await fs.symlink(elsewhere, workspaceDir, linkType);
+    expect(await svc.readFile(workspaceId, rel)).toBe('Hello again.');
+    await svc.writeFile(workspaceId, rel, 'Third.');
+    expect(await fs.readFile(path.join(elsewhere, rel), 'utf-8')).toBe('Third.');
   });
 });
 
