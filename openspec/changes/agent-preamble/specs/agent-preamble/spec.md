@@ -79,10 +79,6 @@ The External agent access page SHALL put its connection setup first in a card co
 - **WHEN** the composed result reports the tool prefix as truncated
 - **THEN** the section warns that the fixed line and the first paragraph are over that channel's cap TOGETHER, names the cap and the length, and names which clients are affected and which are not, so an admin can tell whether it matters to their deployment
 
-#### Scenario: A precondition on a file the caller cannot read
-- **WHEN** a save carries a precondition for a path the caller has no read permission on
-- **THEN** the write route refuses with the same 403 the file route gives, before comparing anything, and a save WITHOUT a precondition is unaffected
-
 #### Scenario: Workspace still loading
 - **WHEN** an admin opens the page before the workspace has reported `kbDirName`
 - **THEN** the section renders without the Edit action until it is known and never creates a save path with a missing segment
@@ -113,6 +109,10 @@ When `isAdmin` is true and `kbDirName` is known, the card SHALL load `${kbDirNam
 #### Scenario: Another admin saved while this editor was open
 - **WHEN** the backing file no longer holds the text this editor loaded and the admin selects Save description
 - **THEN** the write is refused, nothing is overwritten, and the card shows that the file changed and keeps the editor open with the unsaved value
+
+#### Scenario: A precondition on a file the caller cannot read
+- **WHEN** a save carries a precondition for a path the caller has no read permission on
+- **THEN** the write route refuses with the same 403 the file route gives, before comparing anything, and a save WITHOUT a precondition is unaffected
 
 #### Scenario: The backing file cannot be read
 - **WHEN** the default-branch read fails for any reason other than the file being absent

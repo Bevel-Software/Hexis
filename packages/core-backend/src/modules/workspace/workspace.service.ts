@@ -21,6 +21,12 @@ import {
   SAFE_IMPLICIT_FETCH_ARGS,
 } from '../kb-fs/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
+import { isAbsence } from '../../shared/fs-errors.js';
+
+/** One held path turn: the settled tail of the nested mutations launched inside it. */
+interface HeldTurn {
+  tail: Promise<void>;
+}
 
 /**
  * Workspaces are per-branch, not per-user (PLAN §3). One on-disk clone per
@@ -177,7 +183,15 @@ export class WorkspaceService implements IWorkspaceService {
    * caller wrap a whole read-decide-write sequence in a turn and still call
    * the ordinary write inside it.
    */
-  private readonly heldTurns = new AsyncLocalStorage<ReadonlySet<string>>();
+  /**
+   * The turns the current async context holds, each with the tail of the
+   * nested mutations already launched inside it — so a re-entrant call never
+   * waits for the outer turn (that would hang) while two nested calls on the
+   * same path, launched side by side inside one turn, still run one at a
+   * time. The map is inherited by every child context; the entry object is
+   * shared, which is what makes siblings queue on one tail.
+   */
+  private readonly heldTurns = new AsyncLocalStorage<ReadonlyMap<string, HeldTurn>>();
 
   /**
    * Late-bound by the composition root — DiffService depends on
@@ -803,6 +817,7 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath, 'utf-8');
   }
 
@@ -810,7 +825,55 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
+    await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath);
+  }
+
+  /**
+   * Refuse a path that reaches its file through a symbolic link — as the
+   * final component, or as any directory between the workspace root and it.
+   * `assertWithinWorkspace` is lexical: `knowledge-base/notes.md` passes it
+   * however the name resolves, so a link the repository carries (they only
+   * arrive by direct git push; the app's own writes never create one) would
+   * let a read hand out bytes from anywhere the server process can read, and
+   * a write replace whatever the link points at. The rule is the plugin
+   * archive's: the deepest ancestor that exists must resolve to exactly its
+   * own spelling under the workspace's resolved root — identity, not mere
+   * containment — and the entry itself, when it exists, must not be a link.
+   * The workspace root may sit behind a link of the operator's (a mounted
+   * volume): both sides are resolved, so that is allowed.
+   *
+   * The same message as the lexical check on purpose: the routes map it to
+   * the traversal refusal, which is what this is.
+   */
+  private async assertNotThroughLink(absolutePath: string, workspaceDir: string): Promise<void> {
+    const traversal = () => new Error('Path traversal detected');
+    const entry = await fs.lstat(absolutePath).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (entry?.isSymbolicLink()) throw traversal();
+    // The deepest existing ancestor: a write creates the rest, under it.
+    let ancestor = path.dirname(absolutePath);
+    let realAncestor: string | null = null;
+    while (realAncestor === null) {
+      realAncestor = await fs.realpath(ancestor).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
+        throw err;
+      });
+      if (realAncestor === null) {
+        const up = path.dirname(ancestor);
+        if (up === ancestor) throw traversal();
+        ancestor = up;
+      }
+    }
+    const realRoot = await fs.realpath(workspaceDir);
+    const expected = path.join(realRoot, path.relative(path.resolve(workspaceDir), ancestor));
+    const same =
+      process.platform === 'win32'
+        ? realAncestor.toLowerCase() === expected.toLowerCase()
+        : realAncestor === expected;
+    if (!same) throw traversal();
   }
 
   /**
@@ -1025,9 +1088,13 @@ export class WorkspaceService implements IWorkspaceService {
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     // Under the path's turn like every other single-file mutation: a delete
     // landing between a conditional write's compare and its write would let
-    // that write recreate the file the delete had just removed.
-    await this.withResolvedPathTurn(absolutePath, () => fs.rm(absolutePath, { recursive: true, force: true }));
-    await this.diffService?.markUserDeleted(workspaceId, relativePath);
+    // that write recreate the file the delete had just removed. The diff
+    // baseline is updated inside the same turn, so two mutations of one path
+    // update it in the order they landed on disk.
+    await this.withResolvedPathTurn(absolutePath, async () => {
+      await fs.rm(absolutePath, { recursive: true, force: true });
+      await this.diffService?.markUserDeleted(workspaceId, relativePath);
+    });
   }
 
   /**
@@ -1145,9 +1212,21 @@ export class WorkspaceService implements IWorkspaceService {
    */
   private async withResolvedPathTurn<T>(absolutePath: string, op: () => Promise<T>): Promise<T> {
     const held = this.heldTurns.getStore();
-    if (held?.has(absolutePath)) return op();
+    const inner = held?.get(absolutePath);
+    if (inner) {
+      // Re-entrant: runs without waiting for the turn this context holds —
+      // but behind any sibling launched inside that same turn, so a held
+      // turn that fires two conditional writes at once cannot have both
+      // compare the same old content and then overwrite each other.
+      const turn = inner.tail.then(() => op());
+      inner.tail = turn.then(
+        () => undefined,
+        () => undefined,
+      );
+      return turn;
+    }
     const run = (): Promise<T> =>
-      this.heldTurns.run(new Set([...(held ?? []), absolutePath]), op);
+      this.heldTurns.run(new Map([...(held ?? []), [absolutePath, { tail: Promise.resolve() }]]), op);
     const previous = this.writeTurns.get(absolutePath);
     const turn = previous ? previous.then(run) : run();
     const tail = turn.then(
@@ -1188,6 +1267,7 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await this.assertNotThroughLink(absolutePath, workspaceDir);
       // Compare BEFORE creating anything. The parent chain used to be made
       // first, so a refused save at `x/new-folder/note.md` left an empty
       // `x/new-folder/` behind in everyone's tree — for a write that never
@@ -1216,8 +1296,9 @@ export class WorkspaceService implements IWorkspaceService {
         }
         throw err;
       }
+      // Inside the turn, so the baseline follows the order the writes landed in.
+      await this.diffService?.syncFromDisk(workspaceId, relativePath);
     });
-    await this.diffService?.syncFromDisk(workspaceId, relativePath);
   }
 
   async createDirectory(workspaceId: string, relativePath: string): Promise<void> {
@@ -1237,11 +1318,16 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     // An upload over a path is a mutation of that path, so it takes the same
-    // turn as a text write: see {@link withPathTurn}.
-    await this.withResolvedPathTurn(absolutePath, () => fs.writeFile(absolutePath, data));
-    await this.diffService?.syncFromDisk(workspaceId, relativePath);
+    // turn as a text write: see {@link withPathTurn}. The whole of it — the
+    // parent chain too, so a folder delete serialized before this turn
+    // cannot remove the parent between its creation and the write.
+    await this.withResolvedPathTurn(absolutePath, async () => {
+      await this.assertNotThroughLink(absolutePath, workspaceDir);
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, data);
+      await this.diffService?.syncFromDisk(workspaceId, relativePath);
+    });
   }
 
   /**
