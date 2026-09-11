@@ -97,6 +97,32 @@ describe('canonicalFileIdentity', () => {
     expect(() => canonicalFileIdentity('/etc/passwd')).toThrow(PathTraversalError);
   });
 
+  it('refuses an absolute path that the containment stand-in would call contained', () => {
+    // The trap the stand-in root sets for itself: `validateRelativePath`
+    // accepts `/workspace/a.md`, and resolving it against `/workspace`
+    // lands it inside `/workspace` — so containment alone reads it as fine
+    // and it becomes a lock identity. No real workspace directory is ever
+    // literally `/workspace` (it is `<workspacesRoot>/<id>`), so the file
+    // verbs resolve that same path outside their workspace and answer 403.
+    expect(() => canonicalFileIdentity('/workspace/a.md')).toThrow(PathTraversalError);
+    expect(() => canonicalFileIdentity('/workspace')).toThrow(PathTraversalError);
+  });
+
+  it('refuses a non-string path as the client mistake it is, not as a 500', () => {
+    // The routes' guard only tests falsiness, so `{"path": 123}` reaches
+    // here. Unguarded, `canonicalRelativePath` calls `.startsWith` on a
+    // number and the bare `TypeError` becomes a 500; `PUT /file` answers
+    // 400 for that same body.
+    for (const notAPath of [123, true, {}, [], ['a.md'], null, undefined]) {
+      expect(() => canonicalFileIdentity(notAPath as unknown as string)).toThrow(
+        WorkflowValidationError,
+      );
+      expect(() => canonicalFileIdentity(notAPath as unknown as string)).toThrow(
+        'Invalid path: Path is required',
+      );
+    }
+  });
+
   const INPUTS = [
     ONE_FILE,
     `./${ONE_FILE}`,
@@ -111,6 +137,11 @@ describe('canonicalFileIdentity', () => {
     '.',
     './',
     '/etc/passwd',
+    // Absolute, but spelled to look contained under the stand-in root the
+    // implementation resolves against.
+    '/workspace/a.md',
+    '/workspace',
+    '/workspace/',
     '/',
     'knowledge-base\\x\\a.md',
     'C:/Windows/system32',

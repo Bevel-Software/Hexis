@@ -70,11 +70,18 @@ const TERM = /"file_locks"\."(\w+)"\s*(<=|>=|=|<|>)\s*\$(\d+)/g;
 function predicateFor(condition: SQL | undefined): (row: LockRow) => boolean {
   if (!condition) return () => true;
   const { sql: text, params } = dialect.sqlToQuery(condition);
-  const terms = [...text.matchAll(TERM)].map(([, column, operator, index]) => ({
-    field: FIELD_FOR_COLUMN[column],
-    operator,
-    value: comparable(params[Number(index) - 1]),
-  }));
+  const terms = [...text.matchAll(TERM)].map(([, column, operator, index]) => {
+    const field = FIELD_FOR_COLUMN[column];
+    // A column the regex matched but FIELD_FOR_COLUMN does not know would
+    // read `row[undefined]` as the string "undefined" and compare it against
+    // a real parameter — excluding every row, silently, which reads in a test
+    // exactly like "no lock is held". Fail closed here too, for the same
+    // reason the unmatched-reference check below fails closed.
+    if (!field) {
+      throw new Error(`fake file_locks db has no field mapped for column "${column}": ${text}`);
+    }
+    return { field, operator, value: comparable(params[Number(index) - 1]) };
+  });
   // Every clause the lock service builds is a conjunction of column
   // comparisons. A term this cannot read would silently widen the match, so
   // say so instead of quietly answering the wrong question.

@@ -243,6 +243,11 @@ describe('lock routes coordinate on one file identity', () => {
       ['launders back inside', `${KB}/x/../y.md`, 400],
       ['uses backslashes', `${KB}\\x\\a.md`, 400],
       ['is absolute', '/etc/passwd', 403],
+      // Absolute, but spelled to look contained under the stand-in root
+      // `canonicalFileIdentity` resolves against. A real workspace directory
+      // is `<workspacesRoot>/<id>`, so `PUT /file` resolves this outside it
+      // and answers 403.
+      ['is absolute under a workspace-looking root', '/workspace/a.md', 403],
     ];
 
     it.each(REFUSED)('acquire refuses a path that %s', async (_why, badPath, expected) => {
@@ -271,6 +276,28 @@ describe('lock routes coordinate on one file identity', () => {
     it('answers an absolute path with the file verbs\' own wording', async () => {
       const refused = await acquire('/etc/passwd');
       expect(await refused.json()).toMatchObject({ error: 'Path traversal detected' });
+    });
+
+    /**
+     * A truthy non-string `path` clears the routes' own `!targetPath` guard,
+     * so the service is what has to refuse it. `PUT /file` answers 400 (its
+     * `requestPath` type-guards before canonicalising); unguarded, the
+     * canonicaliser would call `.startsWith` on the number and the resulting
+     * `TypeError` would leave here as a 500.
+     */
+    it('refuses a truthy non-string path with 400 on every lock route', async () => {
+      const body = { branch: BRANCH, path: 123 };
+      const responses = await Promise.all([
+        send('POST', '', body),
+        send('DELETE', '', body),
+        send('POST', '/heartbeat', body),
+        send('POST', '/checkpoint', body),
+      ]);
+
+      expect(responses.map((r) => r.status)).toEqual([400, 400, 400, 400]);
+      expect(h.fake.rows()).toEqual([]);
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.commitFile).not.toHaveBeenCalled();
     });
   });
 });
