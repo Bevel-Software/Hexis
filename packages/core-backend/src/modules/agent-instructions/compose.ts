@@ -1,0 +1,286 @@
+/**
+ * What a connected agent is told at the start of an MCP session, composed
+ * from two layers: a platform header the code owns, and the deployment
+ * preamble an admin writes in `mcp-description.md` at the repository root.
+ *
+ * Two channels carry the result. The full text goes out as `instructions` on
+ * the initialize handshake, which Claude Code, Claude Desktop and Cursor place
+ * in the model's system prompt. claude.ai on the web, the Agent SDK and Cline
+ * drop that field, so a short prefix is also prepended to the descriptions of
+ * the four knowledge-base tools (the one pre-call channel every client shows
+ * the model). Both are capped, because both land in every conversation.
+ *
+ * Pure: no IO, no clock. The reader beside it (`read-preamble.ts`) does the
+ * file access; the hosted proxy, the agent-facing route and the local bridge
+ * all read this one composer's output.
+ */
+
+/** The repository-root file an admin edits. */
+export const PREAMBLE_FILE = 'mcp-description.md';
+
+/** UTF-16 units of preamble sent on the handshake before the marker replaces the rest. */
+export const PREAMBLE_CAP = 6_000;
+
+/** UTF-16 units of the whole tool prefix (fixed line included). */
+export const TOOL_PREFIX_CAP = 300;
+
+/** The tools whose descriptions carry the prefix. Every other tool is untouched. */
+export const PREFIXED_TOOLS: ReadonlySet<string> = new Set(['start_session', 'grep', 'list_files', 'read_file']);
+
+/**
+ * The platform header, owned by the code. What Hexis is, that its content is
+ * not in the model's training data, the order in which to search it, and that
+ * skills are reachable as prompts and through the two skill tools.
+ */
+export const PLATFORM_HEADER =
+  "Hexis is this organisation's knowledge base, together with the skills and tools its teams have approved. " +
+  'Its content is specific to the organisation and is not in your training data. ' +
+  'Before answering a question about the organisation, its people, customers, products, processes, projects or internal terms, ' +
+  'search the knowledge base: call `start_session` once, then `grep` for the key terms, `list_files` to orient, and `read_file` what matches. ' +
+  'Prefer what you find there over memory or the web, and say so when the knowledge base is silent on something the organisation should have documented. ' +
+  'Skills are available as prompts and through `list_skills` and `get_skill`.';
+
+/**
+ * The fixed first line of the tool prefix. It always leads, so an admin's
+ * first edit never removes the instruction from the clients that only see
+ * tool descriptions, and a preamble that opens with a heading still yields a
+ * sensible purpose line.
+ */
+export const TOOL_PREFIX_LINE = "This organisation's knowledge base. Search it before answering from memory.";
+
+/** The one-line marker that replaces everything past the preamble cap. */
+export const PREAMBLE_TRUNCATION_MARKER = `[preamble truncated at ${PREAMBLE_CAP.toLocaleString('en-US')} characters; shorten ${PREAMBLE_FILE}]`;
+
+export interface ComposedAgentInstructions {
+  /** The header, then the preamble body when there is one. Sent on the initialize handshake. */
+  instructions: string;
+  /** The platform header alone, so a card can show the fixed part apart from the admin's. */
+  header: string;
+  /** The preamble body as sent (cut and marked when over the cap); empty when there is none. */
+  preamble: string;
+  /** The fixed first line of the prefix, so a card can show which part of it the admin owns. */
+  toolPrefixLine: string;
+  /** The fixed line, then the preamble's first non-heading paragraph. Prepended to the four tools' descriptions. */
+  toolPrefix: string;
+  /** The preamble exceeded {@link PREAMBLE_CAP} and was cut, marker appended. */
+  truncated: boolean;
+  /** Length of the stripped preamble BEFORE the cut, so a card can show `N / 6,000`. */
+  preambleChars: number;
+  /** The prefix exceeded {@link TOOL_PREFIX_CAP} and was cut. */
+  toolPrefixTruncated: boolean;
+  /** Length of the prefix BEFORE the cut, so a card can show `N / 300`. */
+  toolPrefixChars: number;
+  /** The file has a `<!--` with no `-->`: everything from it to the end was withheld. */
+  unterminatedComment: boolean;
+}
+
+/**
+ * Compose the two texts from the raw file content (`null` when the file is
+ * absent). HTML comments are private notes and never leave the file; an
+ * unterminated `<!--` strips everything after it, so the most likely editing
+ * slip withholds text rather than leaking it.
+ */
+export function composeAgentInstructions(preamble: string | null): ComposedAgentInstructions {
+  const { text, unterminated } = stripHtmlComments(preamble ?? '');
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const stripped = normalized.trim();
+  const preambleChars = stripped.length;
+  const truncated = preambleChars > PREAMBLE_CAP;
+  const body = truncated ? `${cutAtCodePoint(stripped, PREAMBLE_CAP)}\n${PREAMBLE_TRUNCATION_MARKER}` : stripped;
+  const instructions = body ? `${PLATFORM_HEADER}\n\n${body}` : PLATFORM_HEADER;
+
+  // Classified UNTRIMMED: the leading indentation of a first line is what
+  // makes it an indented code block, and the trim above would turn that
+  // code into prose. The paragraph itself comes back trimmed.
+  const paragraph = firstNonHeadingParagraph(normalized);
+  const fullPrefix = paragraph ? `${TOOL_PREFIX_LINE} ${paragraph}` : TOOL_PREFIX_LINE;
+  const toolPrefixChars = fullPrefix.length;
+  const toolPrefixTruncated = toolPrefixChars > TOOL_PREFIX_CAP;
+  const toolPrefix = toolPrefixTruncated ? cutAtCodePoint(fullPrefix, TOOL_PREFIX_CAP) : fullPrefix;
+
+  return {
+    instructions,
+    header: PLATFORM_HEADER,
+    preamble: body,
+    toolPrefix,
+    toolPrefixLine: TOOL_PREFIX_LINE,
+    truncated,
+    preambleChars,
+    toolPrefixTruncated,
+    toolPrefixChars,
+    unterminatedComment: unterminated,
+  };
+}
+
+/**
+ * A tool description with the prefix ahead of it: the prefix, a blank line,
+ * then the original. Purpose line first, because claude.ai cuts descriptions
+ * near 500 characters.
+ */
+export function prefixToolDescription(toolPrefix: string, description: string | undefined): string {
+  return description ? `${toolPrefix}\n\n${description}` : toolPrefix;
+}
+
+/**
+ * Remove every `<!-- … -->` block. A `<!--` that is never closed takes the
+ * rest of the text with it and is reported, so the card can warn.
+ */
+function stripHtmlComments(text: string): { text: string; unterminated: boolean } {
+  let out = '';
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf('<!--', from);
+    if (open === -1) {
+      out += text.slice(from);
+      return { text: out, unterminated: false };
+    }
+    out += text.slice(from, open);
+    const close = text.indexOf('-->', open + 4);
+    if (close === -1) return { text: out, unterminated: true };
+    from = close + 3;
+  }
+}
+
+/** An ATX heading line: `#` to `######`, then a space or the end. */
+const ATX_HEADING = /^#{1,6}(\s|$)/;
+/** The underline of a setext heading: a run of `=` or `-` on its own line. */
+const SETEXT_UNDERLINE = /^(=+|-+)$/;
+/** A thematic break: three or more `-`, `*` or `_`, optionally spaced. */
+const THEMATIC_BREAK = /^([-*_])(\s*\1){2,}$/;
+/** The opener of a fenced code block: three or more backticks or tildes, then an optional info string. */
+const CODE_FENCE = /^(`{3,}|~{3,})/;
+/** A list item or a blockquote line: a setext underline cannot be a lazy continuation of either. */
+const LIST_ITEM_OR_QUOTE = /^([-*+]|\d{1,9}[.)])(\s|$)|^>/;
+
+/**
+ * The first paragraph that is not a markdown heading, collapsed to one line.
+ * Blocks are separated by blank lines and by code, fenced or indented; code
+ * is never a paragraph, so a fence and everything inside it (blank lines
+ * and rules included) are skipped, a fence that never closes runs to the
+ * end of the text, and an indented block is skipped line by line — all as
+ * in CommonMark (see `paragraphBlocks`). Inside a block, ATX heading lines and
+ * rules (a thematic break, or a bare `===` or `---` line) are never content,
+ * and a setext heading (paragraph text with a `===` or `---` underline
+ * directly beneath it) is dropped together with its underline, so
+ * `Title\n===\nText` and `## Title\nText` both yield `Text`. A rule beneath
+ * a list item or a blockquote, or beneath the lines that continue one, is
+ * not an underline (it cannot lazily continue either), so `- Item\n---`
+ * keeps the item and drops the rule. Empty when the text has no such
+ * paragraph (absent, empty, code-only or heading-only preamble).
+ */
+function firstNonHeadingParagraph(text: string): string {
+  for (const block of paragraphBlocks(text)) {
+    const kinds = block.map((l) => l.kind);
+    // A list item or blockquote owns every line beneath it until the block
+    // ends (a lazy continuation is trimmed to look like paragraph text), so
+    // once one opens, no rule further down the block is an underline.
+    let container = false;
+    let underline = -1;
+    kinds.forEach((kind, i) => {
+      if (kind === 'container') container = true;
+      else if (kind === 'rule' && i > 0 && !container && kinds[i - 1] === 'text' && SETEXT_UNDERLINE.test(block[i].text))
+        underline = i;
+    });
+    const content = block.filter((l, i) => i > underline && (l.kind === 'text' || l.kind === 'container'));
+    if (content.length > 0) return content.map((l) => l.text).join(' ').replace(/\s+/g, ' ');
+  }
+  return '';
+}
+
+type LineKind = 'heading' | 'rule' | 'container' | 'text';
+
+/** A block's line: its trimmed text and what it is, decided where it was read (see `paragraphBlocks`). */
+interface BlockLine {
+  text: string;
+  kind: LineKind;
+}
+
+/**
+ * What a line is on its own, in CommonMark's order of precedence: a rule is
+ * tested before a list item because `- - -` and `* * *` are breaks, not
+ * items. Whether a rule underlines the text above it depends on its
+ * neighbours and is decided by the caller.
+ */
+function lineKind(line: string): LineKind {
+  if (ATX_HEADING.test(line)) return 'heading';
+  if (THEMATIC_BREAK.test(line) || SETEXT_UNDERLINE.test(line)) return 'rule';
+  if (LIST_ITEM_OR_QUOTE.test(line)) return 'container';
+  return 'text';
+}
+
+/**
+ * The text's blocks outside code, each a list of trimmed non-blank lines.
+ *
+ * Indentation decides what is code, as in CommonMark: a fence opens or
+ * closes only when indented at most three columns, and a line indented
+ * four or more where no paragraph is open — at the start of a block, or
+ * right after a heading or a rule, which end whatever came before them —
+ * is an indented code block: literal text, so a ``` in it is content, not
+ * a fence that would swallow the rest of the file. Under paragraph text
+ * (a list item or blockquote included) the same indentation is a
+ * continuation, since indented code cannot interrupt a paragraph — and a
+ * continuation is paragraph TEXT whatever it says once trimmed: `    # x`
+ * under a line of prose is not a heading and `    ---` is not a rule, so
+ * each line's kind is decided here, with its indentation in hand, and
+ * carried with it.
+ */
+function paragraphBlocks(text: string): BlockLine[][] {
+  const blocks: BlockLine[][] = [];
+  let block: BlockLine[] = [];
+  let fence: string | null = null; // the opener of the fenced code block being skipped
+  const flush = () => {
+    if (block.length > 0) blocks.push(block);
+    block = [];
+  };
+  const paragraphOpen = () => {
+    const last = block[block.length - 1];
+    return last !== undefined && (last.kind === 'text' || last.kind === 'container');
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const indent = indentColumns(raw);
+    if (fence !== null) {
+      // The closer: the opener's character only, at least as many of it, nothing else.
+      if (indent <= 3 && line.startsWith(fence) && /^(`+|~+)$/.test(line)) fence = null;
+      continue;
+    }
+    const opener = indent <= 3 ? CODE_FENCE.exec(line) : null;
+    if (opener) {
+      flush();
+      fence = opener[1];
+    } else if (line.length === 0) {
+      flush();
+    } else if (indent >= 4) {
+      // Indented code, skipped line by line (blank lines between flush
+      // nothing) — or, under an open paragraph, a continuation of it.
+      if (paragraphOpen()) block.push({ text: line, kind: 'text' });
+    } else {
+      block.push({ text: line, kind: lineKind(line) });
+    }
+  }
+  flush();
+  return blocks;
+}
+
+/** Leading indentation in columns, a tab reaching the next multiple of four. */
+function indentColumns(raw: string): number {
+  let columns = 0;
+  for (const ch of raw) {
+    if (ch === ' ') columns += 1;
+    else if (ch === '\t') columns += 4 - (columns % 4);
+    else break;
+  }
+  return columns;
+}
+
+/**
+ * `text` cut to at most `max` UTF-16 units, never inside a surrogate pair: a
+ * high surrogate at the cut moves the cut before it, so no broken character
+ * is ever sent and the count in the card matches what the server sends.
+ */
+function cutAtCodePoint(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
+  return text.slice(0, end);
+}

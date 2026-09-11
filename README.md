@@ -316,6 +316,18 @@ narrow the field, `get_skill` returns one skill at call time.
 </details>
 
 <details>
+<summary><b>How does an agent know what is in the knowledge base?</b></summary>
+
+Every MCP session starts with instructions: a fixed platform header that says
+what Hexis is and to search the knowledge base before answering from memory,
+followed by `mcp-description.md` from the root of your repository, where an
+admin describes what the knowledge base holds and when to consult it. Clients
+that read the handshake (Claude Code, Claude Desktop, Cursor) put it in the
+system prompt; for the ones that do not, the first line is also shown on the
+four core tools. The External agent access page shows exactly what agents get.
+</details>
+
+<details>
 <summary><b>Which agents can connect?</b></summary>
 
 Any MCP-capable client, including Claude Code, Codex, Cursor, Cline and ChatGPT,

@@ -3,12 +3,11 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
-import { useAuth } from '../../auth/state/auth.context';
 import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
-import { filterLibraryItems, isUngrouped, pluginsOfItem, type LibraryFilter } from '../utils/status';
+import { filterLibraryItems, pluginsOfItem, type LibraryFilter } from '../utils/status';
 import { pluginEntriesFor } from '../utils/plugin-entries';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
@@ -31,9 +30,10 @@ import { NewPluginDialog } from './NewPluginDialog';
  * can take its filter as a plain prop and the sidebar can hold no state.
  *
  * The nav lists LENSES and PLACES, never individual plugins: Everything and
- * Owned by me, then the caller's teams (their own space first), then the two
- * roots as file trees. A plugin is reached through the page it is on — its
- * row on Everything or a team's page, its folder in the Plugins tree — so the
+ * Owned by me, then the groups (Everyone first), then the two roots as file
+ * trees. A plugin — the caller's own space included — is reached through the
+ * page it is on: its row on Everything or a team's page, its folder in the
+ * Plugins tree. So the
  * plugin verbs (add to, manage access, delete) live on the plugin page and
  * the tree row, and the nav's own menu keeps only what the nav can answer:
  * a link to the row, and a new plugin.
@@ -43,7 +43,6 @@ export function LibraryLayout() {
   const { items, pluginSummaries, teams, reload, reloadPlugins } = lib;
   const location = useLocation();
   const navigate = useNavigate();
-  const { user } = useAuth();
   const { isAdmin } = useAdmin();
   const toast = useLibraryToast();
   /**
@@ -57,7 +56,7 @@ export function LibraryLayout() {
   const { collapsed } = useSidebar();
 
   const filter = libraryFilterForPath(location.pathname);
-  const personalLabel = personalPluginName(user?.name);
+  const personalLabel = personalPluginName();
 
   /**
    * One row per team: how much of the catalog the team can use, and — in
@@ -89,7 +88,6 @@ export function LibraryLayout() {
     () => items.filter((i) => i.owned && i.status.state !== 'ok').length,
     [items],
   );
-  const ungroupedCount = useMemo(() => items.filter(isUngrouped).length, [items]);
   const attentionCount = useMemo(
     () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,
     [items],
@@ -131,8 +129,6 @@ export function LibraryLayout() {
           onSelect={(next) => navigate(pathForLibraryFilter(next))}
           ownedCount={ownedCount}
           ownedAttention={ownedAttention}
-          personalPluginLabel={personalLabel}
-          ungroupedCount={ungroupedCount}
           teams={teamRows}
           attentionCount={attentionCount}
           onFinishSetup={() => navigate('/connect')}

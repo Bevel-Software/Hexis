@@ -23,6 +23,12 @@ import { pluginsWorkspaceId } from './plugins.service.js';
  * when the caller could see it on the index (a member, or able to discover
  * it). The lens never widens what the catalog already shows the caller — it
  * slices it.
+ *
+ * The list opens with `Everyone`: not a group, the built-in org-wide
+ * principal — what a signed-in person in no group at all can use, which is
+ * what `read: everyone` (or a public plugin) reaches. Same slice, same
+ * caller gate, asked of the resolver as `canReadAsEveryoneBatch`. The name
+ * cannot collide with a group's: `everyone` is reserved by the grammar.
  */
 export interface TeamAccess {
   name: string;
@@ -33,6 +39,9 @@ export interface TeamAccess {
   /** Tool slugs. */
   tools: string[];
 }
+
+/** The org-wide entry's name — the built-in `everyone` principal, as the sidebar spells it. */
+export const EVERYONE_TEAM = 'Everyone';
 
 export function createTeamsRoutes(
   accessControl: IAccessControl,
@@ -75,12 +84,10 @@ export function createTeamsRoutes(
       const callerSeesPlugin = (g: PluginCatalogEntry) =>
         g.folders.some((f) => callerReads(f) || callerReads(accessMdOf(f)));
 
-      const teams: TeamAccess[] = [];
-      for (const name of groups) {
-        const team = await accessControl.canReadAsGroupBatch(wsId, name, probes);
-        if (team === null) continue; // gone between the two reads — nothing to say
-        const reads = (p: string) => team.get(p) === true;
-        teams.push({
+      /** One entry: what `verdicts` reads, cut to what the caller sees. */
+      const slice = (name: string, verdicts: Map<string, boolean>): TeamAccess => {
+        const reads = (p: string) => verdicts.get(p) === true;
+        return {
           name,
           plugins: plugins
             .filter((g) => g.folders.some(reads) && callerSeesPlugin(g))
@@ -89,7 +96,16 @@ export function createTeamsRoutes(
             .filter((s) => reads(skillMdOf(s.path)) && callerReads(skillMdOf(s.path)))
             .map((s) => s.name),
           tools: tools.filter((t) => reads(t.path) && callerReads(t.path)).map((t) => t.slug),
-        });
+        };
+      };
+
+      const teams: TeamAccess[] = [
+        slice(EVERYONE_TEAM, await accessControl.canReadAsEveryoneBatch(wsId, probes)),
+      ];
+      for (const name of groups) {
+        const team = await accessControl.canReadAsGroupBatch(wsId, name, probes);
+        if (team === null) continue; // gone between the two reads — nothing to say
+        teams.push(slice(name, team));
       }
       res.json({ teams });
     } catch (err) {

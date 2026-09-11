@@ -2,6 +2,7 @@ import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, pluginOfPath, isPersonalPlugin
 import { matchPath } from 'react-router-dom';
 import { kbFileUrl } from '../../workspace/routing/kb-routes';
 import type { LibraryFilter } from '../utils/status';
+import { PERSONAL_PLUGIN_NAME } from '../utils/personal-plugin';
 
 /**
  * The Library's URL↔selection mapping, in one place and in both directions.
@@ -221,7 +222,7 @@ export function libraryHomeForItemPath(
   // A personal shelf is decided by the FOLDER, whatever identity the caller
   // resolved (a personal item's identity is null: a shelf is not a plugin).
   if (folder !== null && isPersonalPluginFolder(folder)) {
-    return { label: 'Yours', path: `${LIBRARY_ROOT}/yours` };
+    return { label: PERSONAL_PLUGIN_NAME, path: `${LIBRARY_ROOT}/yours` };
   }
   const plugin = pluginName ?? folder;
   if (plugin !== null) {

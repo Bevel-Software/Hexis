@@ -110,6 +110,8 @@ const PLUGINS: PluginSummary[] = [
 ];
 
 const TEAMS = [
+  // The server opens with the org-wide entry: Product admits everyone here.
+  { name: 'Everyone', plugins: ['Product'], skills: ['roadmap'], tools: ['slack'] },
   { name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: ['heyreach'] },
   { name: 'Everyone Else', plugins: [], skills: ['scratch'], tools: [] },
 ];
@@ -209,10 +211,9 @@ describe('LibraryRoutes', () => {
   it("/skills-and-tools/yours is the caller's own plugin, as a plugin page", async () => {
     renderAt('/skills-and-tools/yours');
     expect(await screen.findByRole('heading', { name: TEST_PERSONAL_GROUP, level: 1 })).toBeInTheDocument();
-    expect(within(nav()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toHaveAttribute(
-      'aria-current',
-      'true',
-    );
+    // Your own space is not a group: no nav row for it, and nothing else lights up.
+    expect(within(nav()).queryByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeNull();
+    expect(within(nav()).queryByRole('button', { current: true })).toBeNull();
     expect(screen.getByRole('heading', { name: 'Skills', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Tools', level: 2 })).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
@@ -232,6 +233,57 @@ describe('LibraryRoutes', () => {
     expect(screen.getByTestId('library-card-integration-heyreach')).toBeInTheDocument();
     expect(screen.queryByTestId('library-card-skill-roadmap')).toBeNull();
     expect(screen.queryByTestId('library-card-integration-slack')).toBeNull();
+  });
+
+  it('Everyone leads the groups, right after the lenses, and opens what is org-wide', async () => {
+    renderAt('/skills-and-tools');
+    // "Everyone Else" is a team in the fixture: the org-wide row is the one
+    // whose whole label is the name plus its count.
+    await within(nav()).findByRole('button', { name: /^Everyone \d+$/ });
+    const rows = within(nav()).getAllByRole('button');
+    const names = rows.map((r) => r.textContent ?? '');
+    const owned = names.findIndex((n) => n.startsWith('Owned by me'));
+    const everyone = names.findIndex((n) => /^Everyone\d+$/.test(n));
+    const gtm = names.findIndex((n) => n.startsWith('GTM Team'));
+    expect(owned).toBeGreaterThan(-1);
+    expect(everyone).toBe(owned + 1);
+    expect(gtm).toBeGreaterThan(everyone);
+    // Your own space is a plugin, not a group: no row for it here.
+    expect(names.some((n) => n.startsWith(TEST_PERSONAL_GROUP))).toBe(false);
+
+    fireEvent.click(rows[everyone]!);
+    await waitFor(() => expect(pathname()).toBe('/skills-and-tools/teams/Everyone'));
+    expect(await screen.findByRole('heading', { name: 'Everyone', level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/^Org-wide: what every signed-in person/)).toBeInTheDocument();
+    // The server's slice: Product's row, roadmap and slack — nothing of GTM's.
+    expect(await within(main()).findByRole('button', { name: /^Product/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: /^GTM/ })).toBeNull();
+    expect(screen.getByTestId('library-card-skill-roadmap')).toBeInTheDocument();
+    expect(screen.getByTestId('library-card-integration-slack')).toBeInTheDocument();
+    expect(screen.queryByTestId('library-card-skill-outreach')).toBeNull();
+  });
+
+  it('holds the org-wide line until the team list has settled and names Everyone', async () => {
+    let resolve: (teams: typeof TEAMS) => void = () => {};
+    teamsMock.listTeams.mockReturnValue(new Promise<typeof TEAMS>((r) => (resolve = r)));
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByText('Loading teams…')).toBeInTheDocument();
+    expect(screen.queryByText(/^Org-wide:/)).toBeNull();
+    resolve(TEAMS);
+    expect(await screen.findByText(/^Org-wide:/)).toBeInTheDocument();
+  });
+
+  it('keeps the org-wide line off a failed team list — the error is the whole story', async () => {
+    teamsMock.listTeams.mockRejectedValue(new Error("Couldn't load teams."));
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
+    expect(screen.queryByText(/^Org-wide:/)).toBeNull();
+  });
+
+  it('says so when nothing is shared with everyone yet', async () => {
+    teamsMock.listTeams.mockResolvedValue([{ name: 'Everyone', plugins: [], skills: [], tools: [] }]);
+    renderAt('/skills-and-tools/teams/Everyone');
+    expect(await screen.findByText('Nothing is shared with everyone yet.')).toBeInTheDocument();
   });
 
   it('a team deep link with a URL-hostile name lands, and an unknown team says so', async () => {
@@ -280,6 +332,23 @@ describe('LibraryRoutes', () => {
     for (const button of within(nav()).getAllByRole('button')) {
       expect(button).not.toHaveAttribute('aria-current', 'true');
     }
+  });
+
+  it('marks a plugin Private on its row when its access.md says so — and your own space always', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      ...PLUGINS,
+      { ...PLUGINS[0]!, name: 'Mine', folders: ['Plugins/Mine'], canWrite: false, isPrivate: true },
+    ]);
+    renderAt('/skills-and-tools');
+    const mine = await within(main()).findByRole('button', { name: /^Mine/ });
+    expect(within(mine).getByText('Private')).toBeInTheDocument();
+    // GTM's access.md makes no such statement: Owner, and nothing else.
+    const gtm = within(main()).getByRole('button', { name: /^GTM/ });
+    expect(within(gtm).getByText('Owner')).toBeInTheDocument();
+    expect(within(gtm).queryByText('Private')).toBeNull();
+    // The personal space is private by construction.
+    const own = within(main()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) });
+    expect(within(own).getByText('Private')).toBeInTheDocument();
   });
 
   it('sends the old /plugins index path home, where Everything lives now', async () => {
@@ -444,7 +513,7 @@ describe('LibraryRoutes', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load teams.");
     expect(screen.queryByText(/There's no team called/)).toBeNull();
     expect(await screen.findByRole('heading', { name: 'GTM Team', level: 1 })).toBeInTheDocument();
-    expect(within(nav()).getByRole('button', { name: new RegExp(`^${TEST_PERSONAL_GROUP}`) })).toBeInTheDocument();
+    expect(within(nav()).getByRole('button', { name: /^Owned by me/ })).toBeInTheDocument();
     expect(within(nav()).queryByRole('button', { name: /^GTM Team/ })).toBeNull();
   });
 

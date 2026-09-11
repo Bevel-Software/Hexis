@@ -38,11 +38,9 @@ export interface PluginsSidebarProps {
    * badge; when zero the row shows `ownedCount` in grey instead.
    */
   ownedAttention: number;
-  /** The caller's own space, e.g. `Juan's Plugin` — see `personalPluginName`. */
-  personalPluginLabel: string;
-  ungroupedCount: number;
   /**
-   * The teams — groups from the access rules — each with how much of the
+   * The teams — groups from the access rules, led by the org-wide `Everyone`
+   * entry the server puts first — each with how much of the
    * catalog it can use, and how many of its plugins' links lock its members
    * out of a skill right now. Orange wins the count slot: it is other
    * people's problem, and the count is not the news.
@@ -97,9 +95,10 @@ export interface PluginsSidebarProps {
  * home) and Owned by me — then ONE switch between the two views of what is
  * below them:
  *
- *  - TEAMS — the caller's own space first (the one team they are always
- *    in), then every group from the access rules: a team's page is what
- *    being in that group lets a person use;
+ *  - TEAMS (shown as "Groups") — Everyone first, the org-wide entry the
+ *    server leads with, then every group from the access rules: a team's
+ *    page is what being in that group lets a person use. The caller's own
+ *    space is a plugin, not a group, and has no row here;
  *  - ADVANCED — `Skills/` and `Plugins/` as they are on disk.
  *
  * Plugins have no rows of their own here. They are reached through the
@@ -124,8 +123,6 @@ export function PluginsSidebar({
   onSelect,
   ownedCount,
   ownedAttention,
-  personalPluginLabel,
-  ungroupedCount,
   teams,
   attentionCount,
   onFinishSetup,
@@ -309,8 +306,8 @@ export function PluginsSidebar({
           hidden={view !== 'teams'}
           className="flex flex-col gap-px"
         >
-          {/* Your own space leads the teams: it is the one you are always in. */}
-          {row(personalPluginLabel, { kind: 'ungrouped' }, ungroupedCount)}
+          {/* Groups only: your own space is not a group — it is reached from
+              its row on Everything and its folder in the Plugins tree. */}
           {teams.map(({ name, count, urgent }) =>
             // Orange wins the count slot: members locked out of a skill outrank
             // how much the team can use, which is not the news.

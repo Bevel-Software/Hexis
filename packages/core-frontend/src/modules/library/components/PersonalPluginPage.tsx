@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react';
 import { isUngrouped } from '../utils/status';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { urlForLibraryItem } from '../routes/library-paths';
@@ -40,13 +39,12 @@ export function PersonalPluginPage() {
   const data = useLibrary();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
-  const { user } = useAuth();
   const [addOpen, setAddOpen] = useState(false);
   const toast = useLibraryToast();
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
 
-  const name = personalPluginName(user?.name);
+  const name = personalPluginName();
   const items = useMemo(() => data.items.filter(isUngrouped), [data.items]);
   /**
    * For the add dialog's name check. Every skill, not only the ungrouped ones:

@@ -1,7 +1,10 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
+import { isPrivateAccessMd } from '../access-model/access-grammar.js';
+import { isAbsence } from '../../shared/fs-errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -116,10 +119,11 @@ export class PluginIndexService implements IPluginIndexService {
       for (const [name, pluginFolders] of folders) {
         // One folder, one access boundary — the folder IS the plugin.
         const [primary] = pluginFolders;
-        const [owners, writers, readers] = await Promise.all([
+        const [owners, writers, readers, isPrivate] = await Promise.all([
           this.accessControl.eligibleOwners(wsId, primary),
           this.accessControl.eligibleWriters(wsId, primary),
           this.accessControl.eligibleReaders(wsId, primary),
+          this.readsAsPrivate(path.join(kbRoot, primary, 'access.md')),
         ]);
         entries.push({
           name,
@@ -132,6 +136,7 @@ export class PluginIndexService implements IPluginIndexService {
           owners,
           writers,
           readers,
+          isPrivate,
         });
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
@@ -221,6 +226,24 @@ export class PluginIndexService implements IPluginIndexService {
       counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
     }
     return counts;
+  }
+
+  /**
+   * What the plugin's own access.md says of itself — see
+   * `PluginCatalogEntry.isPrivate`. Read from disk rather than through the
+   * resolver: the mark reflects the file's frontmatter as written. An
+   * ABSENT file makes no statement (false: a plugin discovered by its
+   * manifest may have no rules yet); any other failure to read it is a real
+   * one and propagates, so the catalog never claims a privacy verdict it
+   * could not inspect — `build` degrades the whole read, as for any fault.
+   */
+  private async readsAsPrivate(accessMdPath: string): Promise<boolean> {
+    try {
+      return isPrivateAccessMd(await fs.readFile(accessMdPath, 'utf8'));
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
   }
 }
 

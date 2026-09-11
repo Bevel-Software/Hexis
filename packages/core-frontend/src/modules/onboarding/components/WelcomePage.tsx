@@ -154,9 +154,8 @@ export function WelcomePage() {
   // The deployment's own address, not the browser's — see `shared/mcp`.
   const mcpUrl = mcpEndpointUrl();
   const snippet = client.snip(mcpUrl);
-  // Capitalized by the same function that spells the plugin heading — "Welcome,
-  // juan" over a sidebar reading "Juan's Plugin" is the app misspelling someone
-  // to their face on the one page addressed to them.
+  // Capitalized here rather than at the call site — "Welcome, juan" is the app
+  // misspelling someone to their face on the one page addressed to them.
   const firstName = displayFirstName(user?.name) || 'there';
 
   const radios = useRef<(HTMLButtonElement | null)[]>([]);

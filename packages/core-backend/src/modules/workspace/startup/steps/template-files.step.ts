@@ -8,6 +8,7 @@ import {
   validateKbRootName,
 } from '@bevel-software/platform-shared';
 import { IGNORE_FILENAME } from '../../bevel-ignore.js';
+import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -27,7 +28,28 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
  * generated from `ADMIN_EMAIL` (see roles-yaml.step.ts), so a repo can't be
  * seeded with a stale hard-coded Admin list.
  */
-export const REQUIRED_FILES: readonly string[] = ['access.md', 'AGENTS.md', '.bevelignore', '.gitignore'];
+export const REQUIRED_FILES: readonly string[] = [
+  'access.md',
+  'AGENTS.md',
+  '.bevelignore',
+  '.gitignore',
+  // The deployment preamble every connected agent is told at session start
+  // (see modules/agent-instructions). Seeded ONCE and never refreshed: the
+  // content is the admin's, and the shipped template is one HTML comment, so
+  // a never-edited file sends nothing of its own.
+  'mcp-description.md',
+];
+
+/**
+ * Required files added AFTER a distribution may have forked the template. A
+ * custom `KB_TEMPLATE_DIR` that predates one of these would otherwise stop
+ * the boot with ENOENT on the first start after an upgrade, on every
+ * protected branch, over a file whose shipped content is one comment. For
+ * these the packaged template's copy stands in, with one line in the log;
+ * every other required file keeps the strict contract (a custom template
+ * missing `access.md` is a real mistake and should fail loudly).
+ */
+export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set(['mcp-description.md']);
 
 /**
  * Repo-root files the startup phase GENERATES rather than copies — today just
@@ -344,7 +366,21 @@ export class TemplateFilesStep implements OnServerStart {
  * placeholders passes through unchanged.
  */
 async function readTemplate(templateDir: string, relPath: string): Promise<string> {
-  return renderKbLayoutPlaceholders(await fs.readFile(await templateSource(templateDir, relPath), 'utf8'));
+  let raw: string;
+  try {
+    raw = await fs.readFile(await templateSource(templateDir, relPath), 'utf8');
+  } catch (err) {
+    const packaged = defaultKbTemplateDir();
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
+      throw err;
+    }
+    console.warn(
+      `[kb-startup] template-files: the configured KB template has no "${relPath}"; ` +
+        'using the packaged copy. Add the file to the template to silence this.',
+    );
+    raw = await fs.readFile(await templateSource(packaged, relPath), 'utf8');
+  }
+  return renderKbLayoutPlaceholders(raw);
 }
 
 /**

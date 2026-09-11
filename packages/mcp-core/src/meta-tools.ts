@@ -7,9 +7,13 @@ import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } f
  * Code-mode meta-tools exposed ALONGSIDE the direct tools. They let an external
  * agent batch many Bevel calls into one isolated-vm run (`call_tool_chain`)
  * instead of one MCP round-trip per call — the same efficiency our own agent
- * gets. `call_tool_chain`'s description carries the code-mode protocol (there is
- * no system prompt over MCP), so the client learns the convention from the tool
- * itself; `list_tools`/`tools_info` are how it discovers what to call.
+ * gets. `call_tool_chain`'s description carries the code-mode protocol, so the
+ * client learns the convention from the tool itself; `list_tools`/`tools_info`
+ * are how it discovers what to call. There IS a system prompt over MCP now: the
+ * platform header and the admin's preamble arrive as `instructions` on the
+ * initialize handshake (see core-backend's modules/agent-instructions/compose.ts).
+ * The protocol stays in the description regardless, because several clients
+ * (claude.ai on the web, the Agent SDK, Cline) drop that field.
  *
  * Security is identical to the direct surface: the chain runs in an isolated-vm
  * but calls tools with the CALLER's credentials against the external catalog —

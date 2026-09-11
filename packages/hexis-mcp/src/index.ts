@@ -29,6 +29,9 @@ export { type HexisMcpConfig, type ResolvedCliConfig, ConfigError, resolveConfig
 export {
   DeploymentError,
   resolveMcpUrl,
+  resolveDeployment,
+  fetchAgentInstructions,
+  type ResolvedDeployment,
   fetchAllManuals,
   fetchLocalOnlyManuals,
   fetchLocalToolVariables,

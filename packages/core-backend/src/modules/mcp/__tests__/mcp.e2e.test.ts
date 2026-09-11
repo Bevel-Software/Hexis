@@ -13,6 +13,7 @@ import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { toolDef } from '../../tool-helpers/tool-def.js';
+import { PLATFORM_HEADER } from '../../agent-instructions/index.js';
 
 /**
  * True end-to-end test over the REAL Streamable-HTTP MCP transport. A real MCP
@@ -38,7 +39,7 @@ const fakeAuth: RequestHandler = (req, _res, next) => {
   next();
 };
 
-async function connectClient(): Promise<Client> {
+async function connectClient(readAgentPreamble?: () => Promise<string | null>): Promise<Client> {
   const registry = new ToolRegistry();
   // Echo `ask` (reflects the received sessionId so continuity is observable) +
   // an erroring `boom`, registered as defs and hosted as endpoints.
@@ -80,6 +81,7 @@ async function connectClient(): Promise<Client> {
     manualName: 'KNOWLEDGE_BASE',
     spillStore: new SpillStore(join(tmpdir(), 'bevel-test-spills')),
     publicFrontendUrl: 'http://localhost:5173',
+    readAgentPreamble,
   });
   const stub = {} as never;
   // local-token deps (internal tokens / OAuth provider / metadata URL) are only
@@ -87,7 +89,15 @@ async function connectClient(): Promise<Client> {
   app.use('/api', createMcpRoutes(mcpService, stub, fakeAuth, fakeAuth, stub, stub, stub, ''));
   app.use('/api', createManualRoutes(registry, fakeAuth));
 
-  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {
+  serverBaseUrl = baseUrl;
+  return openSession();
+}
+
+let serverBaseUrl = '';
+
+/** One more client session against the server `connectClient` started — same app, same `McpService`. */
+async function openSession(): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL(`${serverBaseUrl}/api/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${TEST_BEARER}` } },
   });
   const client = new Client({ name: 'e2e-client', version: '0.0.0' }, { capabilities: {} });
@@ -148,5 +158,31 @@ describe('MCP over real Streamable-HTTP transport', () => {
     const res = await client.callTool({ name: 'boom', arguments: {} });
     expect(res.isError).toBe(true);
     expect((res.content as Array<{ text: string }>)[0].text).toMatch(/kaboom/i);
+  });
+});
+
+describe('agent instructions over the real transport', () => {
+  it('the initialize result carries the header and the preamble body inline', async () => {
+    const client = await connectClient(async () => 'Acme builds solar farms.\n\n<!-- private -->Look in Projects/ first.');
+    const instructions = client.getInstructions();
+    expect(instructions).toBe(`${PLATFORM_HEADER}\n\nAcme builds solar farms.\n\nLook in Projects/ first.`);
+    expect(instructions).not.toContain('private');
+  });
+
+  it('a second session on the SAME server after the file changed carries the new text — read per session, never once at start', async () => {
+    let content = 'Version one.';
+    const read = async () => content;
+    const first = await connectClient(read);
+    expect(first.getInstructions()).toContain('Version one.');
+
+    // The server, its McpService and the reader stay exactly as they are;
+    // only what the reader returns changes. A service that read the file
+    // once at construction would hand the second session the old text.
+    content = 'Version two.';
+    const second = await openSession();
+    expect(second.getInstructions()).toContain('Version two.');
+    expect(second.getInstructions()).not.toContain('Version one.');
+    // The first session keeps the instructions it was initialised with.
+    expect(first.getInstructions()).toContain('Version one.');
   });
 });

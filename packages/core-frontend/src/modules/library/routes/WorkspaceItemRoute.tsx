@@ -1,8 +1,10 @@
-import { Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router-dom';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../../workspace/state/workspace.context';
 import { safeDecode } from '../../workspace/routing/kb-routes';
 import { useLibrary } from '../state/library-data';
+import type { PluginSummary } from '../services/plugins.api';
+import { pluginHoldingPath } from '../utils/plugin-summary';
 import { FileRoute } from '../../workspace/components/FileRoute';
 import { SkillPage } from '../components/skill-page/SkillPage';
 import { ToolPage } from '../components/tool-page/ToolPage';
@@ -74,8 +76,24 @@ export function WorkspaceItemRoute() {
    * redirect would send an id-bearing file (a `.tool`, a note with an `id`)
    * to an id URL, which is no library location — and the surface would
    * switch to Knowledge after all. The path URL is the one the tree gave.
+   *
+   * Above it, when the file sits inside a listed plugin, one line says which
+   * plugin and links to its page: a manifest or an access.md opens as the
+   * file it is (routing the manifest to the page instead proved unreliable),
+   * and the page is one click away for whoever wanted it.
    */
-  const fileView = () => <FileRoute canonicalize={false} />;
+  const fileView = () => (
+    <>
+      {/* Only from a SETTLED list: while it is (re)loading the summaries on
+          hand may be the previous list's, and a plugin whose identity just
+          changed would be linked by its old name. The file itself waits for
+          nothing. */}
+      <PluginFileNote
+        plugin={data.pluginsLoading ? null : pluginHoldingPath(segments.slice(1).join('/'), data.pluginSummaries)}
+      />
+      <FileRoute canonicalize={false} />
+    </>
+  );
 
   // Asked for the raw file by name: no resolution, the editor it is.
   if ((location.state as { rawFile?: boolean } | null)?.rawFile === true) return fileView();
@@ -120,23 +138,6 @@ export function WorkspaceItemRoute() {
     return <Navigate to={LIBRARY_ROOT} replace />;
   }
   const repoRel = `${PLUGINS_DIR}/${plugin}/${tail.join('/')}`;
-
-  // A plugin's MANIFEST is the plugin: clicked in the tree, it opens the
-  // plugin page (whose own collapsible shows the file; the page's Manifest
-  // button asks for the raw file by state, handled above). Matched against
-  // the LISTED plugins' folders — the page keys on the plugin's identity,
-  // which the folder name need not be — so a manifest bundled inside a
-  // skill stays that skill's file, and a plugin the catalog does not list
-  // for this caller (locked, unreadable) falls through to the file itself.
-  if (isManifestFile(last)) {
-    // The list's word, once it has one: while it is (re)loading, the
-    // summaries on hand may be the previous list's, and a manifest whose
-    // identity just changed would open the wrong page from them.
-    if (data.pluginsLoading) return null;
-    const holder = `${PLUGINS_DIR}/${[plugin, ...tail.slice(0, -1)].join('/')}`;
-    const listed = data.pluginSummaries.find((s) => s.folders.includes(holder));
-    if (listed) return <Navigate to={pathForPlugin(listed.name)} replace />;
-  }
 
   // A `.tool` is a tool page wherever it sits. The backend finds manuals at
   // ANY depth below `Plugins/` (`walkFiles` over the whole tree), so a manual
@@ -303,9 +304,19 @@ function folderHasSkillMd(tree: FileTreeEntry | null, workspaceRel: string | nul
   return (folder.children ?? []).some((c) => c.type === 'file' && c.name === 'SKILL.md');
 }
 
-/** The two files that make a folder a plugin: the native manifest and the bundle dialect's. */
-function isManifestFile(segment: string): boolean {
-  return segment === 'plugin.json' || segment === 'plugin.bundle.json';
+/** One line above a file that sits inside a plugin: which plugin, and the way to its page. */
+function PluginFileNote({ plugin }: { plugin: PluginSummary | null }) {
+  if (!plugin) return null;
+  return (
+    <p className="mb-3 flex flex-wrap items-center gap-x-2 text-detail text-ink-muted">
+      <span>
+        Part of the <span className="font-medium text-ink">{plugin.displayName ?? plugin.name}</span> plugin.
+      </span>
+      <Link to={pathForPlugin(plugin.name)} className="font-medium text-ink underline underline-offset-2">
+        Open plugin
+      </Link>
+    </p>
+  );
 }
 
 /** Whether a path segment names a file rather than a folder. */

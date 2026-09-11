@@ -99,6 +99,35 @@ function renewer(config: HexisMcpConfig): (() => Promise<string>) | undefined {
   return () => renewConnectionKeyNow(config);
 }
 
+/** What one read of `/api/config` tells this process about a deployment. */
+export interface ResolvedDeployment {
+  /** The deployment's own MCP endpoint (see {@link resolveMcpUrl}). */
+  mcpUrl: string;
+  /**
+   * Whether the deployment serves `GET /api/agent/instructions` and sends
+   * instructions on its own handshakes. Absent on an older deployment, and
+   * absence is the ONLY signal: probing the route instead would hit the JWT
+   * mounts an unknown `/api/*` path falls through to, which answer 401, and
+   * `getJson` reads a 401 as an expired sign-in.
+   */
+  agentInstructions: boolean;
+}
+
+/**
+ * Everything this process learns from the deployment's config, in ONE fetch:
+ * the MCP endpoint and whether agent instructions are available. The two
+ * consumers that only need the endpoint keep {@link resolveMcpUrl}.
+ */
+export async function resolveDeployment(config: HexisMcpConfig): Promise<ResolvedDeployment> {
+  const body = (await getJson(`${config.baseUrl}/api/config`, {
+    label: 'the deployment config',
+  })) as { mcpUrl?: unknown; agentInstructions?: unknown };
+  return {
+    mcpUrl: mcpUrlFromConfig(config, body),
+    agentInstructions: body?.agentInstructions === true,
+  };
+}
+
 /**
  * The deployment's own MCP endpoint.
  *
@@ -111,11 +140,16 @@ function renewer(config: HexisMcpConfig): (() => Promise<string>) | undefined {
  * Falls back to the guess when the field is absent, which is how a deployment
  * older than that field looks. The frontend's `configureMcpUrl()` degrades the
  * same way, for the same reason.
+ *
+ * A wrapper over {@link resolveDeployment}: same fetch, one field. Kept as a
+ * public export because the CLI consumes it as a plain string.
  */
 export async function resolveMcpUrl(config: HexisMcpConfig): Promise<string> {
-  const body = (await getJson(`${config.baseUrl}/api/config`, {
-    label: 'the deployment config',
-  })) as { mcpUrl?: unknown };
+  return (await resolveDeployment(config)).mcpUrl;
+}
+
+/** The endpoint validation behind {@link resolveMcpUrl}, on an already-fetched config body. */
+function mcpUrlFromConfig(config: HexisMcpConfig, body: { mcpUrl?: unknown }): string {
   const advertised = typeof body?.mcpUrl === 'string' ? body.mcpUrl.trim() : '';
   if (!advertised) {
     console.error(
@@ -156,6 +190,41 @@ export async function resolveMcpUrl(config: HexisMcpConfig): Promise<string> {
     );
   }
   return parsed.toString();
+}
+
+/**
+ * What every connected agent is told at session start, as the deployment
+ * composes it: the platform header plus the admin's `mcp-description.md`.
+ * Passed verbatim as this server's own `instructions`, so a client connected
+ * here receives exactly what one connected to the hosted endpoint receives.
+ *
+ * Never throws. The text is worth having and not worth failing over: a
+ * network error, a non-2xx answer or a body without an `instructions` string
+ * logs one line and resolves to `undefined`, and the server starts without
+ * instructions, as it did before the deployment could send any.
+ */
+export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<string | undefined> {
+  try {
+    const body = (await getJson(`${config.baseUrl}/api/agent/instructions`, {
+      label: 'the agent instructions',
+      headers: { Authorization: `Bearer ${config.connectionKey}` },
+      renew: renewer(config),
+    })) as { instructions?: unknown };
+    if (typeof body?.instructions !== 'string') {
+      console.error(
+        '[hexis-mcp] the deployment answered the agent instructions request without an "instructions" string; ' +
+          'sessions start without them.',
+      );
+      return undefined;
+    }
+    return body.instructions;
+  } catch (err) {
+    console.error(
+      `[hexis-mcp] could not fetch the agent instructions: ${err instanceof Error ? err.message : String(err)}; ` +
+        'sessions start without them.',
+    );
+    return undefined;
+  }
 }
 
 /** One `.tool` manual as `GET /api/agent/all-tools` returns it. */

@@ -1,11 +1,10 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import '../library.css';
-import { useAuth } from '../../auth/state/auth.context';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { urlForLibraryItem } from '../routes/library-paths';
 import { useWorkspace } from '../../workspace/state/workspace.context';
-import { emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
+import { EVERYONE_TEAM, emptyMessageFor, filterLibraryItems, type LibraryFilter } from '../utils/status';
 import { pluginEntriesFor } from '../utils/plugin-entries';
 import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
@@ -48,7 +47,7 @@ function headingFor(filter: LibraryFilter): string {
     case 'owned':
       return 'Owned by me';
     case 'ungrouped':
-      return 'Yours alone';
+      return personalPluginName();
     case 'team':
       return filter.group;
     case 'group':
@@ -60,7 +59,6 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const data = useLibrary();
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
-  const { user } = useAuth();
   const [query, setQuery] = useState('');
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
@@ -69,7 +67,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
     () => filterLibraryItems(data.items, filter, query, data.teams),
     [data.items, filter, query, data.teams],
   );
-  const personalLabel = personalPluginName(user?.name);
+  const personalLabel = personalPluginName();
   const plugins = useMemo(
     () => pluginEntriesFor(data.items, data.pluginSummaries, filter, data.teams, query, personalLabel),
     [data.items, data.pluginSummaries, filter, data.teams, query, personalLabel],
@@ -105,6 +103,15 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           <p className="mt-0.5 text-ui text-ink-muted">
             {data.loading ? '…' : `${count} ${count === 1 ? 'item' : 'items'}`}
           </p>
+          {/* Everyone is not a group but the organisation: say what the page
+              holds, because the name alone reads like one more team. Only
+              once the list has settled and names it — while it loads, or
+              when it failed, the state below is the whole story. */}
+          {filter.kind === 'team' && filter.group === EVERYONE_TEAM && teamsSettled && !unknownTeam && (
+            <p className="mt-2 max-w-prose text-ui text-ink-muted">
+              Org-wide: what every signed-in person and their agents can use, with no group or role needed.
+            </p>
+          )}
         </div>
         <TextField
           className="ml-auto w-64"
