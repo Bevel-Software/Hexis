@@ -424,6 +424,11 @@ describe('WorkspaceService.withPathTurn', () => {
       order.push(`${name}:exit`);
     };
 
+    // Warm the workspace lookup first: a turn chains onto the queue only after
+    // it, and a COLD lookup resolves its three callers in disk order rather
+    // than call order — the queue is one either way, but this asserts FIFO.
+    await svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', async () => undefined);
+
     await Promise.all([
       svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('plain')),
       svc.withPathTurn(workspaceId, './knowledge-base/mcp-description.md', body('dotted')),
@@ -461,6 +466,42 @@ describe('WorkspaceService.withPathTurn', () => {
     });
 
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('After.');
+  });
+
+  it('serializes two writes launched side by side INSIDE a held turn: one lands, the other is refused', async () => {
+    // Both inherit the held turn, so neither waits for it — but they must
+    // still take turns with each other, or both compare the same old
+    // content and the second silently overwrites the first.
+    const rel = 'knowledge-base/mcp-description.md';
+    const results = await svc.withPathTurn(workspaceId, rel, () =>
+      Promise.allSettled([
+        svc.writeFile(workspaceId, rel, 'From A.', { expectedContent: '' }),
+        svc.writeFile(workspaceId, rel, 'From B.', { expectedContent: '' }),
+      ]),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(refused.reason).toMatchObject({ status: 409 });
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('From A.');
+  });
+
+  it('updates the diff baseline inside the turn, in the order the mutations landed', async () => {
+    const rel = 'knowledge-base/notes.md';
+    await fs.writeFile(path.join(workspaceDir, rel), 'Old.', 'utf-8');
+    const calls: string[] = [];
+    svc.setDiffService({
+      markUserDeleted: async () => {
+        calls.push('deleted');
+      },
+      syncFromDisk: async () => {
+        calls.push('synced');
+      },
+    } as never);
+    // A delete and a write queued back to back: the delete's baseline update
+    // must not run after the write's, or the new baseline is lost.
+    await Promise.all([svc.deleteFile(workspaceId, rel), svc.writeFile(workspaceId, rel, 'New.')]);
+    expect(calls).toEqual(['deleted', 'synced']);
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('New.');
   });
 
   it('a throwing turn does not wedge the ones queued behind it', async () => {
@@ -790,6 +831,73 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
 
     await svc.getOrCreateForBranch('alice/draft');
     expect(cloned).toEqual([workspaceIdForBranch('alice/draft')]);
+  });
+});
+
+/**
+ * Reads and writes never follow a symbolic link — as the file itself, or as
+ * a directory on the way to it. A link only reaches a repository by direct
+ * git push, and following one would hand out (or overwrite) whatever the
+ * server process can reach. The workspace root behind a link of the
+ * operator's is the one link that is fine.
+ */
+describe('WorkspaceService — symbolic links', () => {
+  let root: string;
+  let svc: WorkspaceService;
+  let workspaceDir: string;
+  let workspaceId: string;
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const seeded = await seedBranchWorkspace(root, 'main');
+    workspaceDir = seeded.workspaceDir;
+    workspaceId = seeded.workspaceId;
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses to read or write a file that is a link, and leaves the target untouched', async () => {
+    const secret = path.join(root, 'secret.txt');
+    await fs.writeFile(secret, 'DATABASE_URL=postgres://…', 'utf-8');
+    const rel = 'knowledge-base/mcp-description.md';
+    await fs.symlink(secret, path.join(workspaceDir, rel));
+
+    await expect(svc.readFile(workspaceId, rel)).rejects.toThrow('Path traversal detected');
+    await expect(svc.readFileBinary(workspaceId, rel)).rejects.toThrow('Path traversal detected');
+    await expect(svc.writeFile(workspaceId, rel, 'Public text.')).rejects.toThrow('Path traversal detected');
+    await expect(svc.writeFileBinary(workspaceId, rel, Buffer.from('x'))).rejects.toThrow('Path traversal detected');
+    expect(await fs.readFile(secret, 'utf-8')).toBe('DATABASE_URL=postgres://…');
+  });
+
+  it('refuses a file reached through a linked directory, existing or yet to be created', async () => {
+    const elsewhere = path.join(root, 'elsewhere');
+    await fs.mkdir(elsewhere, { recursive: true });
+    await fs.writeFile(path.join(elsewhere, 'note.md'), 'outside', 'utf-8');
+    await fs.symlink(elsewhere, path.join(workspaceDir, 'knowledge-base', 'linked'), linkType);
+
+    await expect(svc.readFile(workspaceId, 'knowledge-base/linked/note.md')).rejects.toThrow('Path traversal detected');
+    await expect(svc.writeFile(workspaceId, 'knowledge-base/linked/new/deeper.md', 'x')).rejects.toThrow(
+      'Path traversal detected',
+    );
+    expect(await fs.readdir(elsewhere)).toEqual(['note.md']);
+  });
+
+  it('reads and writes as before when nothing on the path is a link, the workspace root behind one included', async () => {
+    const rel = 'knowledge-base/Folder/new/page.md';
+    await svc.writeFile(workspaceId, rel, 'Hello.');
+    expect(await svc.readFile(workspaceId, rel)).toBe('Hello.');
+
+    // A mounted-volume shape: the whole workspaces root reached through a link.
+    const mount = path.join(root, 'mount');
+    await fs.symlink(root, mount, linkType);
+    const viaMount = new WorkspaceService(mount, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    expect(await viaMount.readFile(workspaceId, rel)).toBe('Hello.');
+    await viaMount.writeFile(workspaceId, rel, 'Hello again.');
+    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Hello again.');
   });
 });
 
