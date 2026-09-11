@@ -52,9 +52,9 @@ export interface PluginsSidebarProps {
   /** Start a new plugin. The layout owns the dialog; this is only the intent. */
   onCreatePlugin(): void;
   /**
-   * Whether to spell the first plugin out in words, with the chalk arrow. The
-   * hover-revealed `+` is unchanged for everyone; this is only the teaching
-   * mark, and it is an administrator's — see the row itself below.
+   * Whether to spell the first plugin out in words, as a row above the trees.
+   * The hover-revealed `+` is unchanged for everyone; this is only the
+   * teaching mark, and it is an administrator's — see the row itself below.
    *
    * The caller passes a SETTLED verdict, not just a role: the layout derives
    * it from `workspaceHasNoPlugins`, which stays false while plugin discovery
