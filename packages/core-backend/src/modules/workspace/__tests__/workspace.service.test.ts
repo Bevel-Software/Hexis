@@ -408,6 +408,13 @@ describe('WorkspaceService.withPathTurn', () => {
       order.push(`${name}:exit`);
     };
 
+    // Warm the workspace lookup first, for the reason the next test gives:
+    // a COLD lookup resolves its callers in disk order rather than call
+    // order, so `b` can reach the queue first and this assertion — which
+    // names `a` as the one that goes first — fails for a scheduling reason
+    // rather than an interleaving one.
+    await svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', async () => undefined);
+
     await Promise.all([
       svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('a')),
       svc.withPathTurn(workspaceId, 'knowledge-base/mcp-description.md', body('b')),

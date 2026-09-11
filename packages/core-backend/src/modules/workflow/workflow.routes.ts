@@ -420,6 +420,14 @@ export function createWorkflowRoutes(
 
   // ── File locks ────────────────────────────────────────────────────────────
 
+  // These routes hand the caller's spelling straight to the workflow service,
+  // which is where ONE file identity is decided (`canonicalFileIdentity`), so
+  // `./x//a.md` and `x/a.md` are the same lock on every verb below. Refusals
+  // arrive here as `WorkflowDomainError`s carrying the status the file verbs
+  // answer for that same input, and `toHttpError` passes it through unchanged.
+  // Nothing is canonicalised at this layer on purpose: a route-level fix would
+  // leave any other caller of the service coordinating on its own identity.
+
   router.post('/workspace/:id/workflow/locks', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
