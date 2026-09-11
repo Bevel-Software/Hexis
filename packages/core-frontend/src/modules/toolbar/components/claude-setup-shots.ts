@@ -3,9 +3,9 @@
  * thing to click in each.
  *
  * Highlights are PERCENTAGES of the image, never pixels. The shots are
- * re-encoded on the way in (cropped out of a full-window mockup, scaled to
- * 1400px, webp) and they render into a ~700px column, so a pixel offset
- * would be wrong at every size except the one it was measured at.
+ * normalized to 1400x1080 webp on the way in (see the asset README) and they
+ * render into a ~700px column, so a pixel offset would be wrong at every size
+ * except the one it was measured at.
  *
  * `new URL(…, import.meta.url)` rather than `import shot from './x.webp'`:
  * this package ships raw TS and is compiled by whatever bundler the host app
@@ -68,10 +68,19 @@ export const pickInstanceShot: Shot = {
   boxes: [{ x: 37.8, y: 76.9, w: 24.3, h: 4.2 }],
 };
 
+export const selectRepositoryShot: Shot = {
+  src: new URL('../assets/claude-setup/09-select-repository.webp', import.meta.url).href,
+  alt: 'Claude Code on the web, with the Select repository button highlighted below the empty session area.',
+  boxes: [{ x: 38.7, y: 87.3, w: 13.6, h: 3.8 }],
+};
+
 export const pluginsAddShot: Shot = {
   src: new URL('../assets/claude-setup/05-plugins-add.webp', import.meta.url).href,
-  alt: 'The Customize screen on its Plugins tab: the Add button above the list.',
-  boxes: [{ x: 89.7, y: 11.8, w: 6.8, h: 3.9 }],
+  alt: 'The Customize screen, with the Plugins tab and the Add button above the list highlighted.',
+  boxes: [
+    { x: 40.3, y: 11.8, w: 6.2, h: 3.9 },
+    { x: 89.7, y: 11.8, w: 6.8, h: 3.9 },
+  ],
 };
 
 export const addMarketplaceShot: Shot = {
@@ -91,6 +100,6 @@ export const pasteUrlShot: Shot = {
 
 export const installPluginsShot: Shot = {
   src: new URL('../assets/claude-setup/08-install-plugins.webp', import.meta.url).href,
-  alt: 'The Discover list after a sync, with the Add button on the Hexis all row, the bundle that installs everything at once.',
-  boxes: [{ x: 91.5, y: 33.9, w: 5.0, h: 3.7 }],
+  alt: 'The Discover list after a sync, with the whole Hexis all row highlighted as the bundle that installs everything at once.',
+  boxes: [{ x: 27.0, y: 32.1, w: 69.4, h: 7.5 }],
 };

@@ -36,17 +36,20 @@ they can add the marketplace.
 ## Add the marketplace (every person)
 
 1. Connect your account. Claude does not prompt for this, and its
-   **Connect to GitHub** button signs in to github.com, which is not it. Open
-   Claude's **Admin settings → GitHub**, choose **Connect**, and under GitHub
-   instance pick the registered platform instead of github.com; the
-   repository picker on **claude.ai/code** offers the same connect option.
-   You land on the platform's sign-in: approve, and you are back in Claude.
+   **Connect to GitHub** button signs in to github.com, which is not it.
+   Owners can open Claude's **Admin settings → GitHub**, choose **Connect**,
+   and under GitHub instance pick the registered platform instead of
+   github.com. Everyone else opens **claude.ai/code**, chooses **Select
+   repository**, and then **Connect to URL** in the repository picker to select
+   the registered platform. You do not need to start a Claude Code task; this
+   is only where Claude exposes the connection. You land on the platform's
+   sign-in: approve, and you are back in Claude.
 2. Copy the marketplace URL from **External agent access → Marketplaces**.
    It is the same URL Claude Code clones.
 3. In Cowork (or claude.ai), open **Customize → Plugins**, then **Add → Add
    marketplace**, paste the URL and choose **Sync**.
 4. Syncing lists the plugins, it installs none of them. Open **Discover** and
-   choose **Add** on **hexis-all** for everything you may read in one plugin
+   choose **Add** on **Hexis all** for everything you may read in one plugin
    (every skill, and the knowledge base as an MCP server), or single plugins
    for a subset. **Update** in Claude pulls what changed.
 
@@ -58,8 +61,8 @@ account: step 1 has not happened, or the connection it made was since
 disconnected here. Connect again from step 1; if that does not take, the
 server log says why (below).
 
-The same steps, with a screenshot of every screen, are on the **External agent
-access** page in the app. The registration half is shown to admins only.
+The same steps are a five-screen walkthrough on the **External agent access**
+page in the app. The registration half is shown to admins only.
 
 ## When connecting does not take
 

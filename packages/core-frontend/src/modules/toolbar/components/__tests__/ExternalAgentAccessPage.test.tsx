@@ -380,8 +380,8 @@ describe('the Marketplaces tab', () => {
    * The registration steps live on pages inside Claude's ADMIN settings. A
    * non-admin cannot open those, so showing them four screenshots of a door
    * they have no key to is worse than showing them nothing: the two admin
-   * steps and their four shots are gated, and the three steps they can act
-   * on are not.
+   * steps and their four shots are gated, and the five actions they can take
+   * are presented one at a time.
    */
   it('gives a non-admin only the steps they can act on, and none of the admin screenshots', async () => {
     const user = userEvent.setup();
@@ -390,14 +390,95 @@ describe('the Marketplaces tab', () => {
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
 
     expect(within(cowork).queryByText('Register this deployment with your Claude organization')).toBeNull();
-    expect(within(cowork).getByText('Connect your Claude account to this deployment')).toBeTruthy();
-    expect(within(cowork).getByText('Add the marketplace')).toBeTruthy();
-    expect(within(cowork).getByText('Install the plugins you want')).toBeTruthy();
+    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+    expect(carousel).toHaveAttribute('aria-roledescription', 'carousel');
+    expect(within(cowork).getByText('Select repository')).toBeTruthy();
+    expect(within(cowork).getByText('Connect to URL')).toBeTruthy();
 
-    // The four Cowork shots, and not one of the four from Claude's admin settings.
+    // One action shot at a time, beginning with the repository picker trigger,
+    // and not one of the four screens that only an admin can use.
     const alts = within(cowork).getAllByRole('img').map((el) => el.getAttribute('alt') ?? '');
-    expect(alts).toHaveLength(4);
+    expect(alts).toHaveLength(1);
+    expect(alts[0]).toContain('Select repository');
     expect(alts.some((a) => a.includes('admin settings'))).toBe(false);
+  });
+
+  it('pairs every screenshot with its instruction and lets the reader move through all five', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+    const expected = [
+      ['Select repository', 'Connect to URL'],
+      ['Plugins tab', 'select the Plugins tab'],
+      ['Add marketplace', 'choose Add marketplace'],
+      ['URL field', 'Paste the Marketplace URL'],
+      ['Hexis all row', 'choose the Hexis all row'],
+    ];
+
+    for (const [alt, instruction] of expected) {
+      expect(within(carousel).getAllByRole('img')).toHaveLength(1);
+      expect(within(carousel).getByRole('img').getAttribute('alt')).toContain(alt);
+      expect(carousel).toHaveTextContent(instruction);
+      if (within(carousel).queryByRole('button', { name: 'Next' })) {
+        await user.click(within(carousel).getByRole('button', { name: 'Next' }));
+      }
+    }
+
+    expect(within(carousel).getByRole('button', { name: 'Review again' })).toBeTruthy();
+    await user.click(within(carousel).getByRole('button', { name: 'Go to step 3: Marketplace' }));
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 3 of 5: Choose Add marketplace',
+    );
+  });
+
+  /**
+   * Changing slide moves no focus, so nothing would be announced: the reader
+   * is left on the control they pressed while everything under it changes.
+   * The slide group is the live region, and the counter is not, so the step
+   * is announced once rather than twice.
+   */
+  it('announces the slide that replaced it, and only once', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+
+    expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
+    expect(within(carousel).getByText('1 / 5')).not.toHaveAttribute('aria-live');
+  });
+
+  /**
+   * The footer control is ONE button that changes its label, so reaching the
+   * last slide cannot unmount the button the reader is focused on — focus
+   * would fall to the body and take the arrow keys with it, which this
+   * section handles. Node identity is asserted alongside focus because it is
+   * the property that actually guarantees this: it names the cause, so a
+   * `key` or a wrapper added later fails here rather than somewhere vague.
+   */
+  it('keeps focus on the footer control when the last slide relabels it', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+
+    const advance = within(carousel).getByRole('button', { name: 'Next' });
+    for (let step = 0; step < 4; step += 1) {
+      await user.click(within(carousel).getByRole('button', { name: 'Next' }));
+    }
+
+    const restart = within(carousel).getByRole('button', { name: 'Review again' });
+    expect(restart).toBe(advance);
+    expect(restart).toHaveFocus();
+
+    // And it still works as the control it now says it is.
+    await user.click(restart);
+    expect(within(carousel).getByRole('group')).toHaveAccessibleName(
+      'Step 1 of 5: Select this deployment in Claude Code',
+    );
   });
 
   it('gives an admin the registration steps as well, screenshots and all', async () => {
