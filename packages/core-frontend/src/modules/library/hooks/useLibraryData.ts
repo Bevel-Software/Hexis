@@ -98,11 +98,12 @@ export function useLibraryData(): LibraryData {
       // A failed slice is "no verdicts" for its paths: nothing pilled, nothing
       // unlocked — and the other slices still stand. Slices go one after
       // another, so a large catalog costs more round trips, never a burst: at
-      // most one request per verb is in flight.
+      // most one request per verb is in flight. A load that was superseded
+      // (unmount, reload) stops sending slices; its verdicts are discarded.
       const BATCH_LIMIT = 500;
       const verdicts = async (paths: string[], verb: 'write' | 'owner') => {
         const results: Record<string, boolean> = {};
-        for (let i = 0; i < paths.length; i += BATCH_LIMIT) {
+        for (let i = 0; i < paths.length && !cancelled; i += BATCH_LIMIT) {
           const part = await fetchFileAccessBatch(
             defaultWorkspaceId(),
             paths.slice(i, i + BATCH_LIMIT),

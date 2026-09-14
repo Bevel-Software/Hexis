@@ -252,6 +252,41 @@ describe('the Owner pill', () => {
     expect(cardNames()).toEqual(['owned-skill', 'Weather']);
   });
 
+  it('stops sending slices once the load is superseded', async () => {
+    const filler = Array.from({ length: 500 }, (_, i) => ({
+      name: `filler-${i}`,
+      description: '',
+      path: `Skills/filler-${i}`,
+      plugins: [],
+    }));
+    // Two slices per verb; each request hangs until released.
+    svc.listSkills.mockResolvedValue([...filler, ...SKILLS]);
+    const release: Array<() => void> = [];
+    svc.fetchFileAccessBatch.mockImplementation(
+      (_ws: string, paths: string[]) =>
+        new Promise((resolve) => {
+          release.push(() => resolve({ results: Object.fromEntries(paths.map((p) => [p, true])) }));
+        }),
+    );
+    const { unmount } = render(
+      <MemoryRouter>
+        <LibraryProvider>
+          <p>library</p>
+        </LibraryProvider>
+      </MemoryRouter>,
+    );
+
+    // The first slice of each verb is out…
+    await vi.waitFor(() => expect(svc.fetchFileAccessBatch).toHaveBeenCalledTimes(2));
+    // …when the page goes away. Answering them must not send the second ones.
+    unmount();
+    release.splice(0).forEach((r) => r());
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(svc.fetchFileAccessBatch).toHaveBeenCalledTimes(2);
+  });
+
   it('fails closed: an owner lookup that errors pills nothing and takes no write away', async () => {
     svc.fetchFileAccessBatch.mockImplementation(async (_ws: string, paths: string[], verb = 'write') => {
       if (verb === 'owner') throw new Error('boom');
