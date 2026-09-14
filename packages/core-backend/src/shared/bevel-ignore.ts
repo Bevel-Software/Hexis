@@ -22,6 +22,11 @@ interface IgnoreLayer {
  * using standard gitignore syntax (negations, `**`, directory-only patterns, anchoring).
  * Deeper files combine with — and can override — rules from shallower files,
  * mirroring how git layers `.gitignore` files.
+ *
+ * A reader honours the files by walking with `ignore: true` (see
+ * `walkTree`); the walk layers them on the way down. The stack is used
+ * directly only to judge a single path, or to hand a walk the rules in force
+ * above its root.
  */
 export class BevelIgnoreStack {
   private constructor(private readonly layers: readonly IgnoreLayer[]) {}

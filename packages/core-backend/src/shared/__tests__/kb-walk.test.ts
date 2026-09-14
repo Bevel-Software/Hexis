@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { walkKb, type KbWalkListener } from '../kb-walk.js';
+import { walkKb, walkTree, type KbWalkListener, type TreeWalkOptions } from '../kb-walk.js';
+import { BevelIgnoreStack } from '../bevel-ignore.js';
 
 /**
  * The one walk: what it skips, in what order it visits, what it calls a hole
@@ -103,5 +104,125 @@ describe('walkKb', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+/**
+ * The same loop under other rules: what a reader that is not the catalog
+ * says in its options — and nothing it has to re-implement.
+ */
+describe('walkTree', () => {
+  let root: string;
+  const write = async (rel: string, text = '') => {
+    const abs = path.join(root, rel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, text);
+  };
+  const files = async (opts: TreeWalkOptions, extra: KbWalkListener = {}) => {
+    const out: string[] = [];
+    await walkTree(root, opts, [{ ...extra, onFile: (dir, name) => void out.push(dir ? `${dir}/${name}` : name) }]);
+    return out;
+  };
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'tree-walk-'));
+  });
+  afterEach(() => fs.rm(root, { recursive: true, force: true }));
+
+  it('skips nothing by default; `skip` is the reader\'s own list', async () => {
+    await write('.git/HEAD');
+    await write('.bevelignore');
+    await write('a/.hidden.md');
+    await write('a/b.md');
+    expect(await files({})).toEqual(['.bevelignore', '.git/HEAD', 'a/.hidden.md', 'a/b.md']);
+    expect(await files({ skip: (e) => e.name === '.git' })).toEqual(['.bevelignore', 'a/.hidden.md', 'a/b.md']);
+  });
+
+  it('`ignore` honours the .bevelignore files on the way down, layered like git; a listener still sees what was there', async () => {
+    await write('.bevelignore', 'drop/\n');
+    await write('drop/y.md');
+    await write('keep/.bevelignore', 'secret.md\n');
+    await write('keep/secret.md');
+    await write('keep/x.md');
+    await write('keep/drop/z.md'); // the root rule is unanchored: it names this one too
+    expect(await files({})).toEqual(['.bevelignore', 'drop/y.md', 'keep/.bevelignore', 'keep/drop/z.md', 'keep/secret.md', 'keep/x.md']);
+    const listed: string[] = [];
+    const found = await files(
+      { ignore: true },
+      { onDir: (rel, entries, dir) => void listed.push(`${rel || '.'}: ${dir.listed.length} listed, ${entries.length} kept`) },
+    );
+    expect(found).toEqual(['.bevelignore', 'keep/.bevelignore', 'keep/x.md']);
+    expect(listed).toEqual(['.: 3 listed, 2 kept', 'keep: 4 listed, 2 kept']);
+  });
+
+  it('`ignore` given a stack starts from the rules in force above the root', async () => {
+    await write('.bevelignore', '*.png\n');
+    await write('skill/a.md');
+    await write('skill/b.png');
+    const skill = path.join(root, 'skill');
+    const list = async (ignore: boolean | BevelIgnoreStack) => {
+      const out: string[] = [];
+      await walkTree(skill, { ignore }, [{ onFile: (d, n) => void out.push(d ? `${d}/${n}` : n) }]);
+      return out;
+    };
+    // A walk rooted at `skill/` cannot see the rule above it…
+    expect(await list(true)).toEqual(['a.md', 'b.png']);
+    // …unless handed the rules in force there.
+    expect(await list(await BevelIgnoreStack.empty().extendedWith(root))).toEqual(['a.md']);
+  });
+
+  it('a `leaf` is reported, then left alone', async () => {
+    await write('Skills/deploy/SKILL.md');
+    await write('Skills/deploy/assets/a.md');
+    await write('Skills/group/inner/SKILL.md');
+    const dirs: string[] = [];
+    const found = await files(
+      { leaf: (_dir, entries) => entries.some((e) => e.name === 'SKILL.md') },
+      { onDir: (rel) => void dirs.push(rel || '.') },
+    );
+    expect(dirs).toEqual(['.', 'Skills', 'Skills/deploy', 'Skills/group', 'Skills/group/inner']);
+    expect(found).toEqual([]); // nothing beneath a leaf is a file event, its own files included
+  });
+
+  it('`until` ends the walk at the first find', async () => {
+    await write('a/plugin.json');
+    await write('a/deep/x.md');
+    await write('b/y.md');
+    let found = false;
+    const dirs: string[] = [];
+    await walkTree(root, { until: () => found }, [
+      {
+        onDir(rel, entries) {
+          dirs.push(rel || '.');
+          if (entries.some((e) => e.name === 'plugin.json')) found = true;
+        },
+      },
+    ]);
+    expect(found).toBe(true);
+    expect(dirs).toEqual(['.', 'a']); // neither `a/deep` nor `b` was listed
+  });
+
+  it('`unreadable: throw` makes a hole the walk\'s error instead of a report', async () => {
+    await write('locked/a.md');
+    const real = fs.readdir;
+    const spy = vi.spyOn(fs, 'readdir').mockImplementation(((dir: string, opts: unknown) =>
+      String(dir).endsWith('locked')
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts)) as never);
+    try {
+      await expect(walkTree(root, { unreadable: 'throw' }, [])).rejects.toThrow('EACCES');
+      expect((await walkTree(root, {}, [])).holes).toEqual(['locked']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('an entry that is neither file nor folder is never entered, never a file — it is told to onOther', async () => {
+    await write('real/a.md');
+    await fs.symlink(path.join(root, 'real'), path.join(root, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
+    const others: string[] = [];
+    const found = await files({}, { onOther: (dir, e) => void others.push(`${dir ? `${dir}/` : ''}${e.name}:${e.isSymbolicLink()}`) });
+    expect(found).toEqual(['real/a.md']);
+    expect(others).toEqual(['link:true']);
   });
 });

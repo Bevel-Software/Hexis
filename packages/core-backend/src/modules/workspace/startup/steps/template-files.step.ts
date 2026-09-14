@@ -7,7 +7,7 @@ import {
   renderKbLayoutPlaceholders,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
-import { IGNORE_FILENAME } from '../../bevel-ignore.js';
+import { IGNORE_FILENAME } from '../../../../shared/bevel-ignore.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';

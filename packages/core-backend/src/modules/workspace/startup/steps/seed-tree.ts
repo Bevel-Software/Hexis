@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import { walkTree } from '../../../../shared/kb-walk.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
 
@@ -60,33 +61,31 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
   const packableToReal = new Map(
     Object.entries(TEMPLATE_SOURCE_FALLBACKS).map(([real, packable]) => [packable, real]),
   );
-  const walk = async (relDir: string): Promise<void> => {
-    const abs = path.join(templateDir, relDir);
-    const entries = await fs.readdir(abs, { withFileTypes: true });
-    for (const entry of entries) {
-      // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
-      // (this repo in a Docker build) must not seed its history into the KB.
-      if (entry.name === '.git') continue;
-      const rel = relDir ? path.join(relDir, entry.name) : entry.name;
-      if (entry.isDirectory()) {
-        await walk(rel);
-        continue;
-      }
-      // A packable spelling at the template root seeds under its REAL name
-      // — unless the template also carries the literal file (a
-      // distribution's own template), which wins and is copied by its own
-      // walk entry; copying the packable twin too would clobber it.
-      const realName = relDir === '' ? packableToReal.get(entry.name) : undefined;
-      if (realName !== undefined) {
-        if (!(await exists(path.join(templateDir, realName)))) {
-          await copyTemplateFile(templateDir, realName, dest);
+  // A template that is not there is a broken build, not an empty seed.
+  if (!(await fs.stat(templateDir)).isDirectory()) {
+    throw new Error(`KB template "${templateDir}" is not a directory.`);
+  }
+  // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
+  // (this repo in a Docker build) must not seed its history into the KB.
+  // Every other entry is template content, dot-files included.
+  await walkTree(templateDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+    {
+      async onFile(relDir, name) {
+        // A packable spelling at the template root seeds under its REAL name
+        // — unless the template also carries the literal file (a
+        // distribution's own template), which wins and is copied by its own
+        // walk entry; copying the packable twin too would clobber it.
+        const realName = relDir === '' ? packableToReal.get(name) : undefined;
+        if (realName !== undefined) {
+          if (!(await exists(path.join(templateDir, realName)))) {
+            await copyTemplateFile(templateDir, realName, dest);
+          }
+          return;
         }
-        continue;
-      }
-      await copyTemplateFile(templateDir, rel, dest);
-    }
-  };
-  await walk('');
+        await copyTemplateFile(templateDir, relDir ? path.join(relDir, name) : name, dest);
+      },
+    },
+  ]);
 }
 
 /**
