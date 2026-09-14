@@ -28,14 +28,14 @@ export function SharedViaPlugins({
   skillName,
   skillPath,
   memberships,
-  owned,
+  canWrite,
   onChanged,
 }: {
   skillName: string;
   skillPath: string;
   memberships: PluginMembership[];
   /** The caller may edit the skill (its SKILL.md) — the repair verb. */
-  owned: boolean;
+  canWrite: boolean;
   onChanged(): void;
 }) {
   const data = useLibrary();
@@ -105,7 +105,7 @@ export function SharedViaPlugins({
                 </div>
                 <small className={cn('block text-meta', broken ? 'text-urgent' : 'text-ink-faint')}>
                   {broken
-                    ? owned
+                    ? canWrite
                       ? `Needs setup: ${m.name}'s members can't read this skill until the link is repaired.`
                       : `Needs setup: ${m.name}'s members can't read this skill. Ask an editor to repair the link.`
                     : m.linked
@@ -115,7 +115,7 @@ export function SharedViaPlugins({
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 {broken && <StatusDot state="urgent" />}
-                {broken && owned && (
+                {broken && canWrite && (
                   <Button
                     variant="outline"
                     size="tiny"

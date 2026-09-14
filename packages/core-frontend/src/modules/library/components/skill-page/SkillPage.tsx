@@ -124,13 +124,16 @@ export function SkillPage({
   const tabsId = useId();
   const git = useGit();
 
-  // Ownership is a property of the CATALOG entry, not of the skill document —
-  // it comes from the per-file ACL the provider already resolved, so the page
-  // reads it rather than asking again.
-  const owned = useMemo(
-    () => data.items.some((i) => i.kind === 'skill' && i.id === name && i.owned),
+  // Ownership and write are properties of the CATALOG entry, not of the skill
+  // document — the provider already resolved both, so the page reads them
+  // rather than asking again. `owned` is the pill alone; every editor-side
+  // affordance goes by `canWrite`, which a writer holds without owning.
+  const entry = useMemo(
+    () => data.items.find((i) => i.kind === 'skill' && i.id === name),
     [data.items, name],
   );
+  const owned = entry?.owned === true;
+  const canWrite = entry?.canWrite === true;
 
   const skill = detail.skill;
   const skillPath = skill?.path ?? '';
@@ -634,7 +637,7 @@ export function SkillPage({
 
       {/* Not before the folder is known: Accept grants ON the folder and
           Manage access opens it, and both are no-ops against ''. */}
-      {owned && skillPath && (
+      {canWrite && skillPath && (
         <AccessRequestsBanner
           plugin={name}
           folders={[skillPath]}
@@ -666,7 +669,7 @@ export function SkillPage({
           skillName={name}
           skillPath={skillPath}
           memberships={memberships}
-          owned={owned}
+          canWrite={canWrite}
           onChanged={() => {
             data.reload();
             data.reloadPlugins();
@@ -872,7 +875,7 @@ export function SkillPage({
               author={changeAuthorName(cr)}
               when={formatWhen(cr.createdAt)}
               mine={mine}
-              canDecide={owned && !mine}
+              canDecide={canWrite && !mine}
               diff={fileDiff}
               binary={isBinaryFile(active)}
               upToDate={fileDiff !== null && fileDiff.length === 0}
@@ -891,7 +894,7 @@ export function SkillPage({
               onApprove={() => applying.apply(cr)}
               onDecline={() => void decline(cr)}
               onWithdraw={() => void withdraw(cr)}
-              onOpenFull={owned ? () => setCompareCr(cr) : undefined}
+              onOpenFull={canWrite ? () => setCompareCr(cr) : undefined}
             />
           );
         })}
@@ -900,8 +903,10 @@ export function SkillPage({
       {/* Outside the panel: the dock lists change requests touching ANY file of
           the skill, so it is not about the selected tab. The boxes above only
           cover the file on screen, and without this a proposal to a file you
-          are not looking at has no way to reach you. */}
-      {skill && owned && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
+          are not looking at has no way to reach you. Gated by write, not
+          ownership, like Approve itself: the server takes an approval from
+          anyone who can write the file, so a writer reviews the whole change. */}
+      {skill && canWrite && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );
 }
