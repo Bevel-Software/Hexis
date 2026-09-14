@@ -143,7 +143,9 @@ describe('access routes on a proposal branch (real git)', () => {
   });
 
   afterEach(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    // A setup failure leaves no server; closing it anyway would mask that
+    // failure and skip removing the temp dir.
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
     await fs.rm(root, { recursive: true, force: true });
   });
 

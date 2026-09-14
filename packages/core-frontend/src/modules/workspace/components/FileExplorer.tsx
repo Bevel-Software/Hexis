@@ -1092,6 +1092,17 @@ export function TreeChrome({
   );
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
+  // `Manage <folder> →` from a proposed file's sheet keeps that file's change
+  // request: the inherited grant it retargets from was read on the request's
+  // branch, so the folder's rules are edited there too — not on the viewed
+  // branch, which the folder path alone would resolve to.
+  const [inheritedProposal, setInheritedProposal] = useState<
+    { number: number; branch: string | null } | undefined
+  >(undefined);
+  const openAccess = useCallback((entry: FileTreeEntry) => {
+    setInheritedProposal(undefined);
+    setAccessTarget(entry);
+  }, []);
   // A proposed-only file does not exist on the branch being viewed, so its
   // access can only be edited where it lives: the change request's branch.
   // Everything else — including a file a request merely modifies, which is a
@@ -1100,19 +1111,20 @@ export function TreeChrome({
   // to a workspace the file is not on.
   const accessProposal = useMemo(() => {
     if (!accessTarget) return undefined;
+    if (inheritedProposal) return inheritedProposal;
     const crNumber = suggestionOnlyPaths.get(accessTarget.relativePath);
     if (crNumber === undefined) return undefined;
     const cr = openChangeRequests
       .forPath(accessTarget.relativePath)
       .find((c) => c.number === crNumber);
     return { number: crNumber, branch: cr?.branch ?? null };
-  }, [accessTarget, suggestionOnlyPaths, openChangeRequests]);
+  }, [accessTarget, inheritedProposal, suggestionOnlyPaths, openChangeRequests]);
 
   return (
     <>
       <TreeNavContext.Provider value={nav}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
-      <ManageAccessContext.Provider value={setAccessTarget}>
+      <ManageAccessContext.Provider value={openAccess}>
       <SuggestionsContext.Provider value={suggestionsController}>
         {children}
       </SuggestionsContext.Provider>
@@ -1135,9 +1147,15 @@ export function TreeChrome({
           entry={accessTarget}
           proposal={accessProposal}
           // The dialog is keyed on the path, so pointing it at a parent remounts
-          // it against that folder — the whole retarget is this one setter.
-          onManageAncestor={setAccessTarget}
-          onClose={() => setAccessTarget(null)}
+          // it against that folder, on the same branch the grant was read on.
+          onManageAncestor={(ancestor) => {
+            setInheritedProposal(accessProposal);
+            setAccessTarget(ancestor);
+          }}
+          onClose={() => {
+            setInheritedProposal(undefined);
+            setAccessTarget(null);
+          }}
         />
       )}
     </>

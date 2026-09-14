@@ -25,13 +25,24 @@ vi.mock('../../../access/components/ManageAccessDialog', () => ({
     entry: FileTreeEntry;
     workspaceId?: string;
     proposal?: { number: number; branch: string | null };
+    onManageAncestor?: (entry: FileTreeEntry) => void;
   }) => (
     <div
       data-testid="manage-access-dialog"
       data-path={props.entry.relativePath}
       data-workspace={props.workspaceId ?? ''}
       data-proposal={JSON.stringify(props.proposal ?? null)}
-    />
+    >
+      {/* Stands in for the sheet's `Manage <folder> →` on an inherited grant. */}
+      <button
+        type="button"
+        onClick={() =>
+          props.onManageAncestor?.({ name: 'docs', relativePath: 'docs', type: 'directory', children: [] })
+        }
+      >
+        Manage docs →
+      </button>
+    </div>
   ),
 }));
 
@@ -977,6 +988,62 @@ describe('FileExplorer rows: the prototype tree', () => {
     // No proposal, no pinned workspace: the ambient branch, exactly as before.
     expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
     expect(dialog.dataset.workspace).toBe('');
+  });
+
+  /**
+   * An inherited grant on a proposed file was read on the request's branch, so
+   * following it to the folder keeps editing there — the folder path alone
+   * would resolve to the viewed branch.
+   */
+  it('keeps the change request when a proposed file retargets to its folder', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    const row = screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage docs →' }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('docs');
+    expect(JSON.parse(dialog.dataset.proposal!)).toEqual({
+      number: 12,
+      branch: 'suggestions/me/knowledge',
+    });
+  });
+
+  it('retargets an ordinary file to its folder on the viewed branch', () => {
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage docs →' }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('docs');
+    expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
+  });
+
+  it('forgets a retargeted change request on the next right-click', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    const row = screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage docs →' }));
+
+    // A fresh right-click on an ordinary file is a new sheet on the viewed branch.
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('brief.md');
+    expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
   });
 });
 
