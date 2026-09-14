@@ -154,6 +154,13 @@ export function assertNoNewRoles(current: string | null, candidate: string): voi
  * membership only; the human editor and the App roles service keep the plain
  * validator. `readCurrent` returns the file's current text, null when absent.
  * Content of any type is checked — decoded as UTF-8 — so bytes cannot slip past.
+ *
+ * `readCurrent` is read afresh on every call, never cached: `LockingFilesystem`
+ * calls this validator before taking the lock (a cheap early refusal) and again
+ * once the `roles.yaml` lock is held, on the bytes that land. That second call
+ * is the decisive one — it compares against the file as the other roles.yaml
+ * writers, which coordinate on the same lock, left it — so a role deleted while
+ * the write waited cannot be reinstated, and one added meanwhile is not refused.
  */
 export function makeAgentRolesYamlWriteValidator(
   kbDirName: string,

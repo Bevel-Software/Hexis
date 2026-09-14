@@ -1111,6 +1111,41 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
       expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(`${CURRENT}    - b@x.eu\n`);
       expect(workflow.releaseLock).toHaveBeenCalledTimes(1);
     });
+
+    /** A validator that passes before the lock and refuses under it by throwing a bare string. */
+    function refusesUnderLockWith(reason: string) {
+      let calls = 0;
+      return Object.assign(
+        async () => {
+          if (++calls > 1) throw reason;
+        },
+        { appliesTo: (p: string) => p === ROLES },
+      );
+    }
+
+    it('a check that throws a non-Error still releases untouched, and the caller gets that value', async () => {
+      const workflow = makeWorkflow();
+      const fsLayer = new LockingFilesystem(
+        { basePath: root, contained: true },
+        { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite: refusesUnderLockWith('refused') },
+      );
+      await expect(fsLayer.writeFile(ROLES, CURRENT)).rejects.toBe('refused');
+      expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(1);
+      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(WITH_PHOENIX);
+    });
+
+    it('a move whose check throws a non-Error releases BOTH locks untouched', async () => {
+      const workflow = makeWorkflow();
+      const fsLayer = new LockingFilesystem(
+        { basePath: root, contained: true },
+        { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite: refusesUnderLockWith('refused') },
+      );
+      await expect(fsLayer.moveFile(DRAFT, ROLES, { overwrite: true })).rejects.toBe('refused');
+      expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(2);
+      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_PHOENIX);
+    });
   });
 
   it('a copy elsewhere never reads its source for a validator that does not claim the destination', async () => {

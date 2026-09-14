@@ -52,8 +52,14 @@ const ACQUIRE_RETRY_ATTEMPTS = 3;
 /** Backoff between retries (ms). 3 attempts × 2s ≈ 6s ceiling. */
 const ACQUIRE_RETRY_DELAY_MS = 2_000;
 
-/** Errors a withLock `check` threw: nothing was written, so every lock they unwind releases untouched. */
-const refusedUnderLock = new WeakSet<object>();
+/**
+ * Whatever a lock cycle's `check` threw — an Error or any other value — carried
+ * out of `lockedCycle`: nothing was written, so every lock it unwinds releases
+ * untouched. `withLock` hands the caller the original `reason`.
+ */
+class CheckRefusal {
+  constructor(readonly reason: unknown) {}
+}
 
 /**
  * A pre-disk write validator: called with the (workspace-relative path, full
@@ -225,8 +231,10 @@ export class LockingFilesystem extends LocalFilesystem {
       return this.withLock(dest, () => super.moveFile(src, dest, options), check);
     }
     const [first, second] = src < dest ? [src, dest] : [dest, src];
+    // The inner cycle is the raw one, so its refusal reaches the outer lock
+    // still marked as a refusal and both release untouched.
     return this.withLock(first, () =>
-      this.withLock(second, () => super.moveFile(src, dest, options), check),
+      this.lockedCycle(second, () => super.moveFile(src, dest, options), check),
     );
   }
 
@@ -725,9 +733,27 @@ export class LockingFilesystem extends LocalFilesystem {
    * depends on what is on disk judges the state the op will actually replace.
    * A check refusal releases the lock UNTOUCHED — nothing was written, and the
    * no-commit release would reset the path to HEAD, destroying a prior save's
-   * still-queued bytes — and so does every enclosing withLock it unwinds through.
+   * still-queued bytes — and so does every enclosing lock cycle it unwinds
+   * through. The caller receives exactly what `check` threw.
    */
   private async withLock<T>(
+    inputPath: string,
+    op: () => Promise<T>,
+    check?: () => Promise<void>,
+  ): Promise<T> {
+    try {
+      return await this.lockedCycle(inputPath, op, check);
+    } catch (err) {
+      throw err instanceof CheckRefusal ? err.reason : err;
+    }
+  }
+
+  /**
+   * `withLock` without the unwrap: a `check` refusal leaves as a
+   * {@link CheckRefusal}, so a cycle nested inside another (a move's second
+   * lock) tells the enclosing one to release untouched too.
+   */
+  private async lockedCycle<T>(
     inputPath: string,
     op: () => Promise<T>,
     check?: () => Promise<void>,
@@ -759,9 +785,8 @@ export class LockingFilesystem extends LocalFilesystem {
       if (check) {
         try {
           await check();
-        } catch (err) {
-          if (typeof err === 'object' && err !== null) refusedUnderLock.add(err);
-          throw err;
+        } catch (reason) {
+          throw new CheckRefusal(reason);
         }
       }
       result = await op();
@@ -773,9 +798,8 @@ export class LockingFilesystem extends LocalFilesystem {
       // nothing, so it releases untouched instead. Best-effort: a failure to
       // release here surfaces in logs but doesn't override the original op
       // error the caller actually cares about.
-      const untouched = typeof err === 'object' && err !== null && refusedUnderLock.has(err);
       try {
-        if (untouched) {
+        if (err instanceof CheckRefusal) {
           await workflow.releaseLockUntouched(workspaceId, branch, inputPath, user);
         } else {
           await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
