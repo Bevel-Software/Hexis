@@ -18,6 +18,23 @@ vi.mock('../../../../lib/api', () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
 }));
 
+// The sheet itself is covered by the access module's own tests; here only
+// WHICH workspace and proposal the tree hands it matters.
+vi.mock('../../../access/components/ManageAccessDialog', () => ({
+  ManageAccessDialog: (props: {
+    entry: FileTreeEntry;
+    workspaceId?: string;
+    proposal?: { number: number; branch: string | null };
+  }) => (
+    <div
+      data-testid="manage-access-dialog"
+      data-path={props.entry.relativePath}
+      data-workspace={props.workspaceId ?? ''}
+      data-proposal={JSON.stringify(props.proposal ?? null)}
+    />
+  ),
+}));
+
 const EMPTY_TREE: FileTreeEntry = {
   name: '.',
   relativePath: '.',
@@ -916,6 +933,50 @@ describe('FileExplorer rows: the prototype tree', () => {
     // A normal row opens the FILE, never the dialog.
     fireEvent.click(row);
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  /**
+   * A proposed-only file's access lives where the file does: on the change
+   * request's branch. Its right-click offers Manage access, and the sheet is
+   * handed that request — never the viewed branch, where the file is absent.
+   */
+  it('opens Manage access on a proposed-only file against its change request', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    const row = screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 40 });
+
+    // Only what applies to a file this branch does not have.
+    expect(screen.queryByRole('menuitem', { name: /Rename/i })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Delete/i })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Download/i })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('docs/new-idea.md');
+    expect(JSON.parse(dialog.dataset.proposal!)).toEqual({
+      number: 12,
+      branch: 'suggestions/me/knowledge',
+    });
+  });
+
+  it('keeps an existing file on the viewed branch even when my request modifies it', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['brief.md', 12]]),
+    });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('brief.md');
+    // No proposal, no pinned workspace: the ambient branch, exactly as before.
+    expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
+    expect(dialog.dataset.workspace).toBe('');
   });
 });
 
