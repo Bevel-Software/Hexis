@@ -228,6 +228,19 @@ describe('the Owner pill', () => {
     }));
     // The owned skill and tool land in the SECOND slice of the owner batch.
     svc.listSkills.mockResolvedValue([...filler, ...SKILLS]);
+    // Count requests in flight, per verb: slices are serialized, not burst.
+    const inFlight = { write: 0, owner: 0 };
+    const peak = { write: 0, owner: 0 };
+    svc.fetchFileAccessBatch.mockImplementation(
+      async (_ws: string, paths: string[], verb: 'write' | 'owner' = 'write') => {
+        inFlight[verb] += 1;
+        peak[verb] = Math.max(peak[verb], inFlight[verb]);
+        await new Promise((r) => setTimeout(r, 0));
+        inFlight[verb] -= 1;
+        const granted = verb === 'owner' ? OWNED : WRITABLE;
+        return { results: Object.fromEntries(paths.map((p) => [p, granted.has(p)])) };
+      },
+    );
     await renderGallery({ kind: 'owned' });
 
     const calls = svc.fetchFileAccessBatch.mock.calls as [string, string[], string?][];
@@ -235,6 +248,7 @@ describe('the Owner pill', () => {
       calls.filter(([, , verb]) => (verb === 'owner') === owner).map(([, paths]) => paths.length);
     expect(sizes(true)).toEqual([500, SKILLS.length + TOOLS.length]);
     expect(sizes(false)).toEqual([500, SKILLS.length]);
+    expect(peak).toEqual({ write: 1, owner: 1 });
     expect(cardNames()).toEqual(['owned-skill', 'Weather']);
   });
 

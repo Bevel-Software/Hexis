@@ -96,19 +96,21 @@ export function useLibraryData(): LibraryData {
       // The batch endpoint refuses more than 500 paths per request, so a large
       // catalog goes out in slices of that size and the verdicts are merged.
       // A failed slice is "no verdicts" for its paths: nothing pilled, nothing
-      // unlocked — and the other slices still stand.
+      // unlocked — and the other slices still stand. Slices go one after
+      // another, so a large catalog costs more round trips, never a burst: at
+      // most one request per verb is in flight.
       const BATCH_LIMIT = 500;
       const verdicts = async (paths: string[], verb: 'write' | 'owner') => {
-        const slices: string[][] = [];
-        for (let i = 0; i < paths.length; i += BATCH_LIMIT) slices.push(paths.slice(i, i + BATCH_LIMIT));
-        const parts = await Promise.all(
-          slices.map((slice) =>
-            fetchFileAccessBatch(defaultWorkspaceId(), slice, verb).catch(() => ({
-              results: {} as Record<string, boolean>,
-            })),
-          ),
-        );
-        return { results: Object.assign({}, ...parts.map((p) => p.results)) as Record<string, boolean> };
+        const results: Record<string, boolean> = {};
+        for (let i = 0; i < paths.length; i += BATCH_LIMIT) {
+          const part = await fetchFileAccessBatch(
+            defaultWorkspaceId(),
+            paths.slice(i, i + BATCH_LIMIT),
+            verb,
+          ).catch(() => ({ results: {} as Record<string, boolean> }));
+          Object.assign(results, part.results);
+        }
+        return { results };
       };
 
       const [writable, ownership, crs, mine, pending, details] = await Promise.all([
