@@ -103,6 +103,12 @@ export interface FakeLockDb {
   db: Database;
   /** Every row currently stored, in insertion order. */
   rows: () => LockRow[];
+  /**
+   * Store a row as-is, bypassing the service — for a row the service could
+   * not write today, such as one keyed on a raw spelling before paths were
+   * canonicalised.
+   */
+  seed: (row: LockRow) => void;
 }
 
 export function makeFakeLockDb(): FakeLockDb {
@@ -183,5 +189,11 @@ export function makeFakeLockDb(): FakeLockDb {
   });
 
   const db = { insert, select, update, delete: del } as unknown as Database;
-  return { db, rows: () => [...store.values()].map((r) => ({ ...r })) };
+  return {
+    db,
+    rows: () => [...store.values()].map((r) => ({ ...r })),
+    seed: (row) => {
+      store.set(keyOf(row), { ...row });
+    },
+  };
 }

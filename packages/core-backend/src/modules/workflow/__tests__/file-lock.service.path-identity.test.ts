@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { FileLockService } from '../file-lock.service.js';
 import { PathTraversalError, WorkflowValidationError } from '../../../shared/domain-errors.js';
-import { makeFakeLockDb, type FakeLockDb } from './fake-file-lock-db.js';
+import { makeFakeLockDb, type FakeLockDb, type LockRow } from './fake-file-lock-db.js';
 
 /**
  * A lock is only a lock if everyone agrees what it is on. `x/a.md`,
@@ -154,6 +154,84 @@ describe('FileLockService coordinates on one canonical path', () => {
 
     it.each(REFUSED)('get refuses a path that %s', async (_why, badPath, error) => {
       await expect(locks.get(WS, BRANCH, badPath)).rejects.toBeInstanceOf(error);
+    });
+  });
+
+  /**
+   * A row written under a raw spelling before this change. There is
+   * deliberately no transition handling: nothing rewrites the row to its
+   * canonical key, nothing matches it by its old name, and it goes away the
+   * way any unheartbeaten lock does — its own `expiresAt`. A dual match would
+   * be a second identity for the file, which is the thing being removed.
+   */
+  describe('a legacy row stored under a raw spelling', () => {
+    const RAW = './knowledge-base//x//a.md';
+    const T0 = new Date('2026-09-11T12:00:00.000Z');
+    const LEGACY_EXPIRES = new Date(T0.getTime() + 50_000);
+    const legacyRow: LockRow = {
+      workspaceId: WS,
+      branch: BRANCH,
+      path: RAW,
+      holderUserId: ALICE.id,
+      holderName: ALICE.name,
+      mode: 'edit',
+      acquiredAt: new Date(T0.getTime() - 10_000),
+      lastHeartbeatAt: new Date(T0.getTime() - 10_000),
+      expiresAt: LEGACY_EXPIRES,
+    };
+    const legacy = () => fake.rows().find((r) => r.path === RAW);
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(T0);
+      fake.seed(legacyRow);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('is not dual-matched: a canonical acquire by someone else succeeds beside it', async () => {
+      const bob = await locks.acquire(WS, BRANCH, CANONICAL, BOB);
+
+      expect(bob.acquired).toBe(true);
+      expect(bob.lock.holderUserId).toBe(BOB.id);
+      expect((await locks.get(WS, BRANCH, RAW))?.holderUserId).toBe(BOB.id);
+      // Two rows: the new canonical one, and the legacy one left exactly as it was.
+      expect(fake.rows().map((r) => r.path).sort()).toEqual([RAW, CANONICAL].sort());
+      expect(legacy()).toEqual(legacyRow);
+    });
+
+    it('is unreachable by its old name: get, whatever the spelling, reads no lock', async () => {
+      expect(await locks.get(WS, BRANCH, RAW)).toBeNull();
+      expect(await locks.get(WS, BRANCH, CANONICAL)).toBeNull();
+      expect(legacy()).toEqual(legacyRow);
+    });
+
+    it('is not migrated or extended: its holder cannot heartbeat it by its old name', async () => {
+      await expect(locks.heartbeat(WS, BRANCH, RAW, ALICE)).rejects.toBeInstanceOf(
+        WorkflowValidationError,
+      );
+
+      // Not rewritten to the canonical key, and the TTL is its own.
+      expect(fake.rows()).toEqual([legacyRow]);
+    });
+
+    it('is not released by its old name either', async () => {
+      await locks.release(WS, BRANCH, RAW, ALICE);
+
+      expect(fake.rows()).toEqual([legacyRow]);
+    });
+
+    it('expires by its own TTL and nothing else', async () => {
+      // Live: it still reads as a held lock in the workspace until then.
+      expect(await locks.hasAnyActive(WS)).toBe(true);
+
+      vi.setSystemTime(new Date(LEGACY_EXPIRES.getTime() - 1));
+      expect(await locks.hasAnyActive(WS)).toBe(true);
+
+      vi.setSystemTime(LEGACY_EXPIRES);
+      expect(await locks.hasAnyActive(WS)).toBe(false);
+      expect(legacy()?.expiresAt).toEqual(LEGACY_EXPIRES);
     });
   });
 });
