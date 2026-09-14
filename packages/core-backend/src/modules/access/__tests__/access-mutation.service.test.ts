@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { parse as parseYaml } from 'yaml';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../access-control.service.js';
@@ -130,11 +131,21 @@ describe('AccessMutationService', () => {
     const skillAccess = path.join(repo, 'Plugins/newsroom/skills/newsletter/access.md');
     await expect(fs.readFile(skillAccess, 'utf-8')).rejects.toThrow();
 
+    // The folder rules (the access.md BODY, after the frontmatter) as a
+    // verb → entries map, so each grant is checked under its own verb rather
+    // than anywhere in the file.
+    const skillRules = async (): Promise<Record<string, string[]>> => {
+      const text = await fs.readFile(skillAccess, 'utf-8');
+      const m = /^---\n[\s\S]*?\n---\n([\s\S]*)$/.exec(text);
+      expect(m).not.toBeNull();
+      return parseYaml(m![1]) as Record<string, string[]>;
+    };
+
     const r = await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'write', felix);
     access.invalidate(WS);
 
     expect(r).toEqual({ changed: true, editPath: 'Plugins/newsroom/skills/newsletter/access.md' });
-    expect(await fs.readFile(skillAccess, 'utf-8')).toContain('Newbie <newbie@example.com>');
+    expect((await skillRules()).write).toEqual(['Newbie <newbie@example.com>']);
     expect(await fs.readFile(path.join(repo, 'Plugins/newsroom/access.md'), 'utf-8')).not.toContain(
       'newbie@example.com',
     );
@@ -146,10 +157,11 @@ describe('AccessMutationService', () => {
     expect(await access.canRead(WS, 'felix@example.com', skillMd)).toBe(true);
 
     // A second grant edits the file it created rather than starting another.
-    await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'download', felix);
-    const text = await fs.readFile(skillAccess, 'utf-8');
-    expect(text).toContain('write:');
-    expect(text).toContain('download:');
+    const second = await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'download', felix);
+    expect(second).toEqual({ changed: true, editPath: 'Plugins/newsroom/skills/newsletter/access.md' });
+    const rules = await skillRules();
+    expect(rules.write).toEqual(['Newbie <newbie@example.com>']);
+    expect(rules.download).toEqual(['Newbie <newbie@example.com>']);
   });
 
   it('grant on a FILE edits the node frontmatter, NOT the folder (no sibling leak)', async () => {
