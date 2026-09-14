@@ -53,6 +53,17 @@ const ACQUIRE_RETRY_ATTEMPTS = 3;
 const ACQUIRE_RETRY_DELAY_MS = 2_000;
 
 /**
+ * A pre-disk write validator: called with the (workspace-relative path, full
+ * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
+ * names the paths it guards — only a validator that declares it is also run
+ * for the ops whose candidate has to be read first (append, copy, move), so an
+ * unrelated copy never pays for reading its source.
+ */
+export type WriteValidator = ((path: string, content: FileContent) => void | Promise<void>) & {
+  appliesTo?: (path: string) => boolean;
+};
+
+/**
  * Dependencies the wrapper needs to talk to the workflow lock service.
  * Captured at construction time so every per-method call resolves to the
  * same `(workspace, branch, user)` triple — the agent can't accidentally
@@ -76,12 +87,13 @@ export interface LockingFilesystemContext {
   /**
    * Optional pre-disk write validator. Invoked with the (workspace-relative
    * path, full content) of every WHOLE-FILE write BEFORE the bytes land. Throw
-   * to refuse the write — nothing hits disk and the lock is released without a
-   * commit. Used to reject a `roles.yaml` edit that would lock out admins; see
-   * `roles-yaml-guard.ts`. Whole-file writes only (`writeFile` / `writeFiles`);
-   * partial ops (`appendFile`) are not validated.
+   * to refuse the write — nothing hits disk and no lock is taken. Used to
+   * reject a `roles.yaml` edit that would lock out admins (and, for agents,
+   * one that creates a role); see `roles-yaml-guard.ts`. `appendFile`,
+   * `copyFile` and `moveFile` are validated too, with the resulting content,
+   * when the destination is a path the validator's `appliesTo` claims.
    */
-  validateWrite?: (path: string, content: FileContent) => void;
+  validateWrite?: WriteValidator;
   /**
    * Post-commit hook for the BATCH `writeFiles` path (which commits via
    * `commitChanges` and so skips `runPendingCommit`'s emit). Single-file ops
@@ -118,7 +130,7 @@ export class LockingFilesystem extends LocalFilesystem {
     this.assertInsideRepo(inputPath);
     // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins).
     // Runs OUTSIDE the lock so a refusal never acquires/holds one.
-    this.lockContext.validateWrite?.(inputPath, content);
+    await this.lockContext.validateWrite?.(inputPath, content);
     // Creator read grant (see LockingFilesystemContext.creatorAccess): planned
     // BEFORE the write so the topmost-new-directory detection sees the
     // pre-creation tree. A subtree seed lands first in its own lock+commit
@@ -134,6 +146,9 @@ export class LockingFilesystem extends LocalFilesystem {
 
   override async appendFile(inputPath: string, content: FileContent): Promise<void> {
     this.assertInsideRepo(inputPath);
+    await this.validateResultingWrite(inputPath, async () =>
+      Buffer.concat([asBuffer((await this.readIfExists(inputPath)) ?? ''), asBuffer(content)]),
+    );
     return this.withLock(inputPath, () => super.appendFile(inputPath, content));
   }
 
@@ -143,6 +158,7 @@ export class LockingFilesystem extends LocalFilesystem {
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
     this.assertInsideRepo(dest);
+    await this.validateResultingWrite(dest, () => this.readFile(src));
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
     // creates a new file at dest without disturbing src on disk.
     return this.withLock(dest, () => super.copyFile(src, dest, options));
@@ -152,6 +168,7 @@ export class LockingFilesystem extends LocalFilesystem {
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
+    await this.validateResultingWrite(dest, () => this.readFile(src));
     // A move mutates two paths: the source is deleted and the destination
     // is created. Only locking `dest` would let a concurrent writer hold
     // the source's lock and mutate it under us, and would also leave the
@@ -227,7 +244,7 @@ export class LockingFilesystem extends LocalFilesystem {
     // Pre-disk gate every file BEFORE acquiring any lock (fail-closed): a
     // refusal must not leave a lock held or a partial batch on disk.
     if (this.lockContext.validateWrite) {
-      for (const w of writes) this.lockContext.validateWrite(w.path, w.content);
+      for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
     }
     // Deterministic lock order (string sort) so two concurrent batch writes
     // can't deadlock by acquiring the same paths in opposite orders — the same
@@ -558,6 +575,32 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   /**
+   * Validate an op whose resulting bytes at `dest` are not in hand (append,
+   * copy, move): `candidate` is read only when the validator claims `dest`.
+   * Runs before the lock, like `writeFile`'s gate.
+   */
+  private async validateResultingWrite(
+    dest: string,
+    candidate: () => Promise<FileContent>,
+  ): Promise<void> {
+    const validate = this.lockContext.validateWrite;
+    if (!validate?.appliesTo?.(dest)) return;
+    await validate(dest, await candidate());
+  }
+
+  /** The bytes at `inputPath`, or null when nothing is there. */
+  private async readIfExists(inputPath: string): Promise<Buffer | null> {
+    const absolute = this.resolveAbsolutePath(inputPath);
+    if (!absolute) return null;
+    try {
+      return await fs.readFile(absolute);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  /**
    * Land a `seed-access-md` creation-grant plan: under the access.md's own
    * lock (single acquire+release cycle → one commit), re-read the CURRENT
    * bytes and splice the grant into them — never a blind overwrite, so a
@@ -674,6 +717,10 @@ export class LockingFilesystem extends LocalFilesystem {
     await workflow.releaseLock(workspaceId, branch, inputPath, user);
     return result;
   }
+}
+
+function asBuffer(content: FileContent): Buffer {
+  return typeof content === 'string' ? Buffer.from(content, 'utf-8') : Buffer.from(content);
 }
 
 function sleep(ms: number): Promise<void> {

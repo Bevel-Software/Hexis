@@ -200,6 +200,24 @@ describe('TemplateFilesStep', () => {
     expect(subject).toBe('Update AGENTS.md to the current platform template');
   });
 
+  it('ships the roles-vs-groups guide, and a deployment on an older template receives it at boot', async () => {
+    const guide = await template('AGENTS.md');
+    const section = guide.match(/### Roles are pre-set[\s\S]*?(?=\n### )/)?.[0] ?? '';
+    // What roles are, that agents never create them, the group test, what to do instead.
+    expect(section).toContain('A role in `roles.yaml` is an app role');
+    expect(section).toContain('**Agents never create roles.**');
+    expect(section).toContain('**Is it really a group?**');
+    expect(section).toContain('**What to do instead.**');
+    expect(section).toContain('add people to\nexisting roles, and use a GROUP for a task- or team-scoped set of people');
+
+    // An existing deployment's AGENTS.md from before the guide existed.
+    await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
+    await makeRunner([new TemplateFilesStep()]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toContain('**Agents never create roles.**');
+  });
+
   it('rejects .git — any case — as a reserved root name', async () => {
     for (const bad of ['.git', '.GIT', '.Git']) {
       expect(() => new TemplateFilesStep([bad]), bad).toThrow(/must not be "\.git"/);

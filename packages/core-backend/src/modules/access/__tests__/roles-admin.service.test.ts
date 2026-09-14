@@ -240,6 +240,16 @@ describe('RolesAdminService', () => {
     expect(await svc.getHealth()).toEqual({ ok: true, errors: [] });
   });
 
+  it('recover writes a role the current file does not declare — the agent-only new-role rule is not applied here', async () => {
+    await write(repo, 'roles.yaml', 'roles: oops\n');
+    access.invalidate(WS);
+
+    const roster = await svc.recover(ADMIN);
+
+    expect(roster.find((r) => r.canonical === 'admin')?.members).toEqual(['recovery-admin@example.com']);
+    expect(await readRoles()).toMatch(/Admin:/);
+  });
+
   it('recover refuses when no admin is configured — an adminless roster is the disease, not the cure', async () => {
     const corrupt = 'roles:\n  Admin:\n    - a@x.eu\n  Admin:\n    - b@x.eu\n';
     await write(repo, 'roles.yaml', corrupt);
