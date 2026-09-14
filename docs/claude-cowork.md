@@ -18,16 +18,23 @@ they may read.
 
 ## Register the platform once (an Owner of your Claude organization)
 
-1. In the platform, open **Deployment** and find **Claude connection**. It
-   shows generated credentials: hostname, App ID, Client ID, client secret,
-   webhook secret and private key.
+1. In the platform, open **Deployment** and find the **Marketplace** section
+   (it is also on the first-run setup screen, as an optional step you can
+   skip). Open **Register this deployment with Claude**: it shows generated
+   credentials: hostname, App ID, Client ID, client secret, webhook secret and
+   private key.
 2. In Claude, open **Admin settings → Claude Code**, scroll to **Self-hosted
    infrastructure**, and choose **Add manually** beside GitHub Enterprise.
    Paste the fields from step 1. Any display name will do, port 443 is right,
    and read replicas stay empty. Choose **Add configuration** to save them.
 
+3. Back in the Marketplace section, choose **Mark as registered**. Until an
+   admin does, **External agent access** shows people a notice that an admin
+   has to configure the marketplace instead of the steps below.
+
 The webhook URL Claude generates can be ignored. Rotate the credentials from
-the same card if they are ever exposed; the Owner then re-enters them.
+the same section if they are ever exposed; the Owner then re-enters them.
+Rotating does not unmark the registration.
 
 Registering connects the platform to your Claude organization, not to any
 person: every person, the Owner included, connects their own account before
@@ -62,7 +69,8 @@ disconnected here. Connect again from step 1; if that does not take, the
 server log says why (below).
 
 The same steps are a five-screen walkthrough on the **External agent access**
-page in the app. The registration half is shown to admins only.
+page in the app, identical for admins and everyone else once the deployment is
+marked registered. The registration half lives in **Deployment → Marketplace**.
 
 ## When connecting does not take
 

@@ -10,7 +10,10 @@ import {
 } from '../services/github-facade.api';
 
 /**
- * The admin's half of "add this marketplace in Cowork or claude.ai".
+ * The admin's half of "add this marketplace in Cowork or claude.ai": the
+ * generated credentials, inside step 1 of the registration steps in the
+ * Marketplace section of Deployment configuration. It fetches on mount, and
+ * that step mounts it only while its drawer is open.
  *
  * Those surfaces sync marketplaces only from hosts they know, and the one
  * kind of host an organization can add itself is a GitHub Enterprise Server.
@@ -83,24 +86,8 @@ export function ClaudeConnectionCard() {
   };
 
   return (
-    <section aria-labelledby="claude-connection-heading" className="space-y-3">
-      <div>
-        <h2 id="claude-connection-heading" className="text-title font-semibold text-ink">
-          Claude connection
-        </h2>
-        <p className="mt-1 text-xs text-ink-muted leading-snug">
-          Lets people add this deployment's skills marketplace in Cowork and on claude.ai, which
-          accept marketplaces only from a GitHub Enterprise Server their organization registered.
-          Hexis answers as one. Register it once (Owner role, Team or Enterprise plan): in Claude's
-          admin settings, under Claude Code, GitHub Enterprise Server, choose <b>Add manually</b>{' '}
-          and paste the fields below. That connects the deployment to the organization, not to
-          anyone: each person then connects their own account under Claude's admin settings,
-          GitHub, with <b>Connect</b> (or from the repository picker on claude.ai/code), and signs
-          in here.
-        </p>
-      </div>
-
-      {!loaded && <div className="text-xs text-ink-muted">Loading…</div>}
+    <div className="space-y-3" data-testid="claude-connection-credentials">
+      {!loaded && <div className="text-xs text-ink-muted">Loading the credentials…</div>}
 
       {error && (
         <Banner tone="danger" role="alert">
@@ -162,6 +149,6 @@ export function ClaudeConnectionCard() {
           </Banner>
         )}
       </Dialog>
-    </section>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
 import { configureMcpUrl } from '../../../../shared/mcp';
 import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared/marketplace-url';
@@ -22,13 +22,14 @@ import { GITHUB_LINK_KIND, configureMarketplaceGitUrl } from '../../../../shared
  * regression cases below name all six.
  */
 
-const { listMock, createMock, instructionsMock, facadeMock, adminState } = vi.hoisted(() => ({
+const { listMock, createMock, instructionsMock, facadeMock, registrationMock, adminState } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
   instructionsMock: vi.fn(),
   facadeMock: vi.fn(),
-  // Mutable so one file can mount the page as both roles: the Cowork drawer
-  // shows two different sets of steps depending on this.
+  registrationMock: vi.fn(),
+  // Mutable so one file can mount the page as both roles: the tutorial must
+  // be identical for both, and only the "not set up" notice may differ.
   adminState: { isAdmin: false },
 }));
 
@@ -40,10 +41,12 @@ vi.mock('../../../admin/state/admin.context', async (importOriginal) => ({
   useAdmin: () => ({ isAdmin: adminState.isAdmin }),
 }));
 
-// The registration credentials the admin branch shows inline. Mocked, or the
-// component reaches for the real admin endpoint over the network.
+// The registration state the Cowork drawer reads, and the admin credentials
+// endpoint this page must never call. Mocked, or the component reaches for
+// the real endpoints over the network.
 vi.mock('../../../settings/services/github-facade.api', () => ({
   fetchGitHubFacade: facadeMock,
+  fetchMarketplaceRegistration: registrationMock,
 }));
 
 vi.mock('../../services/external-api-keys.api', () => ({
@@ -85,6 +88,8 @@ beforeEach(() => {
   // Cleared, not just re-stubbed: the count is an assertion of its own below.
   facadeMock.mockClear();
   facadeMock.mockResolvedValue(FACADE);
+  registrationMock.mockReset();
+  registrationMock.mockResolvedValue(true);
   listMock.mockResolvedValue([]);
   instructionsMock.mockResolvedValue({
     instructions: 'Search the knowledge base first.',
@@ -367,6 +372,9 @@ describe('the Marketplaces tab', () => {
     for (const drawer of [cowork, git]) {
       expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
     }
+    await within(cowork.closest('details') as HTMLElement).findByRole('region', {
+      name: 'Set up the Claude marketplace',
+    });
     const remote = `${new URL(PUBLIC_URL).origin}/git/marketplace.git`;
     // The same address in both drawers: what Cowork adds is what Claude Code clones.
     expect(snippets().filter((v) => v === remote)).toHaveLength(2);
@@ -377,20 +385,19 @@ describe('the Marketplaces tab', () => {
   });
 
   /**
-   * The registration steps live on pages inside Claude's ADMIN settings. A
-   * non-admin cannot open those, so showing them four screenshots of a door
-   * they have no key to is worse than showing them nothing: the two admin
-   * steps and their four shots are gated, and the five actions they can take
-   * are presented one at a time.
+   * The registration steps live on pages inside Claude's ADMIN settings, and
+   * now in Deployment configuration here. This page has no admin branch left:
+   * the five actions every person takes, one at a time, and none of the
+   * registration screenshots.
    */
-  it('gives a non-admin only the steps they can act on, and none of the admin screenshots', async () => {
+  it('gives everyone only the personal steps, and none of the admin screenshots', async () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
 
+    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
     expect(within(cowork).queryByText('Register this deployment with your Claude organization')).toBeNull();
-    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
     expect(carousel).toHaveAttribute('aria-roledescription', 'carousel');
     expect(within(cowork).getByText('Select repository')).toBeTruthy();
     expect(within(cowork).getByText('Connect to URL')).toBeTruthy();
@@ -408,7 +415,7 @@ describe('the Marketplaces tab', () => {
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
-    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
     const expected = [
       ['Select repository', 'Connect to URL'],
       ['Plugins tab', 'select the Plugins tab'],
@@ -444,7 +451,7 @@ describe('the Marketplaces tab', () => {
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
-    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
     expect(within(carousel).getByText('1 / 5')).not.toHaveAttribute('aria-live');
@@ -463,7 +470,7 @@ describe('the Marketplaces tab', () => {
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
-    const carousel = within(cowork).getByRole('region', { name: 'Set up the Claude marketplace' });
+    const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     const advance = within(carousel).getByRole('button', { name: 'Next' });
     for (let step = 0; step < 4; step += 1) {
@@ -481,81 +488,82 @@ describe('the Marketplaces tab', () => {
     );
   });
 
-  it('gives an admin the registration steps as well, screenshots and all', async () => {
+  /**
+   * State one of three: REGISTERED. The tutorial is the same DOM for an admin
+   * as for anyone else — the admin branch is gone, not merely hidden — and
+   * no one's copy of this page asks for the credentials.
+   */
+  it('shows an admin exactly the tutorial a non-admin sees once the deployment is registered', async () => {
+    const drawerHtml = async () => {
+      const user = userEvent.setup();
+      const view = mount(PUBLIC_URL);
+      await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+      const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+      await user.click(within(cowork).getByText('Cowork and claude.ai'));
+      await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
+      expect(within(cowork).queryByTestId('marketplace-not-configured')).toBeNull();
+      const html = cowork.innerHTML;
+      view.unmount();
+      return html;
+    };
+
+    adminState.isAdmin = false;
+    const asMember = await drawerHtml();
     adminState.isAdmin = true;
+    const asAdmin = await drawerHtml();
+
+    expect(asAdmin).toBe(asMember);
+    expect(asAdmin).not.toContain('Register this deployment with your Claude organization');
+    expect(facadeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * State two: NOT REGISTERED, for a non-admin. No tutorial — its first
+   * screen would list no deployment — and a notice that an admin has to
+   * configure the marketplace, with no link to a page they cannot use.
+   */
+  it('tells a non-admin an admin must configure the marketplace, and shows no tutorial', async () => {
+    registrationMock.mockResolvedValue(false);
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
 
-    expect(within(cowork).getByText('Register this deployment with your Claude organization')).toBeTruthy();
-    expect(within(cowork).getByText('Connect your own Claude account to it')).toBeTruthy();
-    expect(within(cowork).getAllByRole('img')).toHaveLength(8);
-  });
-
-  /**
-   * Step 1 asks the reader to paste six values into Claude's form, so the six
-   * values are IN step 1. Sending them to the Deployment page to fetch them
-   * and back again was friction with nothing on the other end of it.
-   */
-  it('puts the registration credentials in the step that asks for them', async () => {
-    adminState.isAdmin = true;
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
-    // Closed, the drawer holds no credentials at all: a client secret is not
-    // put in the DOM of something nobody opened.
-    expect(within(cowork).queryByDisplayValue(FACADE.clientSecret)).toBeNull();
+    const notice = await within(cowork).findByTestId('marketplace-not-configured');
+    expect(notice).toHaveTextContent('An admin has to configure the marketplace');
+    expect(within(notice).queryByRole('link')).toBeNull();
+    expect(within(cowork).queryByRole('region', { name: 'Set up the Claude marketplace' })).toBeNull();
+    expect(within(cowork).queryAllByRole('img')).toHaveLength(0);
     expect(facadeMock).not.toHaveBeenCalled();
-
-    await user.click(within(cowork).getByText('Cowork and claude.ai'));
-
-    await within(cowork).findByDisplayValue(FACADE.clientSecret);
-    for (const value of [FACADE.host, FACADE.appId, FACADE.clientId, FACADE.webhookSecret]) {
-      expect(within(cowork).getByDisplayValue(value)).toBeTruthy();
-    }
-    // The key is multi-line, which the display-value matcher normalises away.
-    expect(snippets().some((v) => v === FACADE.privateKeyPem)).toBe(true);
   });
 
   /**
-   * The invariant, across the one event that used to break it: credentials are
-   * in the DOM if and only if the drawer holding them is open. This subtree
-   * unmounts on a tab switch, and a fresh <details> comes back closed, so a
-   * React state that merely WATCHED the element went stale and put the secrets
-   * back into a closed drawer. Binding `open` as well is what makes the two
-   * impossible to disagree.
+   * State three: NOT REGISTERED, for an admin. The same absence of a
+   * tutorial, and a notice pointing at the Deployment section that fixes it —
+   * a link that actually lands there.
    */
-  it('keeps the credentials and the drawer in step across a tab switch', async () => {
+  it('points an admin at the Deployment section with a working link', async () => {
+    registrationMock.mockResolvedValue(false);
     adminState.isAdmin = true;
     const user = userEvent.setup();
-    mount(PUBLIC_URL);
+    render(
+      <MemoryRouter initialEntries={['/external-agent-access']}>
+        <Routes>
+          <Route path="/external-agent-access" element={<ExternalAgentAccessPage />} />
+          <Route path="/deployment" element={<div>Deployment settings page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const drawer = () => screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
-
-    await user.click(within(drawer()).getByText('Cowork and claude.ai'));
-    await within(drawer()).findByDisplayValue(FACADE.clientSecret);
-    expect(drawer().open).toBe(true);
-
-    await user.click(screen.getByRole('tab', { name: 'Your agent' }));
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-
-    // The remount refetches, so settle on the credentials before reading the
-    // drawer: asserting both facts in the same tick would pass or fail on
-    // microtask timing rather than on the invariant. Once they are on screen,
-    // the drawer showing them must be open — that is the whole claim, and it
-    // fails when the element and the state can drift apart.
-    await within(drawer()).findByDisplayValue(FACADE.clientSecret);
-    expect(drawer().open).toBe(true);
-  });
-
-  it('never asks the admin endpoint for credentials a non-admin cannot have', async () => {
-    const user = userEvent.setup();
-    mount(PUBLIC_URL);
-    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
     await user.click(within(cowork).getByText('Cowork and claude.ai'));
+
+    const notice = await within(cowork).findByTestId('marketplace-not-configured');
+    expect(within(cowork).queryByRole('region', { name: 'Set up the Claude marketplace' })).toBeNull();
+    const link = within(notice).getByRole('link', { name: /Marketplace section of Deployment settings/ });
+    expect(link).toHaveAttribute('href', '/deployment#marketplace');
+    await user.click(link);
+    expect(await screen.findByText('Deployment settings page')).toBeInTheDocument();
     expect(facadeMock).not.toHaveBeenCalled();
   });
 
@@ -565,11 +573,11 @@ describe('the Marketplaces tab', () => {
    * rectangle still gets the instruction.
    */
   it('names the highlighted control in alt text rather than only boxing it', async () => {
-    adminState.isAdmin = true;
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
     const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     for (const img of within(cowork).getAllByRole('img')) {
       expect((img.getAttribute('alt') ?? '').length).toBeGreaterThan(40);

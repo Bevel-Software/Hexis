@@ -83,9 +83,8 @@ export function ExternalAgentAccessPage() {
   const workspaceUrl = workspaceBaseUrl();
 
   const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
-  // Whether the Cowork drawer is expanded. Only the registration credentials
-  // wait on it; everything else in the drawer renders either way.
-  const [coworkOpen, setCoworkOpen] = useState(false);
+  // Only the wording of the "not set up yet" notice depends on this; the
+  // tutorial itself is the same for everyone.
   const { isAdmin } = useAdmin();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -341,26 +340,15 @@ export function ExternalAgentAccessPage() {
               claude.ai fetch it as a repository once your account is connected.
             </p>
 
-            {/* CONTROLLED, both attributes together. A closed <details> still
-                MOUNTS its children, so the registration credentials wait on
-                `coworkOpen` rather than loading a client secret and a private
-                key into a drawer nobody opened. Watching the element with
-                `onToggle` alone was not enough: this subtree unmounts on a tab
-                switch and the fresh <details> comes back closed while the
-                state stayed true, which put the secrets right back in a closed
-                drawer. With `open` bound too, the element cannot disagree with
-                the state that gates them. */}
-            <details
-              className="border border-line rounded"
-              data-testid="cowork-section"
-              open={coworkOpen}
-              onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
-            >
+            {/* No credentials live in this drawer any more — registering the
+                deployment with Claude is in Deployment configuration — so it
+                is an ordinary closed <details>. */}
+            <details className="border border-line rounded" data-testid="cowork-section">
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                 Cowork and claude.ai
               </summary>
               <div className="px-3 pb-3 space-y-3">
-                <CoworkSetupSteps isAdmin={isAdmin} opened={coworkOpen} />
+                <CoworkSetupSteps isAdmin={isAdmin} />
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-ink">Your Claude connections</div>
                   {loadError && (
