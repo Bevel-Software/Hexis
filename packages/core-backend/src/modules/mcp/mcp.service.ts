@@ -48,7 +48,7 @@ import type { SpillStore } from '../workspace/spill-store.js';
 import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
-import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions } from './downstream-pool.js';
+import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import {
   composeAgentInstructions,
   prefixToolDescription,
@@ -558,31 +558,36 @@ export class McpService {
    * `mcp` manuals never dial from here: they are attached from the downstream
    * pool (see {@link attachDownstream}).
    *
-   * Failures are memoized per (user, manual) for a few minutes (see
+   * Failures are memoized per (user, manual definition) for a few minutes (see
    * {@link ManualFailureMemo}): the catalog is rebuilt on every request, and a
    * manual with a broken credential (expired OAuth, revoked key) would
-   * otherwise re-dial its provider on every single one.
+   * otherwise re-dial its provider on every single one. The definition's
+   * fingerprint is part of the key, so a manual edited after a failure (a
+   * corrected `mcp.json` URL) is tried on the very next request.
    */
   private async discoverTools(
     client: CodeModeUtcpClient,
     manuals: CallTemplate[],
     userId: string,
   ): Promise<ProxiedTool[]> {
-    const routes = new Map<string, () => Promise<PooledDownstream>>();
+    const routes = new Map<string, () => Promise<Lease<PooledDownstream>>>();
     const outcomes = await Promise.all(
       manuals.map(async (m) => {
         const isKb = m.name === EXTERNAL_KB_MANUAL_NAME;
         const name = String(m.name);
+        // Taken before registration, which renames the template in place.
+        const memoKey = `${name}${POOL_KEY_SEPARATOR}${templateFingerprint(m)}`;
         if (!isKb) {
-          const recent = this.manualFailures.recentFailure(userId, name);
+          const recent = this.manualFailures.recentFailure(userId, memoKey);
           if (recent !== undefined) {
             console.warn(`[mcp] skipping manual "${name}" (recent failure, not retried): ${recent}`);
             return { isKb, ok: true as const };
           }
         }
-        // Captured BEFORE the awaited attempt: if a secrets change clears the
-        // memo while registration is in flight, the stale failure from the OLD
-        // credential must not resurrect an entry the clear removed.
+        // Captured BEFORE the awaited attempt: if a secrets change (or a
+        // concurrent success of this same manual) clears the memo while
+        // registration is in flight, the stale failure must not resurrect an
+        // entry the clear removed.
         const generation = this.manualFailures.currentGeneration;
         // Neither path throws: a discovery/network failure and a validation
         // failure both come back as `{ ok: false }`, because the retry
@@ -593,10 +598,10 @@ export class McpService {
             : await registerManual(client, m);
         if (!result.ok) {
           if (isKb) return { isKb, ok: false as const, error: result.error };
-          this.manualFailures.recordFailure(userId, name, result.error, generation);
+          this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
           console.warn(`[mcp] skipping manual "${name}": ${result.error}`);
         } else if (!isKb) {
-          this.manualFailures.clear(userId, name);
+          this.manualFailures.clear(userId, memoKey);
         }
         return { isKb, ok: true as const };
       }),
@@ -618,24 +623,30 @@ export class McpService {
    * been registered here — and `routes` records that calls to this manual go to
    * the pool. The route re-acquires at CALL time rather than holding the pooled
    * client, so an entry evicted between discovery and the call is transparently
-   * re-created instead of used after its connection was closed.
+   * re-created instead of used after its connection was closed. Each use holds
+   * a pool lease only for its own duration, so the pool never closes a
+   * connection an operation is still using.
    */
   private async attachDownstream(
     client: CodeModeUtcpClient,
     template: CallTemplate,
     userId: string,
-    routes: Map<string, () => Promise<PooledDownstream>>,
+    routes: Map<string, () => Promise<Lease<PooledDownstream>>>,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const key = downstreamPoolKey(userId, template);
     const acquire = () => this.downstream.acquire(key, () => this.connectDownstream(userId, template));
     try {
-      const pooled = await acquire();
+      const lease = await acquire();
       const manualName = utcpManualName(template);
-      const tools = (await pooled.client.getTools()).filter((t) => t.name.startsWith(`${manualName}.`));
-      await client.config.tool_repository.saveManual(
-        { ...template, name: manualName },
-        UtcpManualSchema.parse({ tools }),
-      );
+      try {
+        const tools = (await lease.value.client.getTools()).filter((t) => t.name.startsWith(`${manualName}.`));
+        await client.config.tool_repository.saveManual(
+          { ...template, name: manualName },
+          UtcpManualSchema.parse({ tools }),
+        );
+      } finally {
+        lease.release();
+      }
       routes.set(manualName, acquire);
       return { ok: true };
     } catch (err) {
@@ -838,8 +849,12 @@ function utcpManualName(template: CallTemplate): string {
  * template can carry credentials and the key must stay log-safe.
  */
 function downstreamPoolKey(userId: string, template: CallTemplate): string {
-  const fingerprint = createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 16);
-  return [userId, utcpManualName(template), fingerprint].join(POOL_KEY_SEPARATOR);
+  return [userId, utcpManualName(template), templateFingerprint(template)].join(POOL_KEY_SEPARATOR);
+}
+
+/** A short, log-safe hash of a manual's whole definition: changes whenever the definition does. */
+function templateFingerprint(template: CallTemplate): string {
+  return createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 16);
 }
 
 /**
@@ -863,10 +878,14 @@ function useOwnMcpProtocol(client: CodeModeUtcpClient, protocol: McpCommunicatio
  * MCP dispatch path, `callTool` is what `call_tool_chain` bridges every
  * in-isolate tool function to — so the two can never disagree. Every other
  * manual's calls go through the request client unchanged.
+ *
+ * Each routed call holds its pool lease until the call ends — for a stream,
+ * until the consumer finishes or abandons it (`for await` returns the
+ * generator, which runs the `finally`).
  */
 function routeToDownstream(
   client: CodeModeUtcpClient,
-  routes: ReadonlyMap<string, () => Promise<PooledDownstream>>,
+  routes: ReadonlyMap<string, () => Promise<Lease<PooledDownstream>>>,
 ): void {
   const callTool = client.callTool.bind(client);
   const callToolStreaming = client.callToolStreaming.bind(client);
@@ -875,7 +894,12 @@ function routeToDownstream(
   client.callTool = async function routedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
     const route = routeOf(toolName);
     if (!route) return callTool(toolName, toolArgs);
-    return (await route()).client.callTool(toolName, toolArgs);
+    const lease = await route();
+    try {
+      return await lease.value.client.callTool(toolName, toolArgs);
+    } finally {
+      lease.release();
+    }
   };
   client.callToolStreaming = async function* routedCallToolStreaming(
     toolName: string,
@@ -886,7 +910,12 @@ function routeToDownstream(
       yield* callToolStreaming(toolName, toolArgs);
       return;
     }
-    yield* (await route()).client.callToolStreaming(toolName, toolArgs);
+    const lease = await route();
+    try {
+      yield* lease.value.client.callToolStreaming(toolName, toolArgs);
+    } finally {
+      lease.release();
+    }
   };
 }
 

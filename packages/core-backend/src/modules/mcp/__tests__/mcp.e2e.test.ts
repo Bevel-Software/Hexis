@@ -527,6 +527,24 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
     expect(downstream.initializations()).toBe(2);
   });
 
+  it('an mcp.json edited after a failure is tried on the next request, not after the failure memo expires', async () => {
+    downstream = await startFakeDownstreamMcpServer();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let url = 'http://127.0.0.1:1/mcp'; // nothing listens: registration fails and is memoized
+    const { baseUrl } = await startPlatform({
+      manualsFor: () => [
+        { name: 'notion', call_template_type: 'mcp', config: { mcpServers: { srv: { transport: 'http', url } } } },
+      ],
+    });
+    const { client } = await connectSdkClient(baseUrl);
+    expect((await client.listTools()).tools.some((t) => t.name.endsWith('echo'))).toBe(false);
+
+    url = downstream.url; // the user corrects the definition
+    await echoName(client);
+    expect(downstream.initializations()).toBe(1);
+  });
+
   it('idle eviction: an entry unused past the TTL is closed and re-dialed lazily', async () => {
     downstream = await startFakeDownstreamMcpServer();
     let now = 1_000_000;
@@ -543,7 +561,10 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
   });
 });
 
-describe('per-request overhead (reported, not asserted)', () => {
+// A measurement, not a regression gate: it asserts nothing about latency, so it
+// runs only on request (`MCP_PERF=1`) instead of spending ~40 loopback calls on
+// every CI run.
+describe.runIf(process.env.MCP_PERF === '1')('per-request overhead (reported, not asserted)', () => {
   it('measures tools/list and tools/call latency against a warm process', async () => {
     const { baseUrl } = await startPlatform();
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -558,7 +579,9 @@ describe('per-request overhead (reported, not asserted)', () => {
         samples.push(performance.now() - t0);
       }
       samples.sort((x, y) => x - y);
-      return { p50: samples[Math.floor(runs / 2)], p95: samples[Math.floor(runs * 0.95)] };
+      // Nearest-rank percentile: the smallest sample with at least p% of samples at or below it.
+      const pct = (p: number) => samples[Math.min(runs - 1, Math.max(0, Math.ceil(runs * p) - 1))]!;
+      return { p50: pct(0.5), p95: pct(0.95) };
     };
     const list = await time(() => client.listTools());
     const call = await time(() => client.callTool({ name: 'ask', arguments: { body: { prompt: 'perf' } } }));

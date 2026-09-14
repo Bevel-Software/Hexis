@@ -15,11 +15,18 @@
  *   - IDLE-EVICTED and SIZE-BOUNDED, with the retired session store's proven
  *     defaults (4 hours idle, 5000 entries);
  *   - every eviction CLOSES what it evicts (`dispose`) — the pool is the owner
- *     of each connection it opened, and nothing else closes them.
+ *     of each connection it opened, and nothing else closes them;
+ *   - LEASED: `acquire` hands out a lease the caller releases when its
+ *     operation ends. A leased entry is in use, so it is never idle and never
+ *     the LRU victim; an entry invalidated while leased leaves the pool at once
+ *     but is closed only when its last lease is released. A call in progress
+ *     never has its connection closed underneath it.
  *
  * Eviction is lazy, like the store it replaces: `acquire` sweeps idle entries
  * first and enforces the cap on insert. No background timer, so constructing a
- * pool never leaks an interval handle (in tests or anywhere else).
+ * pool never leaks an interval handle (in tests or anywhere else). When every
+ * entry is leased the cap cannot evict anything, and the pool briefly holds
+ * more than `maxEntries` until leases are released.
  *
  * Healing a connection whose server restarted is NOT this class's job: the
  * pooled value carries the existing session-recovery wrapper, which
@@ -38,12 +45,23 @@ export interface DownstreamPoolOptions<V> {
   now?: () => number;
 }
 
+/** A pooled value in use. `release` ends the use; calling it again is a no-op. */
+export interface Lease<V> {
+  readonly value: V;
+  release(): void;
+}
+
 export const DEFAULT_DOWNSTREAM_IDLE_TTL_MS = 4 * 60 * 60 * 1000;
 export const DEFAULT_DOWNSTREAM_MAX_ENTRIES = 5000;
 
 interface Entry<V> {
+  key: string;
   value: V;
   lastUsedAt: number;
+  /** Outstanding leases; an entry with any is in use and not evictable. */
+  leases: number;
+  /** Removed from the pool while leased: close it when the last lease ends. */
+  retired: boolean;
 }
 
 interface Pending<V> {
@@ -68,18 +86,16 @@ export class DownstreamPool<V> {
   }
 
   /**
-   * The pooled value for `key`, creating it with `create` when absent. Marks
-   * the entry used. A creation that rejects is NOT cached — every waiter sees
-   * the rejection and the next `acquire` tries again (retry pacing is the
-   * caller's policy, see ManualFailureMemo).
+   * Lease the pooled value for `key`, creating it with `create` when absent.
+   * The caller MUST release the lease when its operation ends (try/finally).
+   * A creation that rejects is NOT cached — every waiter sees the rejection and
+   * the next `acquire` tries again (retry pacing is the caller's policy, see
+   * ManualFailureMemo).
    */
-  async acquire(key: string, create: () => Promise<V>): Promise<V> {
+  async acquire(key: string, create: () => Promise<V>): Promise<Lease<V>> {
     this.sweep();
     const hit = this.entries.get(key);
-    if (hit) {
-      hit.lastUsedAt = this.now();
-      return hit.value;
-    }
+    if (hit) return this.lease(hit);
     const inflight = this.pending.get(key);
     if (inflight) return this.awaitPending(key, inflight, create);
 
@@ -100,27 +116,25 @@ export class DownstreamPool<V> {
       this.disposeQuietly(key, value);
       return this.acquire(key, create);
     }
-    this.insert(key, value);
-    return value;
+    return this.lease(this.insert(key, value));
   }
 
   /**
-   * Evict (and close) every entry whose key matches — the hook for "this
-   * user's credentials changed". A creation in flight for a matching key is
-   * marked stale, so its result is closed and rebuilt instead of cached.
+   * Evict every entry whose key matches — the hook for "this user's
+   * credentials changed". Idle entries are closed now; leased ones leave the
+   * pool now and are closed when released. A creation in flight for a matching
+   * key is marked stale, so its result is closed and rebuilt instead of cached.
    */
   evictWhere(predicate: (key: string) => boolean): void {
     for (const [key, entry] of [...this.entries]) {
-      if (!predicate(key)) continue;
-      this.entries.delete(key);
-      this.disposeQuietly(key, entry.value);
+      if (predicate(key)) this.retire(entry);
     }
     for (const [key, record] of this.pending) {
       if (predicate(key)) record.stale = true;
     }
   }
 
-  /** Evict and close everything. */
+  /** Evict and close everything (leased entries close on release). */
   closeAll(): void {
     this.evictWhere(() => true);
   }
@@ -130,44 +144,68 @@ export class DownstreamPool<V> {
     return this.entries.size;
   }
 
-  private async awaitPending(key: string, record: Pending<V>, create: () => Promise<V>): Promise<V> {
+  private async awaitPending(key: string, record: Pending<V>, create: () => Promise<V>): Promise<Lease<V>> {
     const value = await record.promise;
     // The creator owns closing a stale value; a joiner just asks again.
     if (record.stale) return this.acquire(key, create);
+    // The creator pooled the value before this continuation ran. If it has
+    // already left the pool again, lease whatever the pool holds now.
     const entry = this.entries.get(key);
-    if (entry) entry.lastUsedAt = this.now();
-    return value;
+    if (!entry || entry.value !== value) return this.acquire(key, create);
+    return this.lease(entry);
   }
 
-  private insert(key: string, value: V): void {
+  private lease(entry: Entry<V>): Lease<V> {
+    entry.leases += 1;
+    entry.lastUsedAt = this.now();
+    let released = false;
+    return {
+      value: entry.value,
+      release: () => {
+        if (released) return;
+        released = true;
+        entry.leases -= 1;
+        // Idleness is measured from the end of the last use.
+        entry.lastUsedAt = this.now();
+        if (entry.retired && entry.leases === 0) this.disposeQuietly(entry.key, entry.value);
+      },
+    };
+  }
+
+  private insert(key: string, value: V): Entry<V> {
     this.sweep();
-    while (this.entries.size >= this.maxEntries) this.evictLeastRecentlyUsed();
-    this.entries.set(key, { value, lastUsedAt: this.now() });
+    while (this.entries.size >= this.maxEntries && this.evictLeastRecentlyUsed()) {
+      // each pass evicted one idle entry
+    }
+    const entry: Entry<V> = { key, value, lastUsedAt: this.now(), leases: 0, retired: false };
+    this.entries.set(key, entry);
+    return entry;
   }
 
   private sweep(): void {
     const cutoff = this.now() - this.idleTtlMs;
-    for (const [key, entry] of [...this.entries]) {
-      if (entry.lastUsedAt < cutoff) {
-        this.entries.delete(key);
-        this.disposeQuietly(key, entry.value);
-      }
+    for (const entry of [...this.entries.values()]) {
+      if (entry.leases === 0 && entry.lastUsedAt < cutoff) this.retire(entry);
     }
   }
 
-  private evictLeastRecentlyUsed(): void {
-    let oldestKey: string | undefined;
-    let oldestUsed = Infinity;
-    for (const [key, entry] of this.entries) {
-      if (entry.lastUsedAt < oldestUsed) {
-        oldestUsed = entry.lastUsedAt;
-        oldestKey = key;
-      }
+  /** Evict the least-recently-used entry not in use; false when every entry is leased. */
+  private evictLeastRecentlyUsed(): boolean {
+    let oldest: Entry<V> | undefined;
+    for (const entry of this.entries.values()) {
+      if (entry.leases > 0) continue;
+      if (!oldest || entry.lastUsedAt < oldest.lastUsedAt) oldest = entry;
     }
-    if (oldestKey === undefined) return;
-    const entry = this.entries.get(oldestKey)!;
-    this.entries.delete(oldestKey);
-    this.disposeQuietly(oldestKey, entry.value);
+    if (!oldest) return false;
+    this.retire(oldest);
+    return true;
+  }
+
+  /** Take an entry out of the pool; close it now, or on its last release when leased. */
+  private retire(entry: Entry<V>): void {
+    if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+    entry.retired = true;
+    if (entry.leases === 0) this.disposeQuietly(entry.key, entry.value);
   }
 
   /**
@@ -191,4 +229,4 @@ function poolKeyLabel(key: string): string {
 }
 
 /** Separator for (user, manual, fingerprint) keys — cannot occur in any of the parts. */
-export const POOL_KEY_SEPARATOR = '\u0000';
+export const POOL_KEY_SEPARATOR = ' ';
