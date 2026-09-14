@@ -54,6 +54,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
+import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { sanitizeError } from './sanitize-error.js';
@@ -865,13 +866,26 @@ export class WorkflowService implements IWorkflowService {
 
   // ── File locks ────────────────────────────────────────────────────────────
 
+  // Every method below canonicalises the caller's spelling into ONE file
+  // identity before it does anything with it. `FileLockService` canonicalises
+  // too, and has to: it is the coordination point and a caller can reach it
+  // without coming through here. The reason to do it again at this layer is
+  // that the path does not only key a lock row here. It is also what the
+  // permission gate is evaluated against, what `commitFile` stages, what the
+  // commit queue enqueues, and what rides out on every `lock-*` event. Left
+  // raw, a checkpoint on `./x//a.md` would find its lock and then fail at the
+  // commit, and a release would enqueue a row the worker keys differently from
+  // the lock it just dropped. Canonicalising is idempotent, so the second pass
+  // inside the lock service is free.
+
   async acquireLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
+    const targetPath = canonicalFileIdentity(rawPath);
     // **Permission check at lock acquisition, not at commit time.** Under the
     // "disk is the source of truth" rule, once a write has landed on disk we
     // must never reject the commit that publishes it — otherwise we'd be
@@ -930,9 +944,10 @@ export class WorkflowService implements IWorkflowService {
   async heartbeatLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<FileLock> {
+    const targetPath = canonicalFileIdentity(rawPath);
     try {
       const lock = await this.fileLocks.heartbeat(workspaceId, branch, targetPath, user);
       console.log(
@@ -957,10 +972,11 @@ export class WorkflowService implements IWorkflowService {
   async commitFileWhileLocked(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
     summary?: string,
   ): Promise<Change | null> {
+    const targetPath = canonicalFileIdentity(rawPath);
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
       throw new WorkflowValidationError(
@@ -1084,9 +1100,10 @@ export class WorkflowService implements IWorkflowService {
   async releaseLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
+    const targetPath = canonicalFileIdentity(rawPath);
     // Ownership check — the lock service's `release` is idempotent and
     // would silently no-op for a non-holder, but we'd still enqueue a
     // commit attributed to whoever called us. The guard rejects callers
@@ -1399,9 +1416,10 @@ export class WorkflowService implements IWorkflowService {
   async releaseLockNoCommit(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
+    const targetPath = canonicalFileIdentity(rawPath);
     // Verify ownership first so the emit only fires when something
     // observable actually changed. `fileLocks.release` silently no-ops
     // when the caller doesn't hold the row (idempotent-by-design), so
@@ -1504,9 +1522,10 @@ export class WorkflowService implements IWorkflowService {
   async releaseLockUntouched(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
+    const targetPath = canonicalFileIdentity(rawPath);
     console.log(
       `[lock] RELEASE-UNTOUCHED start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
     );
@@ -1542,9 +1561,9 @@ export class WorkflowService implements IWorkflowService {
   getLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
   ): Promise<FileLock | null> {
-    return this.fileLocks.get(workspaceId, branch, targetPath);
+    return this.fileLocks.get(workspaceId, branch, canonicalFileIdentity(rawPath));
   }
 
   // ── Change Requests ───────────────────────────────────────────────────────
