@@ -942,7 +942,7 @@ describe('SkillPage: deciding on a change', () => {
     renderPage(true, [foreignCr]);
 
     const approve = await screen.findByRole('button', { name: 'Approve' });
-    expect(screen.getByText('You decide. You own this.')).toBeInTheDocument();
+    expect(screen.getByText('You can decide this.')).toBeInTheDocument();
 
     fireEvent.click(approve);
 

@@ -24,7 +24,8 @@ import {
  *  - ownership   — "owned by me" = named in an `owner:` grant (directly or by
  *                  role) on the skill's `SKILL.md` or the tool's `.tool` file:
  *                  ONE `POST /workspace/:id/access/batch` with `verb: owner`
- *                  on the default-branch workspace, skills and tools together.
+ *                  on the default-branch workspace, skills and tools together
+ *                  (one more per 500 paths past the endpoint's cap).
  *                  Write alone is not ownership — an Admin writes everywhere.
  *  - write       — the skills' `SKILL.md` write verdict, the same batch without
  *                  a verb; it drives the editor-side affordances, which a
@@ -92,13 +93,23 @@ export function useLibraryData(): LibraryData {
 
       const skillProbes = skills.map((s) => `${s.path}/SKILL.md`);
       const ownerProbes = [...skillProbes, ...tools.map((t) => t.path)];
-      // A failed lookup is "no verdicts": nothing pilled, nothing unlocked.
-      const verdicts = (paths: string[], verb: 'write' | 'owner') =>
-        paths.length
-          ? fetchFileAccessBatch(defaultWorkspaceId(), paths, verb).catch(() => ({
+      // The batch endpoint refuses more than 500 paths per request, so a large
+      // catalog goes out in slices of that size and the verdicts are merged.
+      // A failed slice is "no verdicts" for its paths: nothing pilled, nothing
+      // unlocked — and the other slices still stand.
+      const BATCH_LIMIT = 500;
+      const verdicts = async (paths: string[], verb: 'write' | 'owner') => {
+        const slices: string[][] = [];
+        for (let i = 0; i < paths.length; i += BATCH_LIMIT) slices.push(paths.slice(i, i + BATCH_LIMIT));
+        const parts = await Promise.all(
+          slices.map((slice) =>
+            fetchFileAccessBatch(defaultWorkspaceId(), slice, verb).catch(() => ({
               results: {} as Record<string, boolean>,
-            }))
-          : Promise.resolve({ results: {} as Record<string, boolean> });
+            })),
+          ),
+        );
+        return { results: Object.assign({}, ...parts.map((p) => p.results)) as Record<string, boolean> };
+      };
 
       const [writable, ownership, crs, mine, pending, details] = await Promise.all([
         verdicts(skillProbes, 'write'),

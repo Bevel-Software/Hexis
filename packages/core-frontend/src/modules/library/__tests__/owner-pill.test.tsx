@@ -219,6 +219,25 @@ describe('the Owner pill', () => {
     expect(write[0]?.[1]).toEqual(SKILL_PROBES);
   });
 
+  it("splits a catalog past the endpoint's 500-path cap into batches and merges their verdicts", async () => {
+    const filler = Array.from({ length: 500 }, (_, i) => ({
+      name: `filler-${i}`,
+      description: '',
+      path: `Skills/filler-${i}`,
+      plugins: [],
+    }));
+    // The owned skill and tool land in the SECOND slice of the owner batch.
+    svc.listSkills.mockResolvedValue([...filler, ...SKILLS]);
+    await renderGallery({ kind: 'owned' });
+
+    const calls = svc.fetchFileAccessBatch.mock.calls as [string, string[], string?][];
+    const sizes = (owner: boolean) =>
+      calls.filter(([, , verb]) => (verb === 'owner') === owner).map(([, paths]) => paths.length);
+    expect(sizes(true)).toEqual([500, SKILLS.length + TOOLS.length]);
+    expect(sizes(false)).toEqual([500, SKILLS.length]);
+    expect(cardNames()).toEqual(['owned-skill', 'Weather']);
+  });
+
   it('fails closed: an owner lookup that errors pills nothing and takes no write away', async () => {
     svc.fetchFileAccessBatch.mockImplementation(async (_ws: string, paths: string[], verb = 'write') => {
       if (verb === 'owner') throw new Error('boom');

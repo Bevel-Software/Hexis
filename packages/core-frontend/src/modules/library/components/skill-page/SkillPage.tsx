@@ -669,7 +669,7 @@ export function SkillPage({
           skillName={name}
           skillPath={skillPath}
           memberships={memberships}
-          owned={canWrite}
+          canWrite={canWrite}
           onChanged={() => {
             data.reload();
             data.reloadPlugins();
@@ -903,7 +903,9 @@ export function SkillPage({
       {/* Outside the panel: the dock lists change requests touching ANY file of
           the skill, so it is not about the selected tab. The boxes above only
           cover the file on screen, and without this a proposal to a file you
-          are not looking at has no way to reach you. */}
+          are not looking at has no way to reach you. Gated by write, not
+          ownership, like Approve itself: the server takes an approval from
+          anyone who can write the file, so a writer reviews the whole change. */}
       {skill && canWrite && <ChangeRequestDock crs={skillCrs} onSelect={setCompareCr} />}
     </Article>
   );
