@@ -121,6 +121,37 @@ describe('AccessMutationService', () => {
     expect(text).toContain('Newbie <newbie@example.com>');
   });
 
+  it("a skill folder's first grant creates its access.md beside the plugin's, and both rules resolve", async () => {
+    // The skill page's Share opens the dialog on the SKILL folder — the same
+    // folder-grant path as anywhere else. The plugin's own rule is untouched,
+    // and the resolver reads the two at their depths as it does any nesting.
+    await write(repo, 'Plugins/newsroom/access.md', '---\nread:\n  - Product Team\n---\n# Newsroom\n');
+    await write(repo, 'Plugins/newsroom/skills/newsletter/SKILL.md', '# Newsletter\n');
+    const skillAccess = path.join(repo, 'Plugins/newsroom/skills/newsletter/access.md');
+    await expect(fs.readFile(skillAccess, 'utf-8')).rejects.toThrow();
+
+    const r = await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'write', felix);
+    access.invalidate(WS);
+
+    expect(r).toEqual({ changed: true, editPath: 'Plugins/newsroom/skills/newsletter/access.md' });
+    expect(await fs.readFile(skillAccess, 'utf-8')).toContain('Newbie <newbie@example.com>');
+    expect(await fs.readFile(path.join(repo, 'Plugins/newsroom/access.md'), 'utf-8')).not.toContain(
+      'newbie@example.com',
+    );
+    // The skill-level grant holds on the skill, not on the rest of the plugin…
+    const skillMd = 'Plugins/newsroom/skills/newsletter/SKILL.md';
+    expect(await access.canWrite(WS, 'newbie@example.com', skillMd)).toBe(true);
+    expect(await access.canWrite(WS, 'newbie@example.com', 'Plugins/newsroom/README.md')).toBe(false);
+    // …and the plugin-level rule still reaches into the skill folder.
+    expect(await access.canRead(WS, 'felix@example.com', skillMd)).toBe(true);
+
+    // A second grant edits the file it created rather than starting another.
+    await mutation.grant(WS, 'folder', 'Plugins/newsroom/skills/newsletter', 'download', felix);
+    const text = await fs.readFile(skillAccess, 'utf-8');
+    expect(text).toContain('write:');
+    expect(text).toContain('download:');
+  });
+
   it('grant on a FILE edits the node frontmatter, NOT the folder (no sibling leak)', async () => {
     await write(
       repo,
