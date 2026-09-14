@@ -6,7 +6,6 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpService } from '../mcp.service.js';
-import { McpSessionStore } from '../mcp-session-store.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
@@ -15,7 +14,7 @@ import { PLATFORM_HEADER, TOOL_PREFIX_LINE } from '../../agent-instructions/inde
 
 /**
  * End-to-end proxy test: a real express app serving the registry-driven tool
- * surface over loopback, a real per-session `UtcpClient` discovering it, and a
+ * surface over loopback, a real per-request `UtcpClient` discovering it, and a
  * real MCP `Client` driving the proxy over an in-memory transport. Exercises
  * discovery, prefix stripping, schema/args passthrough, dispatch, result
  * mapping, and error translation — without any UTCP/MCP fakes.
@@ -29,7 +28,7 @@ const cleanups: Array<() => Promise<void>> = [];
 async function setup(deps?: {
   secretsVault?: unknown;
   toolManuals?: unknown;
-  /** Session auth kind: a connection-key id (default), or null for an OAuth/JWT session. */
+  /** Caller auth kind: a connection-key id (default), or null for an OAuth/JWT caller. */
   tokenId?: string | null;
   /** Spy for the session-grant reset fired on broken sign-ins. */
   revokeOAuthAccess?: (bearer: string) => Promise<void>;
@@ -92,7 +91,6 @@ async function setup(deps?: {
   const port = (httpServer.address() as { port: number }).port;
 
   const mcp = new McpService(
-    new McpSessionStore(),
     {
       loopbackBaseUrl: `http://127.0.0.1:${port}`,
       manualName: 'KNOWLEDGE_BASE',
@@ -108,7 +106,14 @@ async function setup(deps?: {
     deps?.revokeOAuthAccess,
   );
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  const { server } = await mcp.createSession('user-A', tokenId, 'bevel_testkey', () => {});
+  // The route builds one server per HTTP request; here one server is driven
+  // over an in-memory pair for the whole test, which is what lets these cases
+  // focus on proxy behaviour. The initialize message is passed so the server
+  // carries instructions, exactly as the route's initialize request would.
+  const server = await mcp.createRequestServer(
+    { userId: 'user-A', tokenId, bearer: 'bevel_testkey' },
+    { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
+  );
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
