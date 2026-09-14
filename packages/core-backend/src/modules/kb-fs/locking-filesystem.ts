@@ -52,6 +52,9 @@ const ACQUIRE_RETRY_ATTEMPTS = 3;
 /** Backoff between retries (ms). 3 attempts × 2s ≈ 6s ceiling. */
 const ACQUIRE_RETRY_DELAY_MS = 2_000;
 
+/** Errors a withLock `check` threw: nothing was written, so every lock they unwind releases untouched. */
+const refusedUnderLock = new WeakSet<object>();
+
 /**
  * A pre-disk write validator: called with the (workspace-relative path, full
  * candidate content) of a write; throw (or reject) to refuse it. `appliesTo`
@@ -87,7 +90,10 @@ export interface LockingFilesystemContext {
   /**
    * Optional pre-disk write validator. Invoked with the (workspace-relative
    * path, full content) of every WHOLE-FILE write BEFORE the bytes land. Throw
-   * to refuse the write — nothing hits disk and no lock is taken. Used to
+   * to refuse the write — nothing hits disk. It runs before the lock (so an
+   * ordinary refusal takes none) and again once the lock is held, on exactly
+   * the bytes that land, so a validator reading the current file judges the
+   * state it replaces; a refusal there releases the lock untouched. Used to
    * reject a `roles.yaml` edit that would lock out admins (and, for agents,
    * one that creates a role); see `roles-yaml-guard.ts`. `appendFile`,
    * `copyFile` and `moveFile` are validated too, with the resulting content,
@@ -129,8 +135,10 @@ export class LockingFilesystem extends LocalFilesystem {
   ): Promise<void> {
     this.assertInsideRepo(inputPath);
     // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins).
-    // Runs OUTSIDE the lock so a refusal never acquires/holds one.
-    await this.lockContext.validateWrite?.(inputPath, content);
+    // Runs OUTSIDE the lock first so an ordinary refusal never acquires one,
+    // then again under the lock on the bytes that land (see withLock's check).
+    const validate = this.lockContext.validateWrite;
+    await validate?.(inputPath, content);
     // Creator read grant (see LockingFilesystemContext.creatorAccess): planned
     // BEFORE the write so the topmost-new-directory detection sees the
     // pre-creation tree. A subtree seed lands first in its own lock+commit
@@ -141,15 +149,28 @@ export class LockingFilesystem extends LocalFilesystem {
       plan?.kind === 'frontmatter' && typeof content === 'string'
         ? plan.apply(content)
         : content;
-    return this.withLock(inputPath, () => super.writeFile(inputPath, toWrite, options));
+    return this.withLock(
+      inputPath,
+      () => super.writeFile(inputPath, toWrite, options),
+      validate && (async () => validate(inputPath, toWrite)),
+    );
   }
 
   override async appendFile(inputPath: string, content: FileContent): Promise<void> {
     this.assertInsideRepo(inputPath);
-    await this.validateResultingWrite(inputPath, async () =>
-      Buffer.concat([asBuffer((await this.readIfExists(inputPath)) ?? ''), asBuffer(content)]),
+    const candidate = async () =>
+      Buffer.concat([asBuffer((await this.readIfExists(inputPath)) ?? ''), asBuffer(content)]);
+    await this.validateResultingWrite(inputPath, candidate);
+    // Under the lock the resulting file is judged again and, when a validator
+    // claims the path, written whole — so the bytes that land are the ones judged.
+    let checked: Buffer | null = null;
+    return this.withLock(
+      inputPath,
+      () => (checked === null ? super.appendFile(inputPath, content) : super.writeFile(inputPath, checked)),
+      async () => {
+        checked = await this.validateResultingWrite(inputPath, candidate);
+      },
     );
-    return this.withLock(inputPath, () => super.appendFile(inputPath, content));
   }
 
   override async deleteFile(inputPath: string, options?: RemoveOptions): Promise<void> {
@@ -160,8 +181,20 @@ export class LockingFilesystem extends LocalFilesystem {
     this.assertInsideRepo(dest);
     await this.validateResultingWrite(dest, () => this.readFile(src));
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
-    // creates a new file at dest without disturbing src on disk.
-    return this.withLock(dest, () => super.copyFile(src, dest, options));
+    // creates a new file at dest without disturbing src on disk. Because `src`
+    // is not locked, a claimed destination gets the source bytes read and
+    // judged under the lock, and exactly those bytes are written.
+    let checked: FileContent | null = null;
+    return this.withLock(
+      dest,
+      () =>
+        checked === null
+          ? super.copyFile(src, dest, options)
+          : super.writeFile(dest, checked, { overwrite: options?.overwrite }),
+      async () => {
+        checked = await this.validateResultingWrite(dest, () => this.readFile(src));
+      },
+    );
   }
 
   override async moveFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
@@ -181,12 +214,19 @@ export class LockingFilesystem extends LocalFilesystem {
     // the inner lock's release commits its path — each move lands as two
     // single-file changes (one delete, one create). Git's rename
     // detection on log/blame still groups them visually after the fact.
+    //
+    // The destination is judged again once BOTH locks are held (the inner
+    // lock's check): the source cannot change under its lock, so the bytes
+    // judged there are the bytes the move lands.
+    const check = async () => {
+      await this.validateResultingWrite(dest, () => this.readFile(src));
+    };
     if (src === dest) {
-      return this.withLock(dest, () => super.moveFile(src, dest, options));
+      return this.withLock(dest, () => super.moveFile(src, dest, options), check);
     }
     const [first, second] = src < dest ? [src, dest] : [dest, src];
     return this.withLock(first, () =>
-      this.withLock(second, () => super.moveFile(src, dest, options)),
+      this.withLock(second, () => super.moveFile(src, dest, options), check),
     );
   }
 
@@ -325,6 +365,19 @@ export class LockingFilesystem extends LocalFilesystem {
         );
       }
       acquired.push(p);
+    }
+
+    // Judge every file again now that its lock is held: a validator that reads
+    // the current file (the agent roles.yaml gate) must see the bytes this
+    // batch replaces, not the ones before the locks. Nothing is written yet,
+    // so a refusal leaves every locked path exactly as it was.
+    if (this.lockContext.validateWrite) {
+      try {
+        for (const w of writes) await this.lockContext.validateWrite(w.path, w.content);
+      } catch (err) {
+        await releaseAll(() => 'untouched');
+        throw err;
+      }
     }
 
     // Creator-grant seed locks are BEST-EFFORT, single attempt, acquired
@@ -577,15 +630,18 @@ export class LockingFilesystem extends LocalFilesystem {
   /**
    * Validate an op whose resulting bytes at `dest` are not in hand (append,
    * copy, move): `candidate` is read only when the validator claims `dest`.
-   * Runs before the lock, like `writeFile`'s gate.
+   * Runs before the lock, like `writeFile`'s gate, and again under it. Returns
+   * the bytes judged, or null when no validator claims `dest`.
    */
-  private async validateResultingWrite(
+  private async validateResultingWrite<C extends FileContent>(
     dest: string,
-    candidate: () => Promise<FileContent>,
-  ): Promise<void> {
+    candidate: () => Promise<C>,
+  ): Promise<C | null> {
     const validate = this.lockContext.validateWrite;
-    if (!validate?.appliesTo?.(dest)) return;
-    await validate(dest, await candidate());
+    if (!validate?.appliesTo?.(dest)) return null;
+    const bytes = await candidate();
+    await validate(dest, bytes);
+    return bytes;
   }
 
   /** The bytes at `inputPath`, or null when nothing is there. */
@@ -664,8 +720,18 @@ export class LockingFilesystem extends LocalFilesystem {
    * times before surfacing a structured failure — long enough to ride
    * out a human typing a quick edit, short enough that the agent doesn't
    * stall a whole turn waiting for someone to step away from a file.
+   *
+   * `check` runs once the lock is held and before `op`: a validator that
+   * depends on what is on disk judges the state the op will actually replace.
+   * A check refusal releases the lock UNTOUCHED — nothing was written, and the
+   * no-commit release would reset the path to HEAD, destroying a prior save's
+   * still-queued bytes — and so does every enclosing withLock it unwinds through.
    */
-  private async withLock<T>(inputPath: string, op: () => Promise<T>): Promise<T> {
+  private async withLock<T>(
+    inputPath: string,
+    op: () => Promise<T>,
+    check?: () => Promise<void>,
+  ): Promise<T> {
     const { workflow, workspaceId, branch, user } = this.lockContext;
 
     let lastHolderName: string | null = null;
@@ -690,19 +756,33 @@ export class LockingFilesystem extends LocalFilesystem {
 
     let result: T;
     try {
+      if (check) {
+        try {
+          await check();
+        } catch (err) {
+          if (typeof err === 'object' && err !== null) refusedUnderLock.add(err);
+          throw err;
+        }
+      }
       result = await op();
     } catch (err) {
       // Op failed — drop the lock without committing, so a partial write
       // before the throw doesn't accidentally land as a committed change
       // (the normal `releaseLock` would `commitFile` whatever's on disk
-      // for `inputPath`, including the partial state). Best-effort: a
-      // failure to release here surfaces in logs but doesn't override
-      // the original op error the caller actually cares about.
+      // for `inputPath`, including the partial state). A check refusal wrote
+      // nothing, so it releases untouched instead. Best-effort: a failure to
+      // release here surfaces in logs but doesn't override the original op
+      // error the caller actually cares about.
+      const untouched = typeof err === 'object' && err !== null && refusedUnderLock.has(err);
       try {
-        await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
+        if (untouched) {
+          await workflow.releaseLockUntouched(workspaceId, branch, inputPath, user);
+        } else {
+          await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
+        }
       } catch (releaseErr) {
         console.warn(
-          `[locking-fs] releaseLockNoCommit failed for "${inputPath}" after op error:`,
+          `[locking-fs] lock release failed for "${inputPath}" after op error:`,
           releaseErr instanceof Error ? releaseErr.message : releaseErr,
         );
       }

@@ -202,13 +202,15 @@ describe('TemplateFilesStep', () => {
 
   it('ships the roles-vs-groups guide, and a deployment on an older template receives it at boot', async () => {
     const guide = await template('AGENTS.md');
-    const section = guide.match(/### Roles are pre-set[\s\S]*?(?=\n### )/)?.[0] ?? '';
+    // The section runs from its own heading to the next heading of any level (or the end).
+    const section = guide.split(/\n(?=#{1,6} )/).find((s) => s.startsWith('### Roles are pre-set')) ?? '';
+    const prose = section.replace(/\s+/g, ' ');
     // What roles are, that agents never create them, the group test, what to do instead.
-    expect(section).toContain('A role in `roles.yaml` is an app role');
-    expect(section).toContain('**Agents never create roles.**');
-    expect(section).toContain('**Is it really a group?**');
-    expect(section).toContain('**What to do instead.**');
-    expect(section).toContain('add people to\nexisting roles, and use a GROUP for a task- or team-scoped set of people');
+    expect(prose).toContain('A role in `roles.yaml` is an app role');
+    expect(prose).toContain('**Agents never create roles.**');
+    expect(prose).toContain('**Is it really a group?**');
+    expect(prose).toContain('**What to do instead.**');
+    expect(prose).toContain('add people to existing roles, and use a GROUP for a task- or team-scoped set of people');
 
     // An existing deployment's AGENTS.md from before the guide existed.
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
