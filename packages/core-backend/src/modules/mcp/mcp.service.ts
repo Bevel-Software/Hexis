@@ -584,24 +584,28 @@ export class McpService {
             return { isKb, ok: true as const };
           }
         }
-        // Captured BEFORE the awaited attempt: if a secrets change (or a
+        // Begun BEFORE the awaited attempt: if a secrets change (or a
         // concurrent success of this same manual) clears the memo while
         // registration is in flight, the stale failure must not resurrect an
         // entry the clear removed.
-        const generation = this.manualFailures.currentGeneration;
-        // Neither path throws: a discovery/network failure and a validation
-        // failure both come back as `{ ok: false }`, because the retry
-        // policy — this memo — is ours, not the shared layer's.
-        const result =
-          m.call_template_type === 'mcp'
-            ? await this.attachDownstream(client, m, userId, routes)
-            : await registerManual(client, m);
-        if (!result.ok) {
-          if (isKb) return { isKb, ok: false as const, error: result.error };
-          this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
-          console.warn(`[mcp] skipping manual "${name}": ${result.error}`);
-        } else if (!isKb) {
-          this.manualFailures.clear(userId, memoKey);
+        const generation = this.manualFailures.beginAttempt();
+        try {
+          // Neither path throws: a discovery/network failure and a validation
+          // failure both come back as `{ ok: false }`, because the retry
+          // policy — this memo — is ours, not the shared layer's.
+          const result =
+            m.call_template_type === 'mcp'
+              ? await this.attachDownstream(client, m, userId, routes)
+              : await registerManual(client, m);
+          if (!result.ok) {
+            if (isKb) return { isKb, ok: false as const, error: result.error };
+            this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
+            console.warn(`[mcp] skipping manual "${name}": ${result.error}`);
+          } else if (!isKb) {
+            this.manualFailures.clear(userId, memoKey);
+          }
+        } finally {
+          this.manualFailures.endAttempt(generation);
         }
         return { isKb, ok: true as const };
       }),

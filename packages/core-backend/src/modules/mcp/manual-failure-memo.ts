@@ -14,9 +14,8 @@
  * Failures are remembered for a few minutes only: a repaired credential is
  * picked up at the next build after expiry (or immediately after a restart).
  * Successes are never cached here — this is a circuit breaker, not a catalog
- * cache. Expired entries are pruned opportunistically so the maps stay
- * bounded by the number of DISTINCT recently-failing or recently-cleared
- * (user, manual) pairs.
+ * cache. Expired failures are pruned opportunistically so the map stays
+ * bounded by the number of DISTINCT recently-failing (user, manual) pairs.
  */
 export class ManualFailureMemo {
   private readonly failures = new Map<string, { message: string; expiresAt: number }>();
@@ -24,31 +23,47 @@ export class ManualFailureMemo {
   /**
    * Out-of-order protection. Every clear takes the next value of a monotonic
    * counter and remembers it for the scope it cleared: one pair, one user, or
-   * everyone. A registration attempt captures the counter BEFORE its (slow,
-   * awaited) network call and hands it back to {@link recordFailure}; a failure
-   * is discarded only when a clear covering THAT pair ran in between. A success
-   * of an unrelated manual running concurrently therefore never discards it.
+   * everyone. A registration attempt starts with {@link beginAttempt}, which
+   * captures the counter BEFORE its (slow, awaited) network call; its failure is
+   * discarded only when a clear covering THAT pair ran in between. A success of
+   * an unrelated manual, or a clear for another user, never discards it — no
+   * matter how long the attempt takes.
    */
   private counter = 0;
   private allClearedAt = 0;
-  private readonly userClears = new Map<string, { generation: number; expiresAt: number }>();
-  private readonly pairClears = new Map<string, { generation: number; expiresAt: number }>();
+  private readonly userClears = new Map<string, number>();
+  private readonly pairClears = new Map<string, number>();
   /**
-   * The highest generation among pruned clear records. An attempt captured
-   * before it may have been covered by a record that no longer exists, so its
-   * failure is discarded — the conservative direction (one extra retry) for an
-   * attempt that outlived the TTL.
+   * Generations captured by attempts still in flight (generation → count). A
+   * clear record matters only to an attempt that started before it, so a record
+   * is kept exactly while such an attempt is running — which bounds the clear
+   * maps by what concurrent attempts can still observe.
    */
-  private prunedFloor = 0;
+  private readonly inFlight = new Map<number, number>();
 
   constructor(
     private readonly ttlMs: number = 5 * 60_000,
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** Capture before an awaited registration attempt; pass to {@link recordFailure}. */
-  get currentGeneration(): number {
-    return this.counter;
+  /**
+   * Start a registration attempt. Pass the returned generation to
+   * {@link recordFailure}, and ALWAYS to {@link endAttempt} when the attempt is
+   * over (try/finally) — an attempt never ended keeps later clear records alive.
+   */
+  beginAttempt(): number {
+    const generation = this.counter;
+    this.inFlight.set(generation, (this.inFlight.get(generation) ?? 0) + 1);
+    return generation;
+  }
+
+  /** The attempt started at `generation` is over (after any `recordFailure`/`clear` it made). */
+  endAttempt(generation: number): void {
+    const count = this.inFlight.get(generation);
+    if (count === undefined) return;
+    if (count <= 1) this.inFlight.delete(generation);
+    else this.inFlight.set(generation, count - 1);
+    this.pruneClears();
   }
 
   private key(userId: string, manualName: string): string {
@@ -57,15 +72,18 @@ export class ManualFailureMemo {
 
   /** The remembered failure message when (user, manual) failed recently; undefined otherwise. */
   recentFailure(userId: string, manualName: string): string | undefined {
-    this.prune();
+    const now = this.now();
+    for (const [k, entry] of this.failures) {
+      if (entry.expiresAt <= now) this.failures.delete(k);
+    }
     return this.failures.get(this.key(userId, manualName))?.message;
   }
 
   /**
-   * Record a failure — unless `generation` (captured before the attempt) is
-   * stale for this pair, meaning a clear covering it ran while the attempt was
-   * in flight. Dropping the record is the conservative direction: the worst
-   * case is one extra retry.
+   * Record a failure — unless `generation` (from {@link beginAttempt}) is stale
+   * for this pair, meaning a clear covering it ran while the attempt was in
+   * flight. Dropping the record is the conservative direction: the worst case
+   * is one extra retry.
    */
   recordFailure(userId: string, manualName: string, message: string, generation?: number): void {
     if (generation !== undefined && this.clearedSince(userId, manualName, generation)) return;
@@ -78,8 +96,9 @@ export class ManualFailureMemo {
   /** Forget a pair (e.g. after a successful registration proves the credential works again). */
   clear(userId: string, manualName: string): void {
     const key = this.key(userId, manualName);
-    this.pairClears.set(key, this.clearRecord());
+    this.pairClears.set(key, this.nextGeneration());
     this.failures.delete(key);
+    this.pruneClears();
   }
 
   /**
@@ -88,43 +107,40 @@ export class ManualFailureMemo {
    * waiting out the TTL.
    */
   clearUser(userId: string): void {
-    this.userClears.set(userId, this.clearRecord());
+    this.userClears.set(userId, this.nextGeneration());
     const prefix = `${userId} `;
     for (const k of this.failures.keys()) {
       if (k.startsWith(prefix)) this.failures.delete(k);
     }
+    this.pruneClears();
   }
 
   /** Forget everything — a SHARED secret changed, which can affect any user. */
   clearAll(): void {
-    this.allClearedAt = this.clearRecord().generation;
+    this.allClearedAt = this.nextGeneration();
     this.failures.clear();
   }
 
-  private clearRecord(): { generation: number; expiresAt: number } {
+  private nextGeneration(): number {
     this.counter += 1;
-    return { generation: this.counter, expiresAt: this.now() + this.ttlMs };
+    return this.counter;
   }
 
   private clearedSince(userId: string, manualName: string, generation: number): boolean {
     return (
-      generation < this.prunedFloor ||
       this.allClearedAt > generation ||
-      (this.userClears.get(userId)?.generation ?? 0) > generation ||
-      (this.pairClears.get(this.key(userId, manualName))?.generation ?? 0) > generation
+      (this.userClears.get(userId) ?? 0) > generation ||
+      (this.pairClears.get(this.key(userId, manualName)) ?? 0) > generation
     );
   }
 
-  private prune(): void {
-    const now = this.now();
-    for (const [k, entry] of this.failures) {
-      if (entry.expiresAt <= now) this.failures.delete(k);
-    }
+  /** Drop clear records no in-flight attempt predates: none of them can ever be consulted again. */
+  private pruneClears(): void {
+    let oldest = Infinity;
+    for (const generation of this.inFlight.keys()) oldest = Math.min(oldest, generation);
     for (const clears of [this.userClears, this.pairClears]) {
-      for (const [k, record] of clears) {
-        if (record.expiresAt > now) continue;
-        clears.delete(k);
-        this.prunedFloor = Math.max(this.prunedFloor, record.generation);
+      for (const [k, generation] of clears) {
+        if (generation <= oldest) clears.delete(k);
       }
     }
   }
