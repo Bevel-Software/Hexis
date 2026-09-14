@@ -23,18 +23,27 @@ import { deploymentHost } from './deployment-address';
  *    an admin is also sent to the section that does it.
  *
  * `isAdmin` decides only the wording of that notice, never what the tutorial
- * shows. The state is read on mount, so completing registration and coming
- * back here (or reloading) is all it takes to see the tutorial.
+ * shows.
+ *
+ * The state is read each time the drawer OPENS, not on mount. A closed
+ * <details> still mounts its children, so reading on mount asked for it from
+ * everyone who merely switched tabs — and then never again, which left the
+ * "not set up yet" notice standing after an admin registered the deployment
+ * in another tab. Reading on open answers with what is true when someone
+ * looks; the last answer stays on screen while the next one arrives.
  */
-export function CoworkSetupSteps({ isAdmin }: { isAdmin: boolean }) {
+export function CoworkSetupSteps({ isAdmin, opened }: { isAdmin: boolean; opened: boolean }) {
   const [registered, setRegistered] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!opened) return;
     let live = true;
     fetchMarketplaceRegistration()
       .then((r) => {
-        if (live) setRegistered(r);
+        if (!live) return;
+        setError(null);
+        setRegistered(r);
       })
       .catch((err: unknown) => {
         if (live) setError(err instanceof Error ? err.message : String(err));
@@ -42,7 +51,7 @@ export function CoworkSetupSteps({ isAdmin }: { isAdmin: boolean }) {
     return () => {
       live = false;
     };
-  }, []);
+  }, [opened]);
 
   if (error) {
     return (

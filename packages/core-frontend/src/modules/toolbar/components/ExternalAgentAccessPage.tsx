@@ -83,6 +83,9 @@ export function ExternalAgentAccessPage() {
   const workspaceUrl = workspaceBaseUrl();
 
   const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
+  // Whether the Cowork drawer is expanded. Only the registration state waits
+  // on it; everything else in the drawer renders either way.
+  const [coworkOpen, setCoworkOpen] = useState(false);
   // Only the wording of the "not set up yet" notice depends on this; the
   // tutorial itself is the same for everyone.
   const { isAdmin } = useAdmin();
@@ -340,15 +343,24 @@ export function ExternalAgentAccessPage() {
               claude.ai fetch it as a repository once your account is connected.
             </p>
 
-            {/* No credentials live in this drawer any more — registering the
-                deployment with Claude is in Deployment configuration — so it
-                is an ordinary closed <details>. */}
-            <details className="border border-line rounded" data-testid="cowork-section">
+            {/* CONTROLLED, both attributes together. A closed <details> still
+                MOUNTS its children, so the registration state waits on
+                `coworkOpen` and is read again each time the drawer opens.
+                `onToggle` alone is not enough: this subtree unmounts on a tab
+                switch and the fresh <details> comes back closed while the
+                state stayed true. With `open` bound too, the element cannot
+                disagree with the state that gates the read. */}
+            <details
+              className="border border-line rounded"
+              data-testid="cowork-section"
+              open={coworkOpen}
+              onToggle={(e) => setCoworkOpen(e.currentTarget.open)}
+            >
               <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-ink">
                 Cowork and claude.ai
               </summary>
               <div className="px-3 pb-3 space-y-3">
-                <CoworkSetupSteps isAdmin={isAdmin} />
+                <CoworkSetupSteps isAdmin={isAdmin} opened={coworkOpen} />
                 <div className="space-y-1">
                   <div className="text-xs font-medium text-ink">Your Claude connections</div>
                   {loadError && (

@@ -127,6 +127,13 @@ function mount(mcpUrl: string) {
   );
 }
 
+/** Opens the Cowork drawer on the Marketplaces tab — the opening is what reads the registration state. */
+async function openCowork(user: ReturnType<typeof userEvent.setup>) {
+  const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+  await user.click(within(cowork).getByText('Cowork and claude.ai'));
+  return cowork;
+}
+
 /** Every read-only snippet on screen, as plain strings. */
 function snippets(): string[] {
   return screen
@@ -372,6 +379,7 @@ describe('the Marketplaces tab', () => {
     for (const drawer of [cowork, git]) {
       expect((drawer.closest('details') as HTMLDetailsElement).open).toBe(false);
     }
+    await openCowork(user);
     await within(cowork.closest('details') as HTMLElement).findByRole('region', {
       name: 'Set up the Claude marketplace',
     });
@@ -394,7 +402,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
 
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
     expect(within(cowork).queryByText('Register this deployment with your Claude organization')).toBeNull();
@@ -414,7 +422,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
     const expected = [
       ['Select repository', 'Connect to URL'],
@@ -450,7 +458,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     expect(within(carousel).getByRole('group')).toHaveAttribute('aria-live', 'polite');
@@ -469,7 +477,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
     const carousel = await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     const advance = within(carousel).getByRole('button', { name: 'Next' });
@@ -498,8 +506,7 @@ describe('the Marketplaces tab', () => {
       const user = userEvent.setup();
       const view = mount(PUBLIC_URL);
       await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-      const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
-      await user.click(within(cowork).getByText('Cowork and claude.ai'));
+      const cowork = await openCowork(user);
       await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
       expect(within(cowork).queryByTestId('marketplace-not-configured')).toBeNull();
       const html = cowork.innerHTML;
@@ -527,7 +534,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
 
     const notice = await within(cowork).findByTestId('marketplace-not-configured');
     expect(notice).toHaveTextContent('An admin has to configure the marketplace');
@@ -555,8 +562,7 @@ describe('the Marketplaces tab', () => {
       </MemoryRouter>,
     );
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
-    await user.click(within(cowork).getByText('Cowork and claude.ai'));
+    const cowork = await openCowork(user);
 
     const notice = await within(cowork).findByTestId('marketplace-not-configured');
     expect(within(cowork).queryByRole('region', { name: 'Set up the Claude marketplace' })).toBeNull();
@@ -564,6 +570,37 @@ describe('the Marketplaces tab', () => {
     expect(link).toHaveAttribute('href', '/deployment#marketplace');
     await user.click(link);
     expect(await screen.findByText('Deployment settings page')).toBeInTheDocument();
+    expect(facadeMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A closed <details> still mounts its children, so a read on mount put a
+   * request behind every visit to this tab — and never repeated it, leaving
+   * the "not set up yet" notice standing after an admin registered the
+   * deployment elsewhere. The state is read when the drawer opens, and again
+   * on every opening.
+   */
+  it('reads the registration state only when the drawer opens, and again on each opening', async () => {
+    registrationMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLDetailsElement;
+    expect(cowork.open).toBe(false);
+    expect(registrationMock).not.toHaveBeenCalled();
+
+    const summary = within(cowork).getByText('Cowork and claude.ai');
+    await user.click(summary);
+    await within(cowork).findByTestId('marketplace-not-configured');
+    expect(registrationMock).toHaveBeenCalledTimes(1);
+
+    // Registered in the meantime: closing and reopening is all it takes.
+    await user.click(summary);
+    expect(cowork.open).toBe(false);
+    await user.click(summary);
+    await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
+    expect(within(cowork).queryByTestId('marketplace-not-configured')).toBeNull();
+    expect(registrationMock).toHaveBeenCalledTimes(2);
     expect(facadeMock).not.toHaveBeenCalled();
   });
 
@@ -576,7 +613,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
     await within(cowork).findByRole('region', { name: 'Set up the Claude marketplace' });
 
     for (const img of within(cowork).getAllByRole('img')) {
@@ -595,7 +632,7 @@ describe('the Marketplaces tab', () => {
     const user = userEvent.setup();
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
-    const cowork = screen.getByText('Cowork and claude.ai').closest('details') as HTMLElement;
+    const cowork = await openCowork(user);
     await screen.findByText('My Cowork link');
     expect(cowork).toHaveTextContent('My Cowork link');
     expect(cowork).not.toHaveTextContent('Claude (claude.ai and Cowork)');
