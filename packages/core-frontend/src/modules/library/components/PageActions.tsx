@@ -1,13 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
-import { Link2, Plus, Trash2, Users, Pencil } from 'lucide-react';
+import { Link2, Plus, Trash2, Pencil } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import {
-  Button,
   IconButton,
   MenuItem,
   MenuPanel,
   useDismissableMenu,
 } from '../../../shared/components';
+import { ShareButton } from './ShareButton';
 
 /**
  * The three actions beside a place's title — the prototype's `spaceActs`
@@ -94,12 +94,7 @@ export function PageActions({
 
   return (
     <div className="relative flex flex-none items-center gap-1.5">
-      {onShare && (
-        <Button variant="outline" size="sm" onClick={onShare}>
-          <Users size={13} />
-          Share
-        </Button>
-      )}
+      {onShare && <ShareButton onClick={onShare} />}
 
       {onAdd && (
         <IconButton aria-label={addLabel} title={addLabel} onClick={onAdd}>

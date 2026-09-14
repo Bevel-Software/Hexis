@@ -49,6 +49,7 @@ import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/comp
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
 
 /**
@@ -355,7 +356,7 @@ function ContextMenu({
       <MenuItem role="menuitem" onClick={handleCopyPath}>
         <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
       </MenuItem>
-      {!isRoot && (
+      {offersManageAccess(entry) && (
         <>
           <div className="my-1 border-t border-line" />
           <MenuItem role="menuitem" onClick={() => { openManageAccess(entry); onClose(); }}>
