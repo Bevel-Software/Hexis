@@ -27,10 +27,10 @@ import { LinkSkillPanel } from '../components/LinkSkillPanel';
 
 const OK = { state: 'ok' as const, text: 'Ready' };
 const items: LibraryItem[] = [
-  { kind: 'skill', id: 'deploy', name: 'deploy', description: 'Ship it.', owned: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/deploy', status: OK },
-  { kind: 'skill', id: 'outreach', name: 'outreach', description: '', owned: true, plugin: 'GTM', plugins: [{ name: 'GTM', linked: false, granted: true }], path: 'Plugins/GTM/skills/outreach', status: OK },
-  { kind: 'skill', id: 'pitch', name: 'pitch', description: 'Sales pitch.', owned: false, plugin: 'Sales', plugins: [{ name: 'Sales', linked: false, granted: true }], path: 'Plugins/Sales/skills/pitch', status: OK },
-  { kind: 'integration', id: 'notion', name: 'Notion', description: '', owned: false, plugin: 'GTM', path: 'Plugins/GTM/mcp.json', status: OK },
+  { kind: 'skill', id: 'deploy', name: 'deploy', description: 'Ship it.', owned: false, canWrite: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/deploy', status: OK },
+  { kind: 'skill', id: 'outreach', name: 'outreach', description: '', owned: true, canWrite: true, plugin: 'GTM', plugins: [{ name: 'GTM', linked: false, granted: true }], path: 'Plugins/GTM/skills/outreach', status: OK },
+  { kind: 'skill', id: 'pitch', name: 'pitch', description: 'Sales pitch.', owned: false, canWrite: false, plugin: 'Sales', plugins: [{ name: 'Sales', linked: false, granted: true }], path: 'Plugins/Sales/skills/pitch', status: OK },
+  { kind: 'integration', id: 'notion', name: 'Notion', description: '', owned: false, canWrite: false, plugin: 'GTM', path: 'Plugins/GTM/mcp.json', status: OK },
 ];
 
 function renderPanel() {

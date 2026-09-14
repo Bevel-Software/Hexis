@@ -317,13 +317,18 @@ export function createAccessRoutes(
 
   /**
    * POST /api/workspace/:id/access/batch
-   * Body: `{ paths: string[] }`. Returns `{ results: { [path]: boolean } }`.
+   * Body: `{ paths: string[], verb?: 'write' | 'owner' }`. Returns
+   * `{ results: { [path]: boolean } }`.
+   *
+   * `verb` defaults to `write`, the question every existing caller asks.
+   * `owner` answers from the `owner:` lists alone — no admin rescue, and a
+   * writer is not an owner — which is what an Owner pill has to mean.
    */
   router.post('/workspace/:id/access/batch', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
 
-    const paths = (req.body as { paths?: unknown }).paths;
+    const { paths, verb = 'write' } = req.body as { paths?: unknown; verb?: unknown };
     if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) {
       res.status(400).json({ error: 'paths must be an array of strings' });
       return;
@@ -332,9 +337,15 @@ export function createAccessRoutes(
       res.status(400).json({ error: 'paths cannot exceed 500 entries per request' });
       return;
     }
+    if (verb !== 'write' && verb !== 'owner') {
+      res.status(400).json({ error: 'verb must be "write" or "owner"' });
+      return;
+    }
 
     try {
-      const result = await accessControl.canWriteBatch(
+      const batch = verb === 'owner' ? accessControl.canOwnerBatch : accessControl.canWriteBatch;
+      const result = await batch.call(
+        accessControl,
         req.params.id,
         user.email,
         paths as string[],

@@ -480,6 +480,43 @@ describe('AccessControlService', () => {
       expect(await svc.canOwner(workspaceId, 'razvan@bevel.software', 'Knowledge/Foo.md')).toBe(false);
     });
 
+    it('canOwnerBatch is the Owner pill: owner-listed yes, writers and role-derived Admins no, ownerless nobody', async () => {
+      const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
+      await writeFile(repo, 'roles.yaml', ROLES_YAML);
+      // Admin writes everywhere by role. `owned` names Product Manager (a role)
+      // and ali by email; `ownerless` grants write but no owner at any scope.
+      await writeFile(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
+      await writeFile(
+        repo,
+        'Skills/owned/access.md',
+        '---\nwrite:\n  - Engineer\nowner:\n  - Product Manager\n  - Ali <ali@bevel.software>\n---\n',
+      );
+      await writeFile(repo, 'Skills/ownerless/access.md', '---\nwrite:\n  - Product Manager\n---\n');
+      const paths = ['Skills/owned/SKILL.md', 'Skills/ownerless/SKILL.md', 'Tools/weather.tool'];
+
+      const svc = new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), PROCESS_MAP_DIR);
+      const verdicts = async (email: string) =>
+        Object.fromEntries(await svc.canOwnerBatch(workspaceId, email, paths));
+
+      // Via a role named in `owner:`, and directly by email.
+      expect((await verdicts('felix@example.com'))['Skills/owned/SKILL.md']).toBe(true);
+      expect((await verdicts('ali@bevel.software'))['Skills/owned/SKILL.md']).toBe(true);
+      // razvan is Admin (+ Engineer): write on all three, owner on none.
+      expect(await svc.canWrite(workspaceId, 'razvan@bevel.software', 'Skills/owned/SKILL.md')).toBe(true);
+      expect(await verdicts('razvan@bevel.software')).toEqual({
+        'Skills/owned/SKILL.md': false,
+        'Skills/ownerless/SKILL.md': false,
+        'Tools/weather.tool': false,
+      });
+      // A writer with no owner grant anywhere in scope owns nothing.
+      expect(await svc.canWrite(workspaceId, 'sara@example.com', 'Skills/ownerless/SKILL.md')).toBe(true);
+      expect((await verdicts('sara@example.com'))['Skills/ownerless/SKILL.md']).toBe(false);
+      for (const email of ['felix@example.com', 'ali@bevel.software', 'razvan@bevel.software', 'sara@example.com']) {
+        const v = await verdicts(email);
+        expect([v['Skills/ownerless/SKILL.md'], v['Tools/weather.tool']]).toEqual([false, false]);
+      }
+    });
+
     it('owners are folded into the write-eligibility (approval) set', async () => {
       const { workspaceDir, repo } = await seedWorkspace(root, workspaceId);
       await writeFile(repo, 'roles.yaml', ROLES_YAML);

@@ -277,6 +277,7 @@ export interface LibraryFilterable {
   id?: string;
   name: string;
   description: string;
+  /** Named in the item's `owner:` grant — "Owned by me" lists exactly these. */
   owned: boolean;
   /** Folder plugin from the item's KB path, or null when it sits in none. */
   plugin: string | null;
@@ -313,7 +314,7 @@ export function isInPlugin(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>, 
  * not amber: it locks other people out, and the sidebar count for the plugin
  * is the same colour. Healthy links are untouched.
  */
-export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus }>(
+export function withLinkHealth<T extends LibraryFilterable & { status: AttentionStatus; canWrite?: boolean }>(
   item: T,
   plugin: string,
 ): T {
@@ -329,7 +330,7 @@ export function withLinkHealth<T extends LibraryFilterable & { status: Attention
     ...item,
     status: {
       state: 'urgent',
-      text: item.owned ? 'Needs setup: share with plugin members' : 'Needs setup',
+      text: item.canWrite ? 'Needs setup: share with plugin members' : 'Needs setup',
       hint: `The skill's access rules no longer name ${plugin}'s members. Repair the link from the skill page.`,
     },
   };

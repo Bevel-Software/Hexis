@@ -73,9 +73,12 @@ describe('membership by link', () => {
     // Not granted on Ops: needs setup, in ORANGE (it locks members out), and
     // says whose job it is.
     expect(withLinkHealth(shared, 'Ops').status).toMatchObject({ state: 'urgent', text: 'Needs setup' });
-    expect(withLinkHealth({ ...shared, owned: true }, 'Ops').status.text).toBe(
+    // "share with plugin members" is the WRITER's note — the repair is an
+    // edit, and a writer need not be an owner to make it.
+    expect(withLinkHealth({ ...shared, canWrite: true }, 'Ops').status.text).toBe(
       'Needs setup: share with plugin members',
     );
+    expect(withLinkHealth({ ...shared, owned: true, canWrite: false }, 'Ops').status.text).toBe('Needs setup');
     // Inline membership never wears it.
     expect(withLinkHealth(inline, 'GTM').status).toBe(OK);
   });

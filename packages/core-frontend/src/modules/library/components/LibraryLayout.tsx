@@ -8,7 +8,7 @@ import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library
 import { personalPluginName } from '../utils/personal-plugin';
 import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
 import { filterLibraryItems, pluginsOfItem, type LibraryFilter } from '../utils/status';
-import { pluginEntriesFor } from '../utils/plugin-entries';
+import { ownedLensOf, pluginEntriesFor } from '../utils/plugin-entries';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
 import { useSidebar } from '../../layout/state/sidebar';
@@ -78,15 +78,9 @@ export function LibraryLayout() {
       }),
     [teams, items, pluginSummaries, personalLabel],
   );
-  const ownedCount = useMemo(
-    () =>
-      items.filter((i) => i.owned).length +
-      pluginEntriesFor(items, pluginSummaries, { kind: 'owned' }, teams, '', personalLabel).length,
+  const { count: ownedCount, attention: ownedAttention } = useMemo(
+    () => ownedLensOf(items, pluginSummaries, teams, personalLabel),
     [items, pluginSummaries, teams, personalLabel],
-  );
-  const ownedAttention = useMemo(
-    () => items.filter((i) => i.owned && i.status.state !== 'ok').length,
-    [items],
   );
   const attentionCount = useMemo(
     () => items.filter((i) => i.kind === 'integration' && i.status.state !== 'ok').length,

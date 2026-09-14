@@ -86,6 +86,8 @@ const CATALOG: LibraryData = {
   pendingSkills: [],
   tools: [tool({}), tool({ slug: 'slack', name: 'slack', path: 'Tools/slack.tool' })],
   ownedSkills: new Set(['outreach']),
+  writableSkills: new Set(['outreach']),
+  ownedTools: new Set(),
   allowedToolsBySkill: new Map(),
   crs: [],
   myCrNumbers: new Set(),
@@ -98,7 +100,7 @@ const PLUGINS: PluginSummary[] = [
     folders: ['Plugins/GTM'],
     canRead: true,
     canWrite: true,
-    isOwner: false,
+    isOwner: true,
     skillCount: 1,
     toolCount: 1,
     owners: { roles: [], users: [{ name: 'Olga Ivanova', email: 'olga@bevel.software' }] },
@@ -200,11 +202,18 @@ describe('LibraryRoutes', () => {
   });
 
   it('/skills-and-tools/owned selects Owned by me', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      ...PLUGINS,
+      // Managed (an Admin writes it) but not owner-listed: not theirs.
+      { ...PLUGINS[0]!, name: 'Ops', folders: ['Plugins/Ops'], canWrite: true, isOwner: false },
+    ]);
     renderAt('/skills-and-tools/owned');
     expect(await screen.findByRole('heading', { name: 'Owned by me' })).toBeInTheDocument();
     expect(within(nav()).getByRole('button', { name: /^Owned by me/ })).toHaveAttribute('aria-current', 'true');
-    // GTM is managed by the caller (canWrite): it is theirs. Product is not.
+    // GTM names the caller in its owner list (`isOwner`): it is theirs. Ops is
+    // only managed by them, and Product is neither.
     expect(await within(main()).findByRole('button', { name: /^GTM/ })).toBeInTheDocument();
+    expect(within(main()).queryByRole('button', { name: /^Ops/ })).toBeNull();
     expect(within(main()).queryByRole('button', { name: /^Product/ })).toBeNull();
   });
 
@@ -337,7 +346,7 @@ describe('LibraryRoutes', () => {
   it('marks a plugin Private on its row when its access.md says so — and your own space always', async () => {
     pluginsMock.listPlugins.mockResolvedValue([
       ...PLUGINS,
-      { ...PLUGINS[0]!, name: 'Mine', folders: ['Plugins/Mine'], canWrite: false, isPrivate: true },
+      { ...PLUGINS[0]!, name: 'Mine', folders: ['Plugins/Mine'], canWrite: false, isOwner: false, isPrivate: true },
     ]);
     renderAt('/skills-and-tools');
     const mine = await within(main()).findByRole('button', { name: /^Mine/ });

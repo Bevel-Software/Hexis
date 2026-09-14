@@ -201,7 +201,13 @@ const foreignCr = {
   url: '',
 } as unknown as PullRequestSummary;
 
-function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: number[] = []): LibraryContextValue {
+function libraryValue(
+  owned: boolean,
+  crs: PullRequestSummary[] = [],
+  mine: number[] = [],
+  /** Write on SKILL.md — defaults to `owned`: an owner writes. */
+  canWrite: boolean = owned,
+): LibraryContextValue {
   return {
     crs,
     myCrNumbers: new Set(mine),
@@ -212,6 +218,7 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
         name: 'newsletter',
         description: skillSummary.description,
         owned,
+        canWrite,
         plugin: null,
         path: skillSummary.path,
         status: { state: 'ok', text: '' },
@@ -221,6 +228,8 @@ function libraryValue(owned: boolean, crs: PullRequestSummary[] = [], mine: numb
     tools: [slackTool],
     allowedToolsBySkill: new Map([['newsletter', ['slack_post_message']]]),
     ownedSkills: owned ? new Set(['newsletter']) : new Set<string>(),
+    writableSkills: canWrite ? new Set(['newsletter']) : new Set<string>(),
+    ownedTools: new Set<string>(),
     loading: false,
     error: null,
     reload: () => {},
@@ -547,6 +556,25 @@ describe('SkillPage', () => {
     renderPage(false);
     await screen.findByRole('heading', { name: 'newsletter' });
 
+    expect(screen.queryByText('Owner')).toBeNull();
+  });
+
+  /**
+   * The pill is ownership; the editor-side verbs are write. A writer who is
+   * not in the `owner:` grant — an Admin by role — loses the pill and keeps
+   * every one of them: the dock, and the verdict on someone else's change.
+   */
+  it('hides the Owner badge from a writer who is not an owner, and keeps their editor affordances', async () => {
+    const writer = libraryValue(false, [foreignCr], [], true);
+    renderPage(false, [foreignCr], [], makeFakeBus(), undefined, {
+      items: writer.items,
+      writableSkills: writer.writableSkills,
+    });
+
+    expect(
+      await screen.findByRole('complementary', { name: 'Change requests for this skill' }),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument();
     expect(screen.queryByText('Owner')).toBeNull();
   });
 

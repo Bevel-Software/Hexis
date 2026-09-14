@@ -112,14 +112,15 @@ export function PluginRows({
 }
 
 /**
- * Beside the label: `Owner` for a plugin the caller manages, and `Private`
+ * Beside the label: `Owner` for a plugin the caller owns (`isOwner` — the
+ * listing's owner-lists-only verdict; managing is not owning), and `Private`
  * for one whose access.md says of itself that it is — the file's own
  * frontmatter denies everyone and names only people. A personal space is
  * always the latter; it is also always the reader's, so its row carries the
  * mark on its own. Nothing when neither applies, so the row stays plain text.
  */
 function badgesOf(entry: PluginEntry): ReactNode {
-  const owner = entry.summary?.canWrite === true;
+  const owner = entry.summary?.isOwner === true;
   const isPrivate = entry.name === null || entry.summary?.isPrivate === true;
   if (!owner && !isPrivate) return undefined;
   return (
