@@ -581,12 +581,16 @@ describe('McpService — a collision ends when its sibling is renamed away', () 
     catalog.splice(1, 1);
     await (await connectClient(lastService!, 'tok-1')).listTools();
 
-    // The survivor is NOT memo-skipped from request 1's collision — the memo
-    // key carried the sibling, so removing it changed the key. (It fails
-    // afresh now only because its URL is unreachable — a real attempt, not the
-    // "recent failure, not retried" short-circuit the risk was about.)
+    // Positive proof of a fresh attempt: the survivor now reaches real
+    // registration and fails on its unreachable URL, logging the plain
+    // registration-failure warning `skipping manual "notion-eu": <net error>`.
+    // That message is distinct from BOTH the collision warning (`rewrites to`)
+    // and the memo short-circuit (`recent failure, not retried`) — so its
+    // presence, with those two absent, is exactly "retried this request".
     const messagesFor = (name: string) => warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes(`"${name}"`));
-    expect(messagesFor('notion-eu').some((m) => m.includes('recent failure, not retried'))).toBe(false);
-    expect(messagesFor('notion-eu').some((m) => m.includes('rewrites to'))).toBe(false);
+    const survivor = messagesFor('notion-eu');
+    expect(survivor.some((m) => m.includes('recent failure, not retried'))).toBe(false);
+    expect(survivor.some((m) => m.includes('rewrites to'))).toBe(false);
+    expect(survivor.some((m) => m.startsWith('[mcp] skipping manual "notion-eu": ') && !m.includes('rewrites to'))).toBe(true);
   });
 });
