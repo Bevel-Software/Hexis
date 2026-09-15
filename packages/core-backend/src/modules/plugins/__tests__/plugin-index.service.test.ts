@@ -62,7 +62,6 @@ describe('PluginIndexService', () => {
       toolService(opts.tools),
       KB_DIR,
       new KbPluginSource(new NodeFs()),
-      new NodeFs(),
     );
 
   const kb = () => join(root, wsId, KB_DIR);
@@ -170,7 +169,6 @@ describe('PluginIndexService', () => {
       toolService(),
       KB_DIR,
       new KbPluginSource(new NodeFs()),
-      new NodeFs(),
       Date.now,
       links,
     ).catalog();

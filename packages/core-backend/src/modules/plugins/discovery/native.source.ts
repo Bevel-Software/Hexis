@@ -9,7 +9,7 @@ import {
   pluginDisplayNameOf,
   pluginIdentityOf,
 } from '@bevel-software/platform-shared';
-import type { IFsProbe } from '../../../shared/fs.contract.js';
+import { isAbsence, type IFsProbe } from '../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
 /**
@@ -33,7 +33,7 @@ export async function readNativePlugin(
   unreadable: string[],
 ): Promise<DiscoveredPlugin | null> {
   const folderName = path.posix.basename(relFolder);
-  const manifestRead = await readText(disk, path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings);
+  const manifestRead = await readText(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings);
   if (manifestRead.failed) {
     unreadable.push(`${folder}/${PLUGIN_MANIFEST_FILE}`);
     return null;
@@ -42,7 +42,7 @@ export async function readNativePlugin(
   // between probe and read — then this is no plugin, not one under a guessed name.
   if (manifestRead.text === null) return null;
   const manifestText = manifestRead.text;
-  const mcpJsonText = (await readText(disk, path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
+  const mcpJsonText = (await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
   const manifest = parseObject(manifestText);
   if (manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
@@ -108,7 +108,6 @@ export async function readNativePlugin(
  * the caller decides what a failure means for the file in question.
  */
 async function readText(
-  disk: IFsProbe,
   abs: string,
   folder: string,
   warnings: string[],
@@ -116,7 +115,7 @@ async function readText(
   try {
     return { text: await fs.readFile(abs, 'utf-8'), failed: false };
   } catch (err) {
-    if (disk.isAbsence(err)) return { text: null, failed: false };
+    if (isAbsence(err)) return { text: null, failed: false };
     warnings.push(`${folder}/${path.basename(abs)} could not be read — ${err instanceof Error ? err.message : String(err)}`);
     return { text: null, failed: true };
   }

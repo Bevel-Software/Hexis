@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { IGNORE_FILENAME, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
+import { IGNORE_FILENAME, isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
@@ -64,7 +64,7 @@ export function createWorkspaceRoutes(
   kbDirName: string,
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
-  disk: ITreeWalker & IFsProbe,
+  disk: ITreeWalker,
 ): express.Router {
   const router = express.Router();
 
@@ -770,7 +770,7 @@ export function createWorkspaceRoutes(
       // than the template has no such file yet), so dressing an unreadable
       // file up as a missing one would offer an empty editor over content the
       // save then overwrites.
-      if (disk.isAbsence(error) || (error as NodeJS.ErrnoException).code === 'EISDIR') {
+      if (isAbsence(error) || (error as NodeJS.ErrnoException).code === 'EISDIR') {
         res.status(404).json({ error: 'File not found' });
         return;
       }

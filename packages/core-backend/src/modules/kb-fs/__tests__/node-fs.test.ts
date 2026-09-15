@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { NodeFs } from '../node-fs.js';
 import { BevelIgnoreStack } from '../bevel-ignore.js';
-import type { IgnoreRules, TreeWalkOptions, WalkListener } from '../../../shared/fs.contract.js';
+import { isAbsence, type IgnoreRules, type TreeWalkOptions, type WalkListener } from '../../../shared/fs.contract.js';
 
 const disk = new NodeFs();
 
@@ -342,12 +342,12 @@ describe('NodeFs probes', () => {
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 
   it('isAbsence: ENOENT and ENOTDIR are absence; anything else is a failure to read what is there', () => {
-    expect(disk.isAbsence({ code: 'ENOENT' })).toBe(true);
-    expect(disk.isAbsence({ code: 'ENOTDIR' })).toBe(true);
-    expect(disk.isAbsence({ code: 'EACCES' })).toBe(false);
-    expect(disk.isAbsence({ code: 'EISDIR' })).toBe(false);
-    expect(disk.isAbsence(new Error('plain'))).toBe(false);
-    expect(disk.isAbsence(null)).toBe(false);
+    expect(isAbsence({ code: 'ENOENT' })).toBe(true);
+    expect(isAbsence({ code: 'ENOTDIR' })).toBe(true);
+    expect(isAbsence({ code: 'EACCES' })).toBe(false);
+    expect(isAbsence({ code: 'EISDIR' })).toBe(false);
+    expect(isAbsence(new Error('plain'))).toBe(false);
+    expect(isAbsence(null)).toBe(false);
   });
 
   it('exists / lstatOrNull see the entry itself; statOrNull follows a link; isDirectory is the entry itself', async () => {

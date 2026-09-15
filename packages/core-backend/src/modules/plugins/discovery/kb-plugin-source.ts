@@ -46,7 +46,7 @@ export class KbPluginSource implements PluginSource {
 
   async walkWith(kbRoot: string, listeners: readonly WalkListener[]): Promise<PluginSourceWalk> {
     const warnings: string[] = [];
-    const registry = await loadRegistry(this.disk, kbRoot, warnings);
+    const registry = await loadRegistry(kbRoot, warnings);
     const listener = pluginListener(this.disk, kbRoot, registry, warnings);
     const { holes } = await this.disk.walkKb(kbRoot, [listener.listener, ...listeners]);
     return { discovery: listener.result(), holes };
@@ -98,7 +98,7 @@ function pluginListener(
           if (native) claim(native);
         } else if (has(BUNDLE_FILE)) {
           claimed.push(rel);
-          const bundle = await readBundlePlugin(disk, dir, rel, relFolder, registry, warnings, unreadable);
+          const bundle = await readBundlePlugin(dir, rel, relFolder, registry, warnings, unreadable);
           if (bundle) claim(bundle);
         }
       },

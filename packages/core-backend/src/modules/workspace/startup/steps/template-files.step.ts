@@ -7,7 +7,7 @@ import {
   renderKbLayoutPlaceholders,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
-import { IGNORE_FILENAME, type IFsProbe } from '../../../../shared/fs.contract.js';
+import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
@@ -285,7 +285,7 @@ export class TemplateFilesStep implements OnServerStart {
     // all the rules: separate passes would each read the on-disk file and
     // a later declared write would lose an earlier one's.
     added.push(
-      ...(await reconcileIgnoreRules(this.disk, repoDir, branch, {
+      ...(await reconcileIgnoreRules(repoDir, branch, {
         // The preamble rule is respelled before it is added: a knowledge base
         // that booted the release shipping the unanchored spelling carries the
         // platform's own line, and that line hides a nested namesake too.
@@ -376,7 +376,7 @@ async function readTemplate(disk: IFsProbe, templateDir: string, relPath: string
     raw = await fs.readFile(await templateSource(disk, templateDir, relPath), 'utf8');
   } catch (err) {
     const packaged = defaultKbTemplateDir();
-    if (!disk.isAbsence(err) || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
+    if (!isAbsence(err) || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
       throw err;
     }
     console.warn(
@@ -421,7 +421,6 @@ async function templateDiffers(disk: IFsProbe, templateDir: string, repoDir: str
  * the mismatch this exists to close.
  */
 async function reconcileIgnoreRules(
-  disk: IFsProbe,
   repoDir: string,
   branch: KbBranch,
   rules: {
@@ -441,7 +440,7 @@ async function reconcileIgnoreRules(
     // required-files loop above). A file that is there but cannot be read is
     // NOT "no file": its rules may still be hiding the tree, so the hole is
     // the step's failure, as it is for the migration's retirement.
-    if (!disk.isAbsence(err)) throw err;
+    if (!isAbsence(err)) throw err;
     return [];
   }
   const respelled = (rules.respell ?? []).reduce(

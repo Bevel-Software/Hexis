@@ -44,6 +44,7 @@ import {
 import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { assertInsideRepo } from './repo-path.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
@@ -659,7 +660,7 @@ export class LockingFilesystem extends LocalFilesystem {
     try {
       return await fs.readFile(absolute);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      if (isAbsence(err)) return null;
       throw err;
     }
   }

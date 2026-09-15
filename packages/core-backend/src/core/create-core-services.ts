@@ -415,7 +415,6 @@ export async function createCoreServices(
     toolManualService,
     kbDirName,
     pluginSource,
-    disk,
     Date.now,
     pluginLinkIndex,
   );
@@ -757,7 +756,7 @@ export async function createCoreServices(
   // for readers, and the preamble is a broadcast). One reader, two consumers:
   // the proxy below composes in-process per session; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
-  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName);
+  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName, disk);
   const mcpService = new McpService(
     mcpSessionStore,
     {

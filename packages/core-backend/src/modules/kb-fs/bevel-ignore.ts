@@ -1,8 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
-import { IGNORE_FILENAME, type IgnoreRules } from '../../shared/fs.contract.js';
-import { isAbsence } from './fs-errors.js';
+import { IGNORE_FILENAME, isAbsence, type IgnoreRules } from '../../shared/fs.contract.js';
 
 /** One .bevelignore file's rules, scoped to the directory it lives in. */
 interface IgnoreLayer {

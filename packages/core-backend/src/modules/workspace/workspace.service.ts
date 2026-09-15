@@ -6,7 +6,7 @@ import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import type { IFsProbe, ITreeWalker, TreeWalkOptions } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   RemoteBranchGoneError,
@@ -112,11 +112,11 @@ const FETCH_CACHE_TTL_MS = 30_000;
  * unexplained internal reason. Anything else (EACCES, EIO) is a real read
  * failure and propagates: an unreadable file must not pass for an empty one.
  */
-async function readForConditionalWrite(disk: IFsProbe, absolutePath: string, relativePath: string): Promise<string> {
+async function readForConditionalWrite(absolutePath: string, relativePath: string): Promise<string> {
   try {
     return await fs.readFile(absolutePath, 'utf-8');
   } catch (err) {
-    if (disk.isAbsence(err)) return '';
+    if (isAbsence(err)) return '';
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'EISDIR') {
       const notAFile: Error & { status?: number } = new Error(
@@ -131,12 +131,11 @@ async function readForConditionalWrite(disk: IFsProbe, absolutePath: string, rel
 
 /** Throw the conditional write's 409 unless the file still holds `expectedContent`. */
 async function assertConditionalWriteMatches(
-  disk: IFsProbe,
   absolutePath: string,
   relativePath: string,
   expectedContent: string,
 ): Promise<void> {
-  const current = await readForConditionalWrite(disk, absolutePath, relativePath);
+  const current = await readForConditionalWrite(absolutePath, relativePath);
   if (current === expectedContent) return;
   const stale: Error & { status?: number } = new Error(
     `"${relativePath}" changed since you opened it. Reload it and apply your edit again, ` +
@@ -220,7 +219,7 @@ export class WorkspaceService implements IWorkspaceService {
      */
     kbRepoUrl: string | (() => string),
     private readonly kbDirName: string,
-    private readonly disk: ITreeWalker & IFsProbe,
+    private readonly disk: ITreeWalker,
     gitUsername: string | (() => string) = 'x-access-token',
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
@@ -351,7 +350,7 @@ export class WorkspaceService implements IWorkspaceService {
     try {
       entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
     } catch (err) {
-      if (this.disk.isAbsence(err)) return [];
+      if (isAbsence(err)) return [];
       throw err;
     }
     const cloned: Array<{ id: string; branch: string; unreadable?: string }> = [];
@@ -371,7 +370,7 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
       } catch (err) {
-        if (this.disk.isAbsence(err)) continue;
+        if (isAbsence(err)) continue;
         cloned.push({
           id: entry.name,
           branch,
@@ -692,7 +691,7 @@ export class WorkspaceService implements IWorkspaceService {
     try {
       await fs.access(targetDir);
     } catch (err) {
-      if (!this.disk.isAbsence(err)) throw err;
+      if (!isAbsence(err)) throw err;
       targetExists = false;
     }
 
@@ -713,7 +712,7 @@ export class WorkspaceService implements IWorkspaceService {
         // re-clone". A transient EACCES / EIO / EBUSY must NOT delete
         // what might be a perfectly valid repo whose `.git` we couldn't
         // read this moment — surface the error so the caller can retry.
-        if (!this.disk.isAbsence(err)) throw err;
+        if (!isAbsence(err)) throw err;
       }
       if (alreadyCloned) {
         // We don't auto-pull because that could clobber another user's
@@ -841,7 +840,7 @@ export class WorkspaceService implements IWorkspaceService {
   private async assertNotThroughLink(absolutePath: string, workspaceDir: string): Promise<void> {
     const traversal = () => new Error('Path traversal detected');
     const entry = await fs.lstat(absolutePath).catch((err: unknown) => {
-      if (this.disk.isAbsence(err)) return null;
+      if (isAbsence(err)) return null;
       throw err;
     });
     if (entry?.isSymbolicLink()) throw traversal();
@@ -853,7 +852,7 @@ export class WorkspaceService implements IWorkspaceService {
     let realAncestor: string | null = null;
     while (realAncestor === null) {
       const ancestorEntry = await fs.lstat(ancestor).catch((err: unknown) => {
-        if (this.disk.isAbsence(err)) return null;
+        if (isAbsence(err)) return null;
         throw err;
       });
       // The workspace directory itself may be a link of the operator's (one
@@ -861,7 +860,7 @@ export class WorkspaceService implements IWorkspaceService {
       // check below still holds everything beneath it to its own spelling.
       if (ancestorEntry?.isSymbolicLink() && path.resolve(ancestor) !== path.resolve(workspaceDir)) throw traversal();
       realAncestor = await fs.realpath(ancestor).catch((err: unknown) => {
-        if (this.disk.isAbsence(err)) return null;
+        if (isAbsence(err)) return null;
         throw err;
       });
       if (realAncestor === null) {
@@ -1145,7 +1144,7 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await assertConditionalWriteMatches(this.disk, absolutePath, relativePath, expectedContent);
+    await assertConditionalWriteMatches(absolutePath, relativePath,expectedContent);
   }
 
   /**
@@ -1260,7 +1259,7 @@ export class WorkspaceService implements IWorkspaceService {
       // happened. The compare reads the file, and an absent file reads as
       // empty whether or not its directory exists.
       if (options?.expectedContent !== undefined) {
-        await assertConditionalWriteMatches(this.disk, absolutePath, relativePath, options.expectedContent);
+        await assertConditionalWriteMatches(absolutePath, relativePath,options.expectedContent);
       }
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       try {

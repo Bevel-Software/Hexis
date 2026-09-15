@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isPersonalPluginDir, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
-import type { IFsProbe } from '../../../../shared/fs.contract.js';
+import { isAbsence } from '../../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 
@@ -38,14 +38,14 @@ export const BUNDLE_FILE = 'plugin.bundle.json';
 export const DEFAULT_REGISTRY_PATH = 'configs/mcp/registry.json';
 
 /** The registry, when the repository has one; a missing file is null, a broken one warns. */
-export async function loadRegistry(disk: IFsProbe, kbRoot: string, warnings: string[]): Promise<McpRegistry | null> {
+export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<McpRegistry | null> {
   let text: string;
   try {
     text = await fs.readFile(path.join(kbRoot, DEFAULT_REGISTRY_PATH), 'utf-8');
   } catch (err) {
     // No registry is a valid state: bundles without a profile are still
     // plugins. A registry that exists but cannot be read is not.
-    if (!disk.isAbsence(err)) {
+    if (!isAbsence(err)) {
       const code = (err as { code?: unknown } | null)?.code;
       warnings.push(`${DEFAULT_REGISTRY_PATH} could not be read (${String(code ?? err)}) — every mcpProfile is unresolved`);
     }
@@ -57,7 +57,6 @@ export async function loadRegistry(disk: IFsProbe, kbRoot: string, warnings: str
 }
 
 export async function readBundlePlugin(
-  disk: IFsProbe,
   dir: string,
   folder: string,
   relFolder: string,
@@ -72,7 +71,7 @@ export async function readBundlePlugin(
   try {
     text = await fs.readFile(path.join(dir, BUNDLE_FILE), 'utf-8');
   } catch (err) {
-    if (!disk.isAbsence(err)) {
+    if (!isAbsence(err)) {
       warnings.push(`${folder}/${BUNDLE_FILE} could not be read — ${err instanceof Error ? err.message : String(err)}`);
       unreadable.push(`${folder}/${BUNDLE_FILE}`);
     }

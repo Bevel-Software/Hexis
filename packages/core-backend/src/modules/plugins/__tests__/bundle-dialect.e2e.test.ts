@@ -98,7 +98,7 @@ describe('bundle dialect, end to end', () => {
     skills = new SkillService(workspaceService, access, KB_DIR, disk);
     tools = new ToolManualService(workspaceService, access, KB_DIR, disk, source);
     links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
-    index = new PluginIndexService(workspaceService, access, skills, tools, KB_DIR, source, disk, Date.now, links);
+    index = new PluginIndexService(workspaceService, access, skills, tools, KB_DIR, source, Date.now, links);
     compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, { name: 'acme', owner: 'Acme' }, source, disk);
     linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, skills, links, KB_DIR);
   });
