@@ -195,11 +195,16 @@ describe('checkRepositoryConnection', () => {
     expect(result).toMatchObject({ outcome: 'rejected', reason: 'unreachable', field: 'kbRepoUrl' });
   });
 
-  it('refuses a URL carrying credentials without running git', async () => {
+  it('rejects a URL carrying credentials against the address, in the rule’s words, without running git', async () => {
     const git = fakeGit({ listing: '' });
-    await expect(
-      checkRepositoryConnection({ ...CONNECTION, url: 'https://u:secret@github.com/acme/kb.git' }, git.run),
-    ).rejects.toThrow();
+    const result = await checkRepositoryConnection(
+      { ...CONNECTION, url: 'https://u:secret@github.com/acme/kb.git' },
+      git.run,
+    );
+    expect(result).toMatchObject({ outcome: 'rejected', reason: 'invalid-address', field: 'kbRepoUrl' });
+    if (result.outcome === 'rejected') {
+      expect(result.error).toMatch(/Remove the username and token from the URL/);
+    }
     expect(git.calls).toEqual([]);
   });
 

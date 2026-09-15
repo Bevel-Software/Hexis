@@ -47,7 +47,7 @@ export type ConnectionCheck =
       error: string;
     };
 
-export type FailureReason = 'credentials' | 'not-found' | 'unreachable' | 'unknown';
+export type FailureReason = 'credentials' | 'not-found' | 'unreachable' | 'invalid-address' | 'unknown';
 
 /** Runs one git command; rejects with an error whose message carries git's stderr. */
 export type GitRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ stdout: string }>;
@@ -84,10 +84,16 @@ export async function checkRepositoryConnection(
   run: GitRunner = runGit,
 ): Promise<ConnectionCheck> {
   const { url, token, username } = connection;
-  // The callers validate first and answer with their own wording; this is the
-  // floor under them, because both values reach git (the URL as an argument,
-  // the username inside a shell snippet) and either unvalidated is injection.
-  if (validateHttpsRemote(url)) throw new Error('Refusing to probe a non-https remote.');
+  // The callers validate what they are sent; this is the floor under them,
+  // because both values reach git (the URL as an argument, the username inside
+  // a shell snippet) and either unvalidated is injection. The URL is ANSWERED,
+  // not thrown: one stored before the rule tightened (userinfo) still arrives
+  // here through a save that only changes the token, and the admin needs the
+  // rule's own words against the address — not a 500.
+  const urlProblem = validateHttpsRemote(url);
+  if (urlProblem) {
+    return { outcome: 'rejected', reason: 'invalid-address', field: 'kbRepoUrl', error: urlProblem };
+  }
   if (!/^[A-Za-z0-9._-]+$/.test(username)) throw new Error('Refusing an unsupported git username.');
 
   // The helper reads the token from the environment at call time, so it never

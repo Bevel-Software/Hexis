@@ -481,6 +481,22 @@ describe('POST /setup/settings — the connection is checked before it is stored
     expect(remote.asked).toEqual([]);
     expect(settings.resolve('kbRepoUrl')).toBe('');
   });
+
+  /**
+   * An address already in effect with credentials in it — set before the rule
+   * tightened — is not re-validated by a save that leaves it alone. The REAL
+   * check must still answer that save with a fielded 400, not a 500.
+   */
+  it('refuses a token-only save against an address already carrying credentials, as a 400 on the address', async () => {
+    process.env.KB_REPO_URL = 'https://u:ghp_embedded@127.0.0.1:1/acme/kb.git';
+    const { base, settings } = listen();
+    const res = await post(base, '/api/setup/settings', { settings: { gitToken: 'ghp_new' } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({
+      kbRepoUrl: 'Remove the username and token from the URL — enter the token in its own field.',
+    });
+    expect(settings.resolve('gitToken')).toBe('');
+  });
 });
 
 describe('GET /setup/status', () => {
