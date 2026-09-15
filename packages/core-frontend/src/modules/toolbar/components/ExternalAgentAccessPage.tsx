@@ -83,9 +83,11 @@ export function ExternalAgentAccessPage() {
   const workspaceUrl = workspaceBaseUrl();
 
   const [tab, setTab] = useState<'agent' | 'marketplace' | 'autonomous'>('agent');
-  // Whether the Cowork drawer is expanded. Only the registration credentials
-  // wait on it; everything else in the drawer renders either way.
+  // Whether the Cowork drawer is expanded. Only the registration state waits
+  // on it; everything else in the drawer renders either way.
   const [coworkOpen, setCoworkOpen] = useState(false);
+  // Only the wording of the "not set up yet" notice depends on this; the
+  // tutorial itself is the same for everyone.
   const { isAdmin } = useAdmin();
   const [keys, setKeys] = useState<ExternalApiKeySummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -342,14 +344,12 @@ export function ExternalAgentAccessPage() {
             </p>
 
             {/* CONTROLLED, both attributes together. A closed <details> still
-                MOUNTS its children, so the registration credentials wait on
-                `coworkOpen` rather than loading a client secret and a private
-                key into a drawer nobody opened. Watching the element with
-                `onToggle` alone was not enough: this subtree unmounts on a tab
+                MOUNTS its children, so the registration state waits on
+                `coworkOpen` and is read again each time the drawer opens.
+                `onToggle` alone is not enough: this subtree unmounts on a tab
                 switch and the fresh <details> comes back closed while the
-                state stayed true, which put the secrets right back in a closed
-                drawer. With `open` bound too, the element cannot disagree with
-                the state that gates them. */}
+                state stayed true. With `open` bound too, the element cannot
+                disagree with the state that gates the read. */}
             <details
               className="border border-line rounded"
               data-testid="cowork-section"

@@ -616,7 +616,8 @@ export async function createCoreServer(
   }));
 
   // What an Owner pastes into Claude's admin settings to register this
-  // deployment as a GitHub Enterprise Server — admins only.
+  // deployment as a GitHub Enterprise Server — admins only — plus whether it
+  // is registered, a boolean every signed-in person may read.
   app.use('/api', core.authMiddleware, createGitHubFacadeAdminRoutes({
     credentials: core.githubFacadeCredentials,
     isAdmin: (email) => core.adminAccess.isAdmin(email),

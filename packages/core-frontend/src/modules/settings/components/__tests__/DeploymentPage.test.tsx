@@ -11,15 +11,18 @@ import { AdminContext, type AdminContextValue } from '../../../admin/state/admin
  */
 
 const apiMock = vi.hoisted(() => ({ fetchSetupStatus: vi.fn(), saveSettings: vi.fn() }));
-// The Claude connection card fetches its credentials on mount; answer it so
-// its retry button never stands beside the page's own.
-vi.mock('../../services/github-facade.api', () => ({
+// The Marketplace section reads the registration state on mount, and the
+// credentials only once its drawer opens — the count is asserted below.
+const facadeMock = vi.hoisted(() => ({
   fetchGitHubFacade: vi.fn(async () => ({
     host: 'kb.test', appId: '123456', clientId: 'Iv1.x', clientSecret: 's', webhookSecret: 'w',
     privateKeyPem: 'p', marketplaceUrl: 'https://kb.test/git/marketplace.git', createdAt: 0, rotatedAt: null,
   })),
   rotateGitHubFacade: vi.fn(),
+  fetchMarketplaceRegistration: vi.fn(async () => false),
+  setMarketplaceRegistration: vi.fn(),
 }));
+vi.mock('../../services/github-facade.api', () => facadeMock);
 
 vi.mock('../../../setup/services/setup.api', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -73,10 +76,31 @@ describe('DeploymentPage', () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * The settings host of the Marketplace section: the same section the first
+   * run shows, here without "Optional" (there is nothing to skip past), and
+   * with its credentials still waiting for the drawer.
+   */
+  it('renders the Marketplace section below the form, credentials unfetched until opened', async () => {
+    facadeMock.fetchGitHubFacade.mockClear();
+    renderPage(admin(true));
+    const section = await screen.findByTestId('marketplace-deployment-section');
+    expect(section).toHaveAttribute('id', 'marketplace');
+    expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
+    expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
+    // After the settings form, not before it.
+    const save = screen.getByRole('button', { name: 'Save and continue' });
+    expect(save.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Mark as registered' })).toBeInTheDocument();
+    expect(facadeMock.fetchGitHubFacade).not.toHaveBeenCalled();
+  });
+
   it('tells a non-admin this is not theirs, and never fetches the settings', () => {
     renderPage(admin(false));
     expect(screen.getByText(/Admins only/)).toBeInTheDocument();
     expect(screen.queryByText('Provider address')).toBeNull();
+    expect(screen.queryByTestId('marketplace-deployment-section')).toBeNull();
     // Never fetched, not merely never rendered: the page already told them
     // this is not theirs, so a request nothing renders is pure noise.
     expect(apiMock.fetchSetupStatus).not.toHaveBeenCalled();

@@ -22,8 +22,9 @@
  */
 
 import type { FileContent } from '@mastra/core/workspace';
-import { parseRolesYaml } from './access-grammar.js';
+import { canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
 
 /** Repo-relative basename of the roles file (it lives at the KB repo root). */
 export const ROLES_YAML_BASENAME = 'roles.yaml';
@@ -80,10 +81,97 @@ export function assertRolesYamlParsable(content: string): void {
  */
 export function makeRolesYamlWriteValidator(
   kbDirName: string,
-): (path: string, content: FileContent) => void {
-  return (path, content) => {
+): WriteValidator & ((path: string, content: FileContent) => void) {
+  const validate: WriteValidator & ((path: string, content: FileContent) => void) = (path, content) => {
     if (typeof content !== 'string') return;
     if (!isRolesYamlPath(path, kbDirName)) return;
     assertRolesYamlParsable(content);
   };
+  validate.appliesTo = (path) => isRolesYamlPath(path, kbDirName);
+  return validate;
+}
+
+/** What an agent is told to do instead of creating a role. */
+export const NEW_ROLE_GUIDANCE =
+  'App roles are pre-set — add people to existing roles, and use a GROUP for a task- or team-scoped set of people.';
+
+/**
+ * An AGENT write whose candidate `roles.yaml` declares a role the current file
+ * does not. Same 422 shape as {@link RolesYamlInvalidError}; the message is
+ * self-contained because a tool error reaches the agent as its message alone,
+ * and the agent relays it to its user.
+ */
+export class RolesYamlNewRoleError extends WorkflowDomainError {
+  readonly roleNames: string[];
+  constructor(roleNames: string[]) {
+    const quoted = roleNames.map((n) => `'${n}'`).join(', ');
+    super(
+      `roles.yaml was not saved: agents never create app roles, and ${quoted} ` +
+        `${roleNames.length === 1 ? 'is not an existing role' : 'are not existing roles'}. ${NEW_ROLE_GUIDANCE}`,
+      422,
+      { kind: 'roles-yaml-new-role', roleNames },
+    );
+    this.name = 'RolesYamlNewRoleError';
+    this.roleNames = roleNames;
+  }
+}
+
+/**
+ * The role names `text` declares, canonical → display spelling. Lenient on
+ * purpose: a current file with a bad email still vouches for its role names.
+ * Text that is absent or not a `roles:` mapping declares none.
+ */
+function declaredRoleNames(text: string | null): Map<string, string> {
+  const names = new Map<string, string>();
+  if (text === null) return names;
+  const parsed = parseYamlSubset(text);
+  if (!parsed.ok) return names;
+  const roles = (parsed.value as Record<string, unknown> | null)?.roles;
+  if (roles == null || typeof roles !== 'object' || Array.isArray(roles)) return names;
+  for (const display of Object.keys(roles)) {
+    const canonical = canonicalRoleName(display);
+    if (canonical && !names.has(canonical)) names.set(canonical, display.trim());
+  }
+  return names;
+}
+
+/**
+ * Throw {@link RolesYamlNewRoleError} if `candidate` declares a role name
+ * (compared canonically, so a respelling is not new) absent from `current`.
+ * A rename is a delete plus a create, so it is refused for the created name.
+ */
+export function assertNoNewRoles(current: string | null, candidate: string): void {
+  const existing = declaredRoleNames(current);
+  const created = [...declaredRoleNames(candidate)]
+    .filter(([canonical]) => !existing.has(canonical))
+    .map(([, display]) => display);
+  if (created.length > 0) throw new RolesYamlNewRoleError(created);
+}
+
+/**
+ * The agent's `roles.yaml` gate: everything {@link makeRolesYamlWriteValidator}
+ * refuses, plus any role the current file does not declare. Agents manage
+ * membership only; the human editor and the App roles service keep the plain
+ * validator. `readCurrent` returns the file's current text, null when absent.
+ * Content of any type is checked — decoded as UTF-8 — so bytes cannot slip past.
+ *
+ * `readCurrent` is read afresh on every call, never cached: `LockingFilesystem`
+ * calls this validator before taking the lock (a cheap early refusal) and again
+ * once the `roles.yaml` lock is held, on the bytes that land. That second call
+ * is the decisive one — it compares against the file as the other roles.yaml
+ * writers, which coordinate on the same lock, left it — so a role deleted while
+ * the write waited cannot be reinstated, and one added meanwhile is not refused.
+ */
+export function makeAgentRolesYamlWriteValidator(
+  kbDirName: string,
+  readCurrent: () => Promise<string | null>,
+): WriteValidator {
+  const validate: WriteValidator = async (path, content) => {
+    if (!isRolesYamlPath(path, kbDirName)) return;
+    const text = typeof content === 'string' ? content : Buffer.from(content).toString('utf-8');
+    assertRolesYamlParsable(text);
+    assertNoNewRoles(await readCurrent(), text);
+  };
+  validate.appliesTo = (path) => isRolesYamlPath(path, kbDirName);
+  return validate;
 }
