@@ -37,6 +37,9 @@ const SETTINGS: SettingStatus[] = [
   { key: 'gitToken', envVar: 'GIT_TOKEN', section: KB, source: 'unset', configured: false, secret: true, restartToApply: false },
   { key: 'gitUsername', envVar: 'GIT_USERNAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
   { key: 'kbDirName', envVar: 'KB_DIR_NAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'knowledgeBaseDir', envVar: 'KB_KNOWLEDGE_BASE_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'skillsDir', envVar: 'KB_SKILLS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'pluginsDir', envVar: 'KB_PLUGINS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
@@ -807,6 +810,147 @@ describe('SetupScreen', () => {
     await userEvent.type(screen.getByLabelText('Folder name'), 'company-brain');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
     expect(await screen.findByText(/restart it when convenient/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * A repository whose skills lived in `skills/` connected, got an empty
+ * `Skills/` scaffolded beside it and imported nothing, with no word anywhere.
+ * The folder fields are now in plain sight and checked against what the
+ * repository actually has.
+ */
+describe('SetupScreen — the three root folders', () => {
+  const FOLDER_LABELS = ['Knowledge folder', 'Skills folder', 'Plugins folder'];
+  const LISTED = {
+    ok: true,
+    empty: false,
+    branches: ['main'],
+    defaultBranch: 'main',
+    rootFolders: ['KnowledgeBase', 'skills', 'Data'],
+  };
+  const stateOf = (key: string) => document.getElementById(`${key}-repo-state`);
+
+  function expectInMainSection() {
+    const card = screen.getByRole('heading', { name: 'Knowledge, skills & tools' }).closest('section')!;
+    const advanced = card.querySelector('details')!;
+    for (const label of FOLDER_LABELS) {
+      const field = screen.getByLabelText(label);
+      expect(card).toContainElement(field);
+      expect(advanced).not.toContainElement(field);
+    }
+  }
+
+  it('shows the fields in the main section on first run', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByRole('heading', { name: /Set up this deployment/ });
+    expectInMainSection();
+    expect(screen.getByText(/The three folder names must differ\. Case matters/)).toBeInTheDocument();
+  });
+
+  it('shows the fields in the main section on the Deployment page', () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    expectInMainSection();
+  });
+
+  it('says found, will be created, or names the folder that differs only by case', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue(LISTED);
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 1 branch/);
+
+    expect(stateOf('knowledgeBaseDir')).toHaveTextContent('KnowledgeBase found in the repository.');
+    expect(stateOf('pluginsDir')).toHaveTextContent(
+      'Plugins is not in the repository yet — it will be created.',
+    );
+    expect(stateOf('skillsDir')).toHaveTextContent(
+      'Not found — the repository has skills (differs only by case): set this field to skills or rename the folder.',
+    );
+
+    // Taking the advice says found at once.
+    await userEvent.type(screen.getByLabelText('Skills folder'), 'skills');
+    expect(stateOf('skillsDir')).toHaveTextContent('skills found in the repository.');
+  });
+
+  it('names a folder that differs by case and a trailing s', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['skill'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() =>
+      expect(stateOf('skillsDir')).toHaveTextContent(
+        'Not found — the repository has skill (differs by case and a trailing s)',
+      ),
+    );
+  });
+
+  it('names a folder that differs only by a trailing s', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['Skill'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() =>
+      expect(stateOf('skillsDir')).toHaveTextContent(
+        'Not found — the repository has Skill (differs only by a trailing s): set this field to Skill or rename the folder.',
+      ),
+    );
+  });
+
+  it('offers the listed folders as suggestions on the three fields, less the ones no root may take', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Skills folder')).not.toHaveAttribute('list');
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['.github', ...LISTED.rootFolders, 'Agents'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 1 branch/);
+    for (const label of FOLDER_LABELS) {
+      const list = screen.getByLabelText(label).getAttribute('list');
+      expect(list).toBeTruthy();
+      const options = [...document.querySelectorAll(`#${list} option`)].map((o) => o.getAttribute('value'));
+      // `.github`, `Data` and `Agents` would each fail the save's validation.
+      expect(options).toEqual(['KnowledgeBase', 'skills']);
+    }
+  });
+
+  it('shows only the empty-repository message for an empty repository', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ok: true, empty: true, branches: [], defaultBranch: null, rootFolders: [] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(await screen.findByText(/repository is empty; it will be set up for you/)).toBeInTheDocument();
+    expect(screen.queryByText(/will be created/)).toBeNull();
+    for (const key of ['knowledgeBaseDir', 'skillsDir', 'pluginsDir']) expect(stateOf(key)).toBeNull();
+  });
+
+  it('says nothing about the folders when they could not be listed', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: null });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 1 branch/);
+    expect(stateOf('skillsDir')).toBeNull();
+  });
+
+  it('never blocks the save over a folder warning', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue(LISTED);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(stateOf('skillsDir')).toHaveTextContent(/differs only by case/));
+
+    const save = screen.getByRole('button', { name: 'Save and continue' });
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+  });
+
+  it('checks the folders on a save that proves the connection', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue(LISTED);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: false, settings: SETTINGS });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(stateOf('skillsDir')).toHaveTextContent(/the repository has skills/);
+    expect(stateOf('pluginsDir')).toHaveTextContent(/will be created/);
   });
 });
 

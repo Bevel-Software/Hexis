@@ -1,12 +1,40 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  DEFAULT_KB_LAYOUT,
+  branchModelFromEnv,
+  configureBranchModel,
+  configureKbLayout,
+  currentKbLayout,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
+
+/**
+ * test-setup configures the branch model from the environment, and nothing
+ * unconfigures it; a test that needs the first-run "no branch model yet" state
+ * says so here. Everything else is the real module.
+ */
+const branchModel = vi.hoisted(() => ({ pretendUnconfigured: false }));
+vi.mock('@bevel-software/platform-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@bevel-software/platform-shared')>();
+  return {
+    ...actual,
+    isBranchModelConfigured: () => !branchModel.pretendUnconfigured && actual.isBranchModelConfigured(),
+    // Applying a model configures it, as the real module does.
+    configureBranchModel: (model: Parameters<typeof actual.configureBranchModel>[0]) => {
+      actual.configureBranchModel(model);
+      branchModel.pretendUnconfigured = false;
+    },
+  };
+});
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { ConnectionCheck, RepositoryConnection } from '../connection-check.js';
+import type { RootFolderListing } from '../git-root-folders.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 
@@ -19,7 +47,16 @@ let server: HttpServer | null = null;
  * that runs later in the same worker would otherwise see a different
  * environment than the one it was written against.
  */
-const KB_ENV = ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME', 'GITHUB_TOKEN'] as const;
+const KB_ENV = [
+  'KB_REPO_URL',
+  'GIT_TOKEN',
+  'GIT_USERNAME',
+  'KB_DIR_NAME',
+  'GITHUB_TOKEN',
+  'KB_KNOWLEDGE_BASE_DIR',
+  'KB_SKILLS_DIR',
+  'KB_PLUGINS_DIR',
+] as const;
 let savedEnv: Partial<Record<(typeof KB_ENV)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -59,6 +96,7 @@ function listen(
   isAdmin = true,
   runAll: () => Promise<void> = async () => {},
   checkConnection?: (connection: RepositoryConnection) => Promise<ConnectionCheck>,
+  listFolders?: (listing: RootFolderListing) => Promise<string[] | null>,
 ) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
@@ -83,6 +121,7 @@ function listen(
       { runAll },
       undefined,
       checkConnection,
+      listFolders,
     ),
   );
   server = app.listen(0);
@@ -336,6 +375,146 @@ describe('POST /setup/settings — the completion transition and the KB startup 
 });
 
 /**
+ * The folder names are applied once at boot, so a first-run choice would be
+ * ignored by the phase — `Skills/` scaffolded beside the `skills/` the admin
+ * named — until a restart. The completing save applies them first, while the
+ * process still holds the defaults; after that they stay restart-to-apply.
+ */
+describe('POST /setup/settings — the folder names on the completing save', () => {
+  const completing = { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_x' };
+  afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
+
+  it('applies them before the phase runs, and asks for no restart over them', async () => {
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    }, connectedCheck().check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { ...completing, knowledgeBaseDir: 'Docs', skillsDir: 'skills' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.complete).toBe(true);
+    expect(body.restartRequired).toBe(false);
+    expect(seenByPhase).toEqual([{ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' }]);
+    expect(currentKbLayout()).toEqual({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+  });
+
+  it('applies names stored by an earlier, incomplete save', async () => {
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    }, connectedCheck().check);
+    await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
+    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+    await post(base, '/api/setup/settings', { settings: completing });
+    expect(seenByPhase[0]?.pluginsDir).toBe('plugins');
+  });
+
+  it('leaves them restart-to-apply once setup is complete', async () => {
+    const { base } = listen(true, undefined, connectedCheck().check);
+    await post(base, '/api/setup/settings', { settings: completing });
+    const res = await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).restartRequired).toBe(true);
+    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+  });
+
+  it('does not replace a layout the process already runs', async () => {
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    }, connectedCheck().check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { ...completing, skillsDir: 'capabilities' },
+    });
+    expect((await res.json()).restartRequired).toBe(true);
+    expect(seenByPhase[0]?.skillsDir).toBe('skills');
+  });
+
+  it('applies names corrected between a failed run and its retry', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const seenByPhase: KbLayout[] = [];
+      let fail = true;
+      const { base } = listen(true, async () => {
+        seenByPhase.push(currentKbLayout());
+        if (fail) throw new Error('remote said no');
+      }, connectedCheck().check);
+      const first = await post(base, '/api/setup/settings', {
+        settings: { ...completing, skillsDir: 'skills' },
+      });
+      expect(first.status).toBe(500);
+      // The gate never opened, so the retry initializes what is saved NOW.
+      fail = false;
+      const retry = await post(base, '/api/setup/settings', { settings: { skillsDir: 'capabilities' } });
+      expect(retry.status).toBe(200);
+      const body = await retry.json();
+      expect(body.complete).toBe(true);
+      expect(body.restartRequired).toBe(false);
+      expect(seenByPhase.map((l) => l.skillsDir)).toEqual(['skills', 'capabilities']);
+      expect(currentKbLayout().skillsDir).toBe('capabilities');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  /**
+   * The vitest config pins the branch pair in the environment, which makes the
+   * settings env-sourced and so refused by a save; these tests store their own.
+   */
+  async function withoutBranchEnv(test: () => Promise<void>) {
+    const saved = { DEFAULT_BRANCH: process.env.DEFAULT_BRANCH, PROTECTED_BRANCHES: process.env.PROTECTED_BRANCHES };
+    delete process.env.DEFAULT_BRANCH;
+    delete process.env.PROTECTED_BRANCHES;
+    try {
+      await test();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      // Whatever the test applied, the rest of the worker runs on the pinned model.
+      configureBranchModel(branchModelFromEnv());
+    }
+  }
+
+  it('asks for no restart over a branch model the completing save also applied', () =>
+    withoutBranchEnv(async () => {
+    branchModel.pretendUnconfigured = true;
+    try {
+      const { base } = listen(true, undefined, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', {
+        settings: {
+          ...completing,
+          skillsDir: 'skills',
+          defaultBranch: 'production',
+          protectedBranches: 'production,staging',
+        },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.complete).toBe(true);
+      expect(body.restartRequired).toBe(false);
+    } finally {
+      branchModel.pretendUnconfigured = false;
+    }
+    }));
+
+  it('still asks for a restart over a branch change once a branch model is in effect', () =>
+    withoutBranchEnv(async () => {
+      const { base } = listen(true, undefined, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', {
+        settings: { ...completing, defaultBranch: 'production', protectedBranches: 'production,staging' },
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).restartRequired).toBe(true);
+    }));
+});
+
+/**
  * A saved connection is one the host has accepted for reading AND writing. The
  * save runs the same check as Test connection, on the values it would put in
  * effect, and a failure stores nothing and says which field to fix.
@@ -496,6 +675,87 @@ describe('POST /setup/settings — the connection is checked before it is stored
       kbRepoUrl: 'Remove the username and token from the URL — enter the token in its own field.',
     });
     expect(settings.resolve('gitToken')).toBe('');
+  });
+});
+
+/**
+ * Test connection reports the repository's top-level folders beside the
+ * branches: listed from the branch the remote calls its trunk, `[]` for an
+ * empty repository without a lookup, and `null` when the listing could not be
+ * read — which never turns a proven connection into a failure.
+ */
+describe('POST /setup/test-connection — the root folders it reports', () => {
+  const REPO = 'https://example.com/acme/kb.git';
+  const answering = (check: ConnectionCheck, folders: string[] | null) => {
+    const listed: RootFolderListing[] = [];
+    return {
+      listed,
+      check: async () => check,
+      list: async (listing: RootFolderListing) => {
+        listed.push(listing);
+        return folders;
+      },
+    };
+  };
+
+  it('lists the folders of the branch the remote calls its trunk', async () => {
+    const remote = answering(
+      { outcome: 'connected', branches: ['main', 'production'], defaultBranch: 'production', empty: false },
+      ['Docs', 'skills'],
+    );
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const res = await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' });
+    expect(await res.json()).toEqual({
+      ok: true,
+      outcome: 'connected',
+      empty: false,
+      branches: ['main', 'production'],
+      defaultBranch: 'production',
+      rootFolders: ['Docs', 'skills'],
+    });
+    expect(remote.listed).toEqual([
+      { url: REPO, branch: 'production', username: 'x-access-token', token: 'ghp_x' },
+    ]);
+  });
+
+  it('answers an empty list for an empty repository, without looking', async () => {
+    const remote = answering({ outcome: 'connected', branches: [], defaultBranch: null, empty: true }, ['x']);
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const res = await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' });
+    expect((await res.json()).rootFolders).toEqual([]);
+    expect(remote.listed).toEqual([]);
+  });
+
+  it('still lists for a token that reads but cannot write', async () => {
+    const remote = answering(
+      { outcome: 'read-only', field: 'gitToken', error: 'Grant it write access.', branches: ['main'], defaultBranch: 'main', empty: false },
+      ['skills'],
+    );
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const body = await (await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' })).json();
+    expect(body.ok).toBe(false);
+    expect(body.outcome).toBe('read-only');
+    expect(body.rootFolders).toEqual(['skills']);
+  });
+
+  it('reports null when the listing fails, and the connection still stands', async () => {
+    const remote = answering({ outcome: 'connected', branches: ['main'], defaultBranch: 'main', empty: false }, null);
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const body = await (await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' })).json();
+    expect(body.ok).toBe(true);
+    expect(body.rootFolders).toBeNull();
+  });
+
+  it('lists nothing for a rejected connection', async () => {
+    const remote = answering(
+      { outcome: 'rejected', reason: 'credentials', field: 'gitToken', error: 'The host rejected those credentials.' },
+      ['x'],
+    );
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const body = await (await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' })).json();
+    expect(body.ok).toBe(false);
+    expect(body).not.toHaveProperty('rootFolders');
+    expect(remote.listed).toEqual([]);
   });
 });
 
