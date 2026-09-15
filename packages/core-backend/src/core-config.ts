@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
+import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -226,6 +227,17 @@ export class CoreConfig {
    */
   readonly trustProxy: string;
   /**
+   * Deadline in milliseconds on every git command, after which the child is
+   * killed and the call fails (see `modules/workflow/git/node-git-runner.ts`).
+   *
+   * Configurable because the right ceiling depends on the deployment's own git
+   * host and the size of its knowledge base: a first clone over a slow link can
+   * legitimately take minutes, and a deadline that cuts it off turns a working
+   * deployment into a broken one. Without a knob the remedy for a false timeout
+   * would be a release.
+   */
+  readonly gitTimeoutMs: number;
+  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
    * Defaults to `https://<DOMAIN>` when `DOMAIN` is set.
@@ -369,6 +381,12 @@ export class CoreConfig {
     // stays expressible.
     const domain = (process.env.DOMAIN || '').trim();
     this.trustProxy = (process.env.TRUST_PROXY || (domain ? '1' : '')).trim();
+    // A non-numeric or non-positive value is a misconfiguration whose effect
+    // would be "no deadline at all", so it falls back to the default rather
+    // than being honoured.
+    const gitTimeout = Number(process.env.GIT_TIMEOUT_MS);
+    this.gitTimeoutMs =
+      Number.isFinite(gitTimeout) && gitTimeout > 0 ? gitTimeout : DEFAULT_GIT_TIMEOUT_MS;
     this.publicBackendUrl = (
       process.env.PUBLIC_BACKEND_URL ||
       (domain ? `https://${domain}` : `http://localhost:${this.port}`)

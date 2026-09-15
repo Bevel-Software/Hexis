@@ -81,6 +81,7 @@ import {
 } from '../modules/secrets-vault/index.js';
 import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
+import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
 import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import { assertGitVersion } from '../modules/workflow/git/git-version.js';
@@ -441,12 +442,18 @@ export async function createCoreServices(
   // this function returns. Core registers none: no commit-time validation
   // (advisory anyway) and no ontology write block.
   const workflowHooks = new WorkflowHooks();
+  // How git is run, for every module that runs it: one environment, one buffer
+  // ceiling, one error shape, and — the reason it exists — one deadline, so a
+  // git that never returns cannot hold a workspace (and with it the commit
+  // queue) open indefinitely. See `shared/git.contract.ts`.
+  const gitRunner = new NodeGitRunner(config.gitTimeoutMs);
   const gitService = new GitService(
     workspaceService,
     workflowHooks,
     kbDirName,
     workspaceMutex,
     accessControl,
+    gitRunner,
   );
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.

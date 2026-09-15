@@ -1,7 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   AuthUser,
   BranchInfo,
@@ -37,18 +35,14 @@ import {
   RemoteBranchGoneError,
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
+import {
+  redactGitToken,
+  type GitRunOptions,
+  type GitRunResult,
+  type IGitRunner,
+} from '../../../shared/git.contract.js';
+import { NodeGitRunner } from './node-git-runner.js';
 
-const execFileAsync = promisify(execFile);
-
-interface GitRunResult {
-  stdout: string;
-  stderr: string;
-}
-
-function redact(msg: string): string {
-  const token = process.env.GITHUB_TOKEN;
-  return token ? msg.replaceAll(token, '***') : msg;
-}
 
 /**
  * Fallback committer identity. Every workflow commit overrides the author via
@@ -295,6 +289,14 @@ export class GitService implements IGitService {
     private readonly kbDirName: string,
     private readonly mutex: WorkspaceMutex = new WorkspaceMutex(),
     private readonly accessControl: IAccessControl | null = null,
+    /**
+     * How git is actually run — see `shared/git.contract.ts`. The composition
+     * root passes the one runner, carrying the deployment's configured
+     * deadline; the default here is the same runner on its default deadline,
+     * so a directly constructed service (every suite in this module) still has
+     * one rather than none.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {}
 
   /**
@@ -1408,7 +1410,7 @@ export class GitService implements IGitService {
           // Not a conflict — surface the underlying git error so the real cause
           // (e.g. missing identity, unrelated histories) is diagnosable.
           throw new Error(
-            `git merge failed without detectable conflicts: ${redact(
+            `git merge failed without detectable conflicts: ${redactGitToken(
               err instanceof Error ? err.message : String(err),
             )}`,
           );
@@ -2755,69 +2757,18 @@ export class GitService implements IGitService {
     return stdout.trim().length > 0;
   }
 
-  private async git(
-    cwd: string,
-    args: string[],
-    opts?: {
-      /**
-       * Bytes to feed the subprocess on stdin — used by the
-       * `--pathspec-from-file=-` commit/add paths so a several-hundred-file
-       * batch never has to ride the argv (Windows caps a command line at
-       * ~32K chars).
-       */
-      input?: string;
-    },
-  ): Promise<GitRunResult> {
-    try {
-      const pending = execFileAsync('git', args, {
-        cwd,
-        // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
-        // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as
-        // glob / magic syntax. KB files routinely arrive with bracketed
-        // prefixes like `[Approved] foo.docx` or `[Updated 2025] bar.md`; the
-        // upload pipeline (`writeFileBinary` + `releaseLock` + `commitFile`)
-        // passes the relative path straight through to `git add` / `git
-        // checkout -- <path>`, which would otherwise glob and either match the
-        // wrong file or no file at all. Setting it once here covers every git
-        // subprocess this service spawns.
-        //
-        // `LC_ALL=C` / `LANG=C` force git's human-readable output (including
-        // stderr) to stable, English, locale-independent text. Callers that
-        // classify errors by message — e.g. `readFileAtRef` distinguishing a
-        // "path does not exist in <ref>" absence from a hard failure — would
-        // otherwise misread a translated message on a non-English host and, for
-        // the fail-closed roles.yaml preservation path, fail OPEN.
-        env: { ...process.env, GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C', LANG: 'C' },
-        maxBuffer: 32 * 1024 * 1024,
-      });
-      if (opts?.input !== undefined && pending.child.stdin) {
-        // A dying git can close stdin mid-write; the promise below still
-        // rejects with the exit code, which is the error we want to surface.
-        pending.child.stdin.on('error', () => undefined);
-        pending.child.stdin.write(opts.input);
-        pending.child.stdin.end();
-      }
-      const { stdout, stderr } = await pending;
-      return { stdout: stdout.toString(), stderr: stderr.toString() };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Skip past any leading `-c key=val` pairs so the error names the actual
-      // git subcommand that failed (e.g. "git fetch failed:" not "git -c failed:").
-      let i = 0;
-      while (i < args.length && args[i] === '-c') i += 2;
-      const subcommand = args[i] ?? args[0];
-      const wrapped = new Error(`git ${subcommand} failed: ${redact(msg)}`) as Error & {
-        exitCode?: number;
-        stderr?: string;
-      };
-      // Preserve the underlying exit code / stderr so callers can distinguish
-      // expected non-zero exits (e.g. merge-base exit 1 = no common ancestor)
-      // from infra failures (ENOENT, exit 128) without parsing message strings.
-      const original = err as { code?: unknown; stderr?: unknown };
-      if (typeof original.code === 'number') wrapped.exitCode = original.code;
-      if (typeof original.stderr === 'string') wrapped.stderr = redact(original.stderr);
-      throw wrapped;
-    }
+  /**
+   * Every git invocation this service makes goes through here, and from here
+   * through the injected runner — which is what puts a deadline on it. The
+   * environment, the buffer ceiling, the stdin handling and the error shape all
+   * live in `NodeGitRunner` now; see `shared/git.contract.ts` for why.
+   *
+   * Errors arrive as `GitRunError`, which still carries `exitCode` and
+   * `stderr`, so the callers that read those to tell an expected non-zero exit
+   * from a real failure are unaffected.
+   */
+  private git(cwd: string, args: string[], opts?: GitRunOptions): Promise<GitRunResult> {
+    return this.gitRunner.run(cwd, args, opts);
   }
 }
 
