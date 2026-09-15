@@ -1,17 +1,15 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
-
-const execFileAsync = promisify(execFile);
+import type { IGitRunner } from '../../../shared/git.contract.js';
 
 /**
  * The startup phase's own git plumbing — the runner owns every remote and
  * repository operation of the phase (steps only declare buffered ops), so
- * this is deliberately small and self-contained rather than borrowed from
- * the runtime workspace service.
+ * this is deliberately small: the credential and clone-config arguments the
+ * phase needs on every call, over the one git port the rest of the backend
+ * runs through (`shared/git.contract.ts`).
  */
 
 /** Fallback committer identity; workflow commits override with `--author`. */
@@ -19,16 +17,13 @@ export const BOT_NAME = 'Bevel Workflow';
 export const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
 /**
- * Scrub credentials from anything that reaches a log or an error message:
- * the configured token wherever it appears, and URL userinfo — a remote
- * spelled `https://user:pass@host` would otherwise leak `pass` verbatim
- * through every git failure that quotes the URL back.
+ * A stalled remote must FAIL the phase, not hang the boot forever —
+ * fail-closed (and KB_SAFE_BOOT's demotion) can only engage on an error that
+ * actually arrives. Ten minutes is generous for the largest clone, and far
+ * past the port's default, which is sized for a running deployment's
+ * operations rather than a first clone.
  */
-export function redactSecret(text: string): string {
-  const token = process.env.GITHUB_TOKEN;
-  const scrubbed = token ? text.replaceAll(token, '***') : text;
-  return scrubbed.replace(/:\/\/[^/@\s]+@/g, '://***@');
-}
+const STARTUP_GIT_TIMEOUT_MS = 600_000;
 
 /**
  * Per-invocation `-c` config. Long paths always (Windows checkouts of deep
@@ -57,37 +52,29 @@ function withPersistedCloneConfig(gitUsername: string, args: string[]): string[]
   return [args[0], ...cloneCredentialArgs(gitUsername), ...args.slice(1)];
 }
 
-export async function git(cwd: string, gitUsername: string, args: string[]): Promise<string> {
-  try {
-    const argv = [...credArgs(gitUsername), ...withPersistedCloneConfig(gitUsername, args)];
-    const { stdout } = await execFileAsync('git', argv, {
-      cwd,
-      // A stalled remote must FAIL the phase, not hang the boot forever —
-      // fail-closed (and KB_SAFE_BOOT's demotion) can only engage on an error
-      // that actually arrives. 10 minutes is generous for the largest clone.
-      timeout: 600_000,
-      // The 1MiB default truncates `ls-remote --heads` on remotes with very
-      // many branches, which would silently drop heads from the phase's view.
-      maxBuffer: 64 * 1024 * 1024,
-      // A credential prompt must fail the phase, not hang the boot forever
-      // waiting on a terminal nobody is watching.
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    });
-    return stdout.toString();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(redactSecret(`git ${args[0]} failed: ${msg}`));
-  }
+export async function git(
+  runner: IGitRunner,
+  cwd: string,
+  gitUsername: string,
+  args: string[],
+): Promise<string> {
+  const argv = [...credArgs(gitUsername), ...withPersistedCloneConfig(gitUsername, args)];
+  const { stdout } = await runner.run(cwd, argv, { timeoutMs: STARTUP_GIT_TIMEOUT_MS });
+  return stdout;
 }
 
-export async function stampIdentity(repo: string, gitUsername: string): Promise<void> {
-  await git(repo, gitUsername, ['config', 'user.name', BOT_NAME]);
-  await git(repo, gitUsername, ['config', 'user.email', BOT_EMAIL]);
+export async function stampIdentity(runner: IGitRunner, repo: string, gitUsername: string): Promise<void> {
+  await git(runner, repo, gitUsername, ['config', 'user.name', BOT_NAME]);
+  await git(runner, repo, gitUsername, ['config', 'user.email', BOT_EMAIL]);
 }
 
 /** Branch names present on the remote, from `ls-remote --heads`. */
-export async function lsRemoteHeads(repoUrl: string, gitUsername: string): Promise<Set<string>> {
-  const out = await git(os.tmpdir(), gitUsername, ['ls-remote', '--heads', repoUrl]);
+export async function lsRemoteHeads(
+  runner: IGitRunner,
+  repoUrl: string,
+  gitUsername: string,
+): Promise<Set<string>> {
+  const out = await git(runner, os.tmpdir(), gitUsername, ['ls-remote', '--heads', repoUrl]);
   const heads = new Set<string>();
   for (const line of out.split('\n')) {
     const m = /\srefs\/heads\/(.+)$/.exec(line.trim());

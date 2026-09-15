@@ -54,12 +54,20 @@
  */
 export function redactGitToken(text: string): string {
   const token = process.env.GITHUB_TOKEN;
-  return token ? text.replaceAll(token, '***') : text;
+  const scrubbed = token ? text.replaceAll(token, '***') : text;
+  // URL userinfo as well: a remote spelled `https://user:pass@host` would
+  // otherwise leak `pass` verbatim through every git failure that quotes the
+  // URL back, whatever the token setting.
+  return scrubbed.replace(/:\/\/[^/@\s]+@/g, '://***@');
 }
 
-/** What a completed git invocation produced. Both streams are decoded text. */
-export interface GitRunResult {
-  stdout: string;
+/**
+ * What a completed git invocation produced. `stdout` is decoded text unless
+ * the call asked for bytes (see {@link GitRunOptions.encoding}); `stderr` is
+ * always text, since its only use is a message.
+ */
+export interface GitRunResult<TOut = string> {
+  stdout: TOut;
   stderr: string;
 }
 
@@ -68,7 +76,7 @@ export interface GitRunOptions {
    * Bytes to feed the subprocess on stdin — used by the
    * `--pathspec-from-file=-` commit/add paths so that a several-hundred-file
    * batch never has to ride the argv (Windows caps a command line at ~32K
-   * characters).
+   * characters), and by `cat-file --batch` to name the objects it wants.
    */
   input?: string;
   /**
@@ -78,6 +86,23 @@ export interface GitRunOptions {
    * accommodate it.
    */
   timeoutMs?: number;
+  /**
+   * Environment entries laid over the runner's own for this one call. For the
+   * variables git reads as INPUT to a specific command — `GIT_DIR`,
+   * `GIT_INDEX_FILE` and `GIT_WORK_TREE` pointing a plumbing command at a
+   * scratch index, `GIT_AUTHOR_*` naming a committer, a helper-read credential
+   * — never for the settings that make every invocation safe, which the
+   * runner sets and a caller cannot unset.
+   */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * `'buffer'` returns stdout as raw bytes. For output whose framing is in
+   * BYTES rather than characters: `cat-file --batch` announces each object as
+   * `<oid> <type> <size>` and follows it with exactly `size` bytes, and a
+   * decoded string cannot be walked by that count once the content is not
+   * ASCII. Default `'utf8'`.
+   */
+  encoding?: 'utf8' | 'buffer';
 }
 
 /**
@@ -129,5 +154,6 @@ export function isGitTimeout(err: unknown): boolean {
  * failure, the deadline included.
  */
 export interface IGitRunner {
-  run(cwd: string, args: string[], opts?: GitRunOptions): Promise<GitRunResult>;
+  run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
+  run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
 }

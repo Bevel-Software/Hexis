@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createSetupRoutes } from '../setup.routes.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -62,6 +63,7 @@ function listen(isAdmin = true, runAll: () => Promise<void> = async () => {}) {
       // Default no-op: most suites never complete setup, so the runner is
       // never reached. The completion-transition suite passes its own spy.
       { runAll },
+      new NodeGitRunner(),
     ),
   );
   server = app.listen(0);

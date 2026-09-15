@@ -9,6 +9,7 @@ import express from 'express';
 import type { AuthUser } from '@bevel-software/platform-shared';
 
 import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace-repo.service.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import {
   GitHubFacadeCredentialsService,
   GitHubFacade,
@@ -179,7 +180,7 @@ describe('the GitHub facade', () => {
       credentials: new MemoryGitHubFacadeCredentialsStore(),
       codes: new MemoryGitHubFacadeCodeStore(),
       keys: makeKeys(),
-      repo: new MarketplaceRepoService(path.join(root, 'marketplace.git'), compiler),
+      repo: new MarketplaceRepoService(path.join(root, 'marketplace.git'), compiler, new NodeGitRunner()),
       admins: new Set(['alice@x.io']),
     };
     a = await replica(shared);

@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { KbStartupRunner } from '../../kb-startup-runner.js';
+import { NodeGitRunner } from '../../../../workflow/git/node-git-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
 import { PluginManifestsStep } from '../plugin-manifests.step.js';
@@ -83,6 +84,7 @@ async function seedUpstream(files: Record<string, string>): Promise<string> {
 
 function makeRunner(steps: OnServerStart[], templateDir: string = TEMPLATE_DIR) {
   return new KbStartupRunner({
+    gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
     gitUsername: () => 'x-access-token',
     workspacesRoot,

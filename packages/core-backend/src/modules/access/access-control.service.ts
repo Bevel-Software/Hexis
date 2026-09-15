@@ -1,10 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
+import type { IGitRunner } from '../../shared/git.contract.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -51,8 +51,6 @@ import {
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
 
-const execFileAsync = promisify(execFile);
-
 /**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
@@ -61,55 +59,39 @@ const execFileAsync = promisify(execFile);
  * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
  * (the spec may itself contain spaces, hence the endsWith checks).
  */
-function catFileBatch(repoDir: string, specs: string[]): Promise<(string | null)[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', repoDir, 'cat-file', '--batch'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    child.stdout.on('data', (c: Buffer) => chunks.push(c));
-    child.stderr.on('data', (c: Buffer) => errChunks.push(c));
-    // A dying git can close stdin mid-write; the 'close' handler below still
-    // fires with the exit code, which is the error we want to surface.
-    child.stdin.on('error', () => undefined);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git cat-file --batch exited ${code}: ${Buffer.concat(errChunks).toString('utf-8').trim()}`));
-        return;
-      }
-      try {
-        const out = Buffer.concat(chunks);
-        const results: (string | null)[] = [];
-        let off = 0;
-        for (let i = 0; i < specs.length; i++) {
-          const nl = out.indexOf(0x0a, off);
-          if (nl < 0) throw new Error('unexpected end of git cat-file output');
-          const header = out.subarray(off, nl).toString('utf-8');
-          off = nl + 1;
-          if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-            results.push(null);
-            continue;
-          }
-          const parts = header.split(' ');
-          const size = Number(parts[2]);
-          if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
-            throw new Error(`unexpected git cat-file header: ${header}`);
-          }
-          // Non-blob (a directory path resolves to a tree) → null, but the
-          // payload still has to be skipped to stay aligned.
-          results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
-          off += size + 1; // payload + trailing LF
-        }
-        resolve(results);
-      } catch (err) {
-        reject(err);
-      }
-    });
-    child.stdin.write(`${specs.join('\n')}\n`);
-    child.stdin.end();
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  // Bytes, not text: every `<size>` in the header counts bytes, and the walk
+  // below has to step by that count through content that is not all ASCII.
+  const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
+    input: `${specs.join('\n')}\n`,
+    encoding: 'buffer',
   });
+  const results: (string | null)[] = [];
+  let off = 0;
+  for (let i = 0; i < specs.length; i++) {
+    const nl = out.indexOf(0x0a, off);
+    if (nl < 0) throw new Error('unexpected end of git cat-file output');
+    const header = out.subarray(off, nl).toString('utf-8');
+    off = nl + 1;
+    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
+      results.push(null);
+      continue;
+    }
+    const parts = header.split(' ');
+    const size = Number(parts[2]);
+    if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
+      throw new Error(`unexpected git cat-file header: ${header}`);
+    }
+    // Non-blob (a directory path resolves to a tree) → null, but the
+    // payload still has to be skipped to stay aligned.
+    results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
+    off += size + 1; // payload + trailing LF
+  }
+  return results;
 }
 
 /** Mirrors `shared/hash-email.ts`. Duplicated to avoid a cross-cutting import. */
@@ -1030,6 +1012,13 @@ export class AccessControlService implements IAccessControl {
      * current behaviour (no owner, roles.yaml is the only authority).
      */
     deploymentOwners: readonly string[] = [],
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner; the default is the same runner on its default
+     * deadline, kept for the same reason as `deploymentOwners` above: a great
+     * many fixtures construct this service directly.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1780,7 +1769,7 @@ export class AccessControlService implements IAccessControl {
       else if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
-    const texts = await catFileBatch(repoDir, wanted.map((p) => `${ref}:${p}`));
+    const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
       if (text === null) result.set(p, null);
@@ -1824,15 +1813,7 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<{ kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'error' }> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'show', `${ref}:${relativePath}`],
-        {
-          encoding: 'utf-8',
-          maxBuffer: 16 * 1024 * 1024,
-          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-        },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['show', `${ref}:${relativePath}`]);
       return { kind: 'text', text: stdout };
     } catch (err) {
       const stderr =
@@ -1857,11 +1838,7 @@ export class AccessControlService implements IAccessControl {
     ref: string,
   ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'ls-tree', '-r', '--name-only', ref],
-        { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
       for (const line of stdout.split('\n')) {
@@ -1944,11 +1921,12 @@ export class AccessControlService implements IAccessControl {
   private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
     if (!ref || ref.startsWith('-')) return null;
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
-        { encoding: 'utf-8' },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `${ref}^{commit}`,
+      ]);
       const sha = stdout.trim();
       return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
     } catch {

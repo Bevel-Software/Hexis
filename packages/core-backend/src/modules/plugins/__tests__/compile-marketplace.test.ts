@@ -12,6 +12,7 @@ import { SkillService } from '../../skills/skills.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 
 /**
  * Source in, distribution out — for one caller. The real resolver decides
@@ -98,6 +99,7 @@ describe('compileMarketplace', () => {
       },
       source,
       disk,
+      new NodeGitRunner(),
     );
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));

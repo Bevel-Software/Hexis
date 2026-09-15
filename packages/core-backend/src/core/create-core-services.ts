@@ -25,6 +25,7 @@ import { DeploymentSettingsService } from '../modules/settings/deployment-settin
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
+import type { IGitRunner } from '../shared/git.contract.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -151,6 +152,12 @@ export interface CoreServices {
    * than carrying a `readdir` loop or an errno check of their own.
    */
   disk: ITreeWalker & IFsProbe;
+  /**
+   * Running git — the one runner every module shells out through, carrying
+   * the deployment's deadline. Exposed like `disk` so an overlay's own git
+   * callers run under the same ceiling rather than spawning their own.
+   */
+  gitRunner: IGitRunner;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -321,6 +328,11 @@ export async function createCoreServices(
   const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
   // The disk: one walk, one probe, for every reader below.
   const disk = new NodeFs();
+  // How git is run, for every module that runs it: one environment, one buffer
+  // ceiling, one error shape, and — the reason it exists — one deadline, so a
+  // git that never returns cannot hold a workspace (and with it the commit
+  // queue) open indefinitely. See `shared/git.contract.ts`.
+  const gitRunner = new NodeGitRunner(config.gitTimeoutMs);
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => settings.resolve('kbRepoUrl'),
@@ -362,6 +374,7 @@ export async function createCoreServices(
     seedAdminEmails: [config.adminEmail],
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail]),
+    gitRunner,
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
@@ -375,9 +388,13 @@ export async function createCoreServices(
   // gate cannot disagree about who the owner is. They did: the owner could
   // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
-  const accessControl = new AccessControlService(workspaceService, kbDirName, disk, [
-    config.adminEmail,
-  ]);
+  const accessControl = new AccessControlService(
+    workspaceService,
+    kbDirName,
+    disk,
+    [config.adminEmail],
+    gitRunner,
+  );
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
@@ -442,11 +459,6 @@ export async function createCoreServices(
   // this function returns. Core registers none: no commit-time validation
   // (advisory anyway) and no ontology write block.
   const workflowHooks = new WorkflowHooks();
-  // How git is run, for every module that runs it: one environment, one buffer
-  // ceiling, one error shape, and — the reason it exists — one deadline, so a
-  // git that never returns cannot hold a workspace (and with it the commit
-  // queue) open indefinitely. See `shared/git.contract.ts`.
-  const gitRunner = new NodeGitRunner(config.gitTimeoutMs);
   const gitService = new GitService(
     workspaceService,
     workflowHooks,
@@ -587,12 +599,14 @@ export async function createCoreServices(
     },
     pluginSource,
     disk,
+    gitRunner,
   );
   // Sibling of the workspaces root, like the spill store: one bare repo, one
   // git namespace per caller (see marketplace-repo.service.ts).
   const marketplaceRepo = new MarketplaceRepoService(
     path.resolve(config.workspacesRoot, '..', 'marketplace.git'),
     marketplaceCompiler,
+    gitRunner,
   );
 
   // Remote sync. Drives the workflow module's per-branch pull-and-announce
@@ -963,6 +977,7 @@ export async function createCoreServices(
   return {
     config,
     db,
+    gitRunner,
     disk,
     mcpServerEditService,
     workspaceService,

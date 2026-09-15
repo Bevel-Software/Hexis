@@ -1,7 +1,6 @@
 import express from 'express';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
+import type { IGitRunner } from '../../shared/git.contract.js';
 import {
   DeploymentSettingsService,
   SettingsValidationError,
@@ -13,8 +12,6 @@ import {
   validateBranchModel,
 } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation
-
-const execFileAsync = promisify(execFile);
 
 /**
  * The slice of a sync record the status endpoint publishes. Declared here
@@ -49,6 +46,8 @@ export function createSetupRoutes(
    * would race.
    */
   kbStartupRunner: { runAll(): Promise<void> },
+  /** How git is run, for the connection test — see `shared/git.contract.ts`. */
+  gitRunner: IGitRunner,
   /**
    * The remote-sync facts the Deployment page shows beside the sync secret:
    * the address a webhook or pipeline must call, and what the last call did.
@@ -333,16 +332,14 @@ export function createSetupRoutes(
         // `--end-of-options` on top of the validation above: belt and braces,
         // so nothing that arrives here can ever be read as a flag.
         'ls-remote', '--heads', '--end-of-options', url];
-      const { stdout } = await execFileAsync('git', args, {
-        timeout: 20_000,
-        env: {
-          ...process.env,
-          BEVEL_TEST_TOKEN: token,
-          // Never let git stop for a prompt: without this a bad credential
-          // hangs the request until the timeout instead of failing.
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_ASKPASS: 'echo',
-        },
+      // A short deadline of its own: this is an interactive check behind a
+      // form, and an admin waiting on a wrong URL should hear so in seconds,
+      // not after the port's default. The runner already refuses to let git
+      // stop for a terminal prompt; `GIT_ASKPASS=echo` closes the other prompt
+      // path, so a bad credential fails at once instead of waiting.
+      const { stdout } = await gitRunner.run(process.cwd(), args, {
+        timeoutMs: 20_000,
+        env: { BEVEL_TEST_TOKEN: token, GIT_ASKPASS: 'echo' },
       });
       const lines = stdout.split('\n');
       // `<sha>\trefs/heads/<name>` — tag refs and the bare HEAD row are not

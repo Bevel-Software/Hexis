@@ -1,12 +1,10 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
 import type { VirtualTree } from '../plugins/compile/compile-marketplace.js';
-
-const execFileAsync = promisify(execFile);
+import type { IGitRunner } from '../../shared/git.contract.js';
 
 /** What the repo service asks the compiler for — the one seam it has. */
 export interface MarketplaceCompiler {
@@ -59,6 +57,8 @@ export class MarketplaceRepoService {
     /** Absolute path of the bare repository (created on first use). */
     readonly repoDir: string,
     private readonly compiler: MarketplaceCompiler,
+    /** How git is run — see `shared/git.contract.ts`. */
+    private readonly gitRunner: IGitRunner,
     private readonly committer: { name: string; email: string } = {
       name: 'Hexis',
       email: 'hexis@localhost',
@@ -314,14 +314,22 @@ export class MarketplaceRepoService {
     await fs.writeFile(path.join(this.sidecarDir(), `${namespace}.json`), sourceCommit);
   }
 
+  /**
+   * Every command names the bare repository with `-C`, so the working
+   * directory only has to be somewhere that EXISTS: the process's own, as
+   * before. Not the repository — the first command ever run here is the `init`
+   * that creates it, and a spawn into a directory that is not there fails as
+   * `ENOENT` on git itself, which reads as git being missing. The plumbing
+   * that reads a scratch checkout passes its own `cwd`.
+   */
   private git(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
-    return execFileAsync('git', args, { cwd: opts.cwd, env: opts.env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
+    return this.gitRunner.run(opts.cwd ?? process.cwd(), args, { env: opts.env });
   }
 }
 
-/** The exit code an execFile failure carries, or null when the process never ran. */
+/** The exit code a git failure carries, or null when the process never ran. */
 function exitCodeOf(err: unknown): number | null {
-  const code = (err as { code?: unknown } | null)?.code;
+  const code = (err as { exitCode?: unknown } | null)?.exitCode;
   return typeof code === 'number' ? code : null;
 }
 

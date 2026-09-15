@@ -586,7 +586,7 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, {
+    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, core.gitRunner, {
       // Same address family as the MCP endpoint above, userinfo stripped for
       // the same reason: this string is handed to admins to paste elsewhere.
       url: syncUrl.toString(),

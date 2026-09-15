@@ -35,8 +35,39 @@ export const DEFAULT_GIT_TIMEOUT_MS = 120_000;
  */
 const KILL_GRACE_MS = 5_000;
 
-/** Bytes of stdout one invocation may produce before it is cut off. */
-const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+/**
+ * Bytes of stdout one invocation may produce before it is cut off. The
+ * largest any converted site asked for: `ls-remote --heads` on a remote with
+ * very many branches, and `ls-tree -r` over a large tree, both silently lose
+ * lines at a smaller ceiling.
+ */
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The environment every invocation runs under, laid OVER whatever the caller
+ * supplied so that none of it can be unset per call. Only what is safe for
+ * EVERY caller belongs here. `GIT_LITERAL_PATHSPECS` does not: it is the
+ * workflow service's answer to raw user paths, and the startup runner spells
+ * its literal paths with `:(literal)` magic, which that setting would disable
+ * — so each of them sets its own, per call.
+ *
+ * `LC_ALL=C` / `LANG=C` force git's human-readable output (including stderr)
+ * to stable, English, locale-independent text. Callers that classify errors by
+ * message — `readFileAtRef` distinguishing a "path does not exist in <ref>"
+ * absence from a hard failure — would otherwise misread a translated message
+ * on a non-English host and, for the fail-closed roles.yaml preservation path,
+ * fail OPEN.
+ *
+ * `GIT_TERMINAL_PROMPT=0` makes a credential prompt fail instead of wait. A
+ * server process has no terminal for git to ask at; before the deadline
+ * existed a prompt hung the call forever, and with it a prompt still burns the
+ * whole deadline to learn what an immediate refusal says at once.
+ */
+const FIXED_ENV = {
+  LC_ALL: 'C',
+  LANG: 'C',
+  GIT_TERMINAL_PROMPT: '0',
+} as const;
 
 /**
  * Stop a git command and everything it spawned.
@@ -89,39 +120,38 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
 export class NodeGitRunner implements IGitRunner {
   constructor(private readonly defaultTimeoutMs: number = DEFAULT_GIT_TIMEOUT_MS) {}
 
-  async run(cwd: string, args: string[], opts: GitRunOptions = {}): Promise<GitRunResult> {
+  run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
+  run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
+  async run(cwd: string, args: string[], opts: GitRunOptions = {}): Promise<GitRunResult<string | Buffer>> {
     const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
     const timers: NodeJS.Timeout[] = [];
     let timedOut = false;
 
     try {
-      const pending = execFileAsync('git', args, {
+      const spawnOptions = {
         cwd,
-        // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
-        // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as
-        // glob / magic syntax. KB files routinely arrive with bracketed
-        // prefixes like `[Approved] foo.docx` or `[Updated 2025] bar.md`; the
-        // upload pipeline (`writeFileBinary` + `releaseLock` + `commitFile`)
-        // passes the relative path straight through to `git add` / `git
-        // checkout -- <path>`, which would otherwise glob and either match the
-        // wrong file or no file at all.
-        //
-        // `LC_ALL=C` / `LANG=C` force git's human-readable output (including
-        // stderr) to stable, English, locale-independent text. Callers that
-        // classify errors by message — e.g. `readFileAtRef` distinguishing a
-        // "path does not exist in <ref>" absence from a hard failure — would
-        // otherwise misread a translated message on a non-English host and, for
-        // the fail-closed roles.yaml preservation path, fail OPEN.
-        env: { ...process.env, GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C', LANG: 'C' },
+        env: { ...process.env, ...opts.env, ...FIXED_ENV },
         maxBuffer: MAX_OUTPUT_BYTES,
         // Makes the child a process-group leader so that `killTree` can signal
         // the transport helpers it spawns, not just git itself. Not on Windows,
         // where `detached` means "new console window" rather than "new process
         // group", and where `taskkill /T` walks the tree without it.
         detached: process.platform !== 'win32',
-      });
+      };
+      // Two calls rather than one with a computed encoding: `execFile`'s
+      // overloads are keyed on the encoding literal, and a union satisfies
+      // neither.
+      const pending =
+        opts.encoding === 'buffer'
+          ? execFileAsync('git', args, { ...spawnOptions, encoding: 'buffer' })
+          : execFileAsync('git', args, { ...spawnOptions, encoding: 'utf8' });
 
-      const child = pending.child;
+      // `promisify(execFile)` carries the child on the promise through
+      // `execFile[promisify.custom]`. A double standing in for `execFile` (the
+      // access resolver's cache suite injects failures that way) returns a
+      // plain promise with no child on it; there is then nothing to feed, and
+      // nothing to kill, and neither is an error.
+      const child: ChildProcess | undefined = pending.child;
 
       // Abandonment, as a promise that loses every race it is not needed for.
       // It is the backstop for a tree that outlived even a forced kill: at that
@@ -138,17 +168,17 @@ export class NodeGitRunner implements IGitRunner {
       timers.push(
         setTimeout(() => {
           timedOut = true;
-          killTree(child, 'SIGTERM');
+          if (child) killTree(child, 'SIGTERM');
           timers.push(
             setTimeout(() => {
-              killTree(child, 'SIGKILL');
+              if (child) killTree(child, 'SIGKILL');
               timers.push(setTimeout(() => abandon(new Error('child outlived SIGKILL')), KILL_GRACE_MS));
             }, KILL_GRACE_MS),
           );
         }, timeoutMs),
       );
 
-      if (opts.input !== undefined && child.stdin) {
+      if (opts.input !== undefined && child?.stdin) {
         // A dying git can close stdin mid-write; the promise still rejects with
         // the exit code, which is the error worth surfacing.
         child.stdin.on('error', () => undefined);
@@ -157,7 +187,10 @@ export class NodeGitRunner implements IGitRunner {
       }
 
       const { stdout, stderr } = await Promise.race([pending, abandoned]);
-      return { stdout: stdout.toString(), stderr: stderr.toString() };
+      return {
+        stdout: opts.encoding === 'buffer' ? Buffer.from(stdout) : stdout.toString(),
+        stderr: stderr.toString(),
+      };
     } catch (err) {
       const subcommand = subcommandOf(args);
 
@@ -171,9 +204,15 @@ export class NodeGitRunner implements IGitRunner {
 
       const original = err as { code?: unknown; stderr?: unknown };
       const message = err instanceof Error ? err.message : String(err);
+      const stderr =
+        typeof original.stderr === 'string'
+          ? original.stderr
+          : Buffer.isBuffer(original.stderr)
+            ? original.stderr.toString()
+            : undefined;
       throw new GitRunError(`git ${subcommand} failed: ${redactGitToken(message)}`, {
         exitCode: typeof original.code === 'number' ? original.code : undefined,
-        stderr: typeof original.stderr === 'string' ? redactGitToken(original.stderr) : undefined,
+        stderr: stderr === undefined ? undefined : redactGitToken(stderr),
         cause: err,
       });
     } finally {

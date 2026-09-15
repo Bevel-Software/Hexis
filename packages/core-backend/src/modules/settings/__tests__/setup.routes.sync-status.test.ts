@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createSetupRoutes, type LastSyncStatus } from '../setup.routes.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { Database } from '../../database/connection.js';
@@ -41,6 +42,7 @@ function listen(isAdmin: boolean, last: LastSyncStatus | null) {
       settings,
       { isAdmin: async () => isAdmin } as IAdminAccessService,
       { runAll: async () => {} },
+      new NodeGitRunner(),
       { url: 'https://hexis.example.test/api/sync', lastSync: () => last },
     ),
   );

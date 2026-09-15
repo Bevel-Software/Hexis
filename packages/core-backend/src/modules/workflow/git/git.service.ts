@@ -2767,8 +2767,22 @@ export class GitService implements IGitService {
    * `stderr`, so the callers that read those to tell an expected non-zero exit
    * from a real failure are unaffected.
    */
-  private git(cwd: string, args: string[], opts?: GitRunOptions): Promise<GitRunResult> {
-    return this.gitRunner.run(cwd, args, opts);
+  private git(cwd: string, args: string[], opts?: Omit<GitRunOptions, 'encoding'>): Promise<GitRunResult> {
+    return this.gitRunner.run(cwd, args, {
+      ...opts,
+      // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
+      // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as glob
+      // / magic syntax. KB files routinely arrive with bracketed prefixes like
+      // `[Approved] foo.docx` or `[Updated 2025] bar.md`; the upload pipeline
+      // (`writeFileBinary` + `releaseLock` + `commitFile`) passes the relative
+      // path straight through to `git add` / `git checkout -- <path>`, which
+      // would otherwise glob and either match the wrong file or no file at all.
+      //
+      // THIS service's setting, not the runner's: the startup runner spells its
+      // literal paths as `:(literal)<path>`, which this variable would turn into
+      // a search for a file literally named that.
+      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
+    });
   }
 }
 
