@@ -10,6 +10,7 @@ import {
 } from '../access-model/roles-yaml-guard.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthService } from '../auth/auth.service.js';
@@ -36,7 +37,7 @@ async function readTextIfExists(absolutePath: string): Promise<string | null> {
   try {
     return await fs.readFile(absolutePath, 'utf-8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (isAbsence(err)) return null;
     throw err;
   }
 }

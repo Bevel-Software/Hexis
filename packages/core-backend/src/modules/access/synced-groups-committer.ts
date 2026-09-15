@@ -7,6 +7,7 @@ import { SYNCED_GROUPS_YAML } from '../access-model/group-files.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { SyncedGroupsWriterDeps } from './synced-groups-writer.js';
 
 /**
@@ -55,8 +56,7 @@ export function createSyncedGroupsCommitter(deps: {
           path.posix.join(kbDirName, repoRelPath),
         );
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        if (isAbsence(err)) return null;
         throw err;
       }
     },

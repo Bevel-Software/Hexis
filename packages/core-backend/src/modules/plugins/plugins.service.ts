@@ -4,7 +4,7 @@ import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { isPrivateAccessMd } from '../access-model/access-grammar.js';
-import type { IFsProbe } from '../../shared/fs.contract.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -53,7 +53,6 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly kbDirName: string,
     /** Where plugins come from — the one discovery every catalog shares. */
     private readonly source: PluginSource,
-    private readonly disk: IFsProbe,
     now: () => number = Date.now,
     /**
      * The link index, when the deployment has one: a plugin's skill count is
@@ -241,7 +240,7 @@ export class PluginIndexService implements IPluginIndexService {
     try {
       return isPrivateAccessMd(await fs.readFile(accessMdPath, 'utf8'));
     } catch (err) {
-      if (this.disk.isAbsence(err)) return false;
+      if (isAbsence(err)) return false;
       throw err;
     }
   }

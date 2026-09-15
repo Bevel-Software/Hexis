@@ -47,6 +47,28 @@ export function isSkippedEntry(name: string): boolean {
   return name.startsWith('.') || name === 'node_modules';
 }
 
+/**
+ * THE definition of absence: whether a filesystem error means "there is no
+ * such path". ENOENT is nothing at the name; ENOTDIR is nothing that could be
+ * there, because a parent segment is a file (`notes.md/deeper`). Those two are
+ * the one failure a reader may treat as an ordinary answer.
+ *
+ * Everything else (permissions, I/O, a loop) is a failure to READ what is
+ * there, and a caller that folds it into absence turns an outage into a wrong
+ * answer: an unreadable `access.md` read as "no rules" grants what it would
+ * have denied, and an unreadable file read as "not there" lets a write
+ * destroy bytes nothing ever saw.
+ *
+ * A PURE predicate over a value, like {@link isSkippedEntry} — it touches no
+ * disk, so it is a function every reader imports rather than a method on
+ * {@link IFsProbe}. The probes below all apply it; a reader catching its own
+ * error calls it directly.
+ */
+export function isAbsence(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 /** What a probe says of an entry: what it is, and nothing about the disk that said so. */
 export interface EntryStat {
   isFile(): boolean;
@@ -164,16 +186,11 @@ export interface ITreeWalker {
 }
 
 /**
- * Probing a single path. ONE definition of absence for every reader: ENOENT
- * or ENOTDIR — "there is no such path" — is the one failure a reader may
- * treat as an ordinary answer. Everything else (permissions, I/O, a loop) is
- * a failure to READ what is there, and a caller that folds it into absence
- * turns an outage into a wrong answer. Every `OrNull`/`exists` below applies
- * that rule and lets any other error out.
+ * Probing a single path. Every `OrNull`/`exists` below answers null/false for
+ * {@link isAbsence} and lets every other error out, so no reader has to
+ * decide what a failed probe meant.
  */
 export interface IFsProbe {
-  /** Whether a filesystem error means "there is no such path". */
-  isAbsence(err: unknown): boolean;
   /** Whether SOMETHING is at `p` — a link included, followed or not. */
   exists(p: string): Promise<boolean>;
   /** What is at `p`, links followed; null when nothing is there. */

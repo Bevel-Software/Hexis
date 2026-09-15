@@ -4,7 +4,7 @@ import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '
 import type { IDiffService } from './diff.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkspaceMutex } from '../kb-fs/mutex.js';
-import type { IFsProbe, ITreeWalker, TreeWalkOptions } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from './diff-paths.js';
 import { countLineChanges } from './line-diff.js';
@@ -21,7 +21,7 @@ export class DiffService implements IDiffService {
     private readonly workspacesRoot: string,
     private readonly backupsRoot: string,
     private readonly kbDirName: string,
-    private readonly disk: ITreeWalker & IFsProbe,
+    private readonly disk: ITreeWalker,
   ) {}
 
   // ── public API ──────────────────────────────────────────────────────────
@@ -161,7 +161,7 @@ export class DiffService implements IDiffService {
           // discards it". Any other read failure (EACCES, EMFILE, …) must
           // abort the plan — misclassifying it as no-backup would DELETE a
           // file whose baseline we merely failed to read.
-          if (!this.disk.isAbsence(err)) throw err;
+          if (!isAbsence(err)) throw err;
           deletes.push(rel);
         }
       }
@@ -263,7 +263,7 @@ export class DiffService implements IDiffService {
       try {
         await fs.rename(backupDir, oldBackupTrash);
       } catch (err) {
-        if (!this.disk.isAbsence(err)) throw err; // no existing backup is fine
+        if (!isAbsence(err)) throw err; // no existing backup is fine
       }
       await fs.rename(stagingDir, backupDir);
       await fs.rm(oldBackupTrash, { recursive: true, force: true }).catch(() => undefined);

@@ -18,6 +18,7 @@ import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.j
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
+import { isAbsence } from '../../../shared/fs.contract.js';
 import { assertInsideRepo } from '../../kb-fs/repo-path.js';
 import { cloneTrackingConfigArgs, SAFE_IMPLICIT_FETCH_ARGS } from '../../kb-fs/clone-config.js';
 import {
@@ -243,24 +244,22 @@ async function synthesizeUntrackedSideDiff(
       ? synthesizeNewFileDiff(relativePath, text)
       : synthesizeDeletedFileDiff(relativePath, text);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    if (isAbsence(err)) return '';
     throw err;
   }
 }
 
 /**
- * `stat` for the stray check: false only when nothing can be there (ENOENT,
- * or ENOTDIR when a parent segment is a file). Permission and I/O failures
- * propagate: treating them as "absent" would let an unreadable stray pass as
- * committed.
+ * `stat` for the stray check: false only when nothing can be there — the
+ * disk's own definition of absence. Permission and I/O failures propagate:
+ * treating them as "absent" would let an unreadable stray pass as committed.
  */
 async function existsForCommitCheck(absolutePath: string): Promise<boolean> {
   try {
     await fs.stat(absolutePath);
     return true;
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    if (isAbsence(err)) return false;
     throw err;
   }
 }

@@ -4,7 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
-import type { IFsProbe, ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
+import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -1022,7 +1022,7 @@ export class AccessControlService implements IAccessControl {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
-    private readonly disk: ITreeWalker & IFsProbe,
+    private readonly disk: ITreeWalker,
     /**
      * Emails that count as Admin for the two hardcoded `write` rescues,
      * whatever `roles.yaml` says — in practice `ADMIN_EMAIL`. Optional so the
@@ -1640,7 +1640,7 @@ export class AccessControlService implements IAccessControl {
       try {
         return await fs.readFile(path.join(repoDir, filename), 'utf-8');
       } catch (err) {
-        if (this.disk.isAbsence(err)) return null;
+        if (isAbsence(err)) return null;
         throw err;
       }
     });

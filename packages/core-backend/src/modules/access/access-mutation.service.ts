@@ -36,6 +36,7 @@ import path from 'node:path';
 
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import {
   type Verb,
   KNOWN_VERBS,
@@ -115,10 +116,7 @@ export class AccessMutationService {
     try {
       return await this.workspaceService.readFile(workspaceId, wsRelative);
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (allowMissing && (code === 'ENOENT' || code === 'ENOTDIR')) {
-        return '';
-      }
+      if (allowMissing && isAbsence(err)) return '';
       throw err;
     }
   }

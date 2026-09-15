@@ -12,7 +12,7 @@ import {
   type Verb,
 } from '../../../access-model/access-grammar.js';
 import { spliceGrant } from '../../../access-model/access-splice.js';
-import type { IFsProbe } from '../../../../shared/fs.contract.js';
+import { isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -63,7 +63,7 @@ async function closePersonalSpaces(branch: KbBranch, disk: IFsProbe): Promise<vo
     try {
       text = await fs.readFile(path.join(repoDir, rel), 'utf8');
     } catch (err) {
-      if (disk.isAbsence(err)) continue; // a folder with no rules is not a provisioned space
+      if (isAbsence(err)) continue; // a folder with no rules is not a provisioned space
       throw err;
     }
     const next = closePersonalSpaceRules(text, rel);

@@ -5,7 +5,7 @@ import AdmZip from 'adm-zip';
 import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
-import type { IFsProbe, ITreeWalker } from '../../shared/fs.contract.js';
+import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
@@ -156,7 +156,7 @@ export function createToolManualsAgentRoutes(
       // reset, a merged deletion) is an ABSENCE, the same 404 it would have
       // been a moment earlier, not an internal error.
       const pluginRealBase = await fs.realpath(pluginDir).catch((err: unknown) => {
-        if (disk.isAbsence(err)) return null;
+        if (isAbsence(err)) return null;
         throw err;
       });
       if (pluginRealBase === null) return void res.status(404).json({ error: 'Not found' });
@@ -171,7 +171,7 @@ export function createToolManualsAgentRoutes(
         // resolves every component, so demanding it equal the spelled path is
         // exactly "no component is a link": identity, not mere containment.
         const realNow = await fs.realpath(abs).catch((err: unknown) => {
-          if (disk.isAbsence(err)) return null; // deleted since the walk — an absence, not a failure
+          if (isAbsence(err)) return null; // deleted since the walk — an absence, not a failure
           throw err;
         });
         if (realNow === null || realNow !== path.join(pluginRealBase, ...rel.split('/'))) {
@@ -192,7 +192,7 @@ export function createToolManualsAgentRoutes(
         const handle = await fs
           .open(abs, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
           .catch((err: NodeJS.ErrnoException) => {
-            if (disk.isAbsence(err)) return null; // deleted since the walk — an absence
+            if (isAbsence(err)) return null; // deleted since the walk — an absence
             if (err.code === 'ELOOP') {
               // O_NOFOLLOW's spelling of "the final component is a symlink".
               console.warn(`[tool-manuals] archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);

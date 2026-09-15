@@ -15,7 +15,7 @@ import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.co
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
-import { IGNORE_FILENAME, isSkippedEntry, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
+import { IGNORE_FILENAME, isAbsence, isSkippedEntry, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { withoutIgnoreLine } from './template-files.step.js';
 import { hasManifestEntry, hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
@@ -204,7 +204,7 @@ async function migrateBranch(disk: IFsProbe & ITreeWalker, branch: KbBranch, ref
   // protected branches, never visits a draft. BEFORE the early returns: a
   // branch with both roots (refused below) or neither (nothing to migrate)
   // is no less stale. Idempotent: nothing to drop, nothing declared.
-  const changed = await retireIgnoreRootRules(disk, repoDir, branch, details);
+  const changed = await retireIgnoreRootRules(repoDir, branch, details);
   const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ ignore rules`;
 
   if (hasLegacy && hasPlugins) {
@@ -300,7 +300,6 @@ async function migrateBranch(disk: IFsProbe & ITreeWalker, branch: KbBranch, ref
  * negation is not the rule and stays.
  */
 async function retireIgnoreRootRules(
-  disk: IFsProbe,
   repoDir: string,
   branch: KbBranch,
   details: string[],
@@ -313,7 +312,7 @@ async function retireIgnoreRootRules(
     // its place, a permission hole) is NOT "no file": a rule that may still
     // be there would hide the tree while the run reports success, so the
     // hole surfaces as the step's failure instead.
-    if (disk.isAbsence(err)) return false;
+    if (isAbsence(err)) return false;
     throw err;
   }
   const stale = [`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`];

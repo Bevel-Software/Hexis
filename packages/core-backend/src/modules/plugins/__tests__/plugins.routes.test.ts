@@ -141,7 +141,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
 
   const index =
     opts.index ??
-    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB, new KbPluginSource(new NodeFs()), new NodeFs());
+    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB, new KbPluginSource(new NodeFs()));
 
   const email = opts.email === undefined ? ALI : opts.email;
   const app = express();

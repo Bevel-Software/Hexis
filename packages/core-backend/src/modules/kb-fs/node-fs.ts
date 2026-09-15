@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import {
   WalkError,
+  isAbsence,
   isSkippedEntry,
   type EntryStat,
   type IFsProbe,
@@ -15,7 +16,6 @@ import {
 } from '../../shared/fs.contract.js';
 import { comparePathComponents } from '../../shared/path-order.js';
 import { BevelIgnoreStack } from './bevel-ignore.js';
-import { isAbsence } from './fs-errors.js';
 
 /**
  * The one implementation of {@link ITreeWalker} and {@link IFsProbe}, over
@@ -100,10 +100,6 @@ export class NodeFs implements ITreeWalker, IFsProbe {
   }
 
   // ── IFsProbe ──────────────────────────────────────────────────────────────
-
-  isAbsence(err: unknown): boolean {
-    return isAbsence(err);
-  }
 
   async exists(p: string): Promise<boolean> {
     return (await this.lstatOrNull(p)) !== null;

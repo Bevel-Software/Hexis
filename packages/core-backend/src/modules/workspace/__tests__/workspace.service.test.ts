@@ -102,6 +102,24 @@ describe('WorkspaceService — branch-keyed identity', () => {
     expect(infoB.absolutePath).toBe(path.join(root, 'alice%2Ffeature'));
   });
 
+  it('refuses a FILE squatting the clone path instead of wiping it, and leaves the bytes alone', async () => {
+    // The bootstrap's recovery — wipe and re-clone — is for a crashed
+    // bootstrap's directory shell. A regular file at the clone's name is a
+    // state a human put the deployment in, and ENOTDIR from the `.git` probe
+    // beneath it is absence like any other, so nothing distinguishes the two
+    // unless the clone path itself is checked. It must never be deleted.
+    const workspaceDir = path.join(root, workspaceIdForBranch('target-company-state'));
+    await fs.mkdir(workspaceDir, { recursive: true });
+    const squatter = path.join(workspaceDir, 'knowledge-base');
+    await fs.writeFile(squatter, 'not a clone', 'utf8');
+
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
+    await expect(svc.getOrCreateForBranch('target-company-state')).rejects.toThrow(
+      /"knowledge-base" in this workspace exists but is not a directory/,
+    );
+    expect(await fs.readFile(squatter, 'utf8')).toBe('not a clone');
+  });
+
   it('rejects invalid branch names before touching disk', async () => {
     const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await expect(svc.getOrCreateForBranch('')).rejects.toThrow();

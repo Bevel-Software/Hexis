@@ -49,6 +49,7 @@ import path from 'node:path';
 
 import { LockingFilesystem, type WriteValidator } from '../kb-fs/locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 
 export interface LockedCommitDeps {
@@ -113,8 +114,7 @@ export class AdminLockedCommits {
         path.posix.join(this.deps.kbDirName, repoRel),
       );
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      if (isAbsence(err)) return null;
       throw err;
     }
   }
@@ -285,7 +285,7 @@ export class AdminLockedCommits {
           try {
             await workspaceService.deleteFile(workspaceId, this.wsRel(f.repoRel));
           } catch (err) {
-            if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') throw err;
+            if (!isAbsence(err)) throw err;
           }
         } else {
           await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.content);
@@ -317,7 +317,7 @@ export class AdminLockedCommits {
           else await workspaceService.writeFile(workspaceId, this.wsRel(f.repoRel), f.original);
         } catch (restoreErr) {
           // Deleting an already-absent file IS the original state.
-          if (f.original === null && (restoreErr as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue;
+          if (f.original === null && isAbsence(restoreErr)) continue;
           unrestored.add(this.wsRel(f.repoRel));
           console.warn(`[${logTag}] could not restore ${f.repoRel} after a failed commit`);
         }
