@@ -68,6 +68,14 @@ interface Props {
    * fallback, not a silent no-op.
    */
   onManageAncestor?: (entry: FileTreeEntry) => void;
+  /**
+   * The target exists only on an open change request's branch. Access is then
+   * read and written on THAT branch — the rules land in the proposed file and
+   * merge with it — and the sheet says so. Takes precedence over `workspaceId`.
+   * `branch: null` (the request could not be resolved) refuses to load rather
+   * than falling back to a workspace the file does not exist on.
+   */
+  proposal?: { number: number; branch: string | null };
 }
 
 type Role = 'Owner' | 'Can edit' | 'Can read' | 'Can download';
@@ -446,15 +454,26 @@ export function ManageAccessDialog({
   onClose,
   workspaceId: workspaceIdProp,
   onManageAncestor,
+  proposal,
 }: Props) {
   // `kbDirName` stays context-sourced: it names the clone directory, which is
   // the same on every branch.
   const { workspaceId: ctxWorkspaceId, kbDirName } = useWorkspace();
-  const workspaceId = workspaceIdProp ?? ctxWorkspaceId;
+  const proposalBranchMissing = !!proposal && !proposal.branch;
+  // Workspace ids are the URL-encoded branch name (see `workspaceIdForBranch`).
+  const workspaceId = proposal
+    ? proposal.branch
+      ? encodeURIComponent(proposal.branch)
+      : null
+    : (workspaceIdProp ?? ctxWorkspaceId);
   const { user } = useAuth();
   const [data, setData] = useState<AccessResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(!proposalBranchMissing);
+  const [error, setError] = useState<string | null>(
+    proposalBranchMissing
+      ? `The branch of change request #${proposal.number} could not be found.`
+      : null,
+  );
 
   // Add-row state. `newVerbs` holds the (independent) verbs to grant the chips;
   // it mirrors the per-row checklist so a new person can be given several at once.
@@ -1211,6 +1230,12 @@ export function ManageAccessDialog({
         <p className="truncate text-detail text-ink-muted" title={entry.relativePath}>
           {entry.name}
         </p>
+
+        {proposal && (
+          <Banner tone="neutral" role="status" className="mt-3">
+            {`You're editing access on change request #${proposal.number}. It takes effect when the request merges.`}
+          </Banner>
+        )}
 
         {governed && canManage && (
           <div className="mt-3">

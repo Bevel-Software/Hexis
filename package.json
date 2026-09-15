@@ -6,7 +6,7 @@
     "dev": "pnpm --parallel -r run dev",
     "build": "pnpm -r run build && node scripts/generate-license-notices.mjs",
     "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm -r run test",
+    "test": "pnpm -r --reporter-hide-prefix run test",
     "lint": "eslint .",
     "release": "pnpm build && pnpm changeset publish",
     "notices": "node scripts/generate-license-notices.mjs",
