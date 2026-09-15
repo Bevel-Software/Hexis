@@ -20,9 +20,10 @@ export const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
 /**
  * Scrub credentials from anything that reaches a log or an error message:
- * the token in effect wherever it appears, and URL userinfo — a remote
- * spelled `https://user:pass@host` would otherwise leak `pass` verbatim
- * through every git failure that quotes the URL back.
+ * the token in effect wherever it appears, URL userinfo — a remote spelled
+ * `https://user:pass@host` would otherwise leak `pass` verbatim through every
+ * git failure that quotes the URL back — and URL query strings, where a
+ * presigned remote keeps its credential.
  *
  * "The token in effect" is every place one can come from: each environment
  * spelling `CoreConfig` accepts (it normalises them onto `GITHUB_TOKEN` at
@@ -43,7 +44,14 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
   for (const token of [...new Set(tokens)].sort((a, b) => b.length - a.length)) {
     scrubbed = scrubbed.replaceAll(token, '***');
   }
-  return scrubbed.replace(/:\/\/[^/@\s]+@/g, '://***@');
+  return (
+    scrubbed
+      .replace(/:\/\/[^/@\s]+@/g, '://***@')
+      // A presigned remote carries its credential in the query instead
+      // (`?X-Amz-Signature=…`, `?access_token=…`). A git remote has no query
+      // worth keeping in a log, so the whole of it goes.
+      .replace(/(\bhttps?:\/\/[^\s?#'"]+)\?[^\s#'"]*/gi, '$1?***')
+  );
 }
 
 /**

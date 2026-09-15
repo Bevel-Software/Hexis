@@ -495,6 +495,16 @@ describe('redactSecret', () => {
     expect(redactSecret('https://example.com/kb.git')).toBe('https://example.com/kb.git');
   });
 
+  it('scrubs URL query strings — a presigned remote keeps its credential there', () => {
+    expect(
+      redactSecret("unable to access 'https://git.example.com/kb.git?X-Amz-Signature=abc123&X-Amz-Credential=AKIA/x': 403"),
+    ).toBe("unable to access 'https://git.example.com/kb.git?***': 403");
+    expect(redactSecret('fetch https://git.example.com/kb.git?access_token=s3cret failed')).toBe(
+      'fetch https://git.example.com/kb.git?*** failed',
+    );
+    expect(redactSecret('https://alice:pw@example.com/kb.git?sig=zz')).toBe('https://***@example.com/kb.git?***');
+  });
+
   it('scrubs every token in effect: env aliases and tokens the caller names', () => {
     const saved = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GIT_TOKEN: process.env.GIT_TOKEN };
     delete process.env.GITHUB_TOKEN;

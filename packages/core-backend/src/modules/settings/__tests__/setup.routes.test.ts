@@ -341,6 +341,43 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     }
   });
 
+  it('logs the failure as one line: git text cannot forge a log entry', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const { base } = listen(true, async () => {
+        throw new Error('git push failed: remote: boom\n[setup] everything is fine[31m');
+      });
+      await post(base, '/api/setup/settings', { settings: completing });
+      const line = logged.find((l) => l.includes('KB initialization failed'));
+      expect(line).toBeDefined();
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('classifies the text as thrown, not the scrubbed copy', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const { base } = listen(true, async () => {
+        delete process.env.GITHUB_TOKEN;
+        // A token that spells part of git's own wording: scrubbing it first
+        // would turn "not found" into "not ***" and read as unknown.
+        throw new Error("git ls-remote failed: remote: Repository not found.\nfatal: repository 'x' not found");
+      });
+      const res = await post(base, '/api/setup/settings', { settings: { ...completing, gitToken: 'found' } });
+      expect((await res.json()).kbInit.kind).toBe('not-found');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
   it('tells a non-admin nothing about a standing failure', async () => {
     const consoleError = console.error;
     console.error = () => {};

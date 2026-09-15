@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isBranchModelConfigured } from '@bevel-software/platform-shared';
+import { printable } from '../../../shared/printable.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './kb-git.js';
@@ -166,9 +167,11 @@ export class KbStartupRunner {
       // this runner alone knows about.
       const msg = this.redact(err instanceof Error ? err.message : String(err));
       if (!safeBoot) throw new Error(msg);
+      // Git's stderr and a step's own message are text this process does not
+      // control; one quoted token, so neither can forge or colour a log line.
       console.error(
         '[kb-startup] SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.',
-        msg,
+        printable(msg),
       );
       // Reset only DIRTY handles — ones an apply at least began on (the mark
       // is set before the first op, so a mid-apply failure is covered). A

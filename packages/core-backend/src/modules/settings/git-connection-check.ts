@@ -60,7 +60,10 @@ const STEP_PREFIX = /KB startup step "([^"]+)" (?:failed|stopped the boot): ([\s
 const GIT_PREFIX = /^git \S+ failed:/;
 
 /**
- * Classify a failure from its (already redacted) text.
+ * Classify a failure from its text. Raw text is safe here — none of it reaches
+ * the result — and is the better input where a caller holds it: a scrub
+ * replacing a token that happens to spell part of git's wording would change
+ * the reading.
  *
  * Order is load-bearing. Refusals that NAME a policy or a permission are read
  * before the generic status codes they arrive with — GitHub answers a
@@ -81,9 +84,10 @@ export function classifyGitFailure(text: string): GitFailure {
 
   // A status number proves nothing from inside a URL — `/acme/404-notes.git`
   // or a port carries the digits with no refusal having happened, and a failed
-  // command's message quotes its whole argv. Words still count wherever they
-  // appear; digits only outside URLs.
-  const m = body.replace(/\bhttps?:\/\/\S+/gi, ' ');
+  // command's message quotes its whole argv — nor from curl's own
+  // `Failed to connect to <host> port 403`. Words still count wherever they
+  // appear; digits only outside URLs and port numbers.
+  const m = body.replace(/\bhttps?:\/\/\S+/gi, ' ').replace(/\bport \d+/gi, ' ');
   const isPush = /\bgit push failed\b/i.test(m);
 
   if (

@@ -290,6 +290,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
   /** What a field would save as: what was typed, else what is already stored. */
   const resolved = (key: string) => resolvedIn(draft, key);
 
+  /**
+   * Something typed that no save has stored yet. The retry sends an EMPTY save
+   * — pressed now, it would re-run against the stored values while a corrected
+   * token sits unsaved in the form — so it waits, and Save (which retries too)
+   * is the way to try with the new values.
+   */
+  const draftChanged = Object.values(draft).some((value) => value.trim() !== '');
+
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
 
@@ -544,7 +552,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    * time chain covers this exactly as it covers the form.
    */
   async function retryInitialization() {
-    if (retrying || saving) return;
+    if (retrying || saving || draftChanged) return;
     setRetrying(true);
     setError(null);
     try {
@@ -552,6 +560,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       setInitFailure(null);
       if (result.awaitingRestart) {
         setNeedsRestart(true);
+        // As after a save: the settings page still wants fresh status, or its
+        // host keeps the failure this retry just cleared.
+        if (variant === 'settings') onSaved();
         return;
       }
       if (result.complete && variant === 'setup') {
@@ -775,13 +786,18 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             <Banner tone="danger" role="alert" className="mt-6" data-testid="kb-init-failure">
               <p className="font-semibold">Saved, but the knowledge base could not be initialized</p>
               <p className="mt-1">{initFailure.cause}</p>
+              {draftChanged && (
+                <p className="mt-1">
+                  The form has unsaved changes — saving them retries the initialization with them.
+                </p>
+              )}
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="mt-3"
                 onClick={() => void retryInitialization()}
-                disabled={retrying || saving || testing}
+                disabled={retrying || saving || testing || draftChanged}
               >
                 {retrying ? 'Initializing…' : 'Retry initialization'}
               </Button>

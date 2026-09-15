@@ -117,6 +117,19 @@ describe('classifyGitFailure', () => {
     ).toBe('unknown');
   });
 
+  it('does not read status digits out of a port number', () => {
+    for (const port of ['401', '403', '404']) {
+      for (const sub of ['ls-remote', 'push']) {
+        const text = gitFailed(
+          sub,
+          `https://git.example.com:${port}/kb.git`,
+          `fatal: unable to access 'x': Failed to connect to git.example.com port ${port}: Connection refused`,
+        );
+        expect(classifyGitFailure(text).kind).toBe('unreachable');
+      }
+    }
+  });
+
   it('never quotes the raw text in the cause', () => {
     const raw = gitFailed('ls-remote', URL, 'fatal: weird-marker-7f3a');
     for (const text of [raw, `KB startup step "s" failed: ${raw}`]) {

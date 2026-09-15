@@ -971,6 +971,31 @@ describe('SetupScreen — a failed knowledge-base initialization', () => {
     expect(onSaved).toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();
   });
+
+  it('settings mode: a retry that lands awaiting a restart still refreshes the host', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={WRITE_REFUSED} />);
+    api.saveSettings.mockResolvedValue({ restartRequired: true, complete: false, awaitingRestart: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    expect(await screen.findByText(/needs a restart/)).toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalled();
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
+  });
+
+  it('retry waits while the form has unsaved changes — Save is the retry that carries them', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+    expect(retry).toBeEnabled();
+
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_corrected');
+
+    expect(retry).toBeDisabled();
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(/unsaved changes/i);
+    await userEvent.click(retry);
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
 });
 
 describe('SetupScreen — sync panel when the whole knowledge base is env-set', () => {

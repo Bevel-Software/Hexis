@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Banner, Button } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
@@ -31,19 +31,33 @@ export function DeploymentPage() {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  /**
+   * The latest status request. Answers arrive in any order, and one to an
+   * EARLIER request describes a deployment that has since moved on — the
+   * refresh after a failed save, landing after a successful retry, would put
+   * the cleared failure back — so only the latest request's answer counts.
+   */
+  const latest = useRef(0);
 
   const refresh = useCallback(() => {
     // Non-admins never fetch: the endpoint would answer them safely (status
     // without settings), but this page has already told them it is not
     // theirs — a request whose answer nothing renders is noise.
     if (!isAdmin) return;
+    const request = ++latest.current;
+    const current = () => request === latest.current;
     fetchSetupStatus()
       .then((s) => {
+        if (!current()) return;
         setStatus(s);
         setFailed(false);
       })
-      .catch(() => setFailed(true))
-      .finally(() => setLoaded(true));
+      .catch(() => {
+        if (current()) setFailed(true);
+      })
+      .finally(() => {
+        if (current()) setLoaded(true);
+      });
   }, [isAdmin]);
 
   useEffect(refresh, [refresh]);

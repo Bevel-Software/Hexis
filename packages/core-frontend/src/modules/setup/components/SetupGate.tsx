@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { fetchSetupStatus, type SetupStatus } from '../services/setup.api';
 import { SetupScreen } from './SetupScreen';
 
@@ -26,12 +26,22 @@ import { SetupScreen } from './SetupScreen';
 export function SetupGate({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [checked, setChecked] = useState(false);
+  /** The latest status request; an answer to an earlier one is out of date. */
+  const latest = useRef(0);
 
   const refresh = useCallback(() => {
+    const request = ++latest.current;
+    const current = () => request === latest.current;
     fetchSetupStatus()
-      .then(setStatus)
-      .catch(() => setStatus(null))
-      .finally(() => setChecked(true));
+      .then((s) => {
+        if (current()) setStatus(s);
+      })
+      .catch(() => {
+        if (current()) setStatus(null);
+      })
+      .finally(() => {
+        if (current()) setChecked(true);
+      });
   }, []);
 
   useEffect(refresh, [refresh]);

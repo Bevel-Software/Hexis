@@ -14,6 +14,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { classifyGitFailure, type GitFailure } from './git-connection-check.js';
 import { redactSecret } from '../workspace/startup/kb-git.js';
+import { printable } from '../../shared/printable.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const execFileAsync = promisify(execFile);
@@ -222,12 +223,13 @@ export function createSetupRoutes(
           // The settings ARE saved — only the KB initialization failed. The
           // deployment stays gated (see the status endpoint) until a retry
           // succeeds. Logged in full (scrubbed of the token in effect, which
-          // may be the one this very save stored), returned classified.
-          const msg = redactSecret(initErr instanceof Error ? initErr.message : String(initErr), [
-            settings.resolve('gitToken'),
-          ]);
-          console.error('[setup] KB initialization failed after setup completed:', msg);
-          kbInit = classifyGitFailure(msg);
+          // may be the one this very save stored, and as one printable token),
+          // returned classified — from the text as it arrived, since a scrub
+          // is free to rewrite the words the classifier reads.
+          const raw = initErr instanceof Error ? initErr.message : String(initErr);
+          const msg = redactSecret(raw, [settings.resolve('gitToken')]);
+          console.error('[setup] KB initialization failed after setup completed:', printable(msg));
+          kbInit = classifyGitFailure(raw);
           res.status(500).json({
             error: 'Settings saved, but the knowledge base could not be initialized.',
             kbInit,
@@ -375,8 +377,9 @@ export function createSetupRoutes(
     } catch (err) {
       // `ls-remote` failures have been known to quote the credential back, so
       // the token under test is scrubbed along with the one in effect.
-      const text = redactSecret(err instanceof Error ? err.message : String(err), [token]);
-      const { kind, cause } = classifyGitFailure(text);
+      const raw = err instanceof Error ? err.message : String(err);
+      const text = redactSecret(raw, [token]);
+      const { kind, cause } = classifyGitFailure(raw);
       // Unlike the setup-time phase, an unrecognised answer here is echoed:
       // this is the admin asking the host a direct question about the values
       // they typed, and git's own first lines are the only answer there is.
