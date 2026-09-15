@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { fetchSetupStatus, type SetupStatus } from '../services/setup.api';
+import type { ReactNode } from 'react';
+import { useSetupStatus } from '../hooks/useSetupStatus';
 import { SetupScreen } from './SetupScreen';
 
 /**
@@ -24,32 +24,14 @@ import { SetupScreen } from './SetupScreen';
  * transient network failure would lock everyone out of a working deployment.
  */
 export function SetupGate({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [checked, setChecked] = useState(false);
-  /** The latest status request; an answer to an earlier one is out of date. */
-  const latest = useRef(0);
-
-  const refresh = useCallback(() => {
-    const request = ++latest.current;
-    const current = () => request === latest.current;
-    fetchSetupStatus()
-      .then((s) => {
-        if (current()) setStatus(s);
-      })
-      .catch(() => {
-        if (current()) setStatus(null);
-      })
-      .finally(() => {
-        if (current()) setChecked(true);
-      });
-  }, []);
-
-  useEffect(refresh, [refresh]);
+  // The status is read the shared way (`useSetupStatus`): only the latest
+  // read lands, so a late answer cannot undo what a newer one said.
+  const { status, failed, loaded, refresh } = useSetupStatus();
 
   // Nothing is claimed until the answer is in. Rendering the app here and
   // replacing it a moment later would flash a broken workspace at exactly the
   // people this gate exists to protect from one.
-  if (!checked) {
+  if (!loaded) {
     return (
       <div className="flex h-full items-center justify-center bg-surface text-ui text-ink-muted">
         Loading…
@@ -57,7 +39,7 @@ export function SetupGate({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!status || status.complete) return <>{children}</>;
+  if (!status || failed || status.complete) return <>{children}</>;
 
   if (!status.isAdmin || !status.settings) {
     return (

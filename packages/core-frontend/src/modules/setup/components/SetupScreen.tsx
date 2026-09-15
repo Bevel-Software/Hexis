@@ -204,7 +204,8 @@ interface Props {
    * Re-read the status after a save, so the gate can let the app through.
    *
    * The host must let only its LATEST read land (`SetupGate` and
-   * `DeploymentPage` both do): each fresh `kbInit` replaces the failure on
+   * `DeploymentPage` both read through `useSetupStatus`, which does): each
+   * fresh `kbInit` replaces the failure on
    * screen, so an earlier read answering late — the refresh after a failed
    * save, landing after a retry that succeeded — would otherwise put the
    * cleared failure back.
