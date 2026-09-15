@@ -23,7 +23,12 @@ import { PathTraversalError } from './domain-errors.js';
 export function assertWithinDirectory(absolutePath: string, dir: string): void {
   const resolved = path.resolve(absolutePath);
   const root = path.resolve(dir);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+  // The separator is what makes this a containment check rather than a prefix
+  // match — without it `/srv/ws-backup` passes as "inside" `/srv/ws`. A root
+  // that already ends in one (the filesystem root, `/` or `C:\`) must not get
+  // a second, or every descendant fails to match the doubled prefix.
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  if (resolved !== root && !resolved.startsWith(prefix)) {
     throw new PathTraversalError();
   }
 }

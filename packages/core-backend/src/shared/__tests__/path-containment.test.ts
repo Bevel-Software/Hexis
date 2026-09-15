@@ -16,18 +16,30 @@ describe('assertWithinDirectory', () => {
   it('admits the directory itself and anything under it, however spelled', () => {
     ok(root);
     ok(path.join(root, 'knowledge-base', 'notes.md'));
-    // Unresolved spellings that still land inside.
-    ok(path.join(root, 'a', '..', 'b.md'));
+    // An UNRESOLVED spelling that lands inside. Concatenated, not joined:
+    // `path.join` would collapse the `..` before the guard ever saw it, and
+    // resolving the caller's spelling is the guard's own job.
+    ok(`${root}${path.sep}a${path.sep}..${path.sep}b.md`);
     ok(`${root}${path.sep}`);
   });
 
   it('refuses a climb out, a sibling, and the parent', () => {
-    refused(path.join(root, '..', 'other', 'secrets.md'));
+    // Unresolved again: this is the spelling an attacker actually sends.
+    refused(`${root}${path.sep}..${path.sep}other${path.sep}secrets.md`);
+    refused(`${root}${path.sep}a${path.sep}..${path.sep}..${path.sep}escape.md`);
     refused(path.dirname(root));
     // A sibling whose name merely STARTS with the root's — the prefix trap a
     // `startsWith(root)` check without the separator falls into.
     refused(`${root}-backup`);
     refused(`${root}-backup${path.sep}notes.md`);
+  });
+
+  it('admits descendants of the filesystem root, which already ends in a separator', () => {
+    // `root + sep` would be `//` (or `C:\\`), which no descendant starts
+    // with — so a doubled separator refuses every path under it.
+    const fsRoot = path.parse(path.resolve('/')).root;
+    expect(() => assertWithinDirectory(path.join(fsRoot, 'etc', 'passwd'), fsRoot)).not.toThrow();
+    expect(() => assertWithinDirectory(fsRoot, fsRoot)).not.toThrow();
   });
 
   it('refuses an absolute path somewhere else entirely', () => {

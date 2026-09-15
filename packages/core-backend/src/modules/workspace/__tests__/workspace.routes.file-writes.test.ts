@@ -504,6 +504,9 @@ describe('GET /workspace/:id/file — read failures', () => {
     h = await makeHarness();
     h.readFileMock.mockRejectedValue(new Error('Path traversal detected'));
 
-    expect((await get(h)).status).not.toBe(403);
+    // 500, the route's contract for a read failure that is neither an absence
+    // nor a domain refusal — pinned exactly, so a regression to 404 (or a
+    // silent 200) fails here rather than passing a "not 403" check.
+    expect((await get(h)).status).toBe(500);
   });
 });
