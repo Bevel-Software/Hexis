@@ -2,10 +2,17 @@ import type { WorkflowDomainError } from './domain-errors.js';
 
 /**
  * THE response body for a domain refusal: the error's own message, plus
- * whatever typed discriminators its payload carries — `kind`
- * (`path-traversal`, `unreadable-archive`, …) and `accessConfigErrors` are
- * the ones {@link WorkflowDomainError} subclasses set today — for a client
- * that switches on them rather than on the prose.
+ * whatever its payload carries, for a client that switches on the shape
+ * rather than on the prose.
+ *
+ * The payload is an open `Record<string, unknown>` and deliberately stays
+ * that way — `WorkflowValidationError` takes one from its caller — so this
+ * lists no closed set. The discriminator to reach for is `kind`
+ * (`path-traversal`, `unreadable-archive`, `no-shared-history`, …), which
+ * most refusals carry; beside it they add whatever context that kind needs
+ * (`branchName`, `head`/`base`, `conflictedPaths`, `feature`), and
+ * `AccessConfigError` carries `accessConfigErrors` instead. Read the
+ * subclass to know what its own refusal brings.
  *
  * Eight route surfaces built this object by hand, and seven of them spread
  * the payload AFTER the message:
