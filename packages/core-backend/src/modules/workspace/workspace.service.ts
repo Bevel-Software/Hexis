@@ -6,7 +6,7 @@ import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { BevelIgnoreStack } from './bevel-ignore.js';
+import { walkTree, type TreeWalkOptions } from '../../shared/kb-walk.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   RemoteBranchGoneError,
@@ -810,7 +810,7 @@ export class WorkspaceService implements IWorkspaceService {
 
   async listFiles(workspaceId: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    return this.buildFileTree(workspaceDir, workspaceDir, BevelIgnoreStack.empty(), readFilter);
+    return this.buildFileTree(workspaceDir, workspaceDir, readFilter);
   }
 
   async readFile(workspaceId: string, relativePath: string): Promise<string> {
@@ -901,23 +901,15 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoRoot = path.join(workspaceDir, this.kbDirName);
     const files: Record<string, string> = {};
-    const walk = async (dir: string, ignoreStack: BevelIgnoreStack): Promise<void> => {
-      const nextStack = await ignoreStack.extendedWith(dir);
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name === '.git' && entry.isDirectory()) continue;
-        const childAbs = path.join(dir, entry.name);
-        if (nextStack.isIgnored(childAbs, entry.isDirectory())) continue;
-        if (entry.isDirectory()) {
-          await walk(childAbs, nextStack);
-          continue;
-        }
-        if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-        const repoPath = path.relative(repoRoot, childAbs).replace(/\\/g, '/');
-        files[repoPath] = await fs.readFile(childAbs, 'utf-8');
-      }
-    };
-    await walk(repoRoot, BevelIgnoreStack.empty());
+    await walkTree(repoRoot, explorerWalk(), [
+      {
+        async onFile(dir, name) {
+          if (!name.endsWith('.md')) return;
+          const repoPath = dir ? `${dir}/${name}` : name;
+          files[repoPath] = await fs.readFile(path.join(repoRoot, dir, name), 'utf-8');
+        },
+      },
+    ]);
     return files;
   }
 
@@ -947,45 +939,31 @@ export class WorkspaceService implements IWorkspaceService {
     const zip = new AdmZip();
     let totalBytes = 0;
 
-    const walk = async (dir: string, ignoreStack: BevelIgnoreStack): Promise<void> => {
-      const nextStack = await ignoreStack.extendedWith(dir);
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      entries.sort((a, b) => a.name.localeCompare(b.name));
-      for (const entry of entries) {
-        if (entry.name === '.git' && entry.isDirectory()) continue;
-        if (entry.name === '.gitkeep' && entry.isFile()) continue;
-        const childAbs = path.join(dir, entry.name);
-        if (nextStack.isIgnored(childAbs, entry.isDirectory())) continue;
-        if (entry.isDirectory()) {
-          await walk(childAbs, nextStack);
-          continue;
-        }
-        if (!entry.isFile()) continue; // skip sockets, symlinks, etc.
-        // Check the size cap BEFORE reading the file into memory. Reading
-        // first would let a single hostile 2 GB file allocate the whole
-        // buffer before the throw — defeating the cap as a peak-heap
-        // bound. `stat.size` is an upper bound that we re-verify after
-        // the read in case the file grew between stat and readFile.
-        const stat = await fs.stat(childAbs);
-        if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
-          throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-        }
-        const data = await fs.readFile(childAbs);
-        if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
-          throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-        }
-        totalBytes += data.byteLength;
-        // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
-        // separators regardless of host OS so the zip extracts cleanly
-        // on Windows/Mac/Linux alike.
-        const relInside = path
-          .relative(absoluteRoot, childAbs)
-          .replace(/\\/g, '/');
-        zip.addFile(`${zipRoot}/${relInside}`, data);
-      }
-    };
-
-    await walk(absoluteRoot, BevelIgnoreStack.empty());
+    await walkTree(absoluteRoot, explorerWalk(), [
+      {
+        async onFile(dir, name) {
+          const childAbs = path.join(absoluteRoot, dir, name);
+          // Check the size cap BEFORE reading the file into memory. Reading
+          // first would let a single hostile 2 GB file allocate the whole
+          // buffer before the throw — defeating the cap as a peak-heap
+          // bound. `stat.size` is an upper bound that we re-verify after
+          // the read in case the file grew between stat and readFile.
+          const stat = await fs.stat(childAbs);
+          if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
+            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+          }
+          const data = await fs.readFile(childAbs);
+          if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
+            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+          }
+          totalBytes += data.byteLength;
+          // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
+          // separators regardless of host OS so the zip extracts cleanly
+          // on Windows/Mac/Linux alike.
+          zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
+        },
+      },
+    ]);
     return zip.toBuffer();
   }
 
@@ -1796,70 +1774,83 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
-  private async buildFileTree(
-    dir: string,
-    workspaceRoot: string,
-    parentIgnore: BevelIgnoreStack,
-    readFilter?: ReadTreeFilter,
-  ): Promise<FileTreeEntry> {
-    const name = path.basename(dir);
-    const relativePath = path.relative(workspaceRoot, dir).replace(/\\/g, '/');
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-
-    const ignoreStack = await parentIgnore.extendedWith(dir);
-
-    // First pass: the entries surviving `.git`/`.gitkeep` + `.bevelignore`.
-    const candidates: { entry: (typeof entries)[number]; entryPath: string; rel: string }[] = [];
-    for (const entry of entries) {
-      // `.git/` is never user content and listing it would blow up the
-      // tree response. `.gitkeep` is the empty-folder placeholder — not
-      // worth surfacing in the file list.
-      if (entry.name === '.git' && entry.isDirectory()) continue;
-      if (entry.name === '.gitkeep' && entry.isFile()) continue;
-
-      const entryPath = path.join(dir, entry.name);
-      if (ignoreStack.isIgnored(entryPath, entry.isDirectory())) continue;
-
-      candidates.push({
-        entry,
-        entryPath,
-        rel: path.relative(workspaceRoot, entryPath).replace(/\\/g, '/'),
-      });
+  private async buildFileTree(root: string, workspaceRoot: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
+    /** A folder while the tree is built: whether the caller may read it decides, once its subtree is known, whether it stays. */
+    interface DirNode {
+      name: string;
+      relativePath: string;
+      readable: boolean;
+      children: (FileTreeEntry | DirNode)[];
     }
+    const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, children: [] };
+    const nodes = new Map<string, DirNode>([['', top]]);
 
-    // Read-permission filter: ONE batched check per directory. Drops files the
-    // caller can't read. A directory is kept when the caller can read it — a
-    // readable directory left empty after filtering stays visible, the folder
-    // itself is readable — OR when something readable survives beneath it: a
-    // grant below (a linked skill's folder opened to a plugin's readers, a
-    // sub-folder shared on its own) makes the folders above it the way there,
-    // shown as containers whose own contents stay filtered. So an unreadable
-    // directory is walked, not skipped, and dropped only when the walk finds
-    // nothing. Fail-closed: anything not explicitly readable is dropped. No
-    // filter → identical to the pre-feature tree (regression-safe).
-    const verdict = readFilter && candidates.length > 0 ? await readFilter(candidates.map((c) => c.rel)) : null;
-    const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
+    await walkTree(root, explorerWalk(), [
+      {
+        async onDir(rel, entries) {
+          const node = nodes.get(rel)!;
+          const abs = path.join(root, rel);
+          const rels = entries.map((e) => relOf(path.join(abs, e.name)));
+          // Read-permission filter: ONE batched check per directory. Drops files the
+          // caller can't read. A directory is kept when the caller can read it — a
+          // readable directory left empty after filtering stays visible, the folder
+          // itself is readable — OR when something readable survives beneath it: a
+          // grant below (a linked skill's folder opened to a plugin's readers, a
+          // sub-folder shared on its own) makes the folders above it the way there,
+          // shown as containers whose own contents stay filtered. So an unreadable
+          // directory is walked, not skipped, and dropped only when the walk finds
+          // nothing (see `finish`). Fail-closed: anything not explicitly readable is
+          // dropped. No filter → identical to the pre-feature tree (regression-safe).
+          const verdict = readFilter && entries.length > 0 ? await readFilter(rels) : null;
+          const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
+          entries.forEach((entry, i) => {
+            const entryRel = rels[i]!;
+            if (entry.isDirectory()) {
+              const child: DirNode = { name: entry.name, relativePath: entryRel, readable: readable(entryRel), children: [] };
+              nodes.set(rel ? `${rel}/${entry.name}` : entry.name, child);
+              node.children.push(child);
+            } else if (readable(entryRel)) {
+              node.children.push({ name: entry.name, relativePath: entryRel, type: 'file' });
+            }
+          });
+        },
+      },
+    ]);
 
-    const children: FileTreeEntry[] = [];
-    for (const { entry, entryPath, rel } of candidates) {
-      if (entry.isDirectory()) {
-        const sub = await this.buildFileTree(entryPath, workspaceRoot, ignoreStack, readFilter);
-        if (readable(rel) || (sub.children?.length ?? 0) > 0) children.push(sub);
-      } else if (readable(rel)) {
-        children.push({ name: entry.name, relativePath: rel, type: 'file' });
+    /** Bottom-up: drop a folder the caller may not read once nothing readable turned up beneath it; sort each level. */
+    const finish = (node: DirNode): FileTreeEntry => {
+      const children: FileTreeEntry[] = [];
+      for (const child of node.children) {
+        if ('type' in child) {
+          children.push(child);
+          continue;
+        }
+        const sub = finish(child);
+        if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
       }
-    }
-
-    children.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    return {
-      name,
-      relativePath: relativePath || '.',
-      type: 'directory',
-      children,
+      children.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      return { name: node.name, relativePath: node.relativePath, type: 'directory', children };
     };
+    return finish(top);
   }
+}
+
+/**
+ * The explorer's walk of a workspace: no git internals (never user content,
+ * and listing it would blow up the tree), no `.gitkeep` (the empty-folder
+ * placeholder, not worth showing), `.bevelignore` honoured on the way down —
+ * and a folder that cannot be listed is the request's error, not a tree with
+ * a silent gap. A folder download and the whole-KB read walk the same way,
+ * so they carry exactly what the explorer shows.
+ */
+function explorerWalk(): TreeWalkOptions {
+  return {
+    skip: (e) => (e.name === '.git' && e.isDirectory()) || (e.name === '.gitkeep' && e.isFile()),
+    ignore: true,
+    unreadable: 'throw',
+  };
 }

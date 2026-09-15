@@ -16,7 +16,7 @@ import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
 import { isAbsence } from '../../../../shared/fs-errors.js';
-import { IGNORE_FILENAME } from '../../bevel-ignore.js';
+import { IGNORE_FILENAME } from '../../../../shared/bevel-ignore.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { withoutIgnoreLine } from './template-files.step.js';
 import { hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
