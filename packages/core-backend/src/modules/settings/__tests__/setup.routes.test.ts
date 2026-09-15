@@ -6,6 +6,7 @@ import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { ConnectionCheck, RepositoryConnection } from '../connection-check.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 
@@ -39,8 +40,26 @@ afterEach(() => {
   }
 });
 
-/** Mount the setup router on a throwaway port and hand back its base URL. */
-function listen(isAdmin = true, runAll: () => Promise<void> = async () => {}) {
+/** Stands in for the remote: says a connection reads and writes, and counts the asks. */
+function connectedCheck() {
+  const asked: RepositoryConnection[] = [];
+  const check = async (connection: RepositoryConnection): Promise<ConnectionCheck> => {
+    asked.push(connection);
+    return { outcome: 'connected', branches: ['main'], defaultBranch: 'main', empty: false };
+  };
+  return { asked, check };
+}
+
+/**
+ * Mount the setup router on a throwaway port and hand back its base URL.
+ * `checkConnection` defaults to the REAL check — the test-connection suites
+ * aim it at a port nothing listens on — and save suites pass a stand-in.
+ */
+function listen(
+  isAdmin = true,
+  runAll: () => Promise<void> = async () => {},
+  checkConnection?: (connection: RepositoryConnection) => Promise<ConnectionCheck>,
+) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
@@ -62,6 +81,8 @@ function listen(isAdmin = true, runAll: () => Promise<void> = async () => {}) {
       // Default no-op: most suites never complete setup, so the runner is
       // never reached. The completion-transition suite passes its own spy.
       { runAll },
+      undefined,
+      checkConnection,
     ),
   );
   server = app.listen(0);
@@ -209,7 +230,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     let runs = 0;
     const { base } = listen(true, async () => {
       runs++;
-    });
+    }, connectedCheck().check);
     // First save: an incomplete configuration — no phase.
     let res = await post(base, '/api/setup/settings', { settings: { gitUsername: 'x-access-token' } });
     expect(res.status).toBe(200);
@@ -234,7 +255,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
       const { base } = listen(true, async () => {
         attempts++;
         if (fail) throw new Error('remote said no');
-      });
+      }, connectedCheck().check);
       const res = await post(base, '/api/setup/settings', { settings: completing });
       expect(res.status).toBe(500);
       expect((await res.json()).error).toMatch(/could not be initialized/i);
@@ -266,7 +287,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     const { base } = listen(true, async () => {
       runs++;
       await running;
-    });
+    }, connectedCheck().check);
     // The completing save blocks inside the phase...
     const first = post(base, '/api/setup/settings', { settings: completing });
     // release() in a finally: a mid-test assertion failure must still unblock
@@ -300,6 +321,142 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     expect(res2.status).toBe(200);
     expect(runs).toBe(1);
     expect((await (await fetch(`${base}/api/setup/status`)).json()).complete).toBe(true);
+  });
+});
+
+/**
+ * A saved connection is one the host has accepted for reading AND writing. The
+ * save runs the same check as Test connection, on the values it would put in
+ * effect, and a failure stores nothing and says which field to fix.
+ */
+describe('POST /setup/settings — the connection is checked before it is stored', () => {
+  const REPO = 'https://example.com/acme/kb.git';
+  const refusing = (result: ConnectionCheck) => {
+    const asked: RepositoryConnection[] = [];
+    return {
+      asked,
+      check: async (connection: RepositoryConnection) => {
+        asked.push(connection);
+        return result;
+      },
+    };
+  };
+
+  it('refuses a save whose token cannot read the repository, and stores nothing', async () => {
+    const remote = refusing({
+      outcome: 'rejected',
+      reason: 'credentials',
+      field: 'gitToken',
+      error: 'The host rejected those credentials.',
+    });
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: REPO, gitToken: 'ghp_wrong' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({ gitToken: 'The host rejected those credentials.' });
+    // Checked on exactly the values the save would have put in effect.
+    expect(remote.asked).toEqual([{ url: REPO, token: 'ghp_wrong', username: 'x-access-token' }]);
+    expect(settings.resolve('kbRepoUrl')).toBe('');
+    expect(settings.resolve('gitToken')).toBe('');
+  });
+
+  it('refuses a token that can read but not write, naming the permission', async () => {
+    const remote = refusing({
+      outcome: 'read-only',
+      field: 'gitToken',
+      error:
+        'This token can read the repository but cannot write to it. Grant it write access: on GitHub, “Contents: Read and write”.',
+      branches: ['main'],
+      defaultBranch: 'main',
+      empty: false,
+    });
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: REPO, gitToken: 'ghp_readonly' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.gitToken).toMatch(/Contents: Read and write/);
+    expect(settings.resolve('gitToken')).toBe('');
+  });
+
+  it('refuses when the host cannot be reached, against the address', async () => {
+    const remote = refusing({
+      outcome: 'rejected',
+      reason: 'unreachable',
+      field: 'kbRepoUrl',
+      error: 'Could not reach that host from this server. Check the URL and any network egress rules, then try again.',
+    });
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: REPO, gitToken: 'ghp_x' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/could not reach that host/i);
+    expect(settings.resolve('kbRepoUrl')).toBe('');
+  });
+
+  it('refuses a new address without a token, and never sends the saved token there', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_verysecret' }, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://attacker.example/collector.git' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.gitToken).toMatch(/access token for that repository/i);
+    expect(remote.asked).toEqual([]);
+    expect(settings.resolve('kbRepoUrl')).toBe(REPO);
+  });
+
+  it('checks a new address with the token that arrives beside it, then stores both', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_old' }, null);
+    const moved = 'https://example.com/acme/moved.git';
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: moved, gitToken: 'ghp_new' },
+    });
+    expect(res.status).toBe(200);
+    expect(remote.asked).toEqual([{ url: moved, token: 'ghp_new', username: 'x-access-token' }]);
+    expect(settings.resolve('kbRepoUrl')).toBe(moved);
+  });
+
+  it('checks a changed username against the stored address and token', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_x' }, null);
+    const res = await post(base, '/api/setup/settings', { settings: { gitUsername: 'oauth2' } });
+    expect(res.status).toBe(200);
+    expect(remote.asked).toEqual([{ url: REPO, token: 'ghp_x', username: 'oauth2' }]);
+  });
+
+  it('never probes a save that touches nothing about the connection', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_x' }, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: {
+        oidcClientId: 'hexis-app',
+        oidcProviderLabel: 'Company SSO',
+        // Re-sending the stored values unchanged is not a change either.
+        kbRepoUrl: REPO,
+        gitUsername: 'x-access-token',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(remote.asked).toEqual([]);
+  });
+
+  it('refuses a malformed field on its own terms, before asking the remote anything', async () => {
+    const remote = connectedCheck();
+    const { base } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'git@example.com:acme/kb.git', gitToken: 'ghp_x' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/full URL|https/);
+    expect(remote.asked).toEqual([]);
   });
 });
 

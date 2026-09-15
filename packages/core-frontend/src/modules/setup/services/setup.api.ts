@@ -155,7 +155,16 @@ export async function saveSettings(settings: Record<string, string>): Promise<Sa
 }
 
 export interface ConnectionTest {
+  /** True only for a connection the host accepts for reading AND writing. */
   ok: boolean;
+  /**
+   * Which of the three answers this is: read and write; reads but may not
+   * push (`error` names the permission to grant); or turned down before it
+   * could read — bad credentials, no repository, unreachable host.
+   */
+  outcome?: 'connected' | 'read-only' | 'rejected';
+  /** The field a failure is about, when the server says. */
+  field?: string;
   /** The remote answered but has no branches yet — a supported starting point. */
   empty?: boolean;
   branches?: string[];
@@ -172,6 +181,12 @@ export interface ConnectionTest {
  * Try the credentials against the real remote before saving anything. Values
  * are sent as typed so an admin tests what is on screen, not what is stored;
  * omitted fields fall back to what is already in effect.
+ *
+ * A 4xx is an ANSWER, not a failure to ask: the server looked at these values
+ * and refused them ("enter the access token for that repository", "the URL
+ * must start with https://"). It comes back as the rejection it is, so no
+ * caller can mistake it for "could not check" and carry on past it. Only a
+ * 5xx or a request that never landed throws.
  */
 export async function testConnection(fields: Record<string, string>): Promise<ConnectionTest> {
   const res = await authFetch('/api/setup/test-connection', {
@@ -179,6 +194,20 @@ export async function testConnection(fields: Record<string, string>): Promise<Co
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   });
+  if (res.status >= 400 && res.status < 500) {
+    let data: { error?: string; field?: string } = {};
+    try {
+      data = (await res.json()) as typeof data;
+    } catch {
+      // No body worth reading — the status alone still says "refused".
+    }
+    return {
+      ok: false,
+      outcome: 'rejected',
+      field: data.field,
+      error: data.error || `The connection check was refused (${res.status}).`,
+    };
+  }
   if (!res.ok) await readError(res);
   return (await res.json()) as ConnectionTest;
 }

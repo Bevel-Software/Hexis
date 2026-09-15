@@ -1,0 +1,273 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { validateHttpsRemote } from './deployment-settings.service.js';
+
+const execFileAsync = promisify(execFile);
+
+/** The repository connection a deployment reads and writes its knowledge base with. */
+export interface RepositoryConnection {
+  url: string;
+  token: string;
+  username: string;
+}
+
+/** Which form field a failed check is about — the save reports it against that input. */
+export type ConnectionField = 'kbRepoUrl' | 'gitToken';
+
+/** What the remote listed, when it answered a read. */
+interface Listing {
+  branches: string[];
+  /** What the remote calls its own trunk, when it says. */
+  defaultBranch: string | null;
+  /** No branches yet — a supported starting point, not a failure. */
+  empty: boolean;
+}
+
+/**
+ * The three answers a connection can give, and the only three the screen
+ * distinguishes:
+ *
+ *  - `connected`: the token reads AND writes the repository;
+ *  - `read-only`: it reads, but the host refused the push side — the listing
+ *    rides along, and `error` names the permission to grant;
+ *  - `rejected`: it never got as far as reading — bad credentials, no such
+ *    repository, or a host that could not be reached.
+ */
+export type ConnectionCheck =
+  | ({ outcome: 'connected' } & Listing)
+  | ({ outcome: 'read-only'; field: 'gitToken'; error: string } & Listing)
+  | {
+      outcome: 'rejected';
+      reason: FailureReason;
+      field: ConnectionField;
+      error: string;
+    };
+
+export type FailureReason = 'credentials' | 'not-found' | 'unreachable' | 'unknown';
+
+/** Runs one git command; rejects with an error whose message carries git's stderr. */
+export type GitRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ stdout: string }>;
+
+const TOKEN_ENV = 'BEVEL_PROBE_TOKEN';
+
+const runGit: GitRunner = async (args, env) => {
+  const { stdout } = await execFileAsync('git', args, { timeout: 20_000, env });
+  return { stdout: stdout.toString() };
+};
+
+/**
+ * Ask the remote whether this connection can do what a deployment needs of it:
+ * READ the repository and WRITE to it, with exactly the token and username the
+ * deployment will use.
+ *
+ * Reading alone is not enough. A read-only token lists branches, clones, and
+ * finishes setup — and then every save anyone makes fails at push, which is
+ * the first moment anyone would learn the token was wrong.
+ *
+ *  - Read: `ls-remote --heads`, the cheapest call that proves the address
+ *    resolves and the credential authenticates.
+ *  - Write: a DRY-RUN push deleting a ref that does not exist, from an empty
+ *    scratch repository. Nothing is sent and nothing can be written, but git
+ *    still opens `receive-pack`, which is where a host checks push permission.
+ *    A host that lets us that far answers "remote ref does not exist" (or,
+ *    locally, reports the no-op delete) — either is a yes.
+ *
+ * The ONE function both Test connection and the settings save call, so the
+ * button can never say "connected" about a connection the save would refuse.
+ */
+export async function checkRepositoryConnection(
+  connection: RepositoryConnection,
+  run: GitRunner = runGit,
+): Promise<ConnectionCheck> {
+  const { url, token, username } = connection;
+  // The callers validate first and answer with their own wording; this is the
+  // floor under them, because both values reach git (the URL as an argument,
+  // the username inside a shell snippet) and either unvalidated is injection.
+  if (validateHttpsRemote(url)) throw new Error('Refusing to probe a non-https remote.');
+  if (!/^[A-Za-z0-9._-]+$/.test(username)) throw new Error('Refusing an unsupported git username.');
+
+  // The helper reads the token from the environment at call time, so it never
+  // appears in argv (and so never in a process listing or a crash dump). The
+  // empty helper first clears any the host has configured, so the answer is
+  // about THIS token, not one sitting in a system credential store.
+  const credArgs = [
+    '-c',
+    'credential.helper=',
+    ...(token
+      ? ['-c', `credential.helper=!f() { printf '%s\\n' "username=${username}" "password=$${TOKEN_ENV}"; }; f`]
+      : []),
+  ];
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    [TOKEN_ENV]: token,
+    // Never let git stop for a prompt: without this a bad credential hangs the
+    // request until the timeout instead of failing.
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: 'echo',
+  };
+  const scrub = (err: unknown) => {
+    const raw = err instanceof Error ? err.message : String(err);
+    return token ? raw.replaceAll(token, '***') : raw;
+  };
+
+  let listing: Listing;
+  try {
+    // `--end-of-options` on top of the validation above: belt and braces, so
+    // nothing that arrives here can ever be read as a flag.
+    const { stdout } = await run([...credArgs, 'ls-remote', '--heads', '--end-of-options', url], env);
+    listing = parseListing(stdout);
+  } catch (err) {
+    return rejection(classifyReadFailure(scrub(err)), scrub(err));
+  }
+
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-write-check-'));
+  try {
+    await run(['init', '--bare', '--quiet', scratch], env);
+    const probeRef = `refs/heads/hexis-write-check-${randomBytes(6).toString('hex')}`;
+    await run(
+      [...credArgs, `--git-dir=${scratch}`, 'push', '--dry-run', '--end-of-options', url, `:${probeRef}`],
+      env,
+    );
+    return { outcome: 'connected', ...listing };
+  } catch (err) {
+    const text = scrub(err);
+    const verdict = classifyWriteFailure(text);
+    if (verdict === 'writable') return { outcome: 'connected', ...listing };
+    if (verdict === 'read-only') {
+      return { outcome: 'read-only', field: 'gitToken', error: readOnlyMessage(url), ...listing };
+    }
+    return rejection(verdict, text);
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Why a READ failed. Order matters: an HTTP 403 arrives as
+ * "unable to access '…': The requested URL returned error: 403", so the
+ * credential patterns are tried before the generic "unable to access".
+ */
+export function classifyReadFailure(text: string): FailureReason {
+  if (/timed out|ETIMEDOUT/i.test(text)) return 'unreachable';
+  if (/Authentication failed|could not read Username|could not read Password|invalid credentials|error: 40[13]\b/i.test(text)) {
+    return 'credentials';
+  }
+  if (/not found|repository .* does not exist|error: 404\b/i.test(text)) return 'not-found';
+  if (/could not resolve host|unable to access|Failed to connect|Connection refused|SSL|certificate|TLS/i.test(text)) {
+    return 'unreachable';
+  }
+  return 'unknown';
+}
+
+/**
+ * What a dry-run push's failure means, given the same credentials have just
+ * READ the repository.
+ *
+ * "remote ref does not exist" is git's answer AFTER the host has let it into
+ * `receive-pack` and advertised its refs — the probe ref is absent by design,
+ * so that answer is proof of write access, not a failure. A host refusing the
+ * push side says so at that same door: GitHub "Permission to … denied" or
+ * "Write access to repository not granted", GitLab "not allowed to push",
+ * Bitbucket "lack one or more required privilege scopes", Azure DevOps
+ * "GenericContribute", or plainly a 401/403. A 404 here is the same refusal —
+ * the credentials just listed the repository, so it exists; the host is hiding
+ * the write side from this token.
+ */
+export function classifyWriteFailure(text: string): 'writable' | 'read-only' | FailureReason {
+  if (/remote ref does not exist/i.test(text)) return 'writable';
+  if (/timed out|ETIMEDOUT/i.test(text)) return 'unreachable';
+  if (
+    /Permission to .* denied|Write access to repository not granted|not allowed to push|lack one or more required privilege scopes|GenericContribute|denied|forbidden|Authentication failed|could not read Username|could not read Password|error: 40[134]\b|not found/i.test(
+      text,
+    )
+  ) {
+    return 'read-only';
+  }
+  if (/could not resolve host|unable to access|Failed to connect|Connection refused|SSL|certificate|TLS/i.test(text)) {
+    return 'unreachable';
+  }
+  return 'unknown';
+}
+
+/** The permission a token needs to write, in the host's own words where it is recognised. */
+export function writePermissionFor(url: string): string {
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    // Unreachable in practice — the URL was validated before it was probed.
+  }
+  if (host === 'github.com' || host.endsWith('.github.com')) {
+    return 'on GitHub, “Contents: Read and write” for this repository (a classic token needs the “repo” scope)';
+  }
+  if (host === 'gitlab.com') return 'on GitLab, the “write_repository” scope and at least the Developer role';
+  if (host === 'bitbucket.org') return 'on Bitbucket, “Repositories: Write”';
+  if (host === 'dev.azure.com' || host.endsWith('.visualstudio.com')) {
+    return 'on Azure DevOps, “Code: Read & write”';
+  }
+  return 'push (write) access to this repository';
+}
+
+function readOnlyMessage(url: string): string {
+  return `This token can read the repository but cannot write to it. Grant it write access: ${writePermissionFor(url)}.`;
+}
+
+function rejection(reason: FailureReason, text: string): ConnectionCheck {
+  switch (reason) {
+    case 'credentials':
+      return {
+        outcome: 'rejected',
+        reason,
+        field: 'gitToken',
+        error:
+          'The host rejected those credentials. Check the token, and that the username matches the host (GitHub x-access-token, GitLab oauth2, Bitbucket x-token-auth).',
+      };
+    case 'not-found':
+      return {
+        outcome: 'rejected',
+        reason,
+        field: 'kbRepoUrl',
+        error: 'No repository at that URL — or the token cannot see it.',
+      };
+    case 'unreachable':
+      return {
+        outcome: 'rejected',
+        reason,
+        field: 'kbRepoUrl',
+        error:
+          'Could not reach that host from this server. Check the URL and any network egress rules, then try again.',
+      };
+    default:
+      // Echoed only when it matches nothing known, already scrubbed of the
+      // token — `ls-remote` failures have been known to quote the credential.
+      return {
+        outcome: 'rejected',
+        reason: 'unknown',
+        field: 'kbRepoUrl',
+        error: text.split('\n').slice(0, 3).join(' ').slice(0, 400),
+      };
+  }
+}
+
+/** `<sha>\trefs/heads/<name>` rows, plus the `ref: … HEAD` symref row when a host sends one. */
+function parseListing(stdout: string): Listing {
+  const lines = stdout.split('\n');
+  // Tag refs and the bare HEAD row are not branches, so they are filtered
+  // rather than sliced blindly.
+  const branches = lines
+    .filter((line) => !line.startsWith('ref:'))
+    .map((line) => line.split('\t')[1]?.trim())
+    .filter((ref): ref is string => !!ref && ref.startsWith('refs/heads/'))
+    .map((ref) => ref.slice('refs/heads/'.length));
+  const defaultBranch =
+    lines
+      .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
+      ?.slice('ref: refs/heads/'.length)
+      .split('\t')[0]
+      ?.trim() || null;
+  return { branches, defaultBranch, empty: branches.length === 0 };
+}
