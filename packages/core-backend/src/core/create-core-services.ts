@@ -115,7 +115,6 @@ import {
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
-import { McpSessionStore } from '../modules/mcp/mcp-session-store.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
@@ -721,11 +720,11 @@ export async function createCoreServices(
   const accountErasureService = new AccountErasureService(db, ports.erasureParticipants ?? []);
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
-  // lifecycle; McpSessionStore holds per-session userId in memory
-  // (single-replica — see docs/mcp-remote-access.md). McpService is now a
-  // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
-  // over loopback and re-exposes every tool, dispatching calls back through the
-  // REST tool surface (so agent logic + metering live there, once).
+  // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
+  // discovers the caller's catalog at /api/agent/all-tools over loopback and
+  // re-exposes every tool, dispatching calls back through the REST tool
+  // surface (so agent logic + metering live there, once). No MCP session is
+  // kept, so a restart is invisible to connected clients.
   // Connection keys also come as GitHub-shaped links (`gho_…`, kind
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
@@ -750,15 +749,13 @@ export async function createCoreServices(
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
   });
-  const mcpSessionStore = new McpSessionStore();
-  // What every connected agent is told at session start: the admin's preamble
+  // What every connected agent is told at initialize: the admin's preamble
   // at the repository root, read as the platform (the root is default-deny
   // for readers, and the preamble is a broadcast). One reader, two consumers:
-  // the proxy below composes in-process per session; the agent-facing route
+  // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
   const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName, disk);
   const mcpService = new McpService(
-    mcpSessionStore,
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
       // IPv4 and dodge resolver ambiguity. The proxy authenticates each call with
@@ -766,7 +763,7 @@ export async function createCoreServices(
       loopbackBaseUrl: `http://127.0.0.1:${config.port}`,
       // Manual namespace + UTCP variable prefix (KNOWLEDGE_BASE_API_URL / …).
       manualName: 'KNOWLEDGE_BASE',
-      // Oversized chain results spill here too — an external MCP session has no
+      // Oversized chain results spill here too — an external MCP caller has no
       // ambient workspace, so it reads the spill back by ref via `read_file`.
       spillStore,
       // For the needs-authorization setup link surfaced to external agents.
@@ -778,19 +775,19 @@ export async function createCoreServices(
     // tool need?".
     secretsVaultService,
     toolManualService,
-    // Loopback bearer mint for OAuth/JWT sessions — their own bearer would
+    // Loopback bearer mint for OAuth/JWT requests — their own bearer would
     // 401 at the connection-key/internal-only /api/agent/* hop.
     internalTokenService,
-    // Session-grant reset for broken tool sign-ins. A closure because the
+    // Grant reset for broken tool sign-ins. A closure because the
     // provider is constructed just below (it needs nothing from McpService;
     // the binding is only dereferenced at call time, long after boot).
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
   );
-  // A changed secret invalidates the proxy's remembered manual failures for
-  // that user (null = shared secret → everyone), so a just-repaired
-  // credential is retried on the very next session build instead of waiting
-  // out the failure memo's TTL.
-  secretsVaultService.onMutation((changedUserId) => mcpService.clearManualFailures(changedUserId));
+  // A changed secret invalidates what the proxy built from the old value for
+  // that user (null = shared secret → everyone): remembered manual failures,
+  // so a just-repaired credential is retried on the very next request instead
+  // of waiting out the failure memo's TTL, and pooled downstream connections.
+  secretsVaultService.onMutation((changedUserId) => mcpService.onSecretsChanged(changedUserId));
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
