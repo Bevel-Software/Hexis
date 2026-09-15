@@ -28,7 +28,7 @@ import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
-import { holdCommitWorkerLease, type LeaseLoopHandle } from './lifecycle.js';
+import { holdCommitWorkerLease, leasedWorkers, periodicTask, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -919,15 +919,24 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
+  // The idle-clone sweep rides the same lease as the commit worker: it removes
+  // clones from the shared volume, which is exactly the kind of work only one
+  // process may do at a time. Hourly is plenty against a retention measured in
+  // days; the first run waits ten minutes so a boot is not also a sweep.
+  const idleCloneSweep = periodicTask(
+    async () => {
+      await workflowService.retireIdleWorkspaces(config.workspaceRetentionMs);
+    },
+    { label: 'idle-clone sweep', intervalMs: 60 * 60 * 1000, initialDelayMs: 10 * 60 * 1000 },
+  );
+  const leased =
+    config.workspaceRetentionMs > 0 ? leasedWorkers(pendingCommitsWorker, idleCloneSweep) : pendingCommitsWorker;
   // Not `start()`: the worker runs only while this process holds the
   // commit-worker lease. On a redeploy the outgoing container still holds it,
   // so this one serves requests and declines to drain until that one exits;
   // then it takes the lease and starts. Two processes draining one shared
   // clone volume is the failure this prevents — see `core/lifecycle.ts`.
-  const commitWorker = holdCommitWorkerLease(
-    new AdvisoryLease(db, AdvisoryLock.CommitWorker),
-    pendingCommitsWorker,
-  );
+  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker), leased);
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when

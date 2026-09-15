@@ -38,6 +38,9 @@ pin in `.env` cannot be changed out from under you in the UI.
 | `INTERNAL_TOKEN_SECRET` | no | Dedicated HMAC key for internal (loopback) tool tokens; unset, one is derived from `JWT_SECRET` |
 | `UPDATE_CHECK` | no | `false` disables the release check behind the admin upgrade banner, the app's one outbound request (air-gapped deployments) |
 | `ONTOLOGY_SESSION_BLOCK` | no | Ontology-session touch tracking toggle (default on) |
+| `GIT_TIMEOUT_MS` | no | Ceiling on any single git command (default 120000). Raise it for a large repository on a slow git host |
+| `WORKSPACE_RETENTION_DAYS` | no | Days a branch's clone may go unopened before it is removed from the workspaces volume (default 30; `0` keeps every clone). Only clones with nothing unpublished are ever removed, and the next open re-clones |
+| `LOG_LEVEL` | no | Log verbosity of the server (`debug`, `info`, `warn`, `error`; default `info`) |
 
 ## Generating the two secrets
 
@@ -89,6 +92,18 @@ and seeds the knowledge-base repo, so give the container its `start_period`
 
 Migrations run automatically on boot; there is no separate migrate step, in
 development or in production.
+
+`GET /api/ready` is the answer worth alerting on. It reports whether the
+database is reachable, how old the oldest commit still waiting to be pushed is
+and whether this process is the one pushing, whether the git host was reachable
+at the last attempt, and how much free space the workspaces volume has. The
+status is `ok`, `degraded` (a commit older than ten minutes is waiting, or free
+space is under a gibibyte) or `unavailable` (the database cannot be reached,
+the one case that also returns a 503). Poll it from your monitoring rather than
+the orchestrator: a restart fixes none of the degraded conditions.
+
+Logs are one JSON object per line (`level`, `time`, `module`, `msg`, plus
+whatever the line carries). `LOG_LEVEL` sets the verbosity.
 
 ---
 

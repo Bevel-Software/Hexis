@@ -1833,15 +1833,50 @@ export class GitService implements IGitService {
   async hasUnpushedCommits(workspaceId: string): Promise<boolean> {
     return this.mutex.run(workspaceId, async () => {
       const cwd = await this.repoDir(workspaceId);
-      const branch = await this.currentBranch(cwd);
-      try {
-        const { stdout } = await this.git(cwd, [
-          'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
-        ]);
-        return Number(stdout.trim()) > 0;
-      } catch {
-        return true;
-      }
+      return this.hasUnpushedCommitsIn(cwd);
+    });
+  }
+
+  /** The unlocked half of {@link hasUnpushedCommits}: callers hold the mutex. */
+  private async hasUnpushedCommitsIn(cwd: string): Promise<boolean> {
+    const branch = await this.currentBranch(cwd);
+    try {
+      const { stdout } = await this.git(cwd, [
+        'rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`,
+      ]);
+      return Number(stdout.trim()) > 0;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Remove a clone from disk if — and only if — nothing in it is unpublished:
+   * a clean working tree, no commit its remote does not reach, and nothing
+   * queued for it (`queued`, the caller's question to the commit queue). The
+   * verdict names which guard refused, for the sweep's log.
+   *
+   * All three checks and the removal happen under the clone's mutex, in one
+   * hold. A save is a file write followed by a queued row followed by a
+   * commit the worker runs under this same key, so with the key held the
+   * clone is either entirely published (and may go) or shows the save on one
+   * of the three guards; nothing can land a write between the last check and
+   * the removal. Retiring a published clone loses nothing — the branch lives
+   * on origin, and the next open re-clones it — which is what makes a wrong
+   * "idle" verdict cost one clone rather than anyone's work.
+   */
+  async retireClone(
+    workspaceId: string,
+    opts: { queued: () => Promise<boolean>; remove: () => Promise<void> },
+  ): Promise<'retired' | 'dirty' | 'unpushed' | 'queued'> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const { stdout } = await this.git(cwd, ['status', '--porcelain=v1']);
+      if (stdout.trim().length > 0) return 'dirty';
+      if (await this.hasUnpushedCommitsIn(cwd)) return 'unpushed';
+      if (await opts.queued()) return 'queued';
+      await opts.remove();
+      return 'retired';
     });
   }
 

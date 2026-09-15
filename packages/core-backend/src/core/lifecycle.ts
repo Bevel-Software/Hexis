@@ -139,6 +139,92 @@ export function holdCommitWorkerLease(
   };
 }
 
+export interface PeriodicTaskOptions {
+  /** Names the task in its log lines. */
+  label: string;
+  /** Time between the end of one run and the start of the next. */
+  intervalMs: number;
+  /** Time before the first run; defaults to `intervalMs`. */
+  initialDelayMs?: number;
+  /** Test seam — defaults to `setTimeout` wrapped as a promise. */
+  sleep?: (ms: number) => Promise<void>;
+  log?: (message: string) => void;
+}
+
+/**
+ * A housekeeping job as a {@link LeasedWorker}, so it runs exactly where the
+ * commit worker runs: in the one process holding the lease. Anything that
+ * touches the shared clone volume on a timer belongs here rather than on a
+ * bare `setInterval`, for the same reason the commit worker does — two
+ * processes overlap on every redeploy, and two sweeps of one volume is the
+ * interleaving the lease exists to rule out.
+ *
+ * A run that throws is logged and the schedule continues; a `stop()` during
+ * a run awaits the run, and one during the wait ends the wait at once.
+ */
+export function periodicTask(run: () => Promise<void>, opts: PeriodicTaskOptions): LeasedWorker {
+  const sleep = opts.sleep ?? defaultSleep;
+  const log = opts.log ?? ((message: string) => logger('lifecycle').info(message));
+  const initialDelayMs = opts.initialDelayMs ?? opts.intervalMs;
+
+  let running = false;
+  let loop: Promise<void> | null = null;
+  let wake: (() => void) | null = null;
+
+  const wait = (ms: number) =>
+    Promise.race([
+      sleep(ms),
+      new Promise<void>((resolve) => {
+        wake = resolve;
+      }),
+    ]).finally(() => {
+      wake = null;
+    });
+
+  return {
+    start() {
+      if (running) return;
+      running = true;
+      loop = (async () => {
+        await wait(initialDelayMs);
+        while (running) {
+          try {
+            await run();
+          } catch (err) {
+            log(`${opts.label} failed: ${String(err)}`);
+          }
+          if (running) await wait(opts.intervalMs);
+        }
+      })();
+    },
+    async stop() {
+      if (!running) return;
+      running = false;
+      wake?.();
+      await loop;
+      loop = null;
+    },
+  };
+}
+
+/**
+ * Several workers as one, for the lease loop: all start when the lease is
+ * taken, all stop when it is lost or the process ends. A stop is awaited
+ * for every member even when one of them fails to stop.
+ */
+export function leasedWorkers(...workers: LeasedWorker[]): LeasedWorker {
+  return {
+    start() {
+      for (const worker of workers) worker.start();
+    },
+    async stop() {
+      const outcomes = await Promise.allSettled(workers.map((worker) => worker.stop()));
+      const failed = outcomes.find((o): o is PromiseRejectedResult => o.status === 'rejected');
+      if (failed) throw failed.reason;
+    },
+  };
+}
+
 export interface ShutdownDeps {
   /** The listening server — stops accepting, then drops what is connected. */
   server: Pick<Server, 'close' | 'closeAllConnections'>;

@@ -445,6 +445,60 @@ export class WorkflowService implements IWorkflowService {
     });
   }
 
+  /**
+   * Retire the clones of branches no one has opened for `olderThanMs`. The
+   * disk is the resource this protects: one clone per branch ever opened,
+   * and nothing else removes one until the branch itself is deleted, so a
+   * deployment's volume only ever grows until git starts failing writes.
+   *
+   * A candidate goes only when the git layer, holding the clone's key,
+   * finds nothing unpublished in it — see `GitService.retireClone` for the
+   * three guards and why they cannot be raced. Protected branches are never
+   * candidates: the default branch is the one every boot maintains and every
+   * read of the knowledge base goes through. Each candidate is handled under
+   * the branch-lifecycle lock, so a change request being opened from or
+   * merged into the branch, or the branch's own deletion, waits for the
+   * verdict rather than interleaving with it.
+   *
+   * One clone that cannot be judged (a git error, an unreadable tree) is
+   * logged and kept; the rest of the sweep proceeds. Nothing here throws.
+   */
+  async retireIdleWorkspaces(
+    olderThanMs: number,
+  ): Promise<{ retired: string[]; kept: Array<{ branch: string; reason: string }> }> {
+    const retired: string[] = [];
+    const kept: Array<{ branch: string; reason: string }> = [];
+    if (!(olderThanMs > 0)) return { retired, kept };
+    let candidates;
+    try {
+      candidates = await this.workspaceService.idleWorkspaces(olderThanMs);
+    } catch (err) {
+      log.warn('idle-clone sweep could not list the clones on disk:', { err });
+      return { retired, kept };
+    }
+    for (const { id, branch, idleMs } of candidates) {
+      if (isProtectedBranch(branch)) continue;
+      try {
+        const verdict = await this.branchLifecycle.run(`branch:${branch}`, () =>
+          this.git.retireClone(id, {
+            queued: () => this.pendingCommits.hasAnyForWorkspace(id),
+            remove: () => this.workspaceService.deleteWorkspace(id),
+          }),
+        );
+        if (verdict === 'retired') {
+          retired.push(branch);
+          log.info(`retired the clone of "${branch}", unopened for ${Math.round(idleMs / 86_400_000)} days`);
+        } else {
+          kept.push({ branch, reason: verdict });
+        }
+      } catch (err) {
+        kept.push({ branch, reason: 'error' });
+        log.warn(`idle-clone sweep left the clone of "${branch}" in place:`, { err });
+      }
+    }
+    return { retired, kept };
+  }
+
   /** The deletion itself — callers must hold the branch-lifecycle lock. */
   private async deleteBranchUnlocked(
     workspaceId: string,

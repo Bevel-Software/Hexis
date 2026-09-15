@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { createShutdown, holdCommitWorkerLease, type LeasedWorker } from '../lifecycle.js';
+import {
+  createShutdown,
+  holdCommitWorkerLease,
+  leasedWorkers,
+  periodicTask,
+  type LeasedWorker,
+} from '../lifecycle.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
 
 /** A lease the suite scripts: what each `tryAcquire` answers, and a way to lose it. */
@@ -61,9 +67,11 @@ function manualSleep() {
       new Promise<void>((resolve) => {
         pending.push(resolve);
       }),
+    // Resolves EVERY sleep started so far: a loop woken early leaves its
+    // sleep's resolver behind, and a tick that only served the oldest one
+    // would wake that stale sleep and leave the live one waiting.
     tick: async () => {
-      const wake = pending.shift();
-      wake?.();
+      for (const wake of pending.splice(0)) wake();
       await Promise.resolve();
       await Promise.resolve();
     },
@@ -154,6 +162,99 @@ describe('holdCommitWorkerLease', () => {
 
     await handle.stop();
     expect(record.released).toBe(1);
+  });
+});
+
+describe('periodicTask', () => {
+  it('runs after the initial delay, then once per interval, and a failure does not end the schedule', async () => {
+    const clock = manualSleep();
+    const waits: number[] = [];
+    const sleep = (ms: number) => {
+      waits.push(ms);
+      return clock.sleep();
+    };
+    let runs = 0;
+    const logged: string[] = [];
+    const task = periodicTask(
+      async () => {
+        runs += 1;
+        if (runs === 1) throw new Error('first sweep broke');
+      },
+      { label: 'sweep', intervalMs: 1000, initialDelayMs: 10, sleep, log: (m) => logged.push(m) },
+    );
+
+    task.start();
+    await settle();
+    expect(runs).toBe(0);
+    expect(waits).toEqual([10]);
+
+    await clock.tick();
+    await settle();
+    expect(runs).toBe(1);
+    expect(logged).toEqual(['sweep failed: Error: first sweep broke']);
+    expect(waits).toEqual([10, 1000]);
+
+    await clock.tick();
+    await settle();
+    expect(runs).toBe(2);
+
+    await task.stop();
+    await clock.tick();
+    await settle();
+    expect(runs).toBe(2);
+  });
+
+  it('stop() during the wait returns at once, and during a run waits for it', async () => {
+    const clock = manualSleep();
+    let finishRun: () => void = () => undefined;
+    const task = periodicTask(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRun = resolve;
+        }),
+      { label: 'sweep', intervalMs: 1000, initialDelayMs: 10, sleep: clock.sleep, log: () => undefined },
+    );
+
+    task.start();
+    await settle();
+    // Waiting on the initial delay: stop must not need the clock to advance.
+    await task.stop();
+
+    task.start();
+    await settle();
+    await clock.tick();
+    await settle();
+    // Mid-run: stop resolves only once the run does.
+    let stopped = false;
+    const stopping = task.stop().then(() => {
+      stopped = true;
+    });
+    await settle();
+    expect(stopped).toBe(false);
+    finishRun();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+});
+
+describe('leasedWorkers', () => {
+  it('starts every member, stops every member even when one fails, and reports the failure', async () => {
+    const events: string[] = [];
+    const member = (name: string, failStop = false): LeasedWorker => ({
+      start() {
+        events.push(`${name}:start`);
+      },
+      async stop() {
+        events.push(`${name}:stop`);
+        if (failStop) throw new Error(`${name} would not stop`);
+      },
+    });
+    const all = leasedWorkers(member('a', true), member('b'));
+
+    all.start();
+    expect(events).toEqual(['a:start', 'b:start']);
+    await expect(all.stop()).rejects.toThrow('a would not stop');
+    expect(events).toEqual(['a:start', 'b:start', 'a:stop', 'b:stop']);
   });
 });
 
