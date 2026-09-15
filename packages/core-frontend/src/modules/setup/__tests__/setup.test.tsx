@@ -385,6 +385,34 @@ describe('SetupScreen', () => {
     expect(api.testConnection).not.toHaveBeenCalled();
   });
 
+  /**
+   * The third outcome: the host lets the token read, but not push. That is not
+   * "connected" — every save anyone makes would fail — and not "rejected"
+   * either: the fix is a permission, and the screen has to say which.
+   */
+  it('shows a token that can read but not write as its own outcome, and will not save it', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: false,
+      outcome: 'read-only',
+      field: 'gitToken',
+      error:
+        'This token can read the repository but cannot write to it. Grant it write access: on GitHub, “Contents: Read and write” for this repository.',
+      branches: ['main'],
+      defaultBranch: 'main',
+      empty: false,
+    });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://github.com/acme/kb.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_readonly');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    expect(await screen.findByText(/Contents: Read and write/)).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+    expect(screen.getByText(/can read the repository but cannot write to it\. Grant write access/)).toBeInTheDocument();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
   /** An empty repository is a supported starting point, not a failure. */
   it('treats an empty repository as a success', async () => {
     await renderScreen();

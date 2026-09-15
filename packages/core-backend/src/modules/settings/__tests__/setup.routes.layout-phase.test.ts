@@ -120,7 +120,18 @@ function boot() {
     req.userId = 'user-1';
     next();
   });
-  app.use('/api', createSetupRoutes(settings, { isAdmin: async () => true } as IAdminAccessService, runner));
+  app.use(
+    '/api',
+    createSetupRoutes(
+      settings,
+      { isAdmin: async () => true } as IAdminAccessService,
+      runner,
+      undefined,
+      // The save now proves the connection first; the remote here is local, so
+      // the stand-in answers for the host the stored address names.
+      async () => ({ outcome: 'connected', branches: [BRANCH], defaultBranch: BRANCH, empty: false }),
+    ),
+  );
   server = app.listen(0);
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
