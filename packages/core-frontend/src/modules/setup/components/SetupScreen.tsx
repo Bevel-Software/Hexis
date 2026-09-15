@@ -248,6 +248,11 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
+/** Two reports of the same initialization failure (a status read builds a new object each time). */
+function sameFailure(a: KbInitFailure, b: KbInitFailure): boolean {
+  return a.kind === b.kind && a.cause === b.cause;
+}
+
 export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   /**
@@ -260,9 +265,24 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    */
   const [initFailure, setInitFailure] = useState<KbInitFailure | null>(kbInit ?? null);
   const [seenKbInit, setSeenKbInit] = useState(kbInit);
+  /**
+   * The failure a save or retry from THIS screen has just seen cleared, until a
+   * status read agrees. A read that went out before the retry — the refresh
+   * after the failed save — can still answer after it, reporting that same
+   * failure as standing; this screen knows better, so the stale copy is not
+   * shown. The guard lifts on the first read without a failure, and never
+   * hides a DIFFERENT failure: that is news, whenever it arrives.
+   */
+  const [clearedFailure, setClearedFailure] = useState<KbInitFailure | null>(null);
   if (kbInit !== seenKbInit) {
     setSeenKbInit(kbInit);
-    setInitFailure(kbInit ?? null);
+    if (!kbInit) {
+      setClearedFailure(null);
+      setInitFailure(null);
+    } else if (!(clearedFailure && sameFailure(kbInit, clearedFailure))) {
+      setClearedFailure(null);
+      setInitFailure(kbInit);
+    }
   }
   const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -320,10 +340,19 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    * save — pressed now, it would re-run against the stored values while a
    * corrected token sits unsaved in the form — so it waits, and Save (which
    * retries too) is the way to try with the new values. Judged like the
-   * connection gate above: an edit put back, or a username filled in to the
-   * value already stored, changes nothing and holds nothing up.
+   * connection gate above — an edit put back changes nothing — and a token
+   * username that is just what an address answers (the one typed, or the one
+   * stored) is not an edit of its own: typing the address fills it in, and once
+   * the address is put back or cleared, nothing the admin did is left unsaved.
    */
-  const draftChanged = Object.keys(draft).some((key) => connectionKeyChanged(key));
+  const answeredUsernames = [draft.kbRepoUrl, settings.find((s) => s.key === 'kbRepoUrl')?.value].map(
+    (address) => (address ? tokenUsernameForHost(address)?.username : undefined),
+  );
+  const draftChanged = Object.keys(draft).some(
+    (key) =>
+      !(key === 'gitUsername' && answeredUsernames.includes(draft.gitUsername)) &&
+      connectionKeyChanged(key),
+  );
 
   /**
    * Whether THIS save has to stand behind the repository connection.
@@ -569,6 +598,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     setError(null);
     try {
       const result = await saveSettings({});
+      setClearedFailure(initFailure);
       setInitFailure(null);
       if (result.awaitingRestart) {
         setNeedsRestart(true);
@@ -585,8 +615,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       }
       onSaved();
     } catch (err) {
-      if (err instanceof KbInitFailed) setInitFailure(err.kbInit);
-      else setError(err instanceof Error ? err.message : 'Could not retry the initialization.');
+      if (err instanceof KbInitFailed) {
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+      } else setError(err instanceof Error ? err.message : 'Could not retry the initialization.');
     } finally {
       setRetrying(false);
     }
@@ -654,6 +686,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
       }
       const result = await saveSettings(payload);
       // A save while a failure stands re-ran the initialization, and it held.
+      setClearedFailure(initFailure);
       setInitFailure(null);
       setRestartRequired(result.restartRequired);
       setDraft({});
@@ -695,6 +728,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
         // The values ARE stored — only the initialization failed. The form
         // shows what was saved, and the banner says what to fix and retries
         // without asking for any of it again.
+        setClearedFailure(null);
         setInitFailure(err.kbInit);
         setDraft({});
         onSaved();

@@ -1017,6 +1017,60 @@ describe('SetupScreen — a failed knowledge-base initialization', () => {
     expect(retry).toBeEnabled();
     expect(screen.getByTestId('kb-init-failure')).not.toHaveTextContent(/unsaved changes/i);
   });
+
+  it('a username filled in from the address is not an unsaved change of its own', async () => {
+    // Stored username blank: the address fills in x-access-token, which differs from it.
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl' ? { ...s, source: 'stored' as const, value: 'https://github.com/acme/kb.git', configured: true } : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const address = screen.getByLabelText('Repository address');
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+
+    await userEvent.type(address, '-x');
+    expect(retry).toBeDisabled();
+    await userEvent.type(address, '{Backspace}{Backspace}');
+    expect(retry).toBeEnabled();
+
+    // Cleared, the address means "leave it alone" — and the username it filled in is still not an edit.
+    await userEvent.clear(address);
+    expect(retry).toBeEnabled();
+  });
+
+  it('a late status answer cannot bring back a failure this screen just saw cleared', async () => {
+    const onSaved = vi.fn();
+    const screenWith = (kbInit?: typeof WRITE_REFUSED | typeof POLICY) => (
+      <SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={kbInit} />
+    );
+    const { rerender } = render(screenWith(WRITE_REFUSED));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    // The read sent before the retry answers now: a new object, the same failure.
+    rerender(screenWith({ ...WRITE_REFUSED }));
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
+    // A DIFFERENT failure is news, and shows.
+    rerender(screenWith(POLICY));
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(POLICY.cause);
+  });
+
+  it('after a read agrees the failure cleared, the same failure reported again is shown', async () => {
+    const onSaved = vi.fn();
+    const screenWith = (kbInit?: typeof WRITE_REFUSED) => (
+      <SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={kbInit} />
+    );
+    const { rerender } = render(screenWith(WRITE_REFUSED));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    rerender(screenWith(undefined));
+    rerender(screenWith({ ...WRITE_REFUSED }));
+
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(WRITE_REFUSED.cause);
+  });
 });
 
 describe('SetupScreen — sync panel when the whole knowledge base is env-set', () => {

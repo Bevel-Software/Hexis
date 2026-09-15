@@ -12,8 +12,8 @@ import {
   isBranchModelConfigured,
   validateBranchModel,
 } from '@bevel-software/platform-shared';
-import { classifyGitFailure, failureOf, type GitFailure } from './git-connection-check.js';
-import { redactSecret } from '../workspace/startup/kb-git.js';
+import { classifyGitFailure, failureOf, type GitFailure } from '../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { printable } from '../../shared/printable.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -227,7 +227,10 @@ export function createSetupRoutes(
           // returned classified — by the classification the runner's failure
           // carries, read before any scrub rewrote git's words (`failureOf`).
           const raw = initErr instanceof Error ? initErr.message : String(initErr);
-          const msg = redactSecret(raw, [settings.resolve('gitToken')]);
+          const msg = redactSecret(raw, [
+            settings.resolve('gitToken'),
+            ...urlQuerySecrets(settings.resolve('kbRepoUrl')),
+          ]);
           console.error('[setup] KB initialization failed after setup completed:', printable(msg));
           kbInit = failureOf(initErr);
           res.status(500).json({

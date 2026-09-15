@@ -4,7 +4,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
-import { ClassifiedFailure, classifyGitFailure } from '../../settings/git-connection-check.js';
+import { ClassifiedFailure, classifyGitFailure } from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -18,42 +19,6 @@ const execFileAsync = promisify(execFile);
 /** Fallback committer identity; workflow commits override with `--author`. */
 export const BOT_NAME = 'Bevel Workflow';
 export const BOT_EMAIL = 'bevel-workflow@bevel.software';
-
-/**
- * Scrub credentials from anything that reaches a log or an error message:
- * the token in effect wherever it appears, URL userinfo — a remote spelled
- * `https://user:pass@host` would otherwise leak `pass` verbatim through every
- * git failure that quotes the URL back — and URL query strings, where a
- * presigned remote keeps its credential.
- *
- * "The token in effect" is every place one can come from: each environment
- * spelling `CoreConfig` accepts (it normalises them onto `GITHUB_TOKEN` at
- * boot, but a later write to one of them is not normalised), plus whatever the
- * caller knows about — the settings-stored token, or a token a request brought
- * along. Longest first, so a token that contains another is not half-scrubbed.
- */
-export function redactSecret(text: string, secrets: readonly (string | null | undefined)[] = []): string {
-  const tokens = [
-    process.env.GITHUB_TOKEN,
-    process.env.GIT_TOKEN,
-    process.env.GH_TOKEN,
-    ...secrets,
-  ]
-    .map((t) => t?.trim())
-    .filter((t): t is string => !!t);
-  let scrubbed = text;
-  for (const token of [...new Set(tokens)].sort((a, b) => b.length - a.length)) {
-    scrubbed = scrubbed.replaceAll(token, '***');
-  }
-  return (
-    scrubbed
-      .replace(/:\/\/[^/@\s]+@/g, '://***@')
-      // A presigned remote carries its credential in the query instead
-      // (`?X-Amz-Signature=…`, `?access_token=…`). A git remote has no query
-      // worth keeping in a log, so the whole of it goes.
-      .replace(/(\bhttps?:\/\/[^\s?#'"]+)\?[^\s#'"]*/gi, '$1?***')
-  );
-}
 
 /**
  * Per-invocation `-c` config. Long paths always (Windows checkouts of deep
@@ -102,9 +67,11 @@ export async function git(cwd: string, gitUsername: string, args: string[]): Pro
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Classified here, from what git actually said, before the scrub can
-    // rewrite it — the message that leaves is the scrubbed one.
+    // rewrite it — the message that leaves is the scrubbed one. A remote in
+    // the argv has its query values scrubbed as secrets of their own.
     const raw = `git ${args[0]} failed: ${msg}`;
-    throw new ClassifiedFailure(redactSecret(raw), classifyGitFailure(raw));
+    const querySecrets = args.flatMap((arg) => urlQuerySecrets(arg));
+    throw new ClassifiedFailure(redactSecret(raw, querySecrets), classifyGitFailure(raw));
   }
 }
 

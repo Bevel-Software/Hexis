@@ -4,8 +4,9 @@ import { isBranchModelConfigured } from '@bevel-software/platform-shared';
 import { printable } from '../../../shared/printable.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
-import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './kb-git.js';
-import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../settings/git-connection-check.js';
+import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -63,11 +64,13 @@ export class KbStartupRunner {
 
   /**
    * {@link redactSecret} plus the token in effect, which may never have reached
-   * the environment. Tokens, URL userinfo and URL query strings (a presigned
-   * remote's credential) all go.
+   * the environment. Tokens, URL userinfo and URL query strings go — and the
+   * configured remote's own query values (a presigned remote's credential) are
+   * named as secrets too, so they are scrubbed even where git's text carries
+   * them without the URL around them.
    */
   private redact(text: string): string {
-    return redactSecret(text, [this.opts.gitToken?.()]);
+    return redactSecret(text, [this.opts.gitToken?.(), ...urlQuerySecrets(this.opts.kbRepoUrl())]);
   }
 
   /**

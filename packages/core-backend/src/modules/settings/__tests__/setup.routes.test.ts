@@ -379,7 +379,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
   });
 
   it("answers with the classification the runner's failure carries, not a re-read of its scrubbed message", async () => {
-    const { ClassifiedFailure, classifyGitFailure } = await import('../git-connection-check.js');
+    const { ClassifiedFailure, classifyGitFailure } = await import('../../../shared/git-failure.js');
     const consoleError = console.error;
     console.error = () => {};
     try {

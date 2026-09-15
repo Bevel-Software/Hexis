@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClassifiedFailure, classifyGitFailure, failureOf } from '../git-connection-check.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../git-failure.js';
 
 /**
  * Representative failures, spelled the way they actually reach the classifier:
