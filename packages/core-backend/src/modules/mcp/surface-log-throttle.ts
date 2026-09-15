@@ -15,7 +15,9 @@
  * logged line carries the count so nothing is hidden, only compressed.
  *
  * Bounded: an entry per user, pruned as they go quiet for longer than the
- * interval, so a long-running process never accumulates departed users.
+ * interval, so a long-running process never accumulates departed users. The
+ * pruning is one sweep per interval, not one per request — a request must
+ * not pay for every other active user.
  */
 
 export const DEFAULT_SURFACE_LOG_INTERVAL_MS = 60_000;
@@ -39,6 +41,8 @@ interface LastLogged {
 
 export class SurfaceLogThrottle {
   private readonly last = new Map<string, LastLogged>();
+  /** When the last sweep ran; a sweep is owed once per interval, not per request. */
+  private lastPruneAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly intervalMs: number = DEFAULT_SURFACE_LOG_INTERVAL_MS,
@@ -48,9 +52,15 @@ export class SurfaceLogThrottle {
   /** Record a rebuild for `userId` and say whether to log it. */
   decide(userId: string, shape: SurfaceShape): SurfaceLogDecision {
     const now = this.now();
-    // Prune the OTHERS: this user's entry is about to be read, and at exactly
-    // the interval it still carries the suppressed count the next line owes.
-    this.prune(now, userId);
+    // One sweep per interval, amortized over every request in it: a request
+    // costs O(1), not a walk of every active user, and an entry that goes
+    // quiet is still gone within one interval of the next sweep. The sweep
+    // skips THIS user: its entry is about to be read, and at exactly the
+    // interval it still carries the suppressed count the next line owes.
+    if (now - this.lastPruneAt >= this.intervalMs) {
+      this.prune(now, userId);
+      this.lastPruneAt = now;
+    }
     const key = `${shape.tools}/${shape.manuals}`;
     const prev = this.last.get(userId);
     if (prev && prev.shape === key && now - prev.at < this.intervalMs) {
@@ -60,6 +70,11 @@ export class SurfaceLogThrottle {
     const suppressed = prev?.suppressed ?? 0;
     this.last.set(userId, { at: now, shape: key, suppressed: 0 });
     return { log: true, suppressed };
+  }
+
+  /** Users currently remembered; diagnostics and tests. */
+  size(): number {
+    return this.last.size;
   }
 
   /** Entries for users quiet for the interval or longer carry no information; drop them. */

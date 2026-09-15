@@ -62,3 +62,28 @@ describe('SurfaceLogThrottle', () => {
     expect(throttle.decide('u1', { tools: 5, manuals: 2 })).toEqual({ log: true, suppressed: 0 });
   });
 });
+
+describe('SurfaceLogThrottle — pruning cost', () => {
+  const shape = { tools: 5, manuals: 2 };
+
+  it('sweeps once per interval, not on every rebuild — and every quiet user is still gone by the next sweep', () => {
+    let now = 1_000_000;
+    const throttle = new SurfaceLogThrottle(60_000, () => now);
+
+    throttle.decide('a', shape); // t0 — the first sweep runs here (nothing to drop)
+    now += 30_000;
+    throttle.decide('b', shape); // t0+30s — no sweep owed yet
+    now += 30_000;
+    throttle.decide('c', shape); // t0+60s — sweep: a (quiet 60s) dropped, b kept
+    expect(throttle.size()).toBe(2);
+
+    now += 30_001;
+    throttle.decide('d', shape); // t0+90.001s — b is quiet ≥ interval, but the
+    // sweep ran 30s ago, so no walk happens on this request: b waits.
+    expect(throttle.size()).toBe(3);
+
+    now += 29_999;
+    throttle.decide('e', shape); // t0+120s — sweep: b and c dropped, d kept
+    expect(throttle.size()).toBe(2);
+  });
+});
