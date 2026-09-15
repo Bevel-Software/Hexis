@@ -215,7 +215,7 @@ describe('TemplateFilesStep', () => {
 
     // An existing deployment's AGENTS.md from before the guide existed.
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
-    await makeRunner([new TemplateFilesStep()]).runAll();
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toContain('**Agents never create roles.**');
