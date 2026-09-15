@@ -229,4 +229,4 @@ function poolKeyLabel(key: string): string {
 }
 
 /** Separator for (user, manual, fingerprint) keys — cannot occur in any of the parts. */
-export const POOL_KEY_SEPARATOR = ' ';
+export const POOL_KEY_SEPARATOR = '\u0000';
