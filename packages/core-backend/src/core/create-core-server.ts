@@ -44,6 +44,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -627,12 +628,19 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, core.gitRunner, {
-      // Same address family as the MCP endpoint above, userinfo stripped for
-      // the same reason: this string is handed to admins to paste elsewhere.
-      url: syncUrl.toString(),
-      lastSync: () => core.kbSyncService.lastSync(),
-    }),
+    createSetupRoutes(
+      core.settings,
+      core.adminAccess,
+      core.kbStartupRunner,
+      {
+        // Same address family as the MCP endpoint above, userinfo stripped for
+        // the same reason: this string is handed to admins to paste elsewhere.
+        url: syncUrl.toString(),
+        lastSync: () => core.kbSyncService.lastSync(),
+      },
+      // The connection probe's git runs through the deployment's one runner.
+      repositoryConnectionCheck(core.gitRunner),
+    ),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
     service: core.mcpServerEditService,

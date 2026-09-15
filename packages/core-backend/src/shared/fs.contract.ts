@@ -208,6 +208,14 @@ export interface IFsProbe {
   /** The JSON object in the file at `p`; null when the file is absent, not JSON, or not an object. */
   readJsonObject(p: string): Promise<Record<string, unknown> | null>;
   /**
+   * The file at `p` as UTF-8 text. THROWS as the filesystem does — absence
+   * included — because a caller that can stand in for a missing file must say
+   * so itself (`isAbsence`), and one that cannot should fail. The sibling
+   * above answers `null` instead because "not JSON" and "not there" are the
+   * same non-answer to it; there is no such collapse for raw text.
+   */
+  readTextFile(p: string): Promise<string>;
+  /**
    * Bytes still writable on the volume holding `p`, as an unprivileged process
    * sees them; null when the volume cannot say. The one question the readiness
    * answer asks of the disk: a volume that fills turns every git write into a

@@ -10,6 +10,8 @@ import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { PathTraversalError } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   RemoteBranchGoneError,
@@ -942,11 +944,11 @@ export class WorkspaceService implements IWorkspaceService {
    * The workspace root may sit behind a link of the operator's (a mounted
    * volume): both sides are resolved, so that is allowed.
    *
-   * The same message as the lexical check on purpose: the routes map it to
-   * the traversal refusal, which is what this is.
+   * The same refusal as the lexical check on purpose: this IS a traversal,
+   * reached through a link rather than through a spelling.
    */
   private async assertNotThroughLink(absolutePath: string, workspaceDir: string): Promise<void> {
-    const traversal = () => new Error('Path traversal detected');
+    const traversal = () => new PathTraversalError();
     const entry = await fs.lstat(absolutePath).catch((err: unknown) => {
       if (isAbsence(err)) return null;
       throw err;
@@ -1550,7 +1552,7 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
       } catch (err) {
-        if (err instanceof Error && err.message === 'Path traversal detected') {
+        if (err instanceof PathTraversalError) {
           skipped.push({ path: rawName, reason: err.message });
           continue;
         }
@@ -1859,12 +1861,9 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
+  /** The shared lexical containment check (see `shared/path-containment.ts`). */
   private assertWithinWorkspace(absolutePath: string, workspaceDir: string): void {
-    const resolved = path.resolve(absolutePath);
-    const root = path.resolve(workspaceDir);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
-      throw new Error('Path traversal detected');
-    }
+    assertWithinDirectory(absolutePath, workspaceDir);
   }
 
   private async buildFileTree(root: string, workspaceRoot: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {

@@ -18,7 +18,8 @@ import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../acces
 import type { ICreatorAccess } from '../access-model/creator.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -258,10 +259,6 @@ export function createWorkspaceRoutes(
     const status = (err as { status?: number } | null)?.status;
     if (typeof status === 'number') {
       res.status(status).json({ error: msg });
-      return;
-    }
-    if (msg === 'Path traversal detected') {
-      res.status(403).json({ error: msg });
       return;
     }
     if (msg.startsWith('Invalid path') || msg.startsWith('Only .zip')) {
@@ -658,9 +655,10 @@ export function createWorkspaceRoutes(
       res.setHeader('Cache-Control', 'private, no-cache');
       res.send(buffer);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      // A traversal is the caller's 403; every other read failure here is the
+      // route's honest 404 (the image either is not there or cannot be shown).
+      if (error instanceof PathTraversalError) {
+        sendError(res, error);
         return;
       }
       res.status(404).json({ error: 'File not found' });
@@ -725,11 +723,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      if (error instanceof PathTraversalError) {
+        sendError(res, error);
         return;
       }
+      const msg = error instanceof Error ? error.message : 'Unknown error';
       if (msg === 'Not a directory') {
         res.status(400).json({ error: msg });
         return;
@@ -769,8 +767,9 @@ export function createWorkspaceRoutes(
         return;
       }
       // Traversal stays a 403 and a malformed workspace id its domain status:
-      // both carry messages written to be read by the caller.
-      if (error instanceof WorkflowDomainError || (error as Error)?.message === 'Path traversal detected') {
+      // both carry messages written to be read by the caller. (A traversal IS
+      // a domain error now, so the one check covers both.)
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -813,12 +812,7 @@ export function createWorkspaceRoutes(
       // ourselves and then `fs.stat` / `fs.rm` / `enumerateFilesUnder`
       // it. Without this guard, a `../escape` `filePath` would let the
       // dir-delete branch operate on directories outside the workspace.
-      const workspaceRoot = path.resolve(workspaceDir);
-      if (absolute !== workspaceRoot && !absolute.startsWith(workspaceRoot + path.sep)) {
-        const err: Error & { status?: number } = new Error('Path traversal detected');
-        err.status = 403;
-        throw err;
-      }
+      assertWithinDirectory(absolute, workspaceDir);
       let stat: { isDirectory: () => boolean } | null = null;
       try {
         stat = await fs.stat(absolute);

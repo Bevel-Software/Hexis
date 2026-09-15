@@ -49,7 +49,14 @@ export const validateHttpsRemote = (value: string): string | null => {
   } catch {
     return 'Enter a full URL, e.g. https://github.com/acme/knowledge-base.git';
   }
-  return parsed.protocol === 'https:' ? null : 'The URL must start with https://';
+  if (parsed.protocol !== 'https:') return 'The URL must start with https://';
+  // Userinfo would ride into git's argv on every call, visible in process
+  // listings — the KB startup refuses such a URL, so saving one only defers the
+  // failure to the next boot.
+  if (parsed.username || parsed.password) {
+    return 'Remove the username and token from the URL — enter the token in its own field.';
+  }
+  return null;
 };
 
 /**
@@ -377,6 +384,49 @@ export class DeploymentSettingsService {
     entries: Record<string, string>,
     updatedBy: string | null,
   ): Promise<{ restartRequired: boolean }> {
+    const toWrite = this.plan(entries);
+
+    let restartRequired = false;
+    for (const { key, value, def } of toWrite) {
+      // Compared against the EFFECTIVE value: a layout root that was unset
+      // was already running on its default, so saving that default changes
+      // nothing a restart would pick up.
+      const effective =
+        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
+      if (def.restartToApply && effective !== value) restartRequired = true;
+      const encrypted = def.secret === true;
+      const stored = encrypted ? this.crypto!.encrypt(value) : value;
+      await this.db
+        .insert(deploymentSettings)
+        .values({ key, value: stored, encrypted, updatedBy })
+        .onConflictDoUpdate({
+          target: deploymentSettings.key,
+          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
+        });
+      this.stored.set(key, value);
+    }
+
+    // The git token is consumed through the environment (the credential helper
+    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
+    // it there is what makes a token saved here work without a restart.
+    this.syncGitTokenEnv();
+    return { restartRequired };
+  }
+
+  /**
+   * What {@link resolve} would answer for each key AFTER saving `entries` —
+   * validated by exactly the rules `save` applies, and throwing the same
+   * {@link SettingsValidationError}, but writing nothing. It is how a caller
+   * checks the values a save would put in effect (the repository connection)
+   * before letting the save happen.
+   */
+  resolveAfter(entries: Record<string, string>): (key: string) => string {
+    const toWrite = this.plan(entries);
+    return (key) => toWrite.find((w) => w.key === key)?.value ?? this.resolve(key);
+  }
+
+  /** Validate a batch and return the writes it amounts to; throws on any problem. */
+  private plan(entries: Record<string, string>): { key: string; value: string; def: SettingDef }[] {
     const problems: Record<string, string> = {};
     const toWrite: { key: string; value: string; def: SettingDef }[] = [];
 
@@ -446,32 +496,7 @@ export class DeploymentSettingsService {
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
-
-    let restartRequired = false;
-    for (const { key, value, def } of toWrite) {
-      // Compared against the EFFECTIVE value: a layout root that was unset
-      // was already running on its default, so saving that default changes
-      // nothing a restart would pick up.
-      const effective =
-        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
-      if (def.restartToApply && effective !== value) restartRequired = true;
-      const encrypted = def.secret === true;
-      const stored = encrypted ? this.crypto!.encrypt(value) : value;
-      await this.db
-        .insert(deploymentSettings)
-        .values({ key, value: stored, encrypted, updatedBy })
-        .onConflictDoUpdate({
-          target: deploymentSettings.key,
-          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
-        });
-      this.stored.set(key, value);
-    }
-
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
-    return { restartRequired };
+    return toWrite;
   }
 
   /** Drop stored rows for settings this build no longer defines. */

@@ -128,10 +128,14 @@ export class NodeFs implements ITreeWalker, IFsProbe {
     return raw.sort((a, b) => comparePathComponents(a.name, b.name));
   }
 
+  async readTextFile(p: string): Promise<string> {
+    return fs.readFile(p, 'utf-8');
+  }
+
   async readJsonObject(p: string): Promise<Record<string, unknown> | null> {
     let text: string;
     try {
-      text = await fs.readFile(p, 'utf-8');
+      text = await this.readTextFile(p);
     } catch (err) {
       if (isAbsence(err)) return null;
       throw err;

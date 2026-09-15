@@ -52,6 +52,18 @@ function step(name: string, run: (ctx: ServerStartContext) => Promise<StepResult
   return { name, run };
 }
 
+/**
+ * Poll until `condition` holds. Bounded generously: each retry attempt here is
+ * a real clone, which takes well over a second on a machine running the whole
+ * suite, and a bound sized for an idle machine fails the test under load.
+ */
+async function waitFor(condition: () => boolean, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 function makeRunner(steps: OnServerStart[], url: () => string) {
   return new KbStartupRunner({
     gitRunner: new NodeGitRunner(),
@@ -136,9 +148,7 @@ describe('KbStartupRunner with an unreachable remote', () => {
     });
 
     // Let the loop run its attempts to completion.
-    for (let i = 0; i < 50 && runner.lastFailure() !== null; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitFor(() => runner.lastFailure() === null);
     expect(runner.lastFailure()).toBeNull();
     // 100 → 200 → capped at 250; the loop asked three times and then stopped.
     expect(waits).toEqual([100, 200, 250]);
@@ -166,9 +176,7 @@ describe('KbStartupRunner with an unreachable remote', () => {
         url = upstream; // reachable now — and the step fails instead
       },
     });
-    for (let i = 0; i < 50 && !(runner.lastFailure() ?? '').includes('template is wrong'); i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await waitFor(() => (runner.lastFailure() ?? '').includes('template is wrong'));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(waits).toHaveLength(1);
     expect(runner.lastFailure()).toMatch(/template is wrong/);

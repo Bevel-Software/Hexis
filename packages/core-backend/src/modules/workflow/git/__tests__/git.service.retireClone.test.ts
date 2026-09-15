@@ -97,11 +97,14 @@ describe('GitService.retireClone', () => {
   it('holds the clone for the whole decision, the queue question included', async () => {
     await seedWorkspace(root);
     const svc = service();
-    let answerQueue: (queued: boolean) => void = () => undefined;
-    const queued = () =>
-      new Promise<boolean>((resolve) => {
-        answerQueue = resolve;
-      });
+    // The queue's answer is a promise made up front, so releasing it works
+    // whether or not the git checks before it have finished by then — under a
+    // loaded machine they take longer than this test waits.
+    let answerQueue!: (queued: boolean) => void;
+    const queueAnswer = new Promise<boolean>((resolve) => {
+      answerQueue = resolve;
+    });
+    const queued = () => queueAnswer;
     const remove = vi.fn(async () => undefined);
 
     // While the retire call waits on the queue's answer, any other operation
