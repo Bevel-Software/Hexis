@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
+import { PathTraversalError } from '../../../shared/domain-errors.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -487,12 +488,25 @@ describe('GET /workspace/:id/file — read failures', () => {
     expect(h.readFileMock).toHaveBeenCalledWith(WS, FILE);
   });
 
-  it('keeps a traversal refusal a 403', async () => {
+  it('keeps a traversal refusal a 403 — by its TYPE, not by its wording', async () => {
     h = await makeHarness();
-    h.readFileMock.mockRejectedValue(new Error('Path traversal detected'));
+    h.readFileMock.mockRejectedValue(new PathTraversalError());
 
     const res = await get(h);
 
     expect(res.status).toBe(403);
+  });
+
+  it('a read failure that merely SAYS "Path traversal detected" is not one', async () => {
+    // The wording used to be the check, so any error carrying it — an
+    // upstream tool quoting our own refusal back at us — answered 403 and
+    // read as a blocked traversal in the log. Only the type decides now.
+    h = await makeHarness();
+    h.readFileMock.mockRejectedValue(new Error('Path traversal detected'));
+
+    // 500, the route's contract for a read failure that is neither an absence
+    // nor a domain refusal — pinned exactly, so a regression to 404 (or a
+    // silent 200) fails here rather than passing a "not 403" check.
+    expect((await get(h)).status).toBe(500);
   });
 });

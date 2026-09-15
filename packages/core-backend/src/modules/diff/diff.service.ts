@@ -6,7 +6,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
-import { assertWithinDirectory } from './diff-paths.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { countLineChanges } from './line-diff.js';
 
 /**
