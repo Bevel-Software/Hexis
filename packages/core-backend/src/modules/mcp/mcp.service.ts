@@ -601,7 +601,14 @@ export class McpService {
         const name = String(m.name);
         // Both taken before registration, which renames the template in place.
         const rewritten = utcpManualName(m);
-        const memoKey = `${name}${POOL_KEY_SEPARATOR}${templateFingerprint(m)}`;
+        const siblings = (byRewrittenName.get(rewritten) ?? []).filter((s) => s !== name);
+        // A collision is a property of the LIST, not of this manual's
+        // definition, so the memo key carries the siblings: the moment one is
+        // renamed away, the key changes and the survivor is tried on the very
+        // next request instead of sitting out the memo's TTL.
+        const memoKey =
+          `${name}${POOL_KEY_SEPARATOR}${templateFingerprint(m)}` +
+          (siblings.length > 0 ? `${POOL_KEY_SEPARATOR}collides:${[...siblings].sort().join(',')}` : '');
         if (!isKb) {
           const recent = this.manualFailures.recentFailure(userId, memoKey);
           if (recent !== undefined) {
@@ -618,7 +625,6 @@ export class McpService {
           // Neither path throws: a discovery/network failure and a validation
           // failure both come back as `{ ok: false }`, because the retry
           // policy — this memo — is ours, not the shared layer's.
-          const siblings = (byRewrittenName.get(rewritten) ?? []).filter((s) => s !== name);
           const result: { ok: true } | { ok: false; error: string } =
             !isKb && siblings.length > 0
               ? {

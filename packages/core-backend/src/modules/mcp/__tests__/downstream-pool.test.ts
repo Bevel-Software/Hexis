@@ -250,3 +250,29 @@ describe('DownstreamPool', () => {
     });
   });
 });
+
+describe('cap after an all-leased overflow', () => {
+  it('re-applies the cap when a lease ends, instead of waiting for the next acquire', async () => {
+    const { pool, disposed } = makePool({ maxEntries: 2 });
+    const a = await pool.acquire('a', async () => 'A');
+    const b = await pool.acquire('b', async () => 'B');
+    // Every entry is leased, so this insert cannot evict: the pool overflows.
+    const c = await pool.acquire('c', async () => 'C');
+    expect(pool.size()).toBe(3);
+    expect(disposed).toEqual([]);
+
+    // Ending A's lease makes it the only idle entry — and the cap applies now,
+    // with no acquire in sight. A is the least recently used idle entry.
+    a.release();
+    await flush();
+    expect(disposed).toEqual(['A']);
+    expect(pool.size()).toBe(2);
+
+    // Back within the cap: further releases evict nothing.
+    b.release();
+    c.release();
+    await flush();
+    expect(disposed).toEqual(['A']);
+    expect(pool.size()).toBe(2);
+  });
+});

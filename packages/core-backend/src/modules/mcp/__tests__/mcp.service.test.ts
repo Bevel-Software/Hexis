@@ -34,7 +34,7 @@ async function setup(deps?: {
    * KB manual. Without this the harness serves no catalog at all and every
    * request sees the KB manual alone — which is what most cases want.
    */
-  extraManuals?: CallTemplate[];
+  extraManuals?: CallTemplate[] | ((loopbackBase: string) => CallTemplate[]);
   /** Caller auth kind: a connection-key id (default), or null for an OAuth/JWT caller. */
   tokenId?: string | null;
   /** Spy for the session-grant reset fired on broken sign-ins. */
@@ -91,15 +91,21 @@ async function setup(deps?: {
     res.json({ text: `echo: ${b.prompt}`, sessionId: typeof b.sessionId === 'string' ? b.sessionId : 'new-sess' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
+  // Resolved after listen; the catalog handler runs later and reads it then,
+  // so a manual can point back at this loopback (a live manual endpoint).
+  let loopbackBase = '';
   if (deps?.extraManuals) {
-    const manuals = deps.extraManuals;
-    app.get('/api/agent/all-tools', (_req, res) => res.json({ manuals }));
+    const extra = deps.extraManuals;
+    app.get('/api/agent/all-tools', (_req, res) =>
+      res.json({ manuals: typeof extra === 'function' ? extra(loopbackBase) : extra }),
+    );
   }
   app.use('/api', createManualRoutes(registry, noAuth));
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
   const port = (httpServer.address() as { port: number }).port;
+  loopbackBase = `http://127.0.0.1:${port}`;
 
   const mcp = new McpService(
     {
@@ -116,11 +122,22 @@ async function setup(deps?: {
     undefined, // internalTokens — the fake loopback here accepts any bearer
     deps?.revokeOAuthAccess,
   );
+  lastService = mcp;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
-  // The route builds one server per HTTP request; here one server is driven
-  // over an in-memory pair for the whole test, which is what lets these cases
-  // focus on proxy behaviour. The initialize message is passed so the server
-  // carries instructions, exactly as the route's initialize request would.
+  return connectClient(mcp, tokenId);
+}
+
+/** The service `setup` built last — for a test that needs a SECOND request against the same service. */
+let lastService: McpService | undefined;
+
+/**
+ * One request's server, driven over an in-memory pair. The route builds one
+ * server per HTTP request; a test that needs to observe state the service
+ * keeps ACROSS requests (the failure memo, the pool) opens a second one here.
+ * The initialize message is passed so the server carries instructions,
+ * exactly as the route's initialize request would.
+ */
+async function connectClient(mcp: McpService, tokenId: string | null): Promise<Client> {
   const server = await mcp.createRequestServer(
     { userId: 'user-A', tokenId, bearer: 'bevel_testkey' },
     { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '0.0.0' } } },
@@ -539,5 +556,37 @@ describe('McpService — manual names that rewrite to one identifier', () => {
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain('ask');
     expect(warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes('"KNOWLEDGE-BASE"') && m.includes('rewrites to'))).toBe(true);
+  });
+});
+
+describe('McpService — a collision ends when its sibling is renamed away', () => {
+  const collider = (name: string): CallTemplate =>
+    ({ name, call_template_type: 'http', url: 'http://127.0.0.1:9/never-dialed', http_method: 'GET' }) as CallTemplate;
+
+  it('does not carry the collision in the memo: the survivor is retried the next request, not skipped for the TTL', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // The catalog the loopback serves; the second request reads it after the edit.
+    const catalog: CallTemplate[] = [collider('notion-eu'), collider('notion.eu')];
+    const client = await setup({ extraManuals: () => catalog });
+
+    // Request 1: the pair collides and each is refused with the collision reason.
+    await client.listTools();
+    const collisionWarned = (name: string) =>
+      warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes(`skipping manual "${name}"`) && m.includes('rewrites to'));
+    expect(collisionWarned('notion-eu')).toBe(true);
+    warn.mockClear();
+
+    // The admin renames one away; the survivor no longer collides. Request 2,
+    // same service and same failure memo.
+    catalog.splice(1, 1);
+    await (await connectClient(lastService!, 'tok-1')).listTools();
+
+    // The survivor is NOT memo-skipped from request 1's collision — the memo
+    // key carried the sibling, so removing it changed the key. (It fails
+    // afresh now only because its URL is unreachable — a real attempt, not the
+    // "recent failure, not retried" short-circuit the risk was about.)
+    const messagesFor = (name: string) => warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes(`"${name}"`));
+    expect(messagesFor('notion-eu').some((m) => m.includes('recent failure, not retried'))).toBe(false);
+    expect(messagesFor('notion-eu').some((m) => m.includes('rewrites to'))).toBe(false);
   });
 });

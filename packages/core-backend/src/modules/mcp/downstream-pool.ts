@@ -25,8 +25,10 @@
  * Eviction is lazy, like the store it replaces: `acquire` sweeps idle entries
  * first and enforces the cap on insert. No background timer, so constructing a
  * pool never leaks an interval handle (in tests or anywhere else). When every
- * entry is leased the cap cannot evict anything, and the pool briefly holds
- * more than `maxEntries` until leases are released.
+ * entry is leased the cap cannot evict anything, and the pool holds more than
+ * `maxEntries` until leases are released — and the release that ends an
+ * entry's last lease re-applies the cap, so the overflow ends with the leases,
+ * not with whenever the next acquire happens to run.
  *
  * Healing a connection whose server restarted is NOT this class's job: the
  * pooled value carries the existing session-recovery wrapper, which
@@ -168,18 +170,36 @@ export class DownstreamPool<V> {
         // Idleness is measured from the end of the last use.
         entry.lastUsedAt = this.now();
         if (entry.retired && entry.leases === 0) this.disposeQuietly(entry.key, entry.value);
+        // An insert that found every entry leased could not evict and let the
+        // pool overflow the cap. The overflow has to end with the leases, not
+        // with whenever the next acquire happens to run — so the release that
+        // ends an entry's last lease re-applies the cap. The entry just
+        // released is the newest by `lastUsedAt`, so older idle entries go
+        // first.
+        if (entry.leases === 0) this.enforceCap();
       },
     };
   }
 
   private insert(key: string, value: V): Entry<V> {
     this.sweep();
-    while (this.entries.size >= this.maxEntries && this.evictLeastRecentlyUsed()) {
-      // each pass evicted one idle entry
-    }
+    this.enforceCap(1);
     const entry: Entry<V> = { key, value, lastUsedAt: this.now(), leases: 0, retired: false };
     this.entries.set(key, entry);
     return entry;
+  }
+
+  /**
+   * Evict idle entries, least recently used first, until at most
+   * `maxEntries - reserve` remain — or nothing idle is left, in which case
+   * the pool stays over the cap until a lease is released (which calls this
+   * again). `reserve` is the room an insert needs for the entry it is about
+   * to add.
+   */
+  private enforceCap(reserve = 0): void {
+    while (this.entries.size + reserve > this.maxEntries && this.evictLeastRecentlyUsed()) {
+      // each pass evicted one idle entry
+    }
   }
 
   private sweep(): void {
