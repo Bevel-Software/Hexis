@@ -690,12 +690,20 @@ describe('buildSeedTree', () => {
     expect(await fs.readFile(path.join(dest, 'docs/linked.md'), 'utf8')).toBe('shared');
     expect((await fs.lstat(path.join(dest, 'docs/linked.md'))).isSymbolicLink()).toBe(false);
 
-    // A link to nothing is a broken template, named as such.
+    // A link to nothing is a broken template, named as such…
     await fs.symlink(path.join(root, 'nowhere.md'), path.join(templateDir, 'dangling.md'), 'file');
     const dest2 = path.join(root, 'seed-dest-links-2');
     await fs.mkdir(dest2, { recursive: true });
     await expect(buildSeedTree(templateDir, [], ['admin@example.com'])(dest2)).rejects.toThrow(
       /KB template entry "dangling.md" links to nothing/,
+    );
+    // …and so is a link to a folder, named for what it is.
+    await fs.rm(path.join(templateDir, 'dangling.md'));
+    await fs.symlink(elsewhere, path.join(templateDir, 'dirlink'), process.platform === 'win32' ? 'junction' : 'dir');
+    const dest3 = path.join(root, 'seed-dest-links-3');
+    await fs.mkdir(dest3, { recursive: true });
+    await expect(buildSeedTree(templateDir, [], ['admin@example.com'])(dest3)).rejects.toThrow(
+      /KB template entry "dirlink" links to a directory/,
     );
   });
 });

@@ -91,13 +91,15 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
       async onOther(relDir, entry) {
         // A template may LINK to a file (a distribution's checkout, a Docker
         // build's copy): its content is template content, read through the
-        // link and seeded under the link's own name like any file. A link to
-        // anything else — a folder, nothing — is a broken template, and says so.
+        // link and seeded under the link's own name like any file. Anything
+        // else — a link to a folder or to nothing, a socket — is a broken
+        // template, and the error says what was found.
         const rel = relDir ? path.join(relDir, entry.name) : entry.name;
         const target = await fs.stat(path.join(templateDir, rel)).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
         if (target === null || !target.isFile()) {
+          const what = target === null ? 'nothing' : target.isDirectory() ? 'a directory' : 'not a regular file';
           throw new Error(
-            `KB template entry "${rel}" links to ${target === null ? 'nothing' : 'a directory'} — a template may link only to a file.`,
+            `KB template entry "${rel}" ${entry.isSymbolicLink() ? `links to ${what}` : `is ${what}`} — a template holds regular files, or links to them.`,
           );
         }
         await seedFile(relDir, entry.name);
