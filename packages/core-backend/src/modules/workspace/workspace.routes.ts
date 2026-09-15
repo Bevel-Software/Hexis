@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { IGNORE_FILENAME, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
+import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
@@ -1236,8 +1237,12 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
     // The operator's line carries the errno and the path; the caller's answer
     // names only the folder they asked about — an OS message would leak the
     // server's spelling of the workspace, and would not help them anyway.
+    // Both halves of the log line are user- or disk-controlled text, so both
+    // go through `printable`: a folder name or an OS message carrying a
+    // control character must not steer the terminal or forge a log line.
     const folder = path.relative(workspaceDir, absoluteDir).replace(/\\/g, '/');
-    console.error(`[workspace] could not list every file under "${folder}" for a delete:`, err);
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[workspace] could not list every file under ${printable(folder)} for a delete: ${printable(reason)}`);
     throw Object.assign(new Error(`Could not list every file under "${folder}" — nothing was deleted. Try again, or ask an admin.`), {
       status: 500,
     });
