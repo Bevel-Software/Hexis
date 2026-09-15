@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 import { isAbsence, type EntryStat, type IFsProbe } from '../../../../shared/fs.contract.js';
@@ -21,10 +20,18 @@ export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set([PREAMBLE_FI
  * npm strips every file named `.gitignore` from a published tarball, so the
  * packaged template cannot ship one under its real name (see
  * {@link TemplateSource.pathOf}).
+ *
+ * A `Map`, not an object literal, because the KEY IS A FILENAME and a
+ * template is free to carry a file called `constructor` or `toString`: an
+ * object lookup would answer those from `Object.prototype` and hand a
+ * FUNCTION to `path.join`, failing the seed of a whole knowledge base with a
+ * type error naming nothing. A Map has no prototype chain to fall through,
+ * so the question "does the template spell this differently?" can only ever
+ * be answered by an entry someone actually wrote here.
  */
-export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
-  '.gitignore': 'gitignore.template',
-};
+export const TEMPLATE_SOURCE_FALLBACKS: ReadonlyMap<string, string> = new Map([
+  ['.gitignore', 'gitignore.template'],
+]);
 
 /**
  * ONE template directory, read through ONE disk port — what both readers of
@@ -61,7 +68,7 @@ export class TemplateSource {
   async pathOf(relPath: string): Promise<string> {
     const direct = path.join(this.templateDir, relPath);
     if (await this.there(direct)) return direct;
-    const packable = TEMPLATE_SOURCE_FALLBACKS[relPath];
+    const packable = TEMPLATE_SOURCE_FALLBACKS.get(relPath);
     if (packable !== undefined) {
       const fallback = path.join(this.templateDir, packable);
       if (await this.there(fallback)) return fallback;
@@ -103,7 +110,7 @@ export class TemplateSource {
   async read(relPath: string): Promise<string> {
     let raw: string;
     try {
-      raw = await fs.readFile(await this.pathOf(relPath), 'utf8');
+      raw = await this.disk.readTextFile(await this.pathOf(relPath));
     } catch (err) {
       const packaged = defaultKbTemplateDir();
       if (!isAbsence(err) || !PACKAGED_FALLBACK_FILES.has(relPath) || this.templateDir === packaged) {
@@ -113,7 +120,9 @@ export class TemplateSource {
         `[kb-startup] template-files: the configured KB template has no "${relPath}"; ` +
           'using the packaged copy. Add the file to the template to silence this.',
       );
-      raw = await fs.readFile(await new TemplateSource(this.disk, packaged).pathOf(relPath), 'utf8');
+      // The packaged copy, read the same way — it renders its own
+      // placeholders and cannot fall back again (its guard is this one).
+      return new TemplateSource(this.disk, packaged).read(relPath);
     }
     return renderKbLayoutPlaceholders(raw);
   }
@@ -128,7 +137,7 @@ export class TemplateSource {
   async differsFrom(repoDir: string, relPath: string): Promise<boolean> {
     const norm = (text: string) => text.replace(/\r\n?/g, '\n');
     const [current, template] = await Promise.all([
-      fs.readFile(path.join(repoDir, relPath), 'utf8'),
+      this.disk.readTextFile(path.join(repoDir, relPath)),
       this.read(relPath),
     ]);
     return norm(current) !== norm(template);

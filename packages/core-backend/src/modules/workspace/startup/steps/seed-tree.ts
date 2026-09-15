@@ -164,9 +164,7 @@ class KbSeedTree {
 }
 
 /** The packable spelling a template may carry → the name it seeds under. */
-const PACKABLE_TO_REAL = new Map(
-  Object.entries(TEMPLATE_SOURCE_FALLBACKS).map(([real, packable]) => [packable, real]),
-);
+const PACKABLE_TO_REAL = new Map([...TEMPLATE_SOURCE_FALLBACKS].map(([real, packable]) => [packable, real]));
 
 /** Whether the first 8 KiB carry a NUL byte — the cheap half of "is this text". */
 async function headHasNul(file: string): Promise<boolean> {

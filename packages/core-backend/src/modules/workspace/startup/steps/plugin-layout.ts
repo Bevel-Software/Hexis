@@ -5,7 +5,7 @@ import {
   PLUGIN_SKILLS_DIR,
 } from '@bevel-software/platform-shared';
 import { BUNDLE_FILE } from '../../../plugins/discovery/bundle-dialect/bundle.source.js';
-import type { ITreeWalker, WalkedEntry } from '../../../../shared/fs.contract.js';
+import { isSkippedEntry, type ITreeWalker, type WalkedEntry } from '../../../../shared/fs.contract.js';
 
 /**
  * Whether a folder's listing carries a plugin manifest or a bundle as a
@@ -38,9 +38,19 @@ export class PluginLayout {
    * — THE rule for "this folder was a plugin before manifests existed". A
    * folder with nothing of the kind (a `.gitkeep`, a grouping folder someone
    * made in the tree) is not.
+   *
+   * Entries the walk SKIPS are not content. The two callers reach this with
+   * listings of different provenance — the manifest step's come from a walk
+   * that has already dropped dot-entries and `node_modules`, the migration's
+   * come raw from `listDir` — and judging the raw ones as they arrived made
+   * a folder holding nothing but `.hidden.tool` a plugin: the migration wrote
+   * it a manifest and then moved nothing into it, because its own sweep skips
+   * exactly what this had counted. Filtered HERE rather than at that call
+   * site, so the answer cannot depend on which door it came through.
    */
   async looksLikeLegacyPlugin(dir: string, entries: readonly WalkedEntry[]): Promise<boolean> {
     for (const entry of entries) {
+      if (isSkippedEntry(entry.name)) continue;
       if (
         entry.isFile() &&
         (entry.name === 'access.md' || entry.name === PLUGIN_MCP_FILE || entry.name.toLowerCase().endsWith('.tool'))
