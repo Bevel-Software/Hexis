@@ -312,6 +312,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
    * reader has already changed.
    */
   const connectionRejected = mustProveConnection && test?.ok === false;
+  /** Of those, the host let the token read but not write — a different fix. */
+  const connectionReadOnly = connectionRejected && test?.outcome === 'read-only';
 
   function set(key: string, value: string) {
     setDraft((d) => {
@@ -555,11 +557,15 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         setTesting(true);
         await probe();
         setTesting(false);
+        // Includes a probe the server REFUSED (a 4xx comes back as a
+        // rejection, not a throw) — that is an answer about these values.
         if (proven && !proven.ok) {
           setError(
-            variant === 'setup'
-              ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
-              : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
+            proven.outcome === 'read-only'
+              ? 'Not saved. The token can read the repository but cannot write to it — grant it write access and test again.'
+              : variant === 'setup'
+                ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
+                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
           );
           return;
         }
@@ -572,6 +578,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       // above fills the same fields from the same answer.
       if (
         !probed &&
+        // No address, nothing to look a branch up in.
+        !!resolvedIn(payload, 'kbRepoUrl') &&
         (!resolvedIn(payload, 'defaultBranch') || !resolvedIn(payload, 'protectedBranches'))
       ) {
         await probe();
@@ -612,8 +620,16 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       }
       onSaved();
     } catch (err) {
-      if (err instanceof SettingsProblems) setProblems(err.problems);
-      else setError(err instanceof Error ? err.message : 'Could not save these settings.');
+      if (err instanceof SettingsProblems) {
+        setProblems(err.problems);
+        // A problem about a field this form does not render — the server's
+        // connection check blaming a token the environment supplies, say —
+        // would otherwise vanish, leaving a save that failed silently.
+        const unshown = Object.entries(err.problems).filter(
+          ([key]) => !editable.some((s) => s.key === key),
+        );
+        if (unshown.length > 0) setError(unshown.map(([, message]) => message).join(' '));
+      } else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
       setSaving(false);
       // The page scrolls now, and every message lands at the top of it while
@@ -904,7 +920,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
               // host's own words, and the save banner announces a blocked
               // attempt. This is the label for a button that will not move.
               <span id="connection-refusal" className="text-meta text-danger">
-                The repository turned that connection down. Fix it above and test again.
+                {connectionReadOnly
+                  ? 'That token can read the repository but cannot write to it. Grant write access and test again.'
+                  : 'The repository turned that connection down. Fix it above and test again.'}
               </span>
             )}
           </div>
