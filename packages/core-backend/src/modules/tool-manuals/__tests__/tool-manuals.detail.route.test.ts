@@ -6,6 +6,9 @@ import express from 'express';
 import { afterEach, describe, expect, it, test, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+
+/** The one disk, as production wires it: the service and its discovery read the same one. */
+const disk = new NodeFs();
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsBrowserRoutes } from '../tool-manuals.routes.js';
 import { ToolManualService } from '../tool-manuals.service.js';
@@ -162,7 +165,7 @@ describe('ToolManualService.getDetail — capabilities + access', () => {
     canReadBatch: async (_w: string, _e: string, paths: string[]) => new Map(paths.map((p) => [p, false])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR, new NodeFs(), new KbPluginSource(new NodeFs()));
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR, disk, new KbPluginSource(disk));
 
   /** Write one `.tool` into a fresh temp KB and return the service over it. */
   async function withTool(file: string, content: string): Promise<void> {

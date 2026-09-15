@@ -73,7 +73,18 @@ export async function readNativePlugin(
     mcp && typeof mcp.mcpServers === 'object' && mcp.mcpServers !== null && !Array.isArray(mcp.mcpServers)
       ? (mcp.mcpServers as Record<string, unknown>)
       : null;
-  const exists = await fs.stat(path.join(dir, 'access.md')).then((s) => s.isFile(), () => false);
+  // The plugin EXISTS to the index when its folder carries an `access.md`
+  // (links followed). Absence is "no rules yet"; a probe that fails for any
+  // other reason is a hole like an unreadable manifest — the plugin is not
+  // listed under a guessed answer, and a writer can refuse.
+  let exists: boolean;
+  try {
+    exists = (await disk.statOrNull(path.join(dir, 'access.md')))?.isFile() ?? false;
+  } catch (err) {
+    warnings.push(`${folder}/access.md could not be read — ${err instanceof Error ? err.message : String(err)}`);
+    unreadable.push(`${folder}/access.md`);
+    return null;
+  }
   return {
     name,
     displayName,

@@ -81,9 +81,8 @@ async function listDirOrIncomplete(
   repoRel: string,
 ): Promise<Array<{ name: string; isDirectory(): boolean }> | null> {
   try {
-    return await fs.readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (disk.isAbsence(err)) return null;
+    return await disk.listDir(dir);
+  } catch {
     // The same refusal a hole in discovery gets: this listing is one more
     // read the operation needed and could not have.
     throw incompleteDiscovery([repoRel]);

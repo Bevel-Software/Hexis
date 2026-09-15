@@ -15,10 +15,10 @@ import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.co
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
-import { IGNORE_FILENAME, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
+import { IGNORE_FILENAME, isSkippedEntry, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { withoutIgnoreLine } from './template-files.step.js';
-import { hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
+import { hasManifestEntry, hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -252,8 +252,10 @@ async function migrateBranch(disk: IFsProbe & ITreeWalker, branch: KbBranch, ref
   // Runs whether or not the rename just happened, so a KB already on
   // `Plugins/` still gets missing manifests and any half-done reorganisation
   // finished. That is what makes this idempotent rather than once-only.
-  for (const entry of await fs.readdir(rootOnDisk, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+  // The catalog walk's own skip list: a vendored `node_modules` under the
+  // root is nobody's plugin, and this step must not reorganise it.
+  for (const entry of (await disk.listDir(rootOnDisk)) ?? []) {
+    if (!entry.isDirectory() || isSkippedEntry(entry.name)) continue;
     const folderChanged = await migratePluginFolder(
       disk,
       branch,
@@ -341,12 +343,16 @@ async function migratePluginFolder(
   const relPlugin = `${PLUGINS_DIR}/${folderName}`;
   let changed = false;
 
-  const entries = await fs.readdir(folderDir, { withFileTypes: true });
+  const entries = await disk.listDir(folderDir);
+  if (entries === null) return false; // vanished since the root was listed: nothing to reorganise
 
   // When the manifest is written this run its content is remembered: the
   // buffered write is not on disk yet, and the fold below must see it.
+  // "Has a manifest" is the manifests step's own judgement — a REGULAR file
+  // entry, bundle dialect included — so a folder squatted by a link or a
+  // directory named `plugin.json` is not mistaken for a plugin that has one.
   let renderedManifest: string | null = null;
-  if (!(await disk.exists(path.join(folderDir, PLUGIN_MANIFEST_FILE)))) {
+  if (!hasManifestEntry(entries)) {
     // A folder is made a plugin only when it IS one — by the same rule the
     // manifests step applies: legacy plugin content inside it, and no
     // plugin beneath it. A plain folder somebody made under the root (a
@@ -431,7 +437,7 @@ async function migratePluginFolder(
   // non-event by construction.)
   const extToolsDir = path.join(folderDir, ...HEXIS_TOOLS_DIR.split('/'));
   if (await disk.isDirectory(extToolsDir)) {
-    for (const entry of await fs.readdir(extToolsDir, { withFileTypes: true })) {
+    for (const entry of (await disk.listDir(extToolsDir)) ?? []) {
       if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.tool')) continue;
       const abs = path.join(extToolsDir, entry.name);
       const rel = `${relPlugin}/${HEXIS_TOOLS_DIR}/${entry.name}`;

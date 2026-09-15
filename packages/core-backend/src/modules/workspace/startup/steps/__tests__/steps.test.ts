@@ -604,7 +604,7 @@ describe('TemplateFilesStep', () => {
 describe('RolesYamlStep', () => {
   it('generates roles.yaml with the configured admins on every protected branch', async () => {
     await seedUpstream({ 'marker.txt': 'seeded' });
-    await makeRunner([new RolesYamlStep(['admin@example.com'])]).runAll();
+    await makeRunner([new RolesYamlStep(new NodeFs(), ['admin@example.com'])]).runAll();
 
     for (const b of PROTECTED) {
       const dir = await checkout(b);
@@ -622,7 +622,7 @@ describe('RolesYamlStep', () => {
     // skip-if-present check, reporting success over a KB whose access roster
     // cannot be read. Fail closed instead.
     await seedUpstream({ 'roles.yaml/placeholder.txt': 'squatter' });
-    await expect(makeRunner([new RolesYamlStep(['admin@example.com'])]).runAll()).rejects.toThrow(
+    await expect(makeRunner([new RolesYamlStep(new NodeFs(), ['admin@example.com'])]).runAll()).rejects.toThrow(
       /"roles\.yaml" on branch "current-company-state" exists but is not a regular file \(directory\)/,
     );
   });
@@ -630,7 +630,7 @@ describe('RolesYamlStep', () => {
   it('declares a skip when the file is missing and no admins are configured', async () => {
     await seedUpstream({ 'marker.txt': 'seeded' });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await makeRunner([new RolesYamlStep([])]).runAll(); // resolves — a declared skip, not a failure
+    await makeRunner([new RolesYamlStep(new NodeFs(), [])]).runAll(); // resolves — a declared skip, not a failure
 
     expect(warn.mock.calls.some((c) => String(c[0]).includes('roles-yaml: skipped'))).toBe(true);
     const dir = await checkout(DEFAULT_BRANCH);

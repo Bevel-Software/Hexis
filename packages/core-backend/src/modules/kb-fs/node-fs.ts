@@ -1,8 +1,9 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import type { Stats } from 'node:fs';
 import {
   WalkError,
+  isSkippedEntry,
+  type EntryStat,
   type IFsProbe,
   type IgnoreRules,
   type ITreeWalker,
@@ -15,11 +16,6 @@ import {
 import { comparePathComponents } from '../../shared/path-order.js';
 import { BevelIgnoreStack } from './bevel-ignore.js';
 import { isAbsence } from './fs-errors.js';
-
-/** The knowledge-base walk's skip list: dot-entries (`.git`, a parked delete) and vendored dependencies. */
-export function isSkippedEntry(name: string): boolean {
-  return name.startsWith('.') || name === 'node_modules';
-}
 
 /**
  * The one implementation of {@link ITreeWalker} and {@link IFsProbe}, over
@@ -36,26 +32,24 @@ export class NodeFs implements ITreeWalker, IFsProbe {
 
     const visit = async (abs: string, rel: string, inherited: IgnoreRules): Promise<void> => {
       if (until?.()) return;
-      let raw: import('node:fs').Dirent[];
+      let seen: WalkedEntry[];
       let rules: IgnoreRules;
       try {
-        raw = await fs.readdir(abs, { withFileTypes: true });
+        const raw = await this.listDir(abs);
+        // The root: a checkout without this tree, an empty walk. Deeper: a
+        // folder that vanished between listing and visiting — not a hole.
+        if (raw === null) return;
+        seen = raw.filter((e) => !skip?.(e));
         // A folder whose own `.bevelignore` is there but cannot be read is as
         // much a hole as one that cannot be listed: its rules are unknown, so
         // nothing in it can be judged. (No file is no rules, never an error.)
         rules = ignore ? await inherited.extendedWith(abs) : inherited;
       } catch (err) {
-        if (isAbsence(err)) {
-          // The root: a checkout without this tree, an empty walk. Deeper: a
-          // folder that vanished between listing and visiting — not a hole.
-          return;
-        }
         if (unreadable === 'throw') throw err;
         holes.push(rel);
         for (const l of listeners) await l.onHole?.(rel, err);
         return;
       }
-      const seen = raw.filter((e) => !skip?.(e)).sort((a, b) => comparePathComponents(a.name, b.name));
       const isEntry = (e: WalkedEntry) => e.isDirectory() || e.isFile();
       const listed = seen.filter(isEntry);
       // The rules apply to everything that is there — a link a rule names is as hidden as a file.
@@ -85,6 +79,8 @@ export class NodeFs implements ITreeWalker, IFsProbe {
   }
 
   async walkFiles(root: string, match: (basename: string) => boolean, opts: { strict?: boolean } = {}): Promise<string[]> {
+    // Walk order IS component order over the paths: a folder's entries come
+    // sorted, and a folder's files are visited before its sibling's.
     const out: string[] = [];
     await this.walkKb(root, [
       {
@@ -96,7 +92,7 @@ export class NodeFs implements ITreeWalker, IFsProbe {
         },
       },
     ]);
-    return out.sort();
+    return out;
   }
 
   // ── IFsProbe ──────────────────────────────────────────────────────────────
@@ -109,16 +105,27 @@ export class NodeFs implements ITreeWalker, IFsProbe {
     return (await this.lstatOrNull(p)) !== null;
   }
 
-  statOrNull(p: string): Promise<Stats | null> {
+  statOrNull(p: string): Promise<EntryStat | null> {
     return fs.stat(p).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
   }
 
-  lstatOrNull(p: string): Promise<Stats | null> {
+  lstatOrNull(p: string): Promise<EntryStat | null> {
     return fs.lstat(p).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
   }
 
   async isDirectory(p: string): Promise<boolean> {
     return (await this.lstatOrNull(p))?.isDirectory() ?? false;
+  }
+
+  async listDir(p: string): Promise<WalkedEntry[] | null> {
+    let raw: import('node:fs').Dirent[];
+    try {
+      raw = await fs.readdir(p, { withFileTypes: true });
+    } catch (err) {
+      if (isAbsence(err)) return null;
+      throw err;
+    }
+    return raw.sort((a, b) => comparePathComponents(a.name, b.name));
   }
 
   async readJsonObject(p: string): Promise<Record<string, unknown> | null> {

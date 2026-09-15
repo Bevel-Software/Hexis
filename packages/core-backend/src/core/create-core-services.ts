@@ -342,7 +342,7 @@ export async function createCoreServices(
     new PluginManifestsStep(disk),
     new PersonalSpacesStep(disk),
     new TemplateFilesStep(disk, extraDirs),
-    new RolesYamlStep([config.adminEmail]),
+    new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
   const kbStartupRunner = new KbStartupRunner({

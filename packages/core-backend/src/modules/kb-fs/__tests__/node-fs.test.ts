@@ -361,6 +361,30 @@ describe('NodeFs probes', () => {
     expect(await disk.isDirectory(path.join(root, 'missing'))).toBe(false);
   });
 
+  it('listDir: one folder in walk order, nothing skipped; null when absent; any other failure is the error', async () => {
+    await fs.mkdir(path.join(root, 'd', 'node_modules'), { recursive: true });
+    await fs.mkdir(path.join(root, 'd', '.git'));
+    await fs.writeFile(path.join(root, 'd', 'a-b.md'), '');
+    await fs.mkdir(path.join(root, 'd', 'a'));
+    const listed = await disk.listDir(path.join(root, 'd'));
+    expect(listed?.map((e) => `${e.name}${e.isDirectory() ? '/' : ''}`)).toEqual(['.git/', 'a/', 'a-b.md', 'node_modules/']);
+    expect(await disk.listDir(path.join(root, 'nope'))).toBeNull();
+    // A file is no folder to list, and neither is anything beneath one: ENOTDIR is absence.
+    expect(await disk.listDir(path.join(root, 'd', 'a-b.md'))).toBeNull();
+    expect(await disk.listDir(path.join(root, 'd', 'a-b.md', 'below'))).toBeNull();
+    // Anything else is the error, never an empty folder.
+    const real = fs.readdir;
+    const spy = vi.spyOn(fs, 'readdir').mockImplementation(((dir: string, opts: unknown) =>
+      String(dir).endsWith('d')
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (d: string, o: unknown) => Promise<unknown>).call(fs, dir, opts)) as never);
+    try {
+      await expect(disk.listDir(path.join(root, 'd'))).rejects.toThrow('EACCES');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('readJsonObject: an object, else null — absent, malformed, or not an object; a read failure is the error', async () => {
     await fs.writeFile(path.join(root, 'obj.json'), '{"a":1}');
     await fs.writeFile(path.join(root, 'arr.json'), '[1]');

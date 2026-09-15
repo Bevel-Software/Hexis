@@ -1218,13 +1218,14 @@ export function createWorkspaceRoutes(
  * caller targets it accidentally. Returns paths in the walk's order — stable
  * and lexical — for predictable commit sequencing. A link counts as a file:
  * it is deleted as one, never followed. A folder that cannot be listed is
- * left out.
+ * the delete's error: an enumeration with a hole in it would delete what it
+ * saw and report success over what it did not.
  */
 async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, workspaceDir: string): Promise<string[]> {
   const out: string[] = [];
   const relOf = (dir: string, name: string) =>
     path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
-  await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory() }, [
+  await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory(), unreadable: 'throw' }, [
     {
       onFile: (dir, name) => void out.push(relOf(dir, name)),
       onOther: (dir, e) => void out.push(relOf(dir, e.name)),

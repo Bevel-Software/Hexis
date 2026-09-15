@@ -53,13 +53,8 @@ export class PersonalSpacesStep implements OnServerStart {
 
 async function closePersonalSpaces(branch: KbBranch, disk: IFsProbe): Promise<void> {
   const repoDir = await branch.repoDir();
-  let entries: import('node:fs').Dirent[];
-  try {
-    entries = await fs.readdir(path.join(repoDir, PLUGINS_DIR), { withFileTypes: true });
-  } catch (err) {
-    if (disk.isAbsence(err)) return;
-    throw err;
-  }
+  const entries = await disk.listDir(path.join(repoDir, PLUGINS_DIR));
+  if (entries === null) return;
   const closed: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;

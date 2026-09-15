@@ -1,5 +1,3 @@
-import type { Stats } from 'node:fs';
-
 /**
  * The contracts for READING the disk without locks: walking a tree, honouring
  * `.bevelignore`, and probing a path. Nothing here touches the disk — the one
@@ -40,12 +38,25 @@ import type { Stats } from 'node:fs';
 /** The ignore file's own name — every reader that names it agrees on the spelling. */
 export const IGNORE_FILENAME = '.bevelignore';
 
-/** A directory entry as the walk presents it: a name and what it is. */
-export interface WalkedEntry {
-  name: string;
-  isDirectory(): boolean;
+/**
+ * The knowledge-base walk's skip list: dot-entries (`.git`, a parked delete)
+ * and vendored dependencies are never seen — by {@link ITreeWalker.walkKb},
+ * and by any reader listing one folder of a checkout on its own.
+ */
+export function isSkippedEntry(name: string): boolean {
+  return name.startsWith('.') || name === 'node_modules';
+}
+
+/** What a probe says of an entry: what it is, and nothing about the disk that said so. */
+export interface EntryStat {
   isFile(): boolean;
+  isDirectory(): boolean;
   isSymbolicLink(): boolean;
+}
+
+/** A directory entry as the walk presents it: a name and what it is. */
+export interface WalkedEntry extends EntryStat {
+  name: string;
 }
 
 /**
@@ -142,10 +153,10 @@ export interface ITreeWalker {
   walkKb(root: string, listeners: readonly WalkListener[], options?: Omit<TreeWalkOptions, 'skip'>): Promise<WalkResult>;
   /**
    * The file listing catalog scanners want, on top of {@link walkKb}:
-   * relative (`/`-separated, sorted) paths of files under `root` whose
-   * basename matches. A missing root yields `[]`; skipped entries are never
-   * entered. A directory that cannot be listed is SKIPPED by default — right
-   * for a catalog, which shows what it can. A caller that must see
+   * relative (`/`-separated) paths of files under `root` whose basename
+   * matches, in walk order. A missing root yields `[]`; skipped entries are
+   * never entered. A directory that cannot be listed is SKIPPED by default —
+   * right for a catalog, which shows what it can. A caller that must see
    * EVERYTHING or nothing passes `strict`, and the listing throws a
    * {@link WalkError} naming the directory instead.
    */
@@ -165,12 +176,18 @@ export interface IFsProbe {
   isAbsence(err: unknown): boolean;
   /** Whether SOMETHING is at `p` — a link included, followed or not. */
   exists(p: string): Promise<boolean>;
-  /** `stat` (links followed); null when nothing is there. */
-  statOrNull(p: string): Promise<Stats | null>;
-  /** `lstat` (the entry itself, a link as a link); null when nothing is there. */
-  lstatOrNull(p: string): Promise<Stats | null>;
+  /** What is at `p`, links followed; null when nothing is there. */
+  statOrNull(p: string): Promise<EntryStat | null>;
+  /** What is at `p` itself, a link as a link; null when nothing is there. */
+  lstatOrNull(p: string): Promise<EntryStat | null>;
   /** Whether the entry at `p` is itself a directory (a link to one is not). */
   isDirectory(p: string): Promise<boolean>;
+  /**
+   * ONE folder's own entries — files, folders and the rest — in walk order,
+   * nothing skipped; null when there is no such folder. Any other failure to
+   * list it is the error: a listing with a hole is not a listing.
+   */
+  listDir(p: string): Promise<WalkedEntry[] | null>;
   /** The JSON object in the file at `p`; null when the file is absent, not JSON, or not an object. */
   readJsonObject(p: string): Promise<Record<string, unknown> | null>;
 }

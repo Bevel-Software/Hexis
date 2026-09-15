@@ -120,8 +120,8 @@ export async function hasPluginBeneath(disk: ITreeWalker, dir: string): Promise<
   return anyFolderIn(disk, dir, (rel, entries) => rel !== '' && hasManifestEntry(entries));
 }
 
-/** Whether a folder's listing carries a plugin manifest or a bundle as a regular file. */
-function hasManifestEntry(entries: readonly WalkedEntry[]): boolean {
+/** Whether a folder's listing carries a plugin manifest or a bundle as a regular file — THE "has a manifest" judgement, shared with the migration. */
+export function hasManifestEntry(entries: readonly WalkedEntry[]): boolean {
   return entries.some((e) => e.isFile() && (e.name === PLUGIN_MANIFEST_FILE || e.name === BUNDLE_FILE));
 }
 
