@@ -2,8 +2,10 @@ import type { WorkflowDomainError } from './domain-errors.js';
 
 /**
  * THE response body for a domain refusal: the error's own message, plus
- * whatever typed discriminators its payload carries (`kind`, `unreadable`,
- * `accessConfigErrors`, …) for a client that switches on them.
+ * whatever typed discriminators its payload carries — `kind`
+ * (`path-traversal`, `unreadable-archive`, …) and `accessConfigErrors` are
+ * the ones {@link WorkflowDomainError} subclasses set today — for a client
+ * that switches on them rather than on the prose.
  *
  * Eight route surfaces built this object by hand, and seven of them spread
  * the payload AFTER the message:
