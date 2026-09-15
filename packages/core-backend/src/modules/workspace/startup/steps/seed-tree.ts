@@ -97,7 +97,7 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
         const rel = relDir ? path.join(relDir, entry.name) : entry.name;
         const target = await fs.stat(path.join(templateDir, rel)).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
         if (target === null || !target.isFile()) {
-          const what = target === null ? 'nothing' : target.isDirectory() ? 'a directory' : 'not a regular file';
+          const what = target === null ? 'nothing' : target.isDirectory() ? 'a directory' : 'a special file';
           throw new Error(
             `KB template entry "${rel}" ${entry.isSymbolicLink() ? `links to ${what}` : `is ${what}`} — a template holds regular files, or links to them.`,
           );
