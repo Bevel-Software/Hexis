@@ -494,6 +494,50 @@ describe('redactSecret', () => {
     // A plain URL is untouched.
     expect(redactSecret('https://example.com/kb.git')).toBe('https://example.com/kb.git');
   });
+
+  it('scrubs every token in effect: env aliases and tokens the caller names', () => {
+    const saved = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GIT_TOKEN: process.env.GIT_TOKEN };
+    delete process.env.GITHUB_TOKEN;
+    process.env.GIT_TOKEN = 'glpat_fromenv';
+    try {
+      expect(redactSecret('a glpat_fromenv b ghp_fromsettings c', ['ghp_fromsettings', '', null])).toBe(
+        'a *** b *** c',
+      );
+      // A token containing another is scrubbed whole, not half.
+      expect(redactSecret('x ghp_abc_long y', ['ghp_abc', 'ghp_abc_long'])).toBe('x *** y');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+});
+
+describe('KbStartupRunner redaction', () => {
+  it('scrubs the token in effect from a failure, even one that never reached the environment', async () => {
+    const saved = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      await populatedUpstream();
+      const runner = makeRunner(
+        [
+          step('leaky', async () => {
+            throw new Error('the host said ghp_settingsonly42 is not welcome');
+          }),
+        ],
+        { gitToken: () => 'ghp_settingsonly42' },
+      );
+      const err = await runner.runAll().then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err?.message).toContain('KB startup step "leaky" failed');
+      expect(err?.message).not.toContain('ghp_settingsonly42');
+    } finally {
+      if (saved !== undefined) process.env.GITHUB_TOKEN = saved;
+    }
+  });
 });
 
 describe('KbStartupRunner credentials', () => {

@@ -20,13 +20,29 @@ export const BOT_EMAIL = 'bevel-workflow@bevel.software';
 
 /**
  * Scrub credentials from anything that reaches a log or an error message:
- * the configured token wherever it appears, and URL userinfo — a remote
+ * the token in effect wherever it appears, and URL userinfo — a remote
  * spelled `https://user:pass@host` would otherwise leak `pass` verbatim
  * through every git failure that quotes the URL back.
+ *
+ * "The token in effect" is every place one can come from: each environment
+ * spelling `CoreConfig` accepts (it normalises them onto `GITHUB_TOKEN` at
+ * boot, but a later write to one of them is not normalised), plus whatever the
+ * caller knows about — the settings-stored token, or a token a request brought
+ * along. Longest first, so a token that contains another is not half-scrubbed.
  */
-export function redactSecret(text: string): string {
-  const token = process.env.GITHUB_TOKEN;
-  const scrubbed = token ? text.replaceAll(token, '***') : text;
+export function redactSecret(text: string, secrets: readonly (string | null | undefined)[] = []): string {
+  const tokens = [
+    process.env.GITHUB_TOKEN,
+    process.env.GIT_TOKEN,
+    process.env.GH_TOKEN,
+    ...secrets,
+  ]
+    .map((t) => t?.trim())
+    .filter((t): t is string => !!t);
+  let scrubbed = text;
+  for (const token of [...new Set(tokens)].sort((a, b) => b.length - a.length)) {
+    scrubbed = scrubbed.replaceAll(token, '***');
+  }
   return scrubbed.replace(/:\/\/[^/@\s]+@/g, '://***@');
 }
 

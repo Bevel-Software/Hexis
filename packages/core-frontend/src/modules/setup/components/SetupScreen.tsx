@@ -8,8 +8,10 @@ import {
   syncNow,
   syncOutcomeError,
   testConnection,
+  KbInitFailed,
   SettingsProblems,
   type ConnectionTest,
+  type KbInitFailure,
   type LastSync,
   type SettingStatus,
   type SyncNowResult,
@@ -214,6 +216,12 @@ interface Props {
    * calls, and what the last call did. Absent on a build without the module.
    */
   sync?: SyncStatus;
+  /**
+   * A standing knowledge-base initialization failure, from the status
+   * endpoint — so the banner is there when the screen is opened, not only
+   * right after the save that failed.
+   */
+  kbInit?: KbInitFailure;
 }
 
 /**
@@ -232,8 +240,21 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Props) {
+export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
+  /**
+   * The initialization failure on screen: the status endpoint's, until a save
+   * or a retry from this screen answers more recently. A fresh status read
+   * (a new `kbInit` from the host) takes over again — adjusted during render
+   * rather than in an effect, so the stale banner never paints.
+   */
+  const [initFailure, setInitFailure] = useState<KbInitFailure | null>(kbInit ?? null);
+  const [seenKbInit, setSeenKbInit] = useState(kbInit);
+  if (kbInit !== seenKbInit) {
+    setSeenKbInit(kbInit);
+    setInitFailure(kbInit ?? null);
+  }
+  const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
   const [syncResult, setSyncResult] = useState<SyncNowResult | null>(null);
@@ -516,9 +537,41 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
     );
   }
 
+  /**
+   * Re-run the knowledge-base initialization. No endpoint of its own: any save
+   * while the failure stands re-runs the phase, and an EMPTY one changes no
+   * setting — so nothing has to be typed again, and the server's one-save-at-a-
+   * time chain covers this exactly as it covers the form.
+   */
+  async function retryInitialization() {
+    if (retrying || saving) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      const result = await saveSettings({});
+      setInitFailure(null);
+      if (result.awaitingRestart) {
+        setNeedsRestart(true);
+        return;
+      }
+      if (result.complete && variant === 'setup') {
+        // The same full reload the completing save does, for the same reason:
+        // the browser's branch model predates the app it is about to open.
+        window.location.reload();
+        return;
+      }
+      onSaved();
+    } catch (err) {
+      if (err instanceof KbInitFailed) setInitFailure(err.kbInit);
+      else setError(err instanceof Error ? err.message : 'Could not retry the initialization.');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (saving) return;
+    if (saving || retrying) return;
     setSaving(true);
     setError(null);
     setProblems({});
@@ -577,6 +630,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         await probe();
       }
       const result = await saveSettings(payload);
+      // A save while a failure stands re-ran the initialization, and it held.
+      setInitFailure(null);
       setRestartRequired(result.restartRequired);
       setDraft({});
       // A save can succeed and STILL leave the deployment unusable: a blank
@@ -613,7 +668,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       onSaved();
     } catch (err) {
       if (err instanceof SettingsProblems) setProblems(err.problems);
-      else setError(err instanceof Error ? err.message : 'Could not save these settings.');
+      else if (err instanceof KbInitFailed) {
+        // The values ARE stored — only the initialization failed. The form
+        // shows what was saved, and the banner says what to fix and retries
+        // without asking for any of it again.
+        setInitFailure(err.kbInit);
+        setDraft({});
+        onSaved();
+      } else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
       setSaving(false);
       // The page scrolls now, and every message lands at the top of it while
@@ -706,6 +768,26 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         )}
 
         <div ref={noticeRef}>
+          {/* Saved, but the knowledge base behind the gate was never set up.
+              The cause is the server's classified sentence — what to fix, not
+              what git said — and the retry needs nothing re-entered. */}
+          {initFailure && (
+            <Banner tone="danger" role="alert" className="mt-6" data-testid="kb-init-failure">
+              <p className="font-semibold">Saved, but the knowledge base could not be initialized</p>
+              <p className="mt-1">{initFailure.cause}</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => void retryInitialization()}
+                disabled={retrying || saving || testing}
+              >
+                {retrying ? 'Initializing…' : 'Retry initialization'}
+              </Button>
+            </Banner>
+          )}
+
           {error && (
             <Banner tone="danger" role="alert" className="mt-6">
               {error}
@@ -796,7 +878,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                         // Also while SAVING: a save may be asking the remote
                         // itself, and a second test racing it would overwrite
                         // both the result and the versions derived from it.
-                        disabled={testing || saving}
+                        disabled={testing || saving || retrying}
                       >
                         {testing ? 'Checking…' : 'Test connection'}
                       </Button>
@@ -892,7 +974,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
             <Button
               type="submit"
               variant="primary"
-              disabled={saving || testing || connectionRejected}
+              disabled={saving || testing || retrying || connectionRejected}
               // Described by the refusal, so a reader who lands on a button
               // that will not move is told why rather than left guessing.
               aria-describedby={connectionRejected ? 'connection-refusal' : undefined}

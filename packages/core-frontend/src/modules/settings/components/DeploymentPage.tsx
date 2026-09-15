@@ -87,6 +87,7 @@ export function DeploymentPage() {
           <SetupScreen
             settings={status.settings}
             sync={status.sync}
+            kbInit={status.kbInit}
             onSaved={refresh}
             variant="settings"
           />

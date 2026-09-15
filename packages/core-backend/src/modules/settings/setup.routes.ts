@@ -12,6 +12,8 @@ import {
   isBranchModelConfigured,
   validateBranchModel,
 } from '@bevel-software/platform-shared';
+import { classifyGitFailure, type GitFailure } from './git-connection-check.js';
+import { redactSecret } from '../workspace/startup/kb-git.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const execFileAsync = promisify(execFile);
@@ -64,16 +66,18 @@ export function createSetupRoutes(
   const router = express.Router();
 
   /**
-   * Whether the last setup-time run of the KB startup phase FAILED. While
-   * true the deployment stays GATED: the settings are saved but the KB was
+   * Why the last setup-time run of the KB startup phase FAILED, or null. While
+   * set the deployment stays GATED: the settings are saved but the KB was
    * never initialized, and reporting setup complete would open the app over
-   * an unmaintained (possibly unseeded) knowledge base. Saving the setup
-   * form again retries the phase; a server restart retries it at boot; a
-   * success clears the flag. Per-process state, like the gate itself.
+   * an unmaintained (possibly unseeded) knowledge base. Any save — including
+   * an empty one, which is what "Retry initialization" sends — retries the
+   * phase; a server restart retries it at boot; a success clears it.
+   * Per-process state, like the gate itself.
+   *
+   * Classified, never raw: the admin gets a kind and a remediation sentence,
+   * and what git actually said stays in the server log.
    */
-  let kbInitFailed = false;
-  /** The failure's message, surfaced to the ADMIN on the status endpoint. */
-  let kbInitError: string | null = null;
+  let kbInit: GitFailure | null = null;
   /**
    * The setup-time run currently executing, if any. Its jobs: (a) keeping the
    * status gate SHUT while a run executes (the settings read complete the
@@ -85,7 +89,7 @@ export function createSetupRoutes(
    */
   let kbInitInFlight: Promise<void> | null = null;
   /** The app-gate answer: settings complete AND the KB phase settled clean. */
-  const kbReady = () => isComplete(settings) && !kbInitFailed && kbInitInFlight === null;
+  const kbReady = () => isComplete(settings) && kbInit === null && kbInitInFlight === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -123,7 +127,7 @@ export function createSetupRoutes(
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
-      ...(kbInitFailed ? { kbInitError } : {}),
+      ...(kbInit ? { kbInit } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
   });
@@ -198,11 +202,11 @@ export function createSetupRoutes(
        * Runs on the false→true completion transition — including when the
        * branch model was configured by an EARLIER save and the repository
        * URL arrives on a later one — and again on any save while a previous
-       * setup-time run stands failed (`kbInitFailed`), so saving the form is
-       * the retry. Never on a re-save of a complete, healthy setup: with the
-       * gate open, sessions may be live and that is no longer a quiet moment.
+       * setup-time run stands failed (`kbInit`), so a save is the retry. Never
+       * on a re-save of a complete, healthy setup: with the gate open,
+       * sessions may be live and that is no longer a quiet moment.
        */
-      if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
+      if ((!wasComplete || kbInit !== null) && isComplete(settings)) {
         try {
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`
@@ -213,20 +217,20 @@ export function createSetupRoutes(
           // and opens the gate DELIBERATELY — booting unmaintained so the
           // operator can get in and fix things is exactly what the
           // break-glass is for.
-          kbInitFailed = false;
-          kbInitError = null;
+          kbInit = null;
         } catch (initErr) {
           // The settings ARE saved — only the KB initialization failed. The
           // deployment stays gated (see the status endpoint) until a retry
-          // succeeds. Logged in full, returned actionable.
-          const msg = initErr instanceof Error ? initErr.message : String(initErr);
+          // succeeds. Logged in full (scrubbed of the token in effect, which
+          // may be the one this very save stored), returned classified.
+          const msg = redactSecret(initErr instanceof Error ? initErr.message : String(initErr), [
+            settings.resolve('gitToken'),
+          ]);
           console.error('[setup] KB initialization failed after setup completed:', msg);
-          kbInitFailed = true;
-          kbInitError = msg;
+          kbInit = classifyGitFailure(msg);
           res.status(500).json({
-            error:
-              'Settings saved, but the knowledge base could not be initialized. ' +
-              'Saving the setup form again retries; restarting the server retries too.',
+            error: 'Settings saved, but the knowledge base could not be initialized.',
+            kbInit,
           });
           return;
         } finally {
@@ -369,7 +373,17 @@ export function createSetupRoutes(
         defaultBranch,
       });
     } catch (err) {
-      res.status(200).json({ ok: false, error: explainGitFailure(err, token) });
+      // `ls-remote` failures have been known to quote the credential back, so
+      // the token under test is scrubbed along with the one in effect.
+      const text = redactSecret(err instanceof Error ? err.message : String(err), [token]);
+      const { kind, cause } = classifyGitFailure(text);
+      // Unlike the setup-time phase, an unrecognised answer here is echoed:
+      // this is the admin asking the host a direct question about the values
+      // they typed, and git's own first lines are the only answer there is.
+      res.status(200).json({
+        ok: false,
+        error: kind === 'unknown' ? text.split('\n').slice(0, 3).join(' ').slice(0, 400) : cause,
+      });
     }
   });
 
@@ -421,28 +435,4 @@ export function isComplete(settings: DeploymentSettingsService): boolean {
 /** Answered, but not yet in effect: everything is stored, the process is stale. */
 export function awaitingRestart(settings: DeploymentSettingsService): boolean {
   return settingsAnswered(settings) && !isBranchModelConfigured();
-}
-
-/**
- * Turn git's stderr into something an admin can act on. Deliberately narrow:
- * the raw text is echoed only when it matches nothing known, and the token is
- * scrubbed from it first — `ls-remote` failures have been known to quote the
- * credential back.
- */
-function explainGitFailure(err: unknown, token: string): string {
-  const raw = err instanceof Error ? `${err.message}` : String(err);
-  const text = token ? raw.replaceAll(token, '***') : raw;
-  if (/timed out|ETIMEDOUT/i.test(text)) {
-    return 'The host did not answer in time. Check the URL, and that this server can reach it.';
-  }
-  if (/Authentication failed|could not read Username|invalid credentials|403/i.test(text)) {
-    return 'The host rejected those credentials. Check the token, and that the username matches the host (GitHub x-access-token, GitLab oauth2, Bitbucket x-token-auth).';
-  }
-  if (/not found|repository .* does not exist|404/i.test(text)) {
-    return 'No repository at that URL — or the token cannot see it.';
-  }
-  if (/could not resolve host|unable to access|SSL|certificate/i.test(text)) {
-    return 'Could not reach that host from this server. Check the URL and any network egress rules.';
-  }
-  return text.split('\n').slice(0, 3).join(' ').slice(0, 400);
 }
