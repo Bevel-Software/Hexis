@@ -137,6 +137,38 @@ describe('classifyGitFailure', () => {
     }
   });
 
+  it("knows the connection check's wordings too — there is no second table", () => {
+    expect(
+      classifyGitFailure("fatal: could not read Password for 'https://x-access-token@github.com': terminal prompts disabled").kind,
+    ).toBe('credentials-rejected');
+    expect(
+      classifyGitFailure('remote: Invalid username or token. Password authentication is not supported for Git operations.').kind,
+    ).toBe('credentials-rejected');
+    expect(
+      classifyGitFailure('fatal: unable to access: gnutls_handshake() failed: The TLS connection was non-properly terminated.').kind,
+    ).toBe('unreachable');
+    expect(
+      classifyGitFailure("remote: TF401027: You need the Git 'GenericContribute' permission to perform this action.").kind,
+    ).toBe('write-refused');
+    expect(
+      classifyGitFailure('remote: Your credentials lack one or more required privilege scopes.').kind,
+    ).toBe('write-refused');
+  });
+
+  it('a write: a bare 403/404 or a generic refusal is the push refused; authentication still reads as credentials', () => {
+    const write = { operation: 'write' } as const;
+    const returned = (status: number) =>
+      `fatal: unable to access 'https://git.example.com/kb.git/': The requested URL returned error: ${status}`;
+    expect(classifyGitFailure(returned(403), write).kind).toBe('write-refused');
+    expect(classifyGitFailure(returned(404), write).kind).toBe('write-refused');
+    expect(classifyGitFailure(`remote: Forbidden\n${returned(403)}`, write).kind).toBe('write-refused');
+    expect(classifyGitFailure(returned(401), write).kind).toBe('credentials-rejected');
+    expect(classifyGitFailure('remote: HTTP Basic: Access denied', write).kind).toBe('credentials-rejected');
+    // The same statuses on a read: the login refused, or no such repository.
+    expect(classifyGitFailure(returned(403)).kind).toBe('credentials-rejected');
+    expect(classifyGitFailure(returned(404)).kind).toBe('not-found');
+  });
+
   it('failureOf prefers the classification a failure carries over its scrubbed message', () => {
     const carried = classifyGitFailure(gitFailed('push', 'origin main', 'remote: Permission to acme/kb.git denied to bot.'));
     expect(carried.kind).toBe('write-refused');

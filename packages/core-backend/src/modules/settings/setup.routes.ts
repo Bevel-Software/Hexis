@@ -1,6 +1,4 @@
 import express from 'express';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import {
   DeploymentSettingsService,
@@ -8,16 +6,26 @@ import {
   validateHttpsRemote,
 } from './deployment-settings.service.js';
 import {
+  checkRepositoryConnection,
+  type ConnectionCheck,
+  type RepositoryConnection,
+} from './connection-check.js';
+import {
   configureBranchModel,
   isBranchModelConfigured,
   validateBranchModel,
 } from '@bevel-software/platform-shared';
-import { classifyGitFailure, failureOf, type GitFailure } from '../../shared/git-failure.js';
+import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { printable } from '../../shared/printable.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
-const execFileAsync = promisify(execFile);
+/** Which name a host expects beside the token when none is configured. */
+const DEFAULT_GIT_USERNAME = 'x-access-token';
+
+/** The one rule, in the one wording, for a stored token and a repository it was not saved for. */
+const TOKEN_FOR_THAT_REPOSITORY =
+  'Enter the access token for that repository — the saved one is only used with the repository it was saved for.';
 
 /**
  * The slice of a sync record the status endpoint publishes. Declared here
@@ -63,6 +71,11 @@ export function createSetupRoutes(
     url: string;
     lastSync(): LastSyncStatus | null;
   },
+  /**
+   * The read+write connection check. Injected so route tests can answer for
+   * the remote; production uses the real one.
+   */
+  checkConnection: (connection: RepositoryConnection) => Promise<ConnectionCheck> = checkRepositoryConnection,
 ): express.Router {
   const router = express.Router();
 
@@ -171,6 +184,7 @@ export function createSetupRoutes(
       // one that must run the KB startup phase, regardless of which save
       // configured the branch model.
       const wasComplete = isComplete(settings);
+      if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
       const { restartRequired } = await settings.save(entries, req.userId ?? null);
       /**
        * Apply the branch model to THIS process, so pressing Save finishes
@@ -262,13 +276,86 @@ export function createSetupRoutes(
   }
 
   /**
+   * A SAVED CONNECTION IS ONE THE HOST HAS ACCEPTED FOR READING AND WRITING.
+   *
+   * The completeness check asks only whether the answers are present, so
+   * without this a token the host rejects — or one that can read but not
+   * push — finishes setup as well as a working one, and the first news of it
+   * is every save anyone makes failing. The browser proves the connection too,
+   * but a browser is not the only client, and it is not the last word.
+   *
+   * Checked on the values the save WOULD put in effect, and only when the save
+   * matters to the connection: it changes the address, the token or the
+   * username, or it completes first-run setup. Anything else — single sign-on,
+   * say — is never probed, so an admin is not held hostage to a repository
+   * that is down while they edit something unrelated.
+   *
+   * Answers the refusal itself (400, per-field problems) and returns false;
+   * true means the save may go ahead. Validation problems in `entries` throw
+   * {@link SettingsValidationError} before any probe, exactly as the save would.
+   */
+  async function connectionHoldsFor(
+    entries: Record<string, string>,
+    wasComplete: boolean,
+    res: express.Response,
+  ): Promise<boolean> {
+    const after = settings.resolveAfter(entries);
+    const now: RepositoryConnection = {
+      url: settings.resolve('kbRepoUrl'),
+      token: settings.resolve('gitToken'),
+      username: settings.resolve('gitUsername') || DEFAULT_GIT_USERNAME,
+    };
+    const next: RepositoryConnection = {
+      url: after('kbRepoUrl'),
+      token: after('gitToken'),
+      username: after('gitUsername') || DEFAULT_GIT_USERNAME,
+    };
+    const refuse = (problems: Record<string, string>) => {
+      res.status(400).json({ error: Object.values(problems)[0], problems });
+      return false;
+    };
+
+    // THE CONFIGURED TOKEN ONLY EVER GOES TO THE CONFIGURED REPOSITORY — the
+    // same rule the connection test applies, for the same reason: probing a
+    // new address with the stored token would hand it to whoever runs that
+    // host. A new address brings its own token.
+    const tokenSupplied = Boolean(entries.gitToken?.trim());
+    if (next.url !== now.url && next.token && !tokenSupplied) {
+      return settings.sourceOf('gitToken') === 'env'
+        ? refuse({
+            kbRepoUrl:
+              'The access token is set by the GIT_TOKEN environment variable and is only used with the repository it was set for — change both there.',
+          })
+        : refuse({ gitToken: TOKEN_FOR_THAT_REPOSITORY });
+    }
+
+    // Nothing to prove without both halves: a first save of the address alone
+    // cannot finish setup, and the save that later brings the token is probed.
+    if (!next.url || !next.token) return true;
+
+    const changesConnection =
+      next.url !== now.url || next.token !== now.token || next.username !== now.username;
+    const completesSetup =
+      !wasComplete &&
+      validateBranchModel({
+        defaultBranch: after('defaultBranch'),
+        protectedBranches: after('protectedBranches'),
+      }) === null;
+    if (!changesConnection && !completesSetup) return true;
+
+    const check = await checkConnection(next);
+    if (check.outcome === 'connected') return true;
+    return refuse({ [check.field]: check.error });
+  }
+
+  /**
    * Try the credentials against the real remote, BEFORE anything is saved.
    *
    * This is the reason the screen is worth more than the environment variables
-   * it replaces. `ls-remote` is the cheapest operation that proves all three
-   * values at once — the URL resolves, the token authenticates, and the
-   * username is the one this host expects — and it answers in a second instead
-   * of surfacing as a failed clone at some later, unrelated moment.
+   * it replaces: it proves the URL resolves, the token authenticates, the
+   * username is the one this host expects, AND that the token may push — in a
+   * few seconds instead of as a failed clone or a failed save at some later,
+   * unrelated moment. It runs the same check the save does.
    *
    * Values are taken from the request when supplied so an admin can test what
    * they typed rather than what is stored, and fall back to what is in effect
@@ -308,10 +395,7 @@ export function createSetupRoutes(
     const suppliedToken = supplied('gitToken');
     const testingConfiguredRepo = url === settings.resolve('kbRepoUrl');
     if (!suppliedToken && !testingConfiguredRepo) {
-      res.status(400).json({
-        ok: false,
-        error: 'Enter the access token for that repository — the saved one is only used with the repository it was saved for.',
-      });
+      res.status(400).json({ ok: false, outcome: 'rejected', error: TOKEN_FOR_THAT_REPOSITORY });
       return;
     }
     const token = suppliedToken ?? (testingConfiguredRepo ? settings.resolve('gitToken') : '');
@@ -333,63 +417,37 @@ export function createSetupRoutes(
     }
 
     try {
-      // The helper reads the token from the environment at call time, so it
-      // never appears in argv (and so never in a process listing or a crash
-      // dump). Same shape the real clone uses.
-      const args = ['-c', 'credential.helper=', ...(token
-        ? ['-c', `credential.helper=!f() { echo "username=${username}"; echo "password=$BEVEL_TEST_TOKEN"; }; f`]
-        : []),
-        // `--end-of-options` on top of the validation above: belt and braces,
-        // so nothing that arrives here can ever be read as a flag.
-        'ls-remote', '--heads', '--end-of-options', url];
-      const { stdout } = await execFileAsync('git', args, {
-        timeout: 20_000,
-        env: {
-          ...process.env,
-          BEVEL_TEST_TOKEN: token,
-          // Never let git stop for a prompt: without this a bad credential
-          // hangs the request until the timeout instead of failing.
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_ASKPASS: 'echo',
-        },
-      });
-      const lines = stdout.split('\n');
-      // `<sha>\trefs/heads/<name>` — tag refs and the bare HEAD row are not
-      // branches, so they are filtered rather than sliced blindly.
-      const branches = lines
-        .filter((line) => !line.startsWith('ref:'))
-        .map((line) => line.split('\t')[1]?.trim())
-        .filter((ref): ref is string => !!ref && ref.startsWith('refs/heads/'))
-        .map((ref) => ref.slice('refs/heads/'.length));
-      // `ref: refs/heads/<name>\tHEAD` — what the remote calls its own trunk.
-      const defaultBranch =
-        lines
-          .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
-          ?.slice('ref: refs/heads/'.length)
-          .split('\t')[0]
-          ?.trim() || null;
+      const check = await checkConnection({ url, token, username });
+      if (check.outcome === 'rejected') {
+        // 200: the check RAN and the host said no. A 4xx is for a request that
+        // never got as far as asking.
+        res.json({ ok: false, outcome: check.outcome, field: check.field, error: check.error });
+        return;
+      }
       res.json({
-        ok: true,
+        // Only read AND write is "connected" — a read-only token is refused
+        // on save, so the button must not call it a success.
+        ok: check.outcome === 'connected',
+        outcome: check.outcome,
+        ...(check.outcome === 'read-only' ? { field: check.field, error: check.error } : {}),
         // An EMPTY repository is a success, not a failure — seeding one is a
         // supported path, and saying "no branches yet" beats an error that
         // reads like the credentials are wrong.
-        empty: branches.length === 0,
-        branches,
-        defaultBranch,
+        empty: check.empty,
+        branches: check.branches,
+        defaultBranch: check.defaultBranch,
       });
     } catch (err) {
-      // `ls-remote` failures have been known to quote the credential back, so
-      // the token under test is scrubbed along with the one in effect.
+      // The check answers every refusal it can read as an outcome; a throw is
+      // the check itself breaking. Logged scrubbed — git failures have been
+      // known to quote the credential back — as one printable token, and
+      // returned generic.
       const raw = err instanceof Error ? err.message : String(err);
-      const text = redactSecret(raw, [token]);
-      const { kind, cause } = classifyGitFailure(raw);
-      // Unlike the setup-time phase, an unrecognised answer here is echoed:
-      // this is the admin asking the host a direct question about the values
-      // they typed, and git's own first lines are the only answer there is.
-      res.status(200).json({
-        ok: false,
-        error: kind === 'unknown' ? text.split('\n').slice(0, 3).join(' ').slice(0, 400) : cause,
-      });
+      console.error(
+        '[setup] connection check failed:',
+        printable(redactSecret(raw, [token, ...urlQuerySecrets(url)])),
+      );
+      res.status(500).json({ ok: false, error: 'Could not run the connection check.' });
     }
   });
 

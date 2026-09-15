@@ -31,8 +31,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@utcp/code-mode": "^1.2.13",
     "@utcp/http": "^1.1.12",
-    "@utcp/mcp": "^1.1.7",
-    "@utcp/sdk": "^1.1.1"
+    "@utcp/mcp": "^1.2.0",
+    "@utcp/sdk": "^1.2.0"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

@@ -45,35 +45,35 @@ export class PersonalSpacesStep implements OnServerStart {
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
     for (const branch of await ctx.allBranches()) {
-      await closePersonalSpaces(branch, this.disk);
+      await this.closePersonalSpaces(branch);
     }
     return { outcome: 'ok' };
   }
-}
 
-async function closePersonalSpaces(branch: KbBranch, disk: IFsProbe): Promise<void> {
-  const repoDir = await branch.repoDir();
-  const entries = await disk.listDir(path.join(repoDir, PLUGINS_DIR));
-  if (entries === null) return;
-  const closed: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;
-    const rel = `${PLUGINS_DIR}/${entry.name}/access.md`;
-    let text: string;
-    try {
-      text = await fs.readFile(path.join(repoDir, rel), 'utf8');
-    } catch (err) {
-      if (isAbsence(err)) continue; // a folder with no rules is not a provisioned space
-      throw err;
+  private async closePersonalSpaces(branch: KbBranch): Promise<void> {
+    const repoDir = await branch.repoDir();
+    const entries = await this.disk.listDir(path.join(repoDir, PLUGINS_DIR));
+    if (entries === null) return;
+    const closed: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;
+      const rel = `${PLUGINS_DIR}/${entry.name}/access.md`;
+      let text: string;
+      try {
+        text = await fs.readFile(path.join(repoDir, rel), 'utf8');
+      } catch (err) {
+        if (isAbsence(err)) continue; // a folder with no rules is not a provisioned space
+        throw err;
+      }
+      const next = closePersonalSpaceRules(text, rel);
+      if (next === null) continue;
+      branch.write(rel, next);
+      closed.push(entry.name);
     }
-    const next = closePersonalSpaceRules(text, rel);
-    if (next === null) continue;
-    branch.write(rel, next);
-    closed.push(entry.name);
+    if (closed.length === 0) return;
+    branch.note(`Keep ${closed.length === 1 ? 'a personal space' : `${closed.length} personal spaces`} private`);
+    for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone`);
   }
-  if (closed.length === 0) return;
-  branch.note(`Keep ${closed.length === 1 ? 'a personal space' : `${closed.length} personal spaces`} private`);
-  for (const name of closed) branch.note(`${PLUGINS_DIR}/${name}/access.md: read denies everyone`);
 }
 
 /**

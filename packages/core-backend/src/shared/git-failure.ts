@@ -59,19 +59,39 @@ const STEP_PREFIX = /KB startup step "([^"]+)" (?:failed|stopped the boot): ([\s
 /** How `kb-git.ts` prefixes a failed git invocation: `git <subcommand> failed: …`. */
 const GIT_PREFIX = /^git \S+ failed:/;
 
+/** What a failure's text is the answer to, when the caller knows. */
+export interface GitFailureContext {
+  /**
+   * `write`: the text answers a push. The startup phase's own pushes say so in
+   * their `git push failed:` prefix; the connection check's dry-run push says
+   * so here. Either way the repository was just READ with these credentials,
+   * so a bare 403 or 404, or a generic "denied" / "forbidden", is the host
+   * refusing the write — not a missing repository, not a bad login.
+   */
+  operation?: 'read' | 'write';
+}
+
 /**
  * Classify a failure from its text. Raw text is safe here — none of it reaches
  * the result — and is the better input where a caller holds it: a scrub
  * replacing a token that happens to spell part of git's wording would change
  * the reading.
  *
- * Order is load-bearing. Refusals that NAME a policy or a permission are read
- * before the generic status codes they arrive with — GitHub answers a
- * read-only token's push with a 403 that would otherwise read as "bad
- * credentials", and GitLab's protected-branch refusal also says "not allowed
- * to push".
+ * Order is load-bearing:
+ *  1. Refusals that NAME a policy, then a permission, come first — GitHub
+ *     answers a read-only token's push with a 403 that would otherwise read as
+ *     "bad credentials", and GitLab's protected-branch refusal also says "not
+ *     allowed to push".
+ *  2. Authentication failures come before the generic refusals of a write: a
+ *     public repository reads anonymously, so a push is where a made-up token
+ *     is first presented, and "the host rejected the token" is not "grant it a
+ *     permission". GitLab's auth failure says "Access denied", which a write's
+ *     generic "denied" would otherwise claim.
+ *  3. Then a write's generic refusals, a missing repository, and an
+ *     unreachable host — "unable to access" last, because a refusal arrives
+ *     wrapped in it.
  */
-export function classifyGitFailure(text: string): GitFailure {
+export function classifyGitFailure(text: string, context: GitFailureContext = {}): GitFailure {
   let body = text;
   const step = STEP_PREFIX.exec(text);
   if (step) {
@@ -88,29 +108,44 @@ export function classifyGitFailure(text: string): GitFailure {
   // `Failed to connect to <host> port 403`. Words still count wherever they
   // appear; digits only outside URLs and port numbers.
   const m = body.replace(/\bhttps?:\/\/\S+/gi, ' ').replace(/\bport \d+/gi, ' ');
-  const isPush = /\bgit push failed\b/i.test(m);
+  const isWrite = context.operation === 'write' || /\bgit push failed\b/i.test(m);
 
   if (
     /pre-receive hook declined|hook declined|protected branch|GH006|GH013|\[remote rejected\]/i.test(m)
   ) {
     return known('push-refused-by-policy');
   }
+  // Each host's own words for "this token may not push": GitHub classic and
+  // fine-grained, GitLab, Bitbucket, Azure DevOps.
   if (
-    /Permission to \S+ denied|write access to repository not granted|not allowed to push|push access denied/i.test(m) ||
-    // A 403 on a PUSH: the phase got past `ls-remote` with these credentials,
-    // so the host knows who this is and is refusing the write, not the login.
-    (isPush && /\b403\b/.test(m))
+    /Permission to \S+ denied|write access to repository not granted|not allowed to push|push access denied|lack one or more required privilege scopes|GenericContribute/i.test(
+      m,
+    )
   ) {
     return known('write-refused');
   }
-  if (/Authentication failed|could not read Username|invalid credentials|HTTP Basic: Access denied|\b40[13]\b/i.test(m)) {
+  if (
+    /Authentication failed|could not read Username|could not read Password|Invalid username or (?:token|password)|invalid credentials|HTTP Basic: Access denied|\b401\b/i.test(
+      m,
+    ) ||
+    // On a read a 403 is the login refused; on a write the host already knows
+    // who this is (see below).
+    (!isWrite && /\b403\b/.test(m))
+  ) {
     return known('credentials-rejected');
+  }
+  // A write refused in no host's particular words: these credentials just
+  // read the repository, so it exists and the login worked.
+  if (isWrite && /\b40[34]\b|\bdenied\b|forbidden|not found/i.test(m)) {
+    return known('write-refused');
   }
   if (/not found|repository .* does not exist|\b404\b/i.test(m)) {
     return known('not-found');
   }
   if (
-    /timed out|ETIMEDOUT|could not resolve host|Failed to connect|Connection refused|ECONNREFUSED|Network is unreachable|SSL|certificate|unable to access/i.test(m)
+    /timed out|ETIMEDOUT|could not resolve host|Failed to connect|Connection refused|ECONNREFUSED|Network is unreachable|SSL|\bTLS\b|certificate|unable to access/i.test(
+      m,
+    )
   ) {
     return known('unreachable');
   }
