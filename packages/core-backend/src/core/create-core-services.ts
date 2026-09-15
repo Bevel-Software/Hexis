@@ -26,6 +26,8 @@ import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 import type { IGitRunner } from '../shared/git.contract.js';
+import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
+import { holdCommitWorkerLease, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -158,6 +160,13 @@ export interface CoreServices {
    * callers run under the same ceiling rather than spawning their own.
    */
   gitRunner: IGitRunner;
+  /**
+   * The commit-worker lease loop (see `core/lifecycle.ts`). `held` says
+   * whether THIS process is the one draining the queue; `stop()` is the
+   * shutdown sequence's way of finishing the in-flight commit and handing the
+   * lease to the replacement.
+   */
+  commitWorker: LeaseLoopHandle;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -909,7 +918,15 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  pendingCommitsWorker.start();
+  // Not `start()`: the worker runs only while this process holds the
+  // commit-worker lease. On a redeploy the outgoing container still holds it,
+  // so this one serves requests and declines to drain until that one exits;
+  // then it takes the lease and starts. Two processes draining one shared
+  // clone volume is the failure this prevents — see `core/lifecycle.ts`.
+  const commitWorker = holdCommitWorkerLease(
+    new AdvisoryLease(db, AdvisoryLock.CommitWorker),
+    pendingCommitsWorker,
+  );
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
@@ -978,6 +995,7 @@ export async function createCoreServices(
     config,
     db,
     gitRunner,
+    commitWorker,
     disk,
     mcpServerEditService,
     workspaceService,

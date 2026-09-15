@@ -25,6 +25,14 @@ export {
   type ToolSurfaceCtx,
 } from './core/create-core-server.js';
 export { noopRecoveryAgent, type CorePorts } from './core/core-ports.js';
+// The shutdown sequence a shell's signal handlers call, and the lease-loop
+// handle type `CoreServices.commitWorker` carries.
+export {
+  createShutdown,
+  type ShutdownDeps,
+  type ShutdownOptions,
+  type LeaseLoopHandle,
+} from './core/lifecycle.js';
 
 // Packaged assets (migrations/, kb-template/) + the migration runners.
 export { coreMigrationsDir, defaultKbTemplateDir } from './assets.js';

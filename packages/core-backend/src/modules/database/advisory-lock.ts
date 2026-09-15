@@ -1,3 +1,4 @@
+import pg from 'pg';
 import type { Database } from './connection.js';
 
 /**
@@ -69,6 +70,13 @@ export const AdvisoryLock = {
   CoreMigrations: 1,
   /** Serializes {@link runEnterpriseMigrations} across processes. */
   EnterpriseMigrations: 2,
+  /**
+   * Held by the ONE process allowed to drain the commit queue — see
+   * {@link AdvisoryLease}. Row-level `SKIP LOCKED` already stops two workers
+   * claiming the same row; it does nothing about two workers running git in
+   * the same working tree on a shared volume, which is what this excludes.
+   */
+  CommitWorker: 3,
 } as const;
 
 export type AdvisoryLockId = (typeof AdvisoryLock)[keyof typeof AdvisoryLock];
@@ -142,4 +150,129 @@ export async function withAdvisoryLock<T>(
     }
     client.release(rollbackError);
   }
+}
+
+/** The slice of a `pg.Client` the lease uses — so a suite can hand in a double. */
+export interface LeaseClient {
+  query(text: string, values?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+  end(): Promise<void>;
+  on(event: 'error' | 'end', listener: (...args: unknown[]) => void): unknown;
+}
+
+export interface AdvisoryLeaseOptions {
+  /** How the lease opens its connection. Default: a `pg.Client` on the pool's connection string. */
+  connect?: () => Promise<LeaseClient>;
+  /** Bound on the connect itself, so an unreachable database fails rather than waits. Default 10s. */
+  connectTimeoutMs?: number;
+}
+
+/**
+ * A SESSION-scoped advisory lock held for as long as this process wants it:
+ * the singleton lease. `tryAcquire` never waits — it answers whether this
+ * process is the holder — and the lock lives on a connection of its own for
+ * the process's lifetime, released by {@link release} or by that connection
+ * ending, however it ends.
+ *
+ * WHY ITS OWN CONNECTION, AND WHY THAT IS FINE. A session lock belongs to the
+ * connection that took it, so it cannot ride the pool (see the transaction
+ * form above for what goes wrong when it does). This connection is therefore
+ * opened once and kept, which is the one shape of resource the closing-owner
+ * rule exempts when it is said out loud: its lifetime is intentionally the
+ * process's. The owner that closes it is the shutdown sequence, through
+ * `release`, and if the process dies without one the session dies with it
+ * and Postgres releases the lock — which is exactly how the NEXT process gets
+ * to take it.
+ *
+ * LOSS IS A FIRST-CLASS EVENT. A connection can drop (a database restart, a
+ * network blip) while this process believes it holds the lease; from that
+ * moment another process may hold it too. So the lease watches its connection
+ * and tells its listeners the instant the holding session is gone, and
+ * `held` flips false before any of them run — a holder that keeps working
+ * after that call is the double-worker case this exists to prevent.
+ */
+export class AdvisoryLease {
+  private client: LeaseClient | null = null;
+  private heldFlag = false;
+  private readonly lostListeners: Array<() => void> = [];
+
+  constructor(
+    private readonly db: Database,
+    private readonly lock: AdvisoryLockId,
+    private readonly opts: AdvisoryLeaseOptions = {},
+  ) {}
+
+  /** Whether this process holds the lease right now. */
+  get held(): boolean {
+    return this.heldFlag;
+  }
+
+  /** Called when the holding connection ends without {@link release} — the lease is gone. */
+  onLost(listener: () => void): void {
+    this.lostListeners.push(listener);
+  }
+
+  /**
+   * Take the lease if nobody holds it. Returns at once either way: `true` and
+   * this process is the holder from now on; `false` and nothing is held or
+   * kept open.
+   */
+  async tryAcquire(): Promise<boolean> {
+    if (this.heldFlag) return true;
+    const client = await (this.opts.connect ?? this.defaultConnect)();
+    // Watched BEFORE the lock is asked for, so a connection that drops during
+    // the very query is seen as a loss rather than missed. Also required of a
+    // `pg.Client`: an 'error' with no listener is thrown at the process.
+    client.on('error', () => this.markLost());
+    client.on('end', () => this.markLost());
+    try {
+      const { rows } = await client.query('select pg_try_advisory_lock($1, $2) as held', [
+        LOCK_NAMESPACE,
+        this.lock,
+      ]);
+      if (rows[0]?.held !== true) {
+        await client.end().catch(() => undefined);
+        return false;
+      }
+      this.client = client;
+      this.heldFlag = true;
+      return true;
+    } catch (err) {
+      await client.end().catch(() => undefined);
+      throw err;
+    }
+  }
+
+  /**
+   * Give the lease up and close its connection. Idempotent, and safe to call
+   * on a lease that was never taken or has already been lost.
+   */
+  async release(): Promise<void> {
+    const client = this.client;
+    this.client = null;
+    this.heldFlag = false;
+    if (!client) return;
+    try {
+      await client.query('select pg_advisory_unlock($1, $2)', [LOCK_NAMESPACE, this.lock]);
+    } catch {
+      // Ending the session below releases the lock regardless.
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  }
+
+  private markLost(): void {
+    if (!this.heldFlag) return;
+    this.heldFlag = false;
+    this.client = null;
+    for (const listener of this.lostListeners) listener();
+  }
+
+  private readonly defaultConnect = async (): Promise<LeaseClient> => {
+    const client = new pg.Client({
+      connectionString: this.db.$client.options.connectionString,
+      connectionTimeoutMillis: this.opts.connectTimeoutMs ?? 10_000,
+    });
+    await client.connect();
+    return client;
+  };
 }
