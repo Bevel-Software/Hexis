@@ -78,6 +78,24 @@ describe('useSetupStatus', () => {
     expect(result.current.status).toEqual(status(true));
   });
 
+  it('disabling while a read is out drops its answer; enabling again reads afresh', async () => {
+    const pending = deferred<SetupStatus>();
+    api.fetchSetupStatus.mockReturnValueOnce(pending.promise);
+    const { result, rerender } = renderHook(({ enabled }) => useSetupStatus(enabled), {
+      initialProps: { enabled: true },
+    });
+
+    rerender({ enabled: false });
+    await act(async () => pending.resolve(status(true)));
+    expect(result.current.status).toBeNull();
+    expect(result.current.loaded).toBe(false);
+
+    api.fetchSetupStatus.mockResolvedValueOnce(status(false));
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.status).toEqual(status(false)));
+    expect(api.fetchSetupStatus).toHaveBeenCalledTimes(2);
+  });
+
   it('disabled: never reads', () => {
     const { result } = renderHook(() => useSetupStatus(false));
     act(() => result.current.refresh());

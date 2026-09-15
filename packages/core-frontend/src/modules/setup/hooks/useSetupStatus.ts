@@ -27,8 +27,9 @@ export interface SetupStatusRead {
  * authorisation boundary), the Deployment page keeps the form and offers a
  * retry.
  *
- * `enabled: false` never reads — for a host that already knows the answer is
- * not for this viewer.
+ * `enabled: false` never reads, and drops a read that was still out when it
+ * turned false — for a host that already knows the answer is not for this
+ * viewer.
  */
 export function useSetupStatus(enabled = true): SetupStatusRead {
   const [status, setStatus] = useState<SetupStatus | null>(null);
@@ -38,7 +39,13 @@ export function useSetupStatus(enabled = true): SetupStatusRead {
   const latest = useRef(0);
 
   const refresh = useCallback(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      // Disabling outdates any read still out, exactly as a newer read would:
+      // its answer is for a viewer this hook no longer serves, and landing it
+      // would leave that status waiting for whenever reading is enabled again.
+      latest.current += 1;
+      return;
+    }
     const request = ++latest.current;
     const current = () => request === latest.current;
     fetchSetupStatus()
