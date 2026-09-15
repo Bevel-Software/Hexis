@@ -13,6 +13,7 @@
 
 import { parse as parseFullYaml } from 'yaml';
 import { pluginManifestName } from '@bevel-software/platform-shared';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -526,9 +527,13 @@ export function canonicalRoleName(name: string): string {
   return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-export function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
+/**
+ * Re-exported from `shared/email-identity.ts`, where it lives beside the
+ * identity HASH that must normalise identically. The grammar keeps the name
+ * because its parsers and splices read as prose with it, and its own callers
+ * keep importing it from here.
+ */
+export { canonicalEmail };
 
 // ---------------------------------------------------------------------------
 // Entry parser
