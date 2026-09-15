@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
 import { copyToClipboard } from '../../../lib/clipboard';
+import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
   saveSettings,
   syncNow,
@@ -908,6 +909,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
             )}
           </div>
         </form>
+
+        {/* Outside the form: nothing in it is saved by "Save and continue",
+            and on first run it is optional — the gate never waits on it. The
+            same section in both variants, so first run and Deployment
+            settings cannot drift. */}
+        <MarketplaceSection variant={variant} />
 
         {fromEnv.length > 0 && (
           <Surface tone="sunken" radius="md" className="mt-10 p-4">
