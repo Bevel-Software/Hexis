@@ -250,6 +250,16 @@ describe('NodeFs.walk', () => {
     }
   });
 
+  it("a reader's throwing callback is the reader's error, never a hole", async () => {
+    await write('a/x.md');
+    const boom = new Error('skip decided badly');
+    await expect(disk.walk(root, { skip: () => { throw boom; } }, [])).rejects.toBe(boom);
+    // Nothing was reported as a hole on the way: the walk did not swallow it.
+    const holes: string[] = [];
+    await expect(disk.walk(root, { skip: () => { throw boom; } }, [{ onHole: (rel) => void holes.push(rel) }])).rejects.toBe(boom);
+    expect(holes).toEqual([]);
+  });
+
   it('an entry that is neither file nor folder is never entered, never a file — it is told to onOther', async () => {
     await write('real/a.md');
     await fs.symlink(path.join(root, 'real'), path.join(root, 'link'), process.platform === 'win32' ? 'junction' : 'dir');

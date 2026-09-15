@@ -32,14 +32,17 @@ export class NodeFs implements ITreeWalker, IFsProbe {
 
     const visit = async (abs: string, rel: string, inherited: IgnoreRules): Promise<void> => {
       if (until?.()) return;
-      let seen: WalkedEntry[];
+      let raw: WalkedEntry[];
       let rules: IgnoreRules;
+      // Only the DISK's failures are holes: the listing and the folder's own
+      // rules. A reader's callback that throws is the reader's error, and
+      // propagates untouched like every other listener error.
       try {
-        const raw = await this.listDir(abs);
+        const listed = await this.listDir(abs);
         // The root: a checkout without this tree, an empty walk. Deeper: a
         // folder that vanished between listing and visiting — not a hole.
-        if (raw === null) return;
-        seen = raw.filter((e) => !skip?.(e));
+        if (listed === null) return;
+        raw = listed;
         // A folder whose own `.bevelignore` is there but cannot be read is as
         // much a hole as one that cannot be listed: its rules are unknown, so
         // nothing in it can be judged. (No file is no rules, never an error.)
@@ -50,6 +53,7 @@ export class NodeFs implements ITreeWalker, IFsProbe {
         for (const l of listeners) await l.onHole?.(rel, err);
         return;
       }
+      const seen = raw.filter((e) => !skip?.(e));
       const isEntry = (e: WalkedEntry) => e.isDirectory() || e.isFile();
       const listed = seen.filter(isEntry);
       // The rules apply to everything that is there — a link a rule names is as hidden as a file.

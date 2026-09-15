@@ -1225,12 +1225,23 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
   const out: string[] = [];
   const relOf = (dir: string, name: string) =>
     path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
-  await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory(), unreadable: 'throw' }, [
-    {
-      onFile: (dir, name) => void out.push(relOf(dir, name)),
-      onOther: (dir, e) => void out.push(relOf(dir, e.name)),
-    },
-  ]);
+  try {
+    await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory(), unreadable: 'throw' }, [
+      {
+        onFile: (dir, name) => void out.push(relOf(dir, name)),
+        onOther: (dir, e) => void out.push(relOf(dir, e.name)),
+      },
+    ]);
+  } catch (err) {
+    // The operator's line carries the errno and the path; the caller's answer
+    // names only the folder they asked about — an OS message would leak the
+    // server's spelling of the workspace, and would not help them anyway.
+    const folder = path.relative(workspaceDir, absoluteDir).replace(/\\/g, '/');
+    console.error(`[workspace] could not list every file under "${folder}" for a delete:`, err);
+    throw Object.assign(new Error(`Could not list every file under "${folder}" — nothing was deleted. Try again, or ask an admin.`), {
+      status: 500,
+    });
+  }
   return out;
 }
 
