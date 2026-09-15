@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('mcp-oauth');
 import type { BevelOAuthProvider } from './bevel-oauth-provider.js';
 import { verifyAuthRequest, type McpAuthRequestState } from './oauth-state.js';
 import '../../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
@@ -70,10 +73,7 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     } catch (err) {
       // Message only — the raw error object can carry sensitive context
       // (redirect URIs with tokens, DB details) that must not hit stdout.
-      console.error(
-        `[mcp-oauth] complete failed for client=${st.c}:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      log.error(`complete failed for client=${st.c}:`, { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });

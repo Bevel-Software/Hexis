@@ -1,5 +1,8 @@
 import express from 'express';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('setup');
 import type { IGitRunner } from '../../shared/git.contract.js';
 import {
   DeploymentSettingsService,
@@ -234,7 +237,7 @@ export function createSetupRoutes(
           // deployment stays gated (see the status endpoint) until a retry
           // succeeds. Logged in full, returned actionable.
           const msg = initErr instanceof Error ? initErr.message : String(initErr);
-          console.error('[setup] KB initialization failed after setup completed:', msg);
+          log.error('KB initialization failed after setup completed:', { detail: msg });
           kbInitFailed = true;
           kbInitError = msg;
           res.status(500).json({
@@ -261,7 +264,7 @@ export function createSetupRoutes(
       }
       // Logged in full, returned generic: a driver message here would hand back
       // the schema or the connection string.
-      console.error('[setup] save failed:', err instanceof Error ? err.message : String(err));
+      log.error('save failed:', { err });
       res.status(500).json({ error: 'Could not save these settings.' });
     }
   }

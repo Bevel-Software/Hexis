@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { logger } from '../shared/logging.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
@@ -976,7 +977,7 @@ export async function createCoreServices(
         defaultBranchOf: () => DEFAULT_BRANCH,
       }),
       debounceMs: opts?.debounceMs,
-      log: opts?.log ?? ((message) => console.warn(message)),
+      log: opts?.log ?? ((message) => logger('directory-sync').warn(message)),
     });
   };
   // Groups — the "who you are" principal sets. Manual-mode CRUD on

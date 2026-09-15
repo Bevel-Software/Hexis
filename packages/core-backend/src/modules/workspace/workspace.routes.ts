@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workspace.routes');
 import path from 'node:path';
 import { IGNORE_FILENAME, isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
 import { printable } from '../../shared/printable.js';
@@ -106,7 +109,7 @@ export function createWorkspaceRoutes(
       }
       return user;
     } catch (err) {
-      console.error('[workspace.routes] requireUser failed:', err);
+      log.error('requireUser failed:', { err });
       res.status(500).json({ error: 'Internal server error' });
       return null;
     }
@@ -210,10 +213,7 @@ export function createWorkspaceRoutes(
       try {
         await workflowService.releaseLockNoCommit(workspaceId, branch, targetPath, user);
       } catch (releaseErr) {
-        console.warn(
-          `[workspace.routes] releaseLockNoCommit failed after op error for "${targetPath}":`,
-          releaseErr instanceof Error ? releaseErr.message : releaseErr,
-        );
+        log.warn(`releaseLockNoCommit failed after op error for "${targetPath}":`, { err: releaseErr });
       }
       throw err;
     }
@@ -314,10 +314,7 @@ export function createWorkspaceRoutes(
       // Log the full stack so the next 500 isn't a guessing game — the
       // bare `error.message` we returned before lost most diagnostic
       // signal (cause chain, stack frames, error class).
-      console.error(
-        `[workspace.routes] GET /workspace failed branch=${req.query.branch ?? '(default)'}:`,
-        error instanceof Error ? error.stack ?? error.message : error,
-      );
+      log.error(`GET /workspace failed branch=${req.query.branch ?? '(default)'}:`, { err: error });
       const msg = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ error: msg });
     }
@@ -559,10 +556,7 @@ export function createWorkspaceRoutes(
       });
       creatorAccess.noteAccessFileWritten(workspaceId);
     } catch (err) {
-      console.warn(
-        `[workspace.routes] creator access.md seed failed for "${plan.wsRelPath}":`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`creator access.md seed failed for "${plan.wsRelPath}":`, { err });
     }
   }
 
@@ -786,10 +780,7 @@ export function createWorkspaceRoutes(
       // response body. The distinction this route exists to make is still
       // made — an unreadable file is not a missing one — it is just not
       // narrated to the client.
-      console.warn(
-        `[workspace.routes] GET /file failed for "${filePath}" in "${id}":`,
-        error instanceof Error ? error.message : error,
-      );
+      log.warn(`GET /file failed for "${filePath}" in "${id}":`, { err: error });
       res.status(500).json({ error: "Couldn't read the file." });
     }
   });
@@ -873,10 +864,7 @@ export function createWorkspaceRoutes(
           // Directory already gone (raced delete), or a concurrent writer
           // repopulated it. Either way, skip removal — the per-file deletes
           // are what's load-bearing.
-          console.warn(
-            `[workspace.routes] dir cleanup skipped for "${filePath}":`,
-            rmErr instanceof Error ? rmErr.message : rmErr,
-          );
+          log.warn(`dir cleanup skipped for "${filePath}":`, { err: rmErr });
         }
         // Single tree-refresh signal for the whole batch (we suppressed
         // the per-file ones via `skipFsTreeEvent`).
@@ -1115,10 +1103,7 @@ export function createWorkspaceRoutes(
             const granted = await creatorAccess.grantInExtractedFile(id, user, relFile);
             if (granted !== null) await workspaceService.writeFile(id, relFile, granted);
           } catch (err) {
-            console.warn(
-              `[workspace.routes] creator grant on extracted "${relFile}" failed:`,
-              err instanceof Error ? err.message : err,
-            );
+            log.warn(`creator grant on extracted "${relFile}" failed:`, { err });
           }
         });
       }
@@ -1242,7 +1227,7 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
     // control character must not steer the terminal or forge a log line.
     const folder = path.relative(workspaceDir, absoluteDir).replace(/\\/g, '/');
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(`[workspace] could not list every file under ${printable(folder)} for a delete: ${printable(reason)}`);
+    logger('workspace').error(`could not list every file under ${printable(folder)} for a delete: ${printable(reason)}`);
     throw Object.assign(new Error(`Could not list every file under "${folder}" — nothing was deleted. Try again, or ask an admin.`), {
       status: 500,
     });

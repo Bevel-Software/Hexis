@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../../../shared/logging.js';
+
+const log = logger('kb-startup');
 import path from 'node:path';
 import {
   KNOWLEDGE_BASE_DIR,
@@ -379,8 +382,8 @@ async function readTemplate(disk: IFsProbe, templateDir: string, relPath: string
     if (!isAbsence(err) || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
       throw err;
     }
-    console.warn(
-      `[kb-startup] template-files: the configured KB template has no "${relPath}"; ` +
+    log.warn(
+      `template-files: the configured KB template has no "${relPath}"; ` +
         'using the packaged copy. Add the file to the template to silence this.',
     );
     raw = await fs.readFile(await templateSource(disk, packaged, relPath), 'utf8');

@@ -24,6 +24,9 @@
  */
 
 import type { AuthUser } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('pending-commits');
 import type {
   PendingCommit,
   PendingCommitsService,
@@ -56,7 +59,7 @@ export interface ISystemNoticeSink {
 /** Core default: terminal-failure notices go to stderr (no dashboard). */
 export const consoleSystemNoticeSink: ISystemNoticeSink = {
   async send(notice) {
-    console.error(`[system-notice] ${notice.user.email}: ${notice.message}`);
+    logger('system-notice').error(`${notice.user.email}: ${notice.message}`);
   },
 };
 
@@ -278,9 +281,7 @@ export class PendingCommitsWorker {
         try {
           lastOfBurst = !(await this.deps.service.hasReadyRow(workspaceId, this.deps.now()));
         } catch (peekErr) {
-          console.warn(
-            `[pending-commits] ready-row peek failed for ws=${workspaceId}; validating this commit: ${sanitizeError(peekErr)}`,
-          );
+          log.warn(`ready-row peek failed for ws=${workspaceId}; validating this commit: ${sanitizeError(peekErr)}`);
           lastOfBurst = true;
         }
       }
@@ -296,10 +297,7 @@ export class PendingCommitsWorker {
         // A throw out of drainOnce means something inside the loop
         // itself failed — claimNext, processRow's outer scope, etc.
         // Log loudly and keep looping; the next pass may succeed.
-        console.error(
-          '[pending-commits] worker loop iteration threw:',
-          err instanceof Error ? err.stack ?? err.message : err,
-        );
+        log.error('worker loop iteration threw:', { err });
       }
       if (!this.running) break;
       await this.interruptibleSleep(POLL_INTERVAL_MS);
@@ -367,8 +365,8 @@ export class PendingCommitsWorker {
         // Transient — back off and retry on the next sweep that finds
         // the backoff elapsed.
         await this.deps.service.markTransientFailure(row.id, message);
-        console.warn(
-          `[pending-commits] transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${message}`,
+        log.warn(
+          `transient failure ws=${row.workspaceId} branch=${row.branch} path=${row.path} attempt=${nextAttempts}/${N_TRANSIENT}: ${message}`,
         );
         return;
       }
@@ -378,8 +376,8 @@ export class PendingCommitsWorker {
         // markRecoveryStarted resets `attempts` so the post-recovery
         // commits get a fresh transient budget.
         await this.deps.service.markRecoveryStarted(row.id);
-        console.warn(
-          `[pending-commits] transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
+        log.warn(
+          `transient budget exhausted ws=${row.workspaceId} branch=${row.branch} path=${row.path}; spawning recovery agent (run ${row.recoveryAgentRuns + 1}/${N_RECOVERY}): ${message}`,
         );
         try {
           await this.deps.recoveryAgent.run({
@@ -395,10 +393,9 @@ export class PendingCommitsWorker {
           // the agent finishing without resolving the issue — the row
           // stays `pending` and the next worker pass will hit the same
           // underlying error or escalate after another recovery cycle.
-          console.error(
-            `[pending-commits] recovery agent threw for ws=${row.workspaceId} path=${row.path}:`,
-            sanitizeError(agentErr),
-          );
+          log.error(`recovery agent threw for ws=${row.workspaceId} path=${row.path}:`, {
+            detail: sanitizeError(agentErr),
+          });
         }
         return;
       }
@@ -415,9 +412,7 @@ export class PendingCommitsWorker {
    */
   private async escalate(row: PendingCommit, message: string, notice: string, why: string): Promise<void> {
     await this.deps.service.markNeedsAttention(row.id, message);
-    console.error(
-      `[pending-commits] TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${message}`,
-    );
+    log.error(`TERMINAL ws=${row.workspaceId} branch=${row.branch} path=${row.path} ${why}: ${message}`);
     try {
       await this.deps.feedback.send({
         source: 'system',
@@ -429,10 +424,9 @@ export class PendingCommitsWorker {
       // failure — the row is already `needs_attention` and the next
       // process restart will keep logging it. Just note that the
       // notice didn't reach the dashboard.
-      console.error(
-        `[pending-commits] failed to emit terminal-failure feedback notice for ws=${row.workspaceId} path=${row.path}:`,
-        sanitizeError(feedbackErr),
-      );
+      log.error(`failed to emit terminal-failure feedback notice for ws=${row.workspaceId} path=${row.path}:`, {
+        detail: sanitizeError(feedbackErr),
+      });
     }
   }
 }

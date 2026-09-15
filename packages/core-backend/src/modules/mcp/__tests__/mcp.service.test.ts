@@ -449,7 +449,11 @@ describe('McpService — agent instructions', () => {
       extraTools: KB_TOOLS,
     });
     expect(client.getInstructions()).toBe(PLATFORM_HEADER);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('mcp-description.md'), 'disk');
+    // The error itself rides along, so a terminal shows its stack.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('mcp-description.md'),
+      expect.objectContaining({ message: 'disk' }),
+    );
     // And the four tools carry the fixed line alone.
     const { tools } = await client.listTools();
     for (const name of KB_TOOLS) {

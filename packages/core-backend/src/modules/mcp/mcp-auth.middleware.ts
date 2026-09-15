@@ -1,4 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
@@ -88,7 +91,7 @@ export function createMcpAuthMiddleware(
       } catch (err) {
         // A DB error during verification is a 500, not a 401 — the caller's
         // credentials may be valid; we just can't check them right now.
-        console.error('[mcp-auth] connection-key verification failed:', err);
+        log.error('connection-key verification failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
@@ -111,7 +114,7 @@ export function createMcpAuthMiddleware(
         if (err instanceof InvalidTokenError) {
           unauthorized(res, 'Invalid, expired, or revoked access token');
         } else {
-          console.error('[mcp-auth] OAuth token verification failed:', err);
+          log.error('OAuth token verification failed:', { err });
           res.status(500).json({ error: 'Authentication backend unavailable' });
         }
         return;
@@ -157,7 +160,7 @@ export function createMcpAuthMiddleware(
       try {
         user = await authService.getUserById(claim.userId);
       } catch (err) {
-        console.error('[mcp-auth] internal-token user lookup failed:', err);
+        log.error('internal-token user lookup failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }

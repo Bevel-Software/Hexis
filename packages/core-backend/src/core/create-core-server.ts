@@ -1,4 +1,8 @@
 import express from 'express';
+import { logger } from '../shared/logging.js';
+
+const startupLog = logger('kb-startup');
+const crLog = logger('cr');
 import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
@@ -290,10 +294,9 @@ export async function createCoreServer(
     // its own. Every other failure still stops the boot, because it means
     // the template or a step would write something wrong.
     if (!(err instanceof KbRemoteUnreachableError)) throw err;
-    console.error(
-      '[kb-startup] booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:',
-      err.message,
-    );
+    startupLog.error('booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:', {
+      detail: err.message,
+    });
     core.kbStartupRunner.retryUntilMaintained();
   }
 
@@ -313,10 +316,10 @@ export async function createCoreServer(
     .closeChangeRequestsWithDeletedBranches()
     .then((n) => {
       if (n > 0) {
-        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+        crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
       }
     })
-    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
+    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(

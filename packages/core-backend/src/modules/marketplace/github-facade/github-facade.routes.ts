@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('github-facade');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import '../../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
@@ -60,7 +63,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
   // what the caller sent (its user agent) is rendered printable, so the
   // caller cannot write a line of its own.
   const refused = (req: express.Request, hop: string, err: GitHubFacadeRequestError) => {
-    console.warn(`[github-facade] ${hop} refused (${err.status} ${err.code}): ${err.detail} — from ${userAgentOf(req)}`);
+    log.warn(`${hop} refused (${err.status} ${err.code}): ${err.detail} — from ${userAgentOf(req)}`);
   };
 
   router.get('/login/oauth/authorize', async (req, res) => {
@@ -107,7 +110,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
     try {
       resolved = await keys.verifyAndLoadToken(token);
     } catch (err) {
-      console.error('[github-facade] key verification failed:', err);
+      log.error('key verification failed:', { err });
       res.status(500).json({ message: 'Authentication backend unavailable' });
       return;
     }
@@ -157,7 +160,7 @@ export function createGitHubFacadeRoutes(deps: GitHubFacadeRoutesDeps): express.
       const stderr: Buffer[] = [];
       archive.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
       const fail = (reason: string) => {
-        console.error(`[github-facade] zipball ${sha.slice(0, 7)} failed: ${reason}`);
+        log.error(`zipball ${sha.slice(0, 7)} failed: ${reason}`);
         // Headers are already out once the stream started; the only honest
         // answer then is a cut connection, which the client sees as a failed
         // download rather than a truncated archive it might unpack.
@@ -205,7 +208,7 @@ function bearerOf(req: express.Request): string | null {
 function unauthorized(req: express.Request, res: express.Response, why: string): void {
   // The PATH, never the full URL: a query string is the caller's to fill,
   // and a credential put there would otherwise land in the log.
-  console.warn(`[github-facade] ${req.method} ${printable(req.path)} refused: ${why} — from ${userAgentOf(req)}`);
+  log.warn(`${req.method} ${printable(req.path)} refused: ${why} — from ${userAgentOf(req)}`);
   res.setHeader('WWW-Authenticate', 'Bearer realm="hexis-marketplace"');
   res.status(401).json({ message: 'Bad credentials' });
 }
@@ -238,7 +241,7 @@ function answerError(res: express.Response, err: unknown): void {
     res.status(err.status).json({ message: err.message });
     return;
   }
-  console.error('[github-facade]', err);
+  log.error('request failed:', { err });
   res.status(500).json({ message: 'Internal error' });
 }
 

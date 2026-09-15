@@ -13,6 +13,7 @@
  */
 
 import type express from 'express';
+import { logger } from '../../shared/logging.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 
 /** One error shape for every access-family route. */
@@ -25,7 +26,7 @@ export function toHttpError(
     // `error` must never overwrite the message the client renders.
     return { status: err.status, body: { ...(err.payload ?? {}), error: err.message } };
   }
-  console.error(`[${logTag}] route failure:`, err instanceof Error ? err.stack ?? err.message : err);
+  logger(logTag).error('route failure:', { err });
   const status = err instanceof WorkflowDomainError ? err.status : 500;
   return { status, body: { error: 'Internal error.' } };
 }

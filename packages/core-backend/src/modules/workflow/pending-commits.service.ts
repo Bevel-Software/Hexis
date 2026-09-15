@@ -35,6 +35,9 @@
  */
 
 import { and, eq, inArray, isNull, min, or, sql } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('pending-commits');
 import type { Database } from '../database/connection.js';
 import { pendingCommits } from '../database/schema.js';
 
@@ -521,10 +524,7 @@ export class PendingCommitsService {
       try {
         dirty = await scanner.scan(workspace);
       } catch (err) {
-        console.warn(
-          `[pending-commits] startup scan failed for workspace=${workspace.id}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`startup scan failed for workspace=${workspace.id}:`, { err });
         continue;
       }
       for (const entry of dirty) {

@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workspace');
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -406,10 +409,9 @@ export class WorkspaceService implements IWorkspaceService {
         });
         return;
       } catch (err) {
-        console.warn(
-          `[workspace] referenced clone for "${branch}" failed, retrying without reference:`,
-          redactError(err),
-        );
+        log.warn(`referenced clone for "${branch}" failed, retrying without reference:`, {
+          detail: redactError(err),
+        });
         // Clear any partial output so the retry clones into a clean dir.
         await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       }
@@ -585,10 +587,7 @@ export class WorkspaceService implements IWorkspaceService {
     } catch (err) {
       // One line per branch, not per key: every key writes to the same
       // `.git/config`, so what fails for one fails for all.
-      console.warn(
-        `[workspace] could not normalize the config of the "${branch}" clone:`,
-        redactError(err),
-      );
+      log.warn(`could not normalize the config of the "${branch}" clone:`, { detail: redactError(err) });
     }
     await this.stampCredentialHelper(repoDir, branch);
   }
@@ -629,10 +628,7 @@ export class WorkspaceService implements IWorkspaceService {
       // re-clone that fails on the same validation — masking the real cause.
       // Contain it as a loud non-stamp instead; `normalizeCloneConfig`'s
       // never-throws contract stays true.
-      console.warn(
-        `[workspace] refusing to stamp the credential helper of the "${branch}" clone:`,
-        redactError(err),
-      );
+      log.warn(`refusing to stamp the credential helper of the "${branch}" clone:`, { detail: redactError(err) });
       this.stampedCredentialFingerprint.delete(branch);
       return;
     }
@@ -647,10 +643,9 @@ export class WorkspaceService implements IWorkspaceService {
         const code = (err as { code?: number } | null)?.code;
         if (!(args.includes('--unset-all') && code === 5)) {
           stamped = false;
-          console.warn(
-            `[workspace] could not stamp the credential helper of the "${branch}" clone:`,
-            redactError(err),
-          );
+          log.warn(`could not stamp the credential helper of the "${branch}" clone:`, {
+            detail: redactError(err),
+          });
         }
       }
     }
@@ -756,10 +751,7 @@ export class WorkspaceService implements IWorkspaceService {
       // explicitly means the shape is asserted rather than assumed, and the
       // same call is what repairs an existing clone that drifted.
       await this.normalizeCloneConfig(targetDir, branch);
-      console.log(
-        `[workspace] Cloned ${this.kbDirName} for branch "${branch}"` +
-          (reference ? ' (referenced a sibling clone)' : ''),
-      );
+      log.info(`Cloned ${this.kbDirName} for branch "${branch}"` + (reference ? ' (referenced a sibling clone)' : ''));
       // A fresh clone has already downloaded every ref — tell the git layer
       // so the first `listBranches` skips the redundant implicit `git fetch`.
       // Isolated from the clone-rollback `catch` below: a misbehaving listener
@@ -767,10 +759,9 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         this.onWorkspaceCloned?.(workspaceIdForBranch(branch));
       } catch (listenerErr) {
-        console.error(
-          `[workspace] onWorkspaceCloned listener failed for branch "${branch}":`,
-          redactError(listenerErr),
-        );
+        log.error(`onWorkspaceCloned listener failed for branch "${branch}":`, {
+          detail: redactError(listenerErr),
+        });
       }
     } catch (err) {
       const redacted = redactError(err);
@@ -782,10 +773,10 @@ export class WorkspaceService implements IWorkspaceService {
       // routes answer 410 with the branch named and the browser can say "this
       // branch no longer exists" instead of "something went wrong".
       if (isMissingRemoteBranchFailure(redacted)) {
-        console.log(`[workspace] branch "${branch}" does not exist on origin — nothing to clone`);
+        log.info(`branch "${branch}" does not exist on origin — nothing to clone`);
         throw new RemoteBranchGoneError(branch);
       }
-      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
+      log.error(`Failed to clone for branch "${branch}":`, { detail: redacted });
       throw new Error(`Failed to clone process map: ${redacted}`);
     }
   }
@@ -1046,7 +1037,7 @@ export class WorkspaceService implements IWorkspaceService {
       })
       .catch((err) => {
         this.lastFetchOk.set(repoDir, false);
-        console.warn('[workspace] git fetch origin failed:', redactError(err));
+        log.warn('git fetch origin failed:', { detail: redactError(err) });
       })
       .finally(() => {
         if (this.inFlightFetches.get(repoDir) === promise) {
@@ -1604,10 +1595,7 @@ export class WorkspaceService implements IWorkspaceService {
         maxBuffer: 16 * 1024 * 1024,
       }));
     } catch (err) {
-      console.warn(
-        `[workspace] orphan scan via git status failed for ${workspaceId}:`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`orphan scan via git status failed for ${workspaceId}:`, { err });
       return [];
     }
     if (!stdout.trim()) return [];
@@ -1676,10 +1664,7 @@ export class WorkspaceService implements IWorkspaceService {
         this.branchDirs.delete(branchForWorkspaceId(entry.name));
         removed.push(entry.name);
       } catch (err) {
-        console.warn(
-          `[workspace] sweep failed for ${entry.name}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`sweep failed for ${entry.name}:`, { err });
       }
     }
     return { removed };

@@ -1,4 +1,7 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('database');
 import type { Database } from './connection.js';
 import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 
@@ -38,9 +41,9 @@ import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 /** Apply the CORE migration history from `folder`, tracked in `__drizzle_migrations_core`. */
 export async function runCoreMigrations(db: Database, folder: string): Promise<void> {
   await withAdvisoryLock(db, AdvisoryLock.CoreMigrations, async () => {
-    console.log('Running core database migrations...');
+    log.info('Running core database migrations...');
     await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core' });
-    console.log('Core migrations complete.');
+    log.info('Core migrations complete.');
   });
 }
 
@@ -51,11 +54,11 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
  */
 export async function runEnterpriseMigrations(db: Database, folder: string): Promise<void> {
   await withAdvisoryLock(db, AdvisoryLock.EnterpriseMigrations, async () => {
-    console.log('Running enterprise database migrations...');
+    log.info('Running enterprise database migrations...');
     await migrate(db, {
       migrationsFolder: folder,
       migrationsTable: '__drizzle_migrations_enterprise',
     });
-    console.log('Enterprise migrations complete.');
+    log.info('Enterprise migrations complete.');
   });
 }

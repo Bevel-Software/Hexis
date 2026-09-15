@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('marketplace');
 import { spawn } from 'node:child_process';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { MarketplaceRepoService } from './marketplace-repo.service.js';
@@ -92,7 +95,7 @@ export function createMarketplaceGitRoutes(deps: {
     try {
       resolved = await keys.verifyAndLoadToken(key);
     } catch (err) {
-      console.error('[marketplace] connection-key verification failed:', err);
+      log.error('connection-key verification failed:', { err });
       res.status(500).type('text/plain').send('Authentication backend unavailable');
       return;
     }
@@ -108,7 +111,7 @@ export function createMarketplaceGitRoutes(deps: {
     try {
       ensured = await repo.ensureCompiled({ id: resolved.user.id, email: resolved.user.email });
     } catch (err) {
-      console.error('[marketplace] compile failed:', err);
+      log.error('compile failed:', { err });
       res.status(500).type('text/plain').send('Could not prepare your marketplace');
       return;
     }
@@ -136,9 +139,9 @@ export function createMarketplaceGitRoutes(deps: {
     if (req.headers['git-protocol']) env.HTTP_GIT_PROTOCOL = String(req.headers['git-protocol']);
 
     const child = spawn('git', ['http-backend'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
-    child.stderr.on('data', (chunk: Buffer) => console.warn(`[marketplace] http-backend: ${chunk.toString('utf-8').trim()}`));
+    child.stderr.on('data', (chunk: Buffer) => log.warn(`http-backend: ${chunk.toString('utf-8').trim()}`));
     child.on('error', (err) => {
-      console.error('[marketplace] could not run git http-backend:', err);
+      log.error('could not run git http-backend:', { err });
       if (!res.headersSent) res.status(500).type('text/plain').send('git is unavailable');
     });
     req.pipe(child.stdin);

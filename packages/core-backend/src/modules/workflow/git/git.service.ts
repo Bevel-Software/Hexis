@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { logger } from '../../../shared/logging.js';
 import type {
   AuthUser,
   BranchInfo,
@@ -42,6 +43,9 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+
+const log = logger('git');
+const crLog = logger('cr');
 
 
 /**
@@ -360,11 +364,11 @@ export class GitService implements IGitService {
       try {
         const report = await hook(ctx);
         if (report && report.mustFix.length > 0) {
-          console.warn(formatWarning(report));
+          log.warn(formatWarning(report));
         }
       } catch (validatorErr) {
         // Validator failure is non-fatal — advisory only.
-        console.warn('[git] validator crashed (advisory only, ignoring):', validatorErr instanceof Error ? validatorErr.message : validatorErr);
+        log.warn('validator crashed (advisory only, ignoring):', { err: validatorErr });
       }
     }
   }
@@ -592,7 +596,7 @@ export class GitService implements IGitService {
         this.lastImplicitFetchOk.set(workspaceId, true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[git] implicit fetch failed for workspace ${workspaceId}: ${msg}`);
+        log.warn(`implicit fetch failed for workspace ${workspaceId}: ${msg}`);
         // Stamp the TTL on failure too so a hard-down origin doesn't make
         // every subsequent listBranches retry the (still-failing) fetch and
         // pile up 10s timeouts. Stale local refs are better than spinning.
@@ -955,19 +959,13 @@ export class GitService implements IGitService {
       }
       if (trackedAtHead) {
         await this.git(cwd, ['checkout', 'HEAD', '--', repoRelativePath]).catch((err) => {
-          console.warn(
-            `[git] discardPath checkout failed for "${repoRelativePath}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`discardPath checkout failed for "${repoRelativePath}":`, { err });
         });
       } else {
         // Untracked new file — remove from working tree.
         const fileAbs = path.join(cwd, repoRelativePath);
         await fs.rm(fileAbs, { force: true }).catch((err) => {
-          console.warn(
-            `[git] discardPath rm failed for "${repoRelativePath}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`discardPath rm failed for "${repoRelativePath}":`, { err });
         });
       }
     });
@@ -2316,8 +2314,8 @@ export class GitService implements IGitService {
       // +/- to a file.
       const aligned = counts.length === statuses.length;
       if (!aligned) {
-        console.warn(
-          `[cr] diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
+        crLog.warn(
+          `diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
             `for ${range} — reporting file list without +/- counts`,
         );
       }
@@ -2570,14 +2568,14 @@ export class GitService implements IGitService {
       }
       const dirtyList = porcelain.stdout.trim().replace(/\s+/g, ' ');
       if (queueExplainsIt) {
-        console.log(
-          `[git] workspace=${workspaceId} branch=${branch} working tree is dirty while ` +
+        log.info(
+          `workspace=${workspaceId} branch=${branch} working tree is dirty while ` +
             `pending commits drain (expected — the background worker is catching up). ` +
             `Files: ${dirtyList}`,
         );
       } else {
-        console.warn(
-          `[git] workspace=${workspaceId} branch=${branch} has a non-clean working ` +
+        log.warn(
+          `workspace=${workspaceId} branch=${branch} has a non-clean working ` +
             `tree under save=share with NO queued pending commits — this should never ` +
             `happen and likely indicates a missed lock-release commit. Files: ${dirtyList}`,
         );

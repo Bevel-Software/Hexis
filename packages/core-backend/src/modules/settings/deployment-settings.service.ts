@@ -1,4 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('settings');
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
@@ -290,9 +293,7 @@ export class DeploymentSettingsService {
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
-          console.warn(
-            `[settings] "${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`,
-          );
+          log.warn(`"${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`);
           continue;
         }
         try {
@@ -301,7 +302,7 @@ export class DeploymentSettingsService {
           // A rotated or mistyped key. Loud, and skipped rather than fatal:
           // one unreadable setting must not stop the server from booting into
           // the screen where it can be fixed.
-          console.error(`[settings] could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
+          log.error(`could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
         }
         continue;
       }

@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import type { Database } from '../modules/database/connection.js';
 import type { AdvisoryLease } from '../modules/database/advisory-lock.js';
+import { logger } from '../shared/logging.js';
 
 /**
  * The process lifecycle: who may drain the commit queue, and how the process
@@ -67,7 +68,7 @@ export function holdCommitWorkerLease(
 ): LeaseLoopHandle {
   const retryMs = opts.retryMs ?? DEFAULT_RETRY_MS;
   const sleep = opts.sleep ?? defaultSleep;
-  const log = opts.log ?? ((message: string) => console.log(message));
+  const log = opts.log ?? ((message: string) => logger('lifecycle').info(message));
 
   let running = true;
   let workerRunning = false;
@@ -79,7 +80,7 @@ export function holdCommitWorkerLease(
     workerRunning = false;
     stopping = worker
       .stop()
-      .catch((err: unknown) => log(`[lifecycle] commit worker stop failed: ${String(err)}`))
+      .catch((err: unknown) => log(`commit worker stop failed: ${String(err)}`))
       .finally(() => {
         stopping = null;
       });
@@ -88,7 +89,7 @@ export function holdCommitWorkerLease(
 
   lease.onLost(() => {
     if (!running) return;
-    log('[lifecycle] the commit-worker lease was lost — stopping the worker until it is held again');
+    log('the commit-worker lease was lost — stopping the worker until it is held again');
     void stopWorker();
     wake?.();
   });
@@ -101,12 +102,12 @@ export function holdCommitWorkerLease(
         try {
           acquired = await lease.tryAcquire();
         } catch (err) {
-          log(`[lifecycle] could not ask for the commit-worker lease: ${String(err)}`);
+          log(`could not ask for the commit-worker lease: ${String(err)}`);
         }
         if (acquired && running) {
           workerRunning = true;
           worker.start();
-          log('[lifecycle] this process holds the commit-worker lease and is draining the queue');
+          log('this process holds the commit-worker lease and is draining the queue');
         }
       }
       if (!running) break;
@@ -168,9 +169,9 @@ async function bounded(promise: Promise<unknown>, ms: number, label: string, log
   });
   try {
     const outcome = await Promise.race([promise.then(() => 'done' as const), expired]);
-    if (outcome === 'expired') log(`[lifecycle] ${label} did not finish within ${ms}ms — continuing the shutdown`);
+    if (outcome === 'expired') log(`${label} did not finish within ${ms}ms — continuing the shutdown`);
   } catch (err) {
-    log(`[lifecycle] ${label} failed: ${String(err)}`);
+    log(`${label} failed: ${String(err)}`);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -201,7 +202,7 @@ export function createShutdown(
   deps: ShutdownDeps,
   opts: ShutdownOptions = {},
 ): (reason: string) => Promise<void> {
-  const log = deps.log ?? ((message: string) => console.log(message));
+  const log = deps.log ?? ((message: string) => logger('lifecycle').info(message));
   const deadlineMs = opts.deadlineMs ?? DEFAULT_SHUTDOWN_DEADLINE_MS;
   let inFlight: Promise<void> | null = null;
 
@@ -209,7 +210,7 @@ export function createShutdown(
     inFlight ??= (async () => {
       const startedAt = Date.now();
       const remaining = () => Math.max(0, deadlineMs - (Date.now() - startedAt));
-      log(`[lifecycle] shutting down: ${reason}`);
+      log(`shutting down: ${reason}`);
 
       await bounded(
         new Promise<void>((resolve) => {
@@ -223,7 +224,7 @@ export function createShutdown(
       await bounded(deps.commitWorker.stop(), remaining(), 'stopping the commit worker', log);
       await bounded(deps.db.$client.end(), remaining(), 'ending the database pool', log);
 
-      log(`[lifecycle] shutdown complete in ${Date.now() - startedAt}ms`);
+      log(`shutdown complete in ${Date.now() - startedAt}ms`);
     })();
     return inFlight;
   };

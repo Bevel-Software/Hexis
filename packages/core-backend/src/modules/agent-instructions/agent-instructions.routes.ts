@@ -1,4 +1,7 @@
 import express, { type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('agent-instructions');
 import { composeAgentInstructions } from './compose.js';
 import type { AgentPreambleReader } from './read-preamble.js';
 
@@ -28,7 +31,7 @@ export function createAgentInstructionsRoutes(manualAuth: RequestHandler, readPr
     try {
       res.json(composeAgentInstructions(await readPreamble()));
     } catch (err) {
-      console.error('[agent-instructions] reading mcp-description.md failed:', err instanceof Error ? err.message : err);
+      log.error('reading mcp-description.md failed:', { err });
       res.status(500).json({ error: 'Failed to read the agent instructions' });
     }
   });

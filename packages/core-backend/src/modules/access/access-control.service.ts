@@ -1,6 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
@@ -292,14 +295,12 @@ function accessFileListener(
       if (!parsed.ok) {
         // Treat as if the file didn't exist for resolution purposes.
         // Admin-rescue on access.md paths still lets an admin fix it.
-        for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
+        for (const e of parsed.errors) log.warn(`${e} — file ignored`);
         return;
       }
-      for (const w of parsed.warnings) console.warn(`[access] ${w}`);
+      for (const w of parsed.warnings) log.warn(w);
       if (out.has(parsed.file.dir)) {
-        console.warn(
-          `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
-        );
+        log.warn(`${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`);
         return;
       }
       out.set(parsed.file.dir, parsed.file);
@@ -1634,17 +1635,17 @@ export class AccessControlService implements IAccessControl {
       }
     });
     if (!activeGroups.health.ok) {
-      console.error(
-        `[access] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      log.error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access] ${w}`);
+    for (const w of activeGroups.warnings) log.warn(w);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access] ${w}`);
+    for (const w of mergeWarnings) log.warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
 
@@ -1679,9 +1680,7 @@ export class AccessControlService implements IAccessControl {
       for (const verb of KNOWN_VERBS) {
         file.entries[verb] = file.entries[verb].filter((entry) => {
           if (entry.kind === 'role' && !roleKnown(rolesParsed.index, entry.role)) {
-            console.warn(
-              `[access] ${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`,
-            );
+            log.warn(`${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`);
             return false;
           }
           return true;
@@ -1966,7 +1965,7 @@ export class AccessControlService implements IAccessControl {
       if (outcome.kind === 'error') {
         // The operational signal: one line per failed read, naming the commit
         // and the path, so a run of these is visible in the logs.
-        console.warn(`[access@${tag}] git read of ${relativePath} failed; refusing to decide from a partial tree`);
+        logger(`access@${tag}`).warn(`git read of ${relativePath} failed; refusing to decide from a partial tree`);
         throw new AccessUnreadableError(label, relativePath);
       }
       return outcome.kind === 'text' ? outcome.text : null;
@@ -1986,22 +1985,22 @@ export class AccessControlService implements IAccessControl {
     // fires only on a file that was read and would not parse.
     const activeGroups = await loadActiveGroups(read);
     if (!activeGroups.health.ok) {
-      console.error(
-        `[access@${tag}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      logger(`access@${tag}`).error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access@${tag}] ${w}`);
+    for (const w of activeGroups.warnings) logger(`access@${tag}`).warn(w);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access@${tag}] ${w}`);
+    for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
     const listed = await this.listAccessFilesAtRef(repoDir, commit);
     if (listed === 'error') {
-      console.warn(`[access@${tag}] listing access.md files failed; refusing to decide from a partial tree`);
+      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
     for (const p of listed.accessFiles) {

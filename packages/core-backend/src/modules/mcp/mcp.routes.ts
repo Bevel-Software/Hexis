@@ -1,4 +1,7 @@
 import express, { type Request, type Response, type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -153,7 +156,7 @@ export function createMcpRoutes(
     // block the store's eviction loop. transport.onclose still fires but
     // its `active.delete` is now a no-op.
     void entry.transport.close().catch((err) => {
-      console.warn('[mcp] transport close on eviction failed:', err);
+      log.warn('transport close on eviction failed:', { err });
     });
   });
 
@@ -226,7 +229,7 @@ export function createMcpRoutes(
       rejectSessionMiss(res, sessionIdHeader);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] POST /mcp failed:', msg);
+      log.error('POST /mcp failed:', { detail: msg });
       if (!res.headersSent) {
         jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       } else {
@@ -253,7 +256,7 @@ export function createMcpRoutes(
       await session.transport.handleRequest(req, res);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] session request failed:', msg);
+      log.error('session request failed:', { detail: msg });
       if (!res.headersSent) jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       else res.end();
     }
@@ -472,7 +475,7 @@ export function createMcpRoutes(
       if (err instanceof InvalidTokenError) {
         unauthorized('Invalid, expired, or revoked access token');
       } else {
-        console.error('[mcp] local-token exchange failed:', err);
+        log.error('local-token exchange failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
       }
     }

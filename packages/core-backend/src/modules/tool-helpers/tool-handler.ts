@@ -1,4 +1,7 @@
 import type { Request, Response } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tools');
 import { hasHttpStatus, type ToolHandler } from './tool.contract.js';
 import type { ResolveToolContext } from './tool-context.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
@@ -71,8 +74,8 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
         // A handler can throw after streaming has begun (headers committed); in
         // that case we can only end the stream, not rewrite the status.
         if (res.headersSent) {
-          if (hasHttpStatus(err)) console.error('[tools] handler failed post-stream:', err.message);
-          else console.error('[tools] handler failed post-stream:', err instanceof Error ? err.message : err);
+          if (hasHttpStatus(err)) log.error('handler failed post-stream:', { detail: err.message });
+          else log.error('handler failed post-stream:', { err });
           res.end();
           return;
         }
@@ -81,7 +84,7 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
           return;
         }
         const msg = err instanceof Error ? err.message : 'Unknown error';
-        console.error('[tools] handler failed:', msg);
+        log.error('handler failed:', { detail: msg });
         res.status(500).json({ error: msg });
       }
     };

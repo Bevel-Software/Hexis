@@ -5,9 +5,18 @@ import {
   createCoreServices,
   createCoreServer,
   createShutdown,
+  setLogger,
+  logger,
 } from '@bevel-software/platform-core-backend';
+import { createPinoLogger } from './logging.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Installed before anything else runs, so the first line the process writes
+// is already in the shape the rest will be. See ./logging.ts for why pino
+// lives here and not in the package.
+setLogger(createPinoLogger());
+const log = logger('server');
 
 /**
  * Standalone CORE deployment: no enterprise extensions — empty ports, empty
@@ -32,7 +41,7 @@ async function main(): Promise<void> {
   const app = await createCoreServer(core, {}, { staticDir });
 
   const server = app.listen(config.port, () => {
-    console.log(`Bevel core server listening on http://localhost:${config.port}`);
+    log.info(`Bevel core server listening on http://localhost:${config.port}`, { port: config.port });
   });
 
   /**
@@ -58,22 +67,22 @@ async function main(): Promise<void> {
     if (exiting) return;
     exiting = true;
     shutdown(reason)
-      .catch((err: unknown) => console.error('[lifecycle] shutdown itself failed:', err))
+      .catch((err: unknown) => log.error('shutdown itself failed', { err }))
       .finally(() => process.exit(code));
   };
   process.on('SIGTERM', () => exitAfter('SIGTERM', 0));
   process.on('SIGINT', () => exitAfter('SIGINT', 0));
   process.on('unhandledRejection', (reason) => {
-    console.error('[lifecycle] unhandled promise rejection:', reason);
+    log.error('unhandled promise rejection', { err: reason });
     exitAfter('unhandled promise rejection', 1);
   });
   process.on('uncaughtException', (err) => {
-    console.error('[lifecycle] uncaught exception:', err);
+    log.error('uncaught exception', { err });
     exitAfter('uncaught exception', 1);
   });
 }
 
 main().catch((err) => {
-  console.error('Fatal boot error:', err);
+  log.error('fatal boot error', { err });
   process.exit(1);
 });

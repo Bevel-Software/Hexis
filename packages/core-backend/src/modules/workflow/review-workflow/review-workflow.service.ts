@@ -1,4 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('review-workflow');
 import type {
   AuthUser,
   CancelPrResult,
@@ -378,10 +381,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         // An unreadable tree is not "no eligible writers": that answer would
         // drop every file out of the merge gate. Fail closed instead.
         if (err instanceof AccessUnreadableError) throw err;
-        console.warn(
-          `[review-workflow] eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`,
-          err,
-        );
+        log.warn(`eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`, { err });
       }
 
       if (viewerEmail) {
@@ -395,10 +395,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           if (batch) viewerCanApproveByPath = batch;
         } catch (err) {
           if (err instanceof AccessUnreadableError) throw err;
-          console.warn(
-            `[review-workflow] canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`,
-            err,
-          );
+          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`, { err });
         }
       }
     }

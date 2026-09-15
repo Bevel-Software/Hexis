@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
@@ -140,9 +143,7 @@ export class PluginIndexService implements IPluginIndexService {
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
     } catch (err) {
-      console.warn(
-        `[plugins] plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      log.warn(`plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   }
@@ -160,7 +161,7 @@ export class PluginIndexService implements IPluginIndexService {
   ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>> {
     const byName = new Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>();
     const discovered = await this.source.discover(kbRoot);
-    for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+    for (const w of discovered.warnings) log.warn(w);
     for (const plugin of discovered.plugins) {
       if (plugin.personal || !plugin.exists) continue;
       byName.set(plugin.name, {

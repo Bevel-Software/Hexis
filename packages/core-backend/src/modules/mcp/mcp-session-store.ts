@@ -17,6 +17,10 @@
  * response, and clients re-initialize.
  */
 
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp-session-store');
+
 export interface McpSession {
   sessionId: string;
   userId: string;
@@ -155,7 +159,7 @@ export class McpSessionStore {
         // A misbehaving listener must not stop the sweep from finishing —
         // otherwise one bad subscriber would block the rest of the eviction
         // pass and leak more sessions.
-        console.warn('[mcp-session-store] eviction listener threw:', err);
+        log.warn('eviction listener threw:', { err });
       }
     }
   }

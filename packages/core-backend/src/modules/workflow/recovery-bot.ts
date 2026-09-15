@@ -17,6 +17,9 @@
  */
 
 import { eq } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('pending-commits');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/schema.js';
@@ -43,7 +46,7 @@ export async function ensureRecoveryBotUser(db: Database): Promise<AuthUser> {
     .returning();
   if (inserted.length > 0) {
     const row = inserted[0];
-    console.log(`[pending-commits] created recovery-bot user id=${row.id} email=${row.email}`);
+    log.info(`created recovery-bot user id=${row.id} email=${row.email}`);
     return {
       id: row.id,
       email: row.email,

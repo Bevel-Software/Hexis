@@ -33,6 +33,9 @@
  */
 
 import type { Request, Response } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('events');
 import express from 'express';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import type { WorkflowEventBus } from './event-bus.js';
@@ -140,19 +143,13 @@ export function createEventsRoutes(
       try {
         existing.cleanup();
       } catch (err) {
-        console.warn(
-          `[events] supersede cleanup threw for session=${sessionId}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`supersede cleanup threw for session=${sessionId}:`, { err });
       }
       existing.closed = true;
       try {
         if (!existing.res.writableEnded) existing.res.end();
       } catch (err) {
-        console.warn(
-          `[events] failed to end superseded SSE response for session=${sessionId}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`failed to end superseded SSE response for session=${sessionId}:`, { err });
       }
     }
 
@@ -226,7 +223,7 @@ export function createEventsRoutes(
     res.on('close', cleanup);
     res.on('error', cleanup);
 
-    console.log(`[events] open session=${sessionId} user=${userId} subscribers=${bus.size()}`);
+    log.info(`open session=${sessionId} user=${userId} subscribers=${bus.size()}`);
   });
 
   router.post('/events/:sessionId/focus', authMiddleware, express.json(), (req, res) => {
@@ -271,8 +268,8 @@ export function createEventsRoutes(
     const next = [...new Set([workspaceId, ...extra])].slice(0, MAX_WATCHED_WORKSPACES);
     const previous = session.focusedWorkspaceIds;
     session.focusedWorkspaceIds = next;
-    console.log(
-      `[events] FOCUS session=${sessionId} user=${userId} ${
+    log.info(
+      `FOCUS session=${sessionId} user=${userId} ${
         previous.join(',') || '(none)'
       } → ${next.join(',')}`,
     );

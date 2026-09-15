@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../../../shared/logging.js';
+
+const log = logger('groups-to-plugins');
 import path from 'node:path';
 import {
   HEXIS_EXTENSION_NS,
@@ -214,8 +217,8 @@ async function migrateBranch(disk: IFsProbe & ITreeWalker, branch: KbBranch, ref
     // state a human needs to look at. The branch contributes no migration
     // ops, only a note (which surfaces in a commit only if the ignore
     // retirement above, or a later step, dirties it).
-    console.warn(
-      `[groups-to-plugins] ${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
+    log.warn(
+      `${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
         `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
     );
     if (changed) branch.note(retiredSubject);
@@ -497,8 +500,8 @@ async function foldIntoPluginFiles(
       ? (JSON.parse(renderedManifest) as Record<string, unknown>)
       : await disk.readJsonObject(path.join(folderDir, PLUGIN_MANIFEST_FILE));
   if (manifest === null) {
-    console.warn(
-      `[groups-to-plugins] ${branch.name}: ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
+    log.warn(
+      `${branch.name}: ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
         'mcp manuals convert only when they carry NOTHING for the extensions block; any ' +
         'non-portable half (auth headers, variables, a description, or the local-only flag) ' +
         'keeps the manual a `.tool` until the manifest is fixed.',

@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('github-facade');
 import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
   GitHubFacadeUnavailableError,
@@ -70,7 +73,7 @@ export function createGitHubFacadeAdminRoutes(deps: GitHubFacadeAdminRoutesDeps)
         res.status(409).json({ error: err.message });
         return;
       }
-      console.error('[github-facade admin]', err);
+      log.error('admin route failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   };

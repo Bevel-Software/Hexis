@@ -1,6 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isBranchModelConfigured } from '@bevel-software/platform-shared';
+import { logger } from '../../../shared/logging.js';
+
+// `startupLog` rather than `log`: `retryUntilMaintained` takes a `log`
+// callback of its own, and a module logger of the same name would be
+// shadowed exactly where it is meant to be the default.
+const startupLog = logger('kb-startup');
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
@@ -133,7 +139,7 @@ export class KbStartupRunner {
   retryUntilMaintained(opts: RetryOptions = {}): { stop(): void } {
     const initial = opts.initialDelayMs ?? 30_000;
     const max = opts.maxDelayMs ?? 10 * 60_000;
-    const log = opts.log ?? ((message: string) => console.warn(message));
+    const log = opts.log ?? ((message: string) => startupLog.warn(message));
     const sleep =
       opts.sleep ??
       ((ms: number) =>
@@ -149,18 +155,18 @@ export class KbStartupRunner {
         if (stopped) return;
         try {
           await this.runAll();
-          log('[kb-startup] the remote is reachable again and the knowledge base is maintained — the deployment is open.');
+          log('the remote is reachable again and the knowledge base is maintained — the deployment is open.');
           return;
         } catch (err) {
           if (!(err instanceof KbRemoteUnreachableError)) {
             log(
-              `[kb-startup] the retry stopped on a failure that is not the remote being unreachable — ` +
+              `the retry stopped on a failure that is not the remote being unreachable — ` +
                 `saving the setup form retries once it is fixed: ${this.failure ?? String(err)}`,
             );
             return;
           }
           delay = Math.min(delay * 2, max);
-          log(`[kb-startup] remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
+          log(`remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
         }
       }
     })();
@@ -174,7 +180,7 @@ export class KbStartupRunner {
 
   private async runAllOnce(): Promise<void> {
     if (!isBranchModelConfigured()) {
-      console.log('[kb-startup] branch model not configured yet — phase skipped until setup completes.');
+      startupLog.info('branch model not configured yet — phase skipped until setup completes.');
       return;
     }
     // A branch model without a repository URL is a PARTIALLY set-up deployment
@@ -184,13 +190,13 @@ export class KbStartupRunner {
     // needs stays unreachable. The setup-completion invocation catches up the
     // moment the URL exists.
     if (this.opts.kbRepoUrl().trim() === '') {
-      console.log('[kb-startup] KB repository URL not configured yet — phase skipped until setup completes.');
+      startupLog.info('KB repository URL not configured yet — phase skipped until setup completes.');
       return;
     }
     const safeBoot = process.env.KB_SAFE_BOOT === '1';
     if (safeBoot) {
-      console.warn(
-        '[kb-startup] KB_SAFE_BOOT=1 — failures will abandon maintenance instead of stopping the boot. ' +
+      startupLog.warn(
+        'KB_SAFE_BOOT=1 — failures will abandon maintenance instead of stopping the boot. ' +
           'Remove the variable once the rescue is done.',
       );
     }
@@ -234,7 +240,7 @@ export class KbStartupRunner {
           );
         }
         if (result.outcome === 'skipped') {
-          console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason} (${took})`);
+          startupLog.warn(`${step.name}: skipped — ${result.reason} (${took})`);
           for (const h of handles.values()) h.discardBuffer();
           continue;
         }
@@ -253,11 +259,11 @@ export class KbStartupRunner {
             ? 'no changes'
             : `${changes} change${changes === 1 ? '' : 's'} on ${branches} branch${branches === 1 ? '' : 'es'}`;
         if (result.outcome === 'partial') {
-          console.warn(`[kb-startup] ${step.name}: partial — ${result.reason} (${scope}, ${took})`);
+          startupLog.warn(`${step.name}: partial — ${result.reason} (${scope}, ${took})`);
         } else {
           // One line per step even when nothing happened: a silent phase and a
           // step that never ran look identical from the boot log otherwise.
-          console.log(`[kb-startup] ${step.name}: ok — ${scope} (${took})`);
+          startupLog.info(`${step.name}: ok — ${scope} (${took})`);
         }
         for (const h of handles.values()) await h.applyBuffer();
       }
@@ -267,10 +273,9 @@ export class KbStartupRunner {
       }
     } catch (err) {
       if (!safeBoot) throw err;
-      console.error(
-        '[kb-startup] SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.',
-        redactGitToken(err instanceof Error ? err.message : String(err)),
-      );
+      startupLog.error('SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.', {
+        detail: redactGitToken(err instanceof Error ? err.message : String(err)),
+      });
       // Reset only DIRTY handles — ones an apply at least began on (the mark
       // is set before the first op, so a mid-apply failure is covered). A
       // clone a step merely read must NOT be swept: sweeping it would disturb
@@ -280,7 +285,7 @@ export class KbStartupRunner {
       for (const h of handles.values()) await h.resetUncommitted().catch(() => {});
       return;
     }
-    console.log(`[kb-startup] phase complete (${((Date.now() - phaseStart) / 1000).toFixed(1)}s).`);
+    startupLog.info(`phase complete (${((Date.now() - phaseStart) / 1000).toFixed(1)}s).`);
   }
 
   /**
@@ -351,12 +356,12 @@ export class KbStartupRunner {
         }
       });
       if (seededByOther) {
-        console.log(
-          '[kb-startup] seed push rejected — another replica seeded the remote first; continuing with its branches.',
+        startupLog.info(
+          'seed push rejected — another replica seeded the remote first; continuing with its branches.',
         );
         return seededByOther;
       }
-      console.log(`[kb-startup] seeded empty KB remote with branches: ${protectedBranches.join(', ')}`);
+      startupLog.info(`seeded empty KB remote with branches: ${protectedBranches.join(', ')}`);
       return new Set(protectedBranches);
     }
 
@@ -370,7 +375,7 @@ export class KbStartupRunner {
         await git(this.opts.gitRunner, path.join(dir, 'seed'), user,['push', 'origin', `HEAD:refs/heads/${b}`]);
       });
       heads.add(b);
-      console.log(`[kb-startup] created missing protected branch "${b}" from "${base}"`);
+      startupLog.info(`created missing protected branch "${b}" from "${base}"`);
     }
     return heads;
   }
@@ -491,7 +496,7 @@ export class KbStartupRunner {
     await git(this.opts.gitRunner, repoDir, user,['commit', '-m', h.commitMessage()]);
     try {
       await git(this.opts.gitRunner, repoDir, user,['push', 'origin', `HEAD:refs/heads/${h.name}`]);
-      console.log(`[kb-startup] ${h.name}: ${h.commitSubject()}`);
+      startupLog.info(`${h.name}: ${h.commitSubject()}`);
       // Committed AND pushed: nothing of the phase remains uncommitted here,
       // so a LATER branch's failure under KB_SAFE_BOOT must not rewind this
       // clone to its pre-phase sha — that would leave it behind what origin
@@ -511,10 +516,9 @@ export class KbStartupRunner {
       if (!/non-fast-forward|fetch first/i.test(msg)) {
         throw err;
       }
-      console.warn(
-        `[kb-startup] ${h.name}: push rejected (concurrent replica?) — rolling back local commit.`,
-        redactGitToken(msg),
-      );
+      startupLog.warn(`${h.name}: push rejected (concurrent replica?) — rolling back local commit.`, {
+        detail: redactGitToken(msg),
+      });
       await git(this.opts.gitRunner, repoDir, user,['reset', '--hard', preCommit]).catch(() => {});
     }
   }
