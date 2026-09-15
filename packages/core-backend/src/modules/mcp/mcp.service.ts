@@ -122,9 +122,8 @@ interface RequestSurface {
 
 /** One pooled downstream connection: a client holding one `mcp` manual, named so it can be deregistered. */
 interface PooledDownstream {
+  /** Owns its own `mcp` protocol instance, so its sessions are its alone and `close()` ends exactly them. */
   client: CodeModeUtcpClient;
-  /** The rewritten manual name this client registered — what `dispose` deregisters. */
-  manualName: string;
 }
 
 /**
@@ -192,13 +191,10 @@ export class McpService {
   ) {
     this.downstream = new DownstreamPool<PooledDownstream>({
       ...opts.downstreamPool,
-      // Deregister, never `client.close()`: the protocol is process-wide, so
-      // closing the client would drain every MCP session in the process.
-      // Deregistering releases this manual's reference and closes the session
-      // only if no other manual still holds it (@utcp/mcp >= 1.1.8).
-      dispose: async (entry) => {
-        await entry.client.deregisterManual(entry.manualName);
-      },
+      // Since @utcp/sdk 1.2.0 a client closes only the protocol instances it
+      // created, and @utcp/mcp registers as a factory — so this closes exactly
+      // this entry's MCP sessions and touches no other client's.
+      dispose: (entry) => entry.client.close(),
     });
   }
 
@@ -551,10 +547,9 @@ export class McpService {
    * would otherwise exfiltrate the caller's token to its own endpoint. Tool
    * `${SECRET}` refs resolve lazily via the per-user `bevel-secrets` loader.
    *
-   * Never `close()`d: `UtcpClient.close()` drains the process-wide protocol
-   * registry, which every other request shares. A request's client holds no
-   * connection of its own (its `mcp` manuals route to the pool), so dropping
-   * the reference is the whole teardown.
+   * Not `close()`d: a request's client holds no connection of its own (its
+   * `mcp` manuals route to the pool, so its own `mcp` protocol instance never
+   * opens a session), and dropping the reference is the whole teardown.
    */
   private async buildClient(bearer: string, userId: string, manuals: CallTemplate[]): Promise<CodeModeUtcpClient> {
     const variables = seedBevelHostedManualVars(manuals, this.opts.loopbackBaseUrl, bearer);
@@ -705,21 +700,14 @@ export class McpService {
 
   /**
    * Create one pooled downstream connection: a client registering just this
-   * manual, on the process-wide `mcp` protocol.
+   * manual.
    *
-   * The protocol keeps its sessions keyed by (server name, server config,
-   * auth) — and the config it keys on is the SUBSTITUTED one, so a manual
-   * carrying a per-user credential resolves to a key nobody else can produce.
-   * Two users share a downstream session only when their resolved
-   * configuration and credentials are byte-identical (a plugin-level shared
-   * key), which is the same connection identity in every sense the server can
-   * see.
-   *
-   * Closing one manual's session is `deregisterManual`, which since
-   * `@utcp/mcp@1.1.8` releases that manual's reference and closes the session
-   * when its last holder lets go — so a pooled entry can be disposed without
-   * touching anyone else's connection. `client.close()` must NEVER be used
-   * here: it drains every MCP session in the process.
+   * `@utcp/mcp` (1.2.0+) registers its protocol as a FACTORY, so this client
+   * gets an `mcp` protocol instance of its own: the session it opens lives in
+   * that instance, is reachable from no other client, and ends with
+   * `client.close()`. That is what makes a pool entry per (user, server) an
+   * actual isolation boundary — two users with byte-identical server
+   * definitions still never share a connection — with nothing reached into.
    *
    * SESSION RECOVERY is installed on the pooled client: a downstream server
    * that restarts (or expires a session) answers our next call with the spec's
@@ -728,10 +716,9 @@ export class McpService {
    * breaker for manuals whose REGISTRATION failed, so a recovery neither
    * consults it nor records into it.
    *
-   * A registration that fails throws, so the pool caches nothing and the
-   * caller's memo records the failure. Whatever that attempt opened is closed
-   * by the protocol itself (a failed registration releases its references),
-   * so there is nothing for this method to clean up.
+   * A registration that fails closes the client it built (ending whatever the
+   * attempt opened) and throws, so the pool caches nothing and the caller's
+   * memo records the failure.
    */
   private async connectDownstream(userId: string, template: CallTemplate): Promise<PooledDownstream> {
     // Third-party manuals are never seeded loopback credentials (see
@@ -743,8 +730,11 @@ export class McpService {
     const manualName = utcpManualName(own);
     installSessionRecovery(client, { manualTemplate: (name) => (name === manualName ? own : undefined) });
     const result = await registerManual(client, own);
-    if (!result.ok) throw new Error(result.error);
-    return { client, manualName };
+    if (!result.ok) {
+      await client.close().catch(() => {});
+      throw new Error(result.error);
+    }
+    return { client };
   }
 
   /**

@@ -501,50 +501,18 @@ describe('proxied third-party MCP servers: the downstream pool', () => {
     expect(downstream.initializations()).toBe(1);
   });
 
-  /**
-   * What separates two users' downstream connections is their CREDENTIAL, not
-   * their identity. `@utcp/mcp` keys a session by (server name, server config,
-   * auth) over the SUBSTITUTED config, so a manual carrying a per-user secret
-   * resolves to a key nobody else can produce, while a manual every user
-   * resolves identically — a public server, or one behind a plugin-level
-   * shared key — is one connection they share. Sharing it is sound precisely
-   * because it is the same connection identity: the downstream server cannot
-   * tell those callers apart in the first place.
-   */
-  it('separates two users’ connections when their credentials differ', async () => {
+  it('pools per (user, server): another user gets a connection of their own, even for an identical definition', async () => {
     downstream = await startFakeDownstreamMcpServer();
-    const { baseUrl } = await startPlatform({
-      // Each user's manual resolves to its own token, as a per-user vault
-      // secret would — different config, so a different session key.
-      manualsFor: (bearer) => [
-        {
-          name: 'notion',
-          call_template_type: 'mcp',
-          config: {
-            mcpServers: {
-              srv: { transport: 'http', url: downstream!.url, headers: { authorization: `Bearer ${bearer}` } },
-            },
-          },
-        },
-      ],
-    });
-    const { client: a } = await connectSdkClient(baseUrl, KEY_A);
-    const { client: b } = await connectSdkClient(baseUrl, KEY_B);
-    await a.callTool({ name: await echoName(a), arguments: { text: 'a' } });
-    await b.callTool({ name: await echoName(b), arguments: { text: 'b' } });
-    expect(downstream.initializations()).toBe(2);
-  });
-
-  it('shares one connection between users whose server definition is identical', async () => {
-    downstream = await startFakeDownstreamMcpServer();
+    // The same server definition for both users, with no per-user credential
+    // in it — the case where nothing but the pool boundary keeps them apart.
     const { baseUrl } = await startPlatform({ manualsFor: withDownstream(downstream) });
     const { client: a } = await connectSdkClient(baseUrl, KEY_A);
     const { client: b } = await connectSdkClient(baseUrl, KEY_B);
     await a.callTool({ name: await echoName(a), arguments: { text: 'a' } });
     await b.callTool({ name: await echoName(b), arguments: { text: 'b' } });
-    // No per-user credential in this definition, so both users resolve the
-    // same session key and the pool's two entries ride one downstream session.
-    expect(downstream.initializations()).toBe(1);
+    // Each pooled client owns its own `mcp` protocol instance, so each user's
+    // entry dials its own session: a second initialization, not a shared one.
+    expect(downstream.initializations()).toBe(2);
   });
 
   it('recovery pass-through: a downstream restart is healed on the next call', async () => {
