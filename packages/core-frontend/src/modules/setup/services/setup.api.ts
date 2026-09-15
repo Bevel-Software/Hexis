@@ -182,11 +182,12 @@ export interface ConnectionTest {
  * are sent as typed so an admin tests what is on screen, not what is stored;
  * omitted fields fall back to what is already in effect.
  *
- * A 4xx is an ANSWER, not a failure to ask: the server looked at these values
+ * A 400 is an ANSWER, not a failure to ask: the server looked at these values
  * and refused them ("enter the access token for that repository", "the URL
  * must start with https://"). It comes back as the rejection it is, so no
- * caller can mistake it for "could not check" and carry on past it. Only a
- * 5xx or a request that never landed throws.
+ * caller can mistake it for "could not check" and carry on past it. Any other
+ * failure throws — a 401/403 is about the session, not the repository, and
+ * must not be shown as the host refusing these values.
  */
 export async function testConnection(fields: Record<string, string>): Promise<ConnectionTest> {
   const res = await authFetch('/api/setup/test-connection', {
@@ -194,7 +195,7 @@ export async function testConnection(fields: Record<string, string>): Promise<Co
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   });
-  if (res.status >= 400 && res.status < 500) {
+  if (res.status === 400) {
     let data: { error?: string; field?: string } = {};
     try {
       data = (await res.json()) as typeof data;

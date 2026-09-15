@@ -127,6 +127,17 @@ describe('POST /setup/test-connection — what may reach git', () => {
     expect(res.status).toBe(400);
   });
 
+  /** The KB startup refuses such a URL; the credential would sit in git's argv. */
+  it('refuses a URL carrying credentials', async () => {
+    const { base } = listen();
+    const res = await post(base, '/api/setup/test-connection', {
+      kbRepoUrl: 'https://x-access-token:ghp_embedded@example.com/acme/kb.git',
+      gitToken: 'ghp_x',
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Remove the username and token from the URL/);
+  });
+
   it('refuses a username that would break out of the credential-helper snippet', async () => {
     const { base } = listen();
     const res = await post(base, '/api/setup/test-connection', {
@@ -457,6 +468,18 @@ describe('POST /setup/settings — the connection is checked before it is stored
     expect(res.status).toBe(400);
     expect((await res.json()).problems.kbRepoUrl).toMatch(/full URL|https/);
     expect(remote.asked).toEqual([]);
+  });
+
+  it('refuses an address carrying credentials, before asking the remote anything', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://user:ghp_embedded@example.com/acme/kb.git', gitToken: 'ghp_x' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/Remove the username and token from the URL/);
+    expect(remote.asked).toEqual([]);
+    expect(settings.resolve('kbRepoUrl')).toBe('');
   });
 });
 

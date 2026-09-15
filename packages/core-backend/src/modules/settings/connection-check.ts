@@ -68,8 +68,8 @@ const runGit: GitRunner = async (args, env) => {
  * finishes setup — and then every save anyone makes fails at push, which is
  * the first moment anyone would learn the token was wrong.
  *
- *  - Read: `ls-remote --heads`, the cheapest call that proves the address
- *    resolves and the credential authenticates.
+ *  - Read: `ls-remote` of HEAD and the branches, the cheapest call that proves
+ *    the address resolves and the credential authenticates.
  *  - Write: a DRY-RUN push deleting a ref that does not exist, from an empty
  *    scratch repository. Nothing is sent and nothing can be written, but git
  *    still opens `receive-pack`, which is where a host checks push permission.
@@ -110,15 +110,24 @@ export async function checkRepositoryConnection(
     GIT_ASKPASS: 'echo',
   };
   const scrub = (err: unknown) => {
-    const raw = err instanceof Error ? err.message : String(err);
+    let raw = err instanceof Error ? err.message : String(err);
+    // execFile's timeout kills git with SIGTERM and says so only in `killed` /
+    // `signal` — the message is a bare "Command failed". Without the marker a
+    // host that never answers classifies as `unknown`, not unreachable.
+    const exit = err as { killed?: boolean; signal?: string | null } | null;
+    if (exit?.killed && exit.signal === 'SIGTERM') raw += '\ntimed out';
     return token ? raw.replaceAll(token, '***') : raw;
   };
 
   let listing: Listing;
   try {
     // `--end-of-options` on top of the validation above: belt and braces, so
-    // nothing that arrives here can ever be read as a flag.
-    const { stdout } = await run([...credArgs, 'ls-remote', '--heads', '--end-of-options', url], env);
+    // nothing that arrives here can ever be read as a flag. Patterns, not
+    // `--heads`: `--heads` drops the HEAD symref, and with it the default branch.
+    const { stdout } = await run(
+      [...credArgs, 'ls-remote', '--symref', '--end-of-options', url, 'HEAD', 'refs/heads/*'],
+      env,
+    );
     listing = parseListing(stdout);
   } catch (err) {
     return rejection(classifyReadFailure(scrub(err)), scrub(err));
@@ -281,7 +290,7 @@ function parseListing(stdout: string): Listing {
     .map((ref) => ref.slice('refs/heads/'.length));
   const defaultBranch =
     lines
-      .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
+      .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('\tHEAD'))
       ?.slice('ref: refs/heads/'.length)
       .split('\t')[0]
       ?.trim() || null;

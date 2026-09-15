@@ -70,6 +70,14 @@ describe('testConnection — a refused probe is an answer', () => {
     });
   });
 
+  it.each([
+    [401, 'Not signed in'],
+    [403, 'Admin access required'],
+  ])('throws on a %i — the session was refused, not the repository', async (status, error) => {
+    transport.authFetch.mockResolvedValue(json(status, { error }));
+    await expect(testConnection({ kbRepoUrl: 'https://x/y.git' })).rejects.toThrow(error);
+  });
+
   it('still throws when the check could not be asked at all', async () => {
     transport.authFetch.mockResolvedValue(json(500, { error: 'Could not run the connection check.' }));
     await expect(testConnection({})).rejects.toThrow(/could not run/i);

@@ -115,11 +115,16 @@ describe('classifyReadFailure', () => {
 describe('checkRepositoryConnection', () => {
   it('is connected when the token reads and the dry-run push gets in', async () => {
     const git = fakeGit({
-      listing: 'abc\trefs/heads/main\ndef\trefs/heads/dev\n',
+      listing: 'ref: refs/heads/main\tHEAD\nabc\tHEAD\nabc\trefs/heads/main\ndef\trefs/heads/dev\n',
       push: gitError("error: unable to delete 'hexis-write-check-x': remote ref does not exist"),
     });
     const result = await checkRepositoryConnection(CONNECTION, git.run);
-    expect(result).toEqual({ outcome: 'connected', branches: ['main', 'dev'], defaultBranch: null, empty: false });
+    expect(result).toEqual({ outcome: 'connected', branches: ['main', 'dev'], defaultBranch: 'main', empty: false });
+    // `--heads` would drop the HEAD symref, and with it the default branch.
+    const listing = git.calls.find((args) => args.includes('ls-remote'))!;
+    expect(listing).toContain('--symref');
+    expect(listing).not.toContain('--heads');
+    expect(listing.slice(-2)).toEqual(['HEAD', 'refs/heads/*']);
     // The write probe is a DRY RUN deleting a scratch ref — never a real push.
     const push = git.calls.find((args) => args.includes('push'))!;
     expect(push).toContain('--dry-run');
@@ -176,6 +181,26 @@ describe('checkRepositoryConnection', () => {
     const result = await checkRepositoryConnection(CONNECTION, git.run);
     expect(result).toMatchObject({ outcome: 'rejected', reason: 'unreachable', field: 'kbRepoUrl' });
     if (result.outcome === 'rejected') expect(result.error).toMatch(/could not reach that host/i);
+  });
+
+  /** How execFile reports its own timeout: SIGTERM, and nothing about time in the message. */
+  it('is rejected as unreachable when git is killed by the timeout', async () => {
+    const killed = Object.assign(new Error('Command failed: git ls-remote\n'), {
+      killed: true,
+      signal: 'SIGTERM',
+      code: null,
+    });
+    const git = fakeGit({ listing: killed });
+    const result = await checkRepositoryConnection(CONNECTION, git.run);
+    expect(result).toMatchObject({ outcome: 'rejected', reason: 'unreachable', field: 'kbRepoUrl' });
+  });
+
+  it('refuses a URL carrying credentials without running git', async () => {
+    const git = fakeGit({ listing: '' });
+    await expect(
+      checkRepositoryConnection({ ...CONNECTION, url: 'https://u:secret@github.com/acme/kb.git' }, git.run),
+    ).rejects.toThrow();
+    expect(git.calls).toEqual([]);
   });
 
   it('never quotes the token back, even in an unrecognised failure', async () => {

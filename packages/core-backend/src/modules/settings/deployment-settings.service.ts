@@ -46,7 +46,14 @@ export const validateHttpsRemote = (value: string): string | null => {
   } catch {
     return 'Enter a full URL, e.g. https://github.com/acme/knowledge-base.git';
   }
-  return parsed.protocol === 'https:' ? null : 'The URL must start with https://';
+  if (parsed.protocol !== 'https:') return 'The URL must start with https://';
+  // Userinfo would ride into git's argv on every call, visible in process
+  // listings — the KB startup refuses such a URL, so saving one only defers the
+  // failure to the next boot.
+  if (parsed.username || parsed.password) {
+    return 'Remove the username and token from the URL — enter the token in its own field.';
+  }
+  return null;
 };
 
 /**
