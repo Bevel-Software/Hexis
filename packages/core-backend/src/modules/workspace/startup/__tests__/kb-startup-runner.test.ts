@@ -8,6 +8,7 @@ import path from 'node:path';
 import { KbStartupRunner } from '../kb-startup-runner.js';
 import { WorkspaceService } from '../../workspace.service.js';
 import { redactSecret } from '../kb-git.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../settings/git-connection-check.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 const execFileAsync = promisify(execFile);
@@ -472,6 +473,35 @@ describe('KbStartupRunner', () => {
 
     await makeRunner([step('noop', async () => ({ outcome: 'ok' }))]).runAll();
     expect(await fs.readFile(path.join(local, 'unpushed.md'), 'utf8')).toBe('precious');
+  });
+});
+
+describe('KbStartupRunner — what a failed phase throws', () => {
+  it('a scrubbed message (tokens, a presigned query) that still carries what git said', async () => {
+    const prev = process.env.GITHUB_TOKEN;
+    // Tokens that spell parts of git's own wording: scrubbing them rewrites the
+    // diagnostic, so the scrubbed message alone would no longer read as unreachable.
+    process.env.GITHUB_TOKEN = 'onnect';
+    try {
+      const err = await makeRunner([step('noop', async () => ({ outcome: 'ok' }))], {
+        kbRepoUrl: () => 'https://127.0.0.1:1/kb.git?X-Amz-Signature=SECRETSIG',
+        gitToken: () => 'access',
+      })
+        .runAll()
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(ClassifiedFailure);
+      const message = (err as Error).message;
+      expect(message).not.toContain('SECRETSIG');
+      expect(message).not.toMatch(/onnect|access/);
+      expect(failureOf(err).kind).toBe('unreachable');
+      expect(classifyGitFailure(message).kind).not.toBe('unreachable');
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prev;
+    }
   });
 });
 

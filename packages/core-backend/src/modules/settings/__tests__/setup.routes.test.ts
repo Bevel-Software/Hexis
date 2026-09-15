@@ -378,6 +378,22 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     }
   });
 
+  it("answers with the classification the runner's failure carries, not a re-read of its scrubbed message", async () => {
+    const { ClassifiedFailure, classifyGitFailure } = await import('../git-connection-check.js');
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const carried = classifyGitFailure('git push failed: remote: Permission to acme/kb.git denied to bot.');
+      const { base } = listen(true, async () => {
+        throw new ClassifiedFailure('git push failed: *** *** ***', carried);
+      });
+      const res = await post(base, '/api/setup/settings', { settings: completing });
+      expect((await res.json()).kbInit).toEqual(carried);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
   it('tells a non-admin nothing about a standing failure', async () => {
     const consoleError = console.error;
     console.error = () => {};

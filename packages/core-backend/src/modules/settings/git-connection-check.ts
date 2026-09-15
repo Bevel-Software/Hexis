@@ -120,3 +120,31 @@ export function classifyGitFailure(text: string): GitFailure {
 function known(kind: Exclude<GitFailureKind, 'step-failed'>): GitFailure {
   return { kind, cause: CAUSES[kind] };
 }
+
+/**
+ * A failure whose message is already scrubbed for the log, carrying the
+ * classification read from the text BEFORE the scrub.
+ *
+ * Scrubbing and classifying both want the raw text, and they cannot share it
+ * in order: a scrub is free to rewrite the very words the classifier reads (a
+ * token that spells `connect` turns "Failed to connect" into something else),
+ * while carrying the raw text on to wherever classification happens would put
+ * the secret into every error that travels. So the place that holds the raw
+ * text does both, once, and only the scrubbed message and the fixed-sentence
+ * classification leave it.
+ */
+export class ClassifiedFailure extends Error {
+  constructor(
+    message: string,
+    readonly failure: GitFailure,
+  ) {
+    super(message);
+    this.name = 'ClassifiedFailure';
+  }
+}
+
+/** The classification a failure carries, else one read from its message. */
+export function failureOf(err: unknown): GitFailure {
+  if (err instanceof ClassifiedFailure) return err.failure;
+  return classifyGitFailure(err instanceof Error ? err.message : String(err));
+}

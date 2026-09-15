@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyGitFailure } from '../git-connection-check.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../git-connection-check.js';
 
 /**
  * Representative failures, spelled the way they actually reach the classifier:
@@ -135,6 +135,15 @@ describe('classifyGitFailure', () => {
     for (const text of [raw, `KB startup step "s" failed: ${raw}`]) {
       expect(classifyGitFailure(text).cause).not.toContain('weird-marker-7f3a');
     }
+  });
+
+  it('failureOf prefers the classification a failure carries over its scrubbed message', () => {
+    const carried = classifyGitFailure(gitFailed('push', 'origin main', 'remote: Permission to acme/kb.git denied to bot.'));
+    expect(carried.kind).toBe('write-refused');
+    expect(failureOf(new ClassifiedFailure('git push failed: *** ***', carried))).toEqual(carried);
+    // Anything else is read from its text.
+    expect(failureOf(new Error('KB startup step "s" failed: boom')).kind).toBe('step-failed');
+    expect(failureOf('Could not resolve host').kind).toBe('unreachable');
   });
 
   it('every cause is one sentence', () => {

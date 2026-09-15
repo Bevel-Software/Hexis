@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
+import { ClassifiedFailure, classifyGitFailure } from '../../settings/git-connection-check.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -100,7 +101,10 @@ export async function git(cwd: string, gitUsername: string, args: string[]): Pro
     return stdout.toString();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(redactSecret(`git ${args[0]} failed: ${msg}`));
+    // Classified here, from what git actually said, before the scrub can
+    // rewrite it — the message that leaves is the scrubbed one.
+    const raw = `git ${args[0]} failed: ${msg}`;
+    throw new ClassifiedFailure(redactSecret(raw), classifyGitFailure(raw));
   }
 }
 

@@ -200,7 +200,15 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
 
 interface Props {
   settings: SettingStatus[];
-  /** Re-read the status after a save, so the gate can let the app through. */
+  /**
+   * Re-read the status after a save, so the gate can let the app through.
+   *
+   * The host must let only its LATEST read land (`SetupGate` and
+   * `DeploymentPage` both do): each fresh `kbInit` replaces the failure on
+   * screen, so an earlier read answering late — the refresh after a failed
+   * save, landing after a retry that succeeded — would otherwise put the
+   * cleared failure back.
+   */
   onSaved(): void;
   /**
    * Where the screen is standing. `setup` (the default) is the first-run
@@ -246,7 +254,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    * The initialization failure on screen: the status endpoint's, until a save
    * or a retry from this screen answers more recently. A fresh status read
    * (a new `kbInit` from the host) takes over again — adjusted during render
-   * rather than in an effect, so the stale banner never paints.
+   * rather than in an effect, so the stale banner never paints. That a fresh
+   * prop really is the latest read is the host's promise (see `onSaved`), and
+   * each retry or save that clears the failure here also asks for that read.
    */
   const [initFailure, setInitFailure] = useState<KbInitFailure | null>(kbInit ?? null);
   const [seenKbInit, setSeenKbInit] = useState(kbInit);
@@ -290,14 +300,6 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
   /** What a field would save as: what was typed, else what is already stored. */
   const resolved = (key: string) => resolvedIn(draft, key);
 
-  /**
-   * Something typed that no save has stored yet. The retry sends an EMPTY save
-   * — pressed now, it would re-run against the stored values while a corrected
-   * token sits unsaved in the form — so it waits, and Save (which retries too)
-   * is the way to try with the new values.
-   */
-  const draftChanged = Object.values(draft).some((value) => value.trim() !== '');
-
   const editable = settings.filter((s) => s.source !== 'env');
   const fromEnv = settings.filter((s) => s.source === 'env');
 
@@ -312,6 +314,16 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
     if (!typed) return false;
     return typed !== (settings.find((s) => s.key === key)?.value ?? '').trim();
   };
+
+  /**
+   * Something typed that a save would actually store. The retry sends an EMPTY
+   * save — pressed now, it would re-run against the stored values while a
+   * corrected token sits unsaved in the form — so it waits, and Save (which
+   * retries too) is the way to try with the new values. Judged like the
+   * connection gate above: an edit put back, or a username filled in to the
+   * value already stored, changes nothing and holds nothing up.
+   */
+  const draftChanged = Object.keys(draft).some((key) => connectionKeyChanged(key));
 
   /**
    * Whether THIS save has to stand behind the repository connection.

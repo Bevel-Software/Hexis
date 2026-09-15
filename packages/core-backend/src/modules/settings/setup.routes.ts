@@ -12,7 +12,7 @@ import {
   isBranchModelConfigured,
   validateBranchModel,
 } from '@bevel-software/platform-shared';
-import { classifyGitFailure, type GitFailure } from './git-connection-check.js';
+import { classifyGitFailure, failureOf, type GitFailure } from './git-connection-check.js';
 import { redactSecret } from '../workspace/startup/kb-git.js';
 import { printable } from '../../shared/printable.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
@@ -224,12 +224,12 @@ export function createSetupRoutes(
           // deployment stays gated (see the status endpoint) until a retry
           // succeeds. Logged in full (scrubbed of the token in effect, which
           // may be the one this very save stored, and as one printable token),
-          // returned classified — from the text as it arrived, since a scrub
-          // is free to rewrite the words the classifier reads.
+          // returned classified — by the classification the runner's failure
+          // carries, read before any scrub rewrote git's words (`failureOf`).
           const raw = initErr instanceof Error ? initErr.message : String(initErr);
           const msg = redactSecret(raw, [settings.resolve('gitToken')]);
           console.error('[setup] KB initialization failed after setup completed:', printable(msg));
-          kbInit = classifyGitFailure(raw);
+          kbInit = failureOf(initErr);
           res.status(500).json({
             error: 'Settings saved, but the knowledge base could not be initialized.',
             kbInit,

@@ -996,6 +996,27 @@ describe('SetupScreen — a failed knowledge-base initialization', () => {
     await userEvent.click(retry);
     expect(api.saveSettings).not.toHaveBeenCalled();
   });
+
+  it('retry comes back once an edit is put back — an unchanged value is not an unsaved change', async () => {
+    const REPO = 'https://github.com/acme/kb.git';
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl'
+        ? { ...s, source: 'stored' as const, value: REPO, configured: true }
+        : s.key === 'gitUsername'
+          ? { ...s, source: 'stored' as const, value: 'x-access-token', configured: true }
+          : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const address = screen.getByLabelText('Repository address');
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+
+    await userEvent.type(address, '-old');
+    expect(retry).toBeDisabled();
+    await userEvent.type(address, '{Backspace}{Backspace}{Backspace}{Backspace}');
+
+    expect(retry).toBeEnabled();
+    expect(screen.getByTestId('kb-init-failure')).not.toHaveTextContent(/unsaved changes/i);
+  });
 });
 
 describe('SetupScreen — sync panel when the whole knowledge base is env-set', () => {

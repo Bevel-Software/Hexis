@@ -5,6 +5,7 @@ import { printable } from '../../../shared/printable.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './kb-git.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../settings/git-connection-check.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -60,7 +61,11 @@ export interface KbStartupRunnerOptions {
 export class KbStartupRunner {
   constructor(private readonly opts: KbStartupRunnerOptions) {}
 
-  /** {@link redactSecret} plus the token in effect, which may never have reached the environment. */
+  /**
+   * {@link redactSecret} plus the token in effect, which may never have reached
+   * the environment. Tokens, URL userinfo and URL query strings (a presigned
+   * remote's credential) all go.
+   */
   private redact(text: string): string {
     return redactSecret(text, [this.opts.gitToken?.()]);
   }
@@ -120,14 +125,17 @@ export class KbStartupRunner {
         const started = Date.now();
         const result = await step.run(ctx).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(this.redact(`KB startup step "${step.name}" failed: ${msg}`));
+          const raw = `KB startup step "${step.name}" failed: ${msg}`;
+          // A git failure inside the step was classified where git's words were
+          // still whole; anything else is read here, before the scrub.
+          const failure = err instanceof ClassifiedFailure ? err.failure : classifyGitFailure(raw);
+          throw new ClassifiedFailure(this.redact(raw), failure);
         });
         const took = `${((Date.now() - started) / 1000).toFixed(1)}s`;
         if (result.outcome === 'stopBoot') {
           // Redacted like every other exit: the message reaches the log.
-          throw new Error(
-            this.redact(`KB startup step "${step.name}" stopped the boot: ${result.message}`),
-          );
+          const raw = `KB startup step "${step.name}" stopped the boot: ${result.message}`;
+          throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
         }
         if (result.outcome === 'skipped') {
           console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason} (${took})`);
@@ -166,7 +174,8 @@ export class KbStartupRunner {
       // environment holds, and a token saved on the setup screen is the one
       // this runner alone knows about.
       const msg = this.redact(err instanceof Error ? err.message : String(err));
-      if (!safeBoot) throw new Error(msg);
+      // The classification rides along, read from text no scrub had touched.
+      if (!safeBoot) throw new ClassifiedFailure(msg, failureOf(err));
       // Git's stderr and a step's own message are text this process does not
       // control; one quoted token, so neither can forge or colour a log line.
       console.error(
@@ -397,7 +406,7 @@ export class KbStartupRunner {
       }
       console.warn(
         `[kb-startup] ${h.name}: push rejected (concurrent replica?) — rolling back local commit.`,
-        this.redact(msg),
+        printable(this.redact(msg)),
       );
       await git(repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
     }
