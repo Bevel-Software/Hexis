@@ -527,6 +527,13 @@ export const githubFacadeIdentity = pgTable('github_facade_identity', {
   publicKeyPem: text('public_key_pem').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   rotatedAt: timestamp('rotated_at'),
+  /**
+   * When an admin said the deployment is registered with their Claude
+   * organization; null while it is not. Nothing on the Claude side reports
+   * this back, so an admin states it. Not sealed: it is the one fact about
+   * this row every signed-in person may read.
+   */
+  registeredAt: timestamp('registered_at'),
 });
 
 /**

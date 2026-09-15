@@ -80,6 +80,8 @@ const CATALOG: LibraryData = {
   ],
   tools: [],
   ownedSkills: new Set(['outreach']),
+  writableSkills: new Set(['outreach']),
+  ownedTools: new Set(),
   allowedToolsBySkill: new Map(),
   pendingSkills: [],
   crs: [],

@@ -4,7 +4,7 @@ import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { isPrivateAccessMd } from '../access-model/access-grammar.js';
-import { isAbsence } from '../../shared/fs-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -14,7 +14,6 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -52,6 +51,8 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly skillService: ISkillService,
     private readonly toolManualService: IToolManualService,
     private readonly kbDirName: string,
+    /** Where plugins come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
     /**
      * The link index, when the deployment has one: a plugin's skill count is
@@ -59,8 +60,6 @@ export class PluginIndexService implements IPluginIndexService {
      * set (and older tests) keep the inline-only count.
      */
     private readonly links?: PluginLinkIndex,
-    /** Where plugins come from — native manifests unless a dialect is configured. */
-    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }

@@ -1,4 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,6 +61,7 @@ describe('PluginIndexService', () => {
       skillService(opts.skills),
       toolService(opts.tools),
       KB_DIR,
+      new KbPluginSource(new NodeFs()),
     );
 
   const kb = () => join(root, wsId, KB_DIR);
@@ -165,6 +168,7 @@ describe('PluginIndexService', () => {
       skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
       toolService(),
       KB_DIR,
+      new KbPluginSource(new NodeFs()),
       Date.now,
       links,
     ).catalog();

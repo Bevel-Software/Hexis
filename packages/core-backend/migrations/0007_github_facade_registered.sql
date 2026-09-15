@@ -1,0 +1,1 @@
+ALTER TABLE "github_facade_identity" ADD COLUMN "registered_at" timestamp;

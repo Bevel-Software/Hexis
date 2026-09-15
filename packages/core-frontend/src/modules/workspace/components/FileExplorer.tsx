@@ -49,6 +49,7 @@ import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/comp
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
 
 /**
@@ -214,11 +215,18 @@ function ContextMenu({
   returnFocusTo,
   deletable = true,
   extraItems = [],
+  proposed = false,
 }: {
   x: number;
   y: number;
   entry: FileTreeEntry;
   isRoot: boolean;
+  /**
+   * The entry exists only on a change request's branch. Nothing that acts on
+   * THIS branch's copy applies (there is none), so only the path and Manage
+   * access — which follows the file to the proposal — are offered.
+   */
+  proposed?: boolean;
   /** False for a folder the platform owns (a reserved root): no Delete. */
   deletable?: boolean;
   onClose: () => void;
@@ -249,7 +257,7 @@ function ContextMenu({
   // Only files whose name ends with `.zip` (case-insensitive) get the
   // extraction affordance — matches the OS shell-extension behavior users
   // already know from Windows Explorer / macOS Finder.
-  const isZip = entry.type === 'file' && /\.zip$/i.test(entry.name);
+  const isZip = !proposed && entry.type === 'file' && /\.zip$/i.test(entry.name);
 
   // The one prototype context-menu item the platform has never had
   // (proto:3948). The page-level `⋯ → Copy path` does not cover it: that only
@@ -355,7 +363,7 @@ function ContextMenu({
       <MenuItem role="menuitem" onClick={handleCopyPath}>
         <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
       </MenuItem>
-      {!isRoot && (
+      {offersManageAccess(entry) && (
         <>
           <div className="my-1 border-t border-line" />
           <MenuItem role="menuitem" onClick={() => { openManageAccess(entry); onClose(); }}>
@@ -917,30 +925,48 @@ export function FileTreeNode({
   // A file from the caller's own open change request that does not exist on
   // this branch. Its row is a LINK to the request, not a file: there is no
   // content here to show, so clicking opens the change-request view, and none
-  // of the file affordances (rename, drag, download, context menu) apply —
-  // they would all 404 against a path this branch has never heard of. The
-  // accent colour is the tell that this is proposed, not present.
+  // of the file affordances (rename, drag, download) apply — they would all
+  // 404 against a path this branch has never heard of. The context menu keeps
+  // only what makes sense for a proposal: the path, and Manage access, which
+  // the chrome points at the change request's branch. The accent colour is
+  // the tell that this is proposed, not present.
   const suggestedCr = suggestions.crFor(entry.relativePath);
   if (suggestedCr !== null) {
     return (
-      <button
-        type="button"
-        className={cn(
-          ROW_CLASS,
-          'text-accent hover:bg-hover hover:text-accent-hover',
-          'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+      <>
+        <button
+          ref={rowRef}
+          type="button"
+          className={cn(
+            ROW_CLASS,
+            'text-accent hover:bg-hover hover:text-accent-hover',
+            'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+          )}
+          style={{ paddingLeft }}
+          onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
+          onContextMenu={handleContextMenu}
+          title="Proposed by you: opens the change request"
+        >
+          <CaretSlot show={false} />
+          <span className="truncate">{entry.name}</span>
+          <span
+            aria-hidden
+            className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
+          />
+        </button>
+        {contextMenu && (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            entry={entry}
+            isRoot={false}
+            proposed
+            deletable={false}
+            onClose={() => setContextMenu(null)}
+            returnFocusTo={rowRef}
+          />
         )}
-        style={{ paddingLeft }}
-        onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
-        title="Proposed by you: opens the change request"
-      >
-        <CaretSlot show={false} />
-        <span className="truncate">{entry.name}</span>
-        <span
-          aria-hidden
-          className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
-        />
-      </button>
+      </>
     );
   }
 
@@ -1067,12 +1093,39 @@ export function TreeChrome({
   );
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
+  // `Manage <folder> →` from a proposed file's sheet keeps that file's change
+  // request: the inherited grant it retargets from was read on the request's
+  // branch, so the folder's rules are edited there too — not on the viewed
+  // branch, which the folder path alone would resolve to.
+  const [inheritedProposal, setInheritedProposal] = useState<
+    { number: number; branch: string | null } | undefined
+  >(undefined);
+  const openAccess = useCallback((entry: FileTreeEntry) => {
+    setInheritedProposal(undefined);
+    setAccessTarget(entry);
+  }, []);
+  // A proposed-only file does not exist on the branch being viewed, so its
+  // access can only be edited where it lives: the change request's branch.
+  // Everything else — including a file a request merely modifies, which is a
+  // real row here — keeps the ambient workspace. The branch is null when the
+  // request cannot be resolved; the dialog refuses rather than falling back
+  // to a workspace the file is not on.
+  const accessProposal = useMemo(() => {
+    if (!accessTarget) return undefined;
+    if (inheritedProposal) return inheritedProposal;
+    const crNumber = suggestionOnlyPaths.get(accessTarget.relativePath);
+    if (crNumber === undefined) return undefined;
+    const cr = openChangeRequests
+      .forPath(accessTarget.relativePath)
+      .find((c) => c.number === crNumber);
+    return { number: crNumber, branch: cr?.branch ?? null };
+  }, [accessTarget, inheritedProposal, suggestionOnlyPaths, openChangeRequests]);
 
   return (
     <>
       <TreeNavContext.Provider value={nav}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
-      <ManageAccessContext.Provider value={setAccessTarget}>
+      <ManageAccessContext.Provider value={openAccess}>
       <SuggestionsContext.Provider value={suggestionsController}>
         {children}
       </SuggestionsContext.Provider>
@@ -1091,12 +1144,19 @@ export function TreeChrome({
       )}
       {accessTarget && (
         <ManageAccessDialog
-          key={accessTarget.relativePath}
+          key={`${accessTarget.relativePath}@${accessProposal?.branch ?? ''}`}
           entry={accessTarget}
+          proposal={accessProposal}
           // The dialog is keyed on the path, so pointing it at a parent remounts
-          // it against that folder — the whole retarget is this one setter.
-          onManageAncestor={setAccessTarget}
-          onClose={() => setAccessTarget(null)}
+          // it against that folder, on the same branch the grant was read on.
+          onManageAncestor={(ancestor) => {
+            setInheritedProposal(accessProposal);
+            setAccessTarget(ancestor);
+          }}
+          onClose={() => {
+            setInheritedProposal(undefined);
+            setAccessTarget(null);
+          }}
         />
       )}
     </>

@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
+import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
-import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
+import { reservedRootDirs } from './template-files.step.js';
+import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource } from './template-source.js';
 
 /**
  * The empty-remote seed builder the runner takes as `buildSeedTree`: the full
@@ -18,25 +20,55 @@ import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './t
  * `extraRootDirs` is validated eagerly, at composition time: a bad value
  * should fail at boot beside the rest of the wiring, not mid-seed of
  * somebody's knowledge base.
+ *
+ * A factory over {@link KbSeedTree} rather than the class itself, because the
+ * runner's port is a function: it asks for a directory to be filled and gets
+ * back what was generated, and knows nothing of templates or disks.
  */
 export function buildSeedTree(
+  disk: IFsProbe & ITreeWalker,
   templateDir: string,
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
 ): (dir: string) => Promise<string[]> {
-  const requiredDirs = reservedRootDirs(extraRootDirs);
-  return async (dir) => {
+  const seeder = new KbSeedTree(
+    disk,
+    new TemplateSource(disk, templateDir),
+    reservedRootDirs(extraRootDirs),
+    seedAdminEmails,
+  );
+  return (dir) => seeder.seed(dir);
+}
+
+/**
+ * Seeding a fresh knowledge base into an empty directory.
+ *
+ * The walker and the template are held, not passed: every step of a seed —
+ * the tree copy, one file's copy, the link check — reads the SAME template
+ * through the SAME disk, and threading both through each helper's signature
+ * only created places where a future caller could pass a different one.
+ */
+class KbSeedTree {
+  constructor(
+    private readonly disk: ITreeWalker & IFsProbe,
+    private readonly templates: TemplateSource,
+    private readonly requiredDirs: readonly string[],
+    private readonly seedAdminEmails: readonly string[],
+  ) {}
+
+  /** Fill `dir` with a complete knowledge base; resolve to what was GENERATED. */
+  async seed(dir: string): Promise<string[]> {
     const generated: string[] = [];
-    await copyTemplateTree(templateDir, dir);
+    await this.copyTemplateTree(dir);
     // Reserved roots the template does not carry. Without this the seed commit
     // would hold only what the template has, and a distribution's own roots
     // would appear a step later, when the first startup phase tops them up —
     // the same folders, arriving in a second commit for no reason. Keyed on
     // the DIRECTORY's existence: a template already carrying content under a
     // root never gets a pointless placeholder beside it.
-    for (const rootDir of requiredDirs) {
+    for (const rootDir of this.requiredDirs) {
       const abs = path.join(dir, rootDir);
-      const found = await lstatOrNull(abs);
+      const found = await this.disk.lstatOrNull(abs);
       if (found) {
         if (found.isDirectory()) continue;
         // Only a template shipping a FILE under a reserved name reaches this —
@@ -49,72 +81,90 @@ export function buildSeedTree(
     }
     // Generated, never templated — see roles-yaml.step.ts. The runner refuses
     // to seed an empty remote with no admins, so the list is non-empty here.
-    await fs.writeFile(path.join(dir, 'roles.yaml'), renderRolesYaml(seedAdminEmails), 'utf8');
+    await fs.writeFile(path.join(dir, 'roles.yaml'), renderRolesYaml(this.seedAdminEmails), 'utf8');
     generated.push('roles.yaml');
     return generated;
-  };
-}
-
-/** Copy the entire template tree into `dest` (roles.yaml isn't in it — it's generated). */
-async function copyTemplateTree(templateDir: string, dest: string): Promise<void> {
-  const packableToReal = new Map(
-    Object.entries(TEMPLATE_SOURCE_FALLBACKS).map(([real, packable]) => [packable, real]),
-  );
-  const walk = async (relDir: string): Promise<void> => {
-    const abs = path.join(templateDir, relDir);
-    const entries = await fs.readdir(abs, { withFileTypes: true });
-    for (const entry of entries) {
-      // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
-      // (this repo in a Docker build) must not seed its history into the KB.
-      if (entry.name === '.git') continue;
-      const rel = relDir ? path.join(relDir, entry.name) : entry.name;
-      if (entry.isDirectory()) {
-        await walk(rel);
-        continue;
-      }
-      // A packable spelling at the template root seeds under its REAL name
-      // — unless the template also carries the literal file (a
-      // distribution's own template), which wins and is copied by its own
-      // walk entry; copying the packable twin too would clobber it.
-      const realName = relDir === '' ? packableToReal.get(entry.name) : undefined;
-      if (realName !== undefined) {
-        if (!(await exists(path.join(templateDir, realName)))) {
-          await copyTemplateFile(templateDir, realName, dest);
-        }
-        continue;
-      }
-      await copyTemplateFile(templateDir, rel, dest);
-    }
-  };
-  await walk('');
-}
-
-/**
- * Copy one template file (by repo-relative path) into `dest`, creating
- * parents. Text files are RENDERED — the managed guide and the ignore file
- * name the three root folders, which a deployment may have renamed — and a
- * file without placeholders comes out byte-identical to its source.
- *
- * "Text" is decided by the BYTES, not the name: strict UTF-8 with no NUL.
- * A name-based rule mistook a hidden binary for text and re-encoded it;
- * anything that does not decode is copied byte for byte. Either way the
- * source's mode survives — a template script keeps its executable bit.
- */
-async function copyTemplateFile(templateDir: string, relPath: string, dest: string): Promise<void> {
-  const from = await templateSource(templateDir, relPath);
-  const to = path.join(dest, relPath);
-  await fs.mkdir(path.dirname(to), { recursive: true });
-  // A binary is spotted from its first bytes (a NUL turns up early in any
-  // real one) and streamed across without ever being read whole; only what
-  // may be text is read in full, and the full decode is still the judge.
-  const text = (await headHasNul(from)) ? null : asText(await fs.readFile(from));
-  if (text === null) {
-    await fs.copyFile(from, to);
-  } else {
-    await fs.writeFile(to, renderKbLayoutPlaceholders(text), 'utf8');
   }
-  await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
+
+  /** Copy the entire template tree into `dest` (roles.yaml isn't in it — it's generated). */
+  private async copyTemplateTree(dest: string): Promise<void> {
+    // A template that is not there is a broken build, not an empty seed.
+    const templateStat = await this.templates.rootStat();
+    if (templateStat === null || !templateStat.isDirectory()) {
+      throw new Error(`KB template "${this.templates.root}" is not a directory.`);
+    }
+    // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
+    // (this repo in a Docker build) must not seed its history into the KB.
+    // Every other entry is template content, dot-files included.
+    await this.disk.walk(this.templates.root, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+      {
+        onFile: (relDir, name) => this.seedFile(relDir, name, dest),
+        onOther: async (relDir, entry) => {
+          // A template may LINK to a file (a distribution's checkout, a Docker
+          // build's copy): its content is template content, read through the
+          // link and seeded under the link's own name like any file. Anything
+          // else — a link to a folder or to nothing, a socket — is a broken
+          // template, and the error says what was found.
+          const rel = relDir ? path.join(relDir, entry.name) : entry.name;
+          const target = await this.templates.statOf(rel);
+          if (target === null || !target.isFile()) {
+            const what = target === null ? 'nothing' : target.isDirectory() ? 'a directory' : 'a special file';
+            throw new Error(
+              `KB template entry "${rel}" ${entry.isSymbolicLink() ? `links to ${what}` : `is ${what}`} — a template holds regular files, or links to them.`,
+            );
+          }
+          await this.seedFile(relDir, entry.name, dest);
+        },
+      },
+    ]);
+  }
+
+  /** Seed one template file, by the name the walk saw it under. */
+  private async seedFile(relDir: string, name: string, dest: string): Promise<void> {
+    // A packable spelling at the template root seeds under its REAL name
+    // — unless the template also carries the literal file (a
+    // distribution's own template), which wins and is copied by its own
+    // walk entry; copying the packable twin too would clobber it.
+    const realName = relDir === '' ? PACKABLE_TO_REAL.get(name) : undefined;
+    if (realName !== undefined) {
+      if (!(await this.templates.carries(realName))) {
+        await this.copyTemplateFile(realName, dest);
+      }
+      return;
+    }
+    await this.copyTemplateFile(relDir ? path.join(relDir, name) : name, dest);
+  }
+
+  /**
+   * Copy one template file (by repo-relative path) into `dest`, creating
+   * parents. Text files are RENDERED — the managed guide and the ignore file
+   * name the three root folders, which a deployment may have renamed — and a
+   * file without placeholders comes out byte-identical to its source.
+   *
+   * "Text" is decided by the BYTES, not the name: strict UTF-8 with no NUL.
+   * A name-based rule mistook a hidden binary for text and re-encoded it;
+   * anything that does not decode is copied byte for byte. Either way the
+   * source's mode survives — a template script keeps its executable bit.
+   */
+  private async copyTemplateFile(relPath: string, dest: string): Promise<void> {
+    const from = await this.templates.pathOf(relPath);
+    const to = path.join(dest, relPath);
+    await fs.mkdir(path.dirname(to), { recursive: true });
+    // A binary is spotted from its first bytes (a NUL turns up early in any
+    // real one) and streamed across without ever being read whole; only what
+    // may be text is read in full, and the full decode is still the judge.
+    const text = (await headHasNul(from)) ? null : asText(await fs.readFile(from));
+    if (text === null) {
+      await fs.copyFile(from, to);
+    } else {
+      await fs.writeFile(to, renderKbLayoutPlaceholders(text), 'utf8');
+    }
+    await fs.chmod(to, (await fs.stat(from)).mode & 0o777);
+  }
 }
+
+/** The packable spelling a template may carry → the name it seeds under. */
+const PACKABLE_TO_REAL = new Map([...TEMPLATE_SOURCE_FALLBACKS].map(([real, packable]) => [packable, real]));
 
 /** Whether the first 8 KiB carry a NUL byte — the cheap half of "is this text". */
 async function headHasNul(file: string): Promise<boolean> {
@@ -133,24 +183,6 @@ function asText(bytes: Buffer): string | null {
   if (bytes.includes(0)) return null;
   try {
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** `lstat` without the throw — null when nothing is at `p`. */
-async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.lstat(p);
   } catch {
     return null;
   }

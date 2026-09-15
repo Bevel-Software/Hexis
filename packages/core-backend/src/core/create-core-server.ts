@@ -139,12 +139,9 @@ export async function createCoreServer(
   // page still can't read events on the user's behalf.
   //
   // `exposedHeaders` lets a BROWSER-based MCP client (e.g. MCP Inspector) read
-  // the Streamable-HTTP session header off the `initialize` response — custom
-  // response headers are hidden from browser JS unless exposed, so without this
-  // the client can't send `Mcp-Session-Id` back at all, and every follow-up
-  // 400s with "Bad Request: Mcp-Session-Id header is required" — the
-  // missing-header case, not the unknown-session one (that answers 404
-  // "Session not found"). `WWW-Authenticate` is
+  // custom response headers, which are hidden from browser JS unless exposed.
+  // The MCP endpoint is stateless and never sends `Mcp-Session-Id`, so only
+  // `Mcp-Protocol-Version` is exposed for it. `WWW-Authenticate` is
   // exposed so a browser client can read the 401 challenge and start the OAuth
   // discovery flow. (Native clients like Claude Code aren't subject to CORS.)
   app.use(
@@ -153,7 +150,7 @@ export async function createCoreServer(
       credentials: true,
       // `SYNC_RESPONSE_HEADER` is how the browser tells the sync endpoint's
       // own 503 from a reverse proxy's — see `kb-sync.routes.ts`.
-      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
+      exposedHeaders: ['Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
     }),
   );
   // Global JSON body parser. Some overlay routes carry a whole document dump
@@ -409,7 +406,7 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
+    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName, disk: core.disk },
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -465,6 +462,7 @@ export async function createCoreServer(
     core.kbDirName,
     core.creatorAccess,
     core.adminAccess,
+    core.disk,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -615,7 +613,8 @@ export async function createCoreServer(
   }));
 
   // What an Owner pastes into Claude's admin settings to register this
-  // deployment as a GitHub Enterprise Server — admins only.
+  // deployment as a GitHub Enterprise Server — admins only — plus whether it
+  // is registered, a boolean every signed-in person may read.
   app.use('/api', core.authMiddleware, createGitHubFacadeAdminRoutes({
     credentials: core.githubFacadeCredentials,
     isAdmin: (email) => core.adminAccess.isAdmin(email),

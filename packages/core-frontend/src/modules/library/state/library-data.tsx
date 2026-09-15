@@ -58,7 +58,16 @@ export interface LibraryItem {
   id: string;
   name: string;
   description: string;
+  /**
+   * The caller is named in the item's `owner:` grant, directly or through a
+   * role — the Owner pill and "Owned by me". Write access is not ownership.
+   */
   owned: boolean;
+  /**
+   * The caller may write the item — a skill's SKILL.md, a tool's `.tool`
+   * file. What the editor-side affordances go by, owner or not.
+   */
+  canWrite: boolean;
   status: AttentionStatus;
   /** Folder plugin from the KB path, or null when the item is in none. */
   plugin: string | null;
@@ -185,6 +194,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
+      canWrite: data.writableSkills.has(s.name),
       plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
@@ -212,6 +222,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
+      canWrite: false,
       plugin: pluginOfItem(s.path, undefined, pluginSummaries),
       shared: isSharedPath(s.path),
       path: s.path,
@@ -231,7 +242,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       // The browser tool surface exposes no human description for a `.tool`
       // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
-      owned: t.canWrite,
+      owned: data.ownedTools.has(t.slug),
+      canWrite: t.canWrite,
       plugin: pluginOfItem(t.path, undefined, pluginSummaries),
       path: t.path,
       status: toolStatus(t),
@@ -242,6 +254,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     data.pendingSkills,
     data.tools,
     data.ownedSkills,
+    data.writableSkills,
+    data.ownedTools,
     data.allowedToolsBySkill,
     pluginSummaries,
   ]);

@@ -5,6 +5,7 @@ import AdmZip from 'adm-zip';
 import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
@@ -44,7 +45,12 @@ export function createToolManualsAgentRoutes(
   toolManualService: IToolManualService,
   manualAuth: RequestHandler,
   resolveUserEmail: ResolveUserEmail,
-  archiveDeps?: { workspaceService: WorkspaceService; accessControl: IAccessControl; kbDirName: string },
+  archiveDeps?: {
+    workspaceService: WorkspaceService;
+    accessControl: IAccessControl;
+    kbDirName: string;
+    disk: ITreeWalker & IFsProbe;
+  },
 ): express.Router {
   const router = express.Router();
 
@@ -91,7 +97,7 @@ export function createToolManualsAgentRoutes(
       if (!folder || folder === '.' || folder === '..' || /[/\\]/.test(folder)) {
         return void res.status(422).json({ error: 'Not a plugin folder name' });
       }
-      const { workspaceService, accessControl, kbDirName } = archiveDeps;
+      const { workspaceService, accessControl, kbDirName, disk } = archiveDeps;
       const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
       await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
@@ -105,42 +111,32 @@ export function createToolManualsAgentRoutes(
       // guards, no read-time re-resolution — complexity that existed only to
       // support what the platform has no use for. Starting with the plugin
       // folder itself: a symlinked `Plugins/<folder>` is not a plugin.
-      // Only ENOENT is an absence; an EACCES/EIO answered with 404 would
-      // dress a real read problem up as a missing plugin (the same contract
-      // as the realpath/open probes below).
-      const folderStat = await fs.lstat(pluginDir).catch((err: NodeJS.ErrnoException) => {
-        if (err.code === 'ENOENT') return null;
-        throw err;
-      });
+      // Only absence is a 404; an EACCES/EIO answered with 404 would dress a
+      // real read problem up as a missing plugin (the same contract as the
+      // realpath/open probes below).
+      const folderStat = await disk.lstatOrNull(pluginDir);
       if (folderStat === null || !folderStat.isDirectory()) {
         return void res.status(404).json({ error: 'Not found' });
       }
       const rels: string[] = [];
-      const walk = async (dir: string, rel: string): Promise<void> => {
-        let entries;
-        try {
-          entries = await fs.readdir(dir, { withFileTypes: true });
-        } catch (err) {
-          // Only an absent directory is a non-event; anything else (EACCES,
-          // EIO) silently missing from the archive would hand the client an
-          // incomplete plugin stamped as success.
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-          throw err;
-        }
-        for (const e of entries) {
-          if (e.name === '.git') continue;
-          const childRel = rel ? `${rel}/${e.name}` : e.name;
-          // Dirent's isDirectory/isFile are both false for a symlink, so a
-          // link is never walked and never listed — but say so, once, because
-          // an author who committed one deserves to know it went nowhere.
-          if (e.isDirectory()) await walk(path.join(dir, e.name), childRel);
-          else if (e.isFile()) rels.push(childRel);
-          else if (e.isSymbolicLink()) {
+      // Only an absent folder is a non-event; anything else (EACCES, EIO)
+      // silently missing from the archive would hand the client an
+      // incomplete plugin stamped as success — so a hole is the error.
+      await disk.walk(pluginDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+        {
+          onFile(dir, name) {
+            rels.push(dir ? `${dir}/${name}` : name);
+          },
+          onOther(dir, e) {
+            // A link is never walked and never listed — but say so, once,
+            // because an author who committed one deserves to know it went
+            // nowhere.
+            if (!e.isSymbolicLink()) return;
+            const childRel = dir ? `${dir}/${e.name}` : e.name;
             console.warn(`[tool-manuals] archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
-          }
-        }
-      };
-      await walk(pluginDir, '');
+          },
+        },
+      ]);
       if (rels.length === 0) return void res.status(404).json({ error: 'Not found' });
       const verdicts = await accessControl.canReadBatch(
         wsId,
@@ -159,8 +155,8 @@ export function createToolManualsAgentRoutes(
       // verification is a moment old, and a plugin deleted since (a workspace
       // reset, a merged deletion) is an ABSENCE, the same 404 it would have
       // been a moment earlier, not an internal error.
-      const pluginRealBase = await fs.realpath(pluginDir).catch((err: NodeJS.ErrnoException) => {
-        if (err.code === 'ENOENT') return null;
+      const pluginRealBase = await fs.realpath(pluginDir).catch((err: unknown) => {
+        if (isAbsence(err)) return null;
         throw err;
       });
       if (pluginRealBase === null) return void res.status(404).json({ error: 'Not found' });
@@ -174,8 +170,8 @@ export function createToolManualsAgentRoutes(
         // link with the final component still a regular file. realpath
         // resolves every component, so demanding it equal the spelled path is
         // exactly "no component is a link": identity, not mere containment.
-        const realNow = await fs.realpath(abs).catch((err: NodeJS.ErrnoException) => {
-          if (err.code === 'ENOENT') return null; // deleted since the walk — an absence, not a failure
+        const realNow = await fs.realpath(abs).catch((err: unknown) => {
+          if (isAbsence(err)) return null; // deleted since the walk — an absence, not a failure
           throw err;
         });
         if (realNow === null || realNow !== path.join(pluginRealBase, ...rel.split('/'))) {
@@ -191,12 +187,12 @@ export function createToolManualsAgentRoutes(
         // O_NOFOLLOW makes a final-component symlink fail the open itself
         // where the platform defines it (Linux — production; Windows test
         // runs fall back to the realpath identity check above alone). Only an
-        // ENOENT is a skip; any other failure is a real read problem that
+        // absence is a skip; any other failure is a real read problem that
         // must surface as a 500, not ship as a silently partial archive.
         const handle = await fs
           .open(abs, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
           .catch((err: NodeJS.ErrnoException) => {
-            if (err.code === 'ENOENT') return null; // deleted since the walk — an absence
+            if (isAbsence(err)) return null; // deleted since the walk — an absence
             if (err.code === 'ELOOP') {
               // O_NOFOLLOW's spelling of "the final component is a symlink".
               console.warn(`[tool-manuals] archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);

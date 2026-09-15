@@ -7,7 +7,7 @@ import {
   PLUGIN_MCP_SCHEMA,
   pluginManifestName,
 } from '@bevel-software/platform-shared';
-import { walkFiles } from '../../../shared/fs-walk.js';
+import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
 import { judgeMcpServerEntry } from '../../tool-manuals/mcp-json-discovery.js';
 import type { SkillSummary } from '../../skills/skills.contract.js';
@@ -89,6 +89,8 @@ export interface MarketplaceOptions {
 }
 
 export interface CompileInput {
+  /** The walk that lists a skill folder's files. */
+  disk: ITreeWalker;
   /** Absolute path of the KB checkout (the folder holding `Plugins/`, `Skills/`, …). */
   kbRoot: string;
   /** The released catalog, UNFILTERED — `readable` does the filtering. */
@@ -118,7 +120,7 @@ const RESERVED_SLUGS = new Set([BUNDLE_NAME, SKILLS_PLUGIN_NAME]);
 const NEVER_SHIPPED = new Set(['access.md', '.bevelignore']);
 
 export async function compileMarketplace(input: CompileInput): Promise<VirtualTree> {
-  const { kbRoot, skills, plugins, membership, readable, options } = input;
+  const { disk, kbRoot, skills, plugins, membership, readable, options } = input;
   const files = new Map<string, Buffer>();
   const warnings: string[] = [];
   const put = (rel: string, content: string | Buffer) =>
@@ -245,7 +247,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       put(`${base}/.mcp.json`, `${JSON.stringify({ mcpServers: p.mcp }, null, 2)}\n`);
     }
     for (const s of p.skills) {
-      await copySkill(kbRoot, s, `${base}/skills/${s.name}`, put);
+      await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
     }
   }
 
@@ -256,7 +258,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     (s, other) =>
       warnings.push(`"${s.name}" at ${s.path} shares its name with ${other.path} — left out of skills/ and the bundle`),
   );
-  for (const s of flat) await copySkill(kbRoot, s, `skills/${s.name}`, put);
+  for (const s of flat) await copySkill(disk, kbRoot, s,`skills/${s.name}`, put);
 
   // 5. The one-install bundle: a plugin of its own that IS everything the
   //    caller may read — every skill once, plus the knowledge base's MCP
@@ -290,7 +292,7 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       put(`${base}/${PLUGIN_MCP_FILE}`, `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: kbMcp }, null, 2)}\n`);
       put(`${base}/.mcp.json`, `${JSON.stringify({ mcpServers: kbMcp }, null, 2)}\n`);
     }
-    for (const s of flat) await copySkill(kbRoot, s, `${base}/skills/${s.name}`, put);
+    for (const s of flat) await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
   }
 
   // 6. The two catalogues + a README naming the source. The bundle is listed
@@ -347,13 +349,14 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
 
 /** Copy a skill folder (minus what never ships) under `dest`. */
 async function copySkill(
+  disk: ITreeWalker,
   kbRoot: string,
   skill: SkillSummary,
   dest: string,
   put: (rel: string, content: Buffer) => void,
 ): Promise<void> {
   const abs = path.join(kbRoot, skill.path);
-  for (const rel of await walkFiles(abs, (name) => !NEVER_SHIPPED.has(name))) {
+  for (const rel of await disk.walkFiles(abs, (name) => !NEVER_SHIPPED.has(name))) {
     put(`${dest}/${rel}`, await fs.readFile(path.join(abs, rel)));
   }
 }

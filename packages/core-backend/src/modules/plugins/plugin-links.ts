@@ -8,7 +8,6 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import { canonicalRoleName, pluginPrincipalKey } from '../access-model/access-grammar.js';
 import type { PluginMembership } from './plugins.contract.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -64,8 +63,9 @@ export class PluginLinkIndex {
     private readonly skillService: ISkillService,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
+    /** Where plugins come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
-    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -50,7 +51,7 @@ describe('CreatorAccessService.planForCreate', () => {
     await fs.mkdir(path.join(repo, 'KnowledgeBase'), { recursive: true });
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
-    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB), KB);
+    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB, new NodeFs()), KB, new NodeFs());
   });
 
   afterEach(async () => {
@@ -163,7 +164,7 @@ describe('CreatorAccessService.planForCreate', () => {
 
   it('the seeded grant makes the new folder readable — including via the batched tree check', async () => {
     const ws = stubWorkspaceService(path.join(root, WS));
-    const access = new AccessControlService(ws, KB);
+    const access = new AccessControlService(ws, KB, new NodeFs());
     const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Mine`, 'dir');
     expect(plan?.kind).toBe('seed-access-md');
     if (plan?.kind !== 'seed-access-md') return;
@@ -179,7 +180,7 @@ describe('CreatorAccessService.planForCreate', () => {
 
   it('the frontmatter grant makes a loose file readable via the FULL check', async () => {
     const ws = stubWorkspaceService(path.join(root, WS));
-    const access = new AccessControlService(ws, KB);
+    const access = new AccessControlService(ws, KB, new NodeFs());
     const plan = await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/loose.md`, 'file');
     expect(plan?.kind).toBe('frontmatter');
     if (plan?.kind !== 'frontmatter') return;
@@ -200,7 +201,7 @@ describe('CreatorAccessService.grantInExtractedFile', () => {
     await fs.mkdir(path.join(repo, 'KnowledgeBase'), { recursive: true });
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
-    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB), KB);
+    svc = new CreatorAccessService(ws, new AccessControlService(ws, KB, new NodeFs()), KB, new NodeFs());
   });
 
   afterEach(async () => {

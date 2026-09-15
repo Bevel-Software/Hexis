@@ -4,8 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
-import { isAbsence } from '../../shared/fs-errors.js';
-import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
+import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -171,13 +170,13 @@ export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: str
  * even when the synced file is empty or malformed — falling back would
  * resurrect retired manual groups); otherwise `groups.yaml` → manual mode.
  *
- * `read` returns null for a genuinely-absent file and may THROW for any other
- * failure. Only ENOENT/ENOTDIR count as absent (the caller may also whitelist
- * them into null); every other read error — notably a non-absence error on
- * `synced-groups.yaml` — is treated as a BROKEN source: no groups, no
- * fallback to the manual file (falling back would resurrect retired groups),
- * and an `ok: false` health marker. Structural parse failures degrade the
- * same way; this function never throws.
+ * `read` returns null for a genuinely-absent file — ENOENT/ENOTDIR, the
+ * reader's judgement through the fs probe — and THROWS for any other failure.
+ * Every thrown error — notably one on `synced-groups.yaml` — is treated as a
+ * BROKEN source: no groups, no fallback to the manual file (falling back
+ * would resurrect retired groups), and an `ok: false` health marker.
+ * Structural parse failures degrade the same way; this function never throws
+ * (except to let an `AccessUnreadableError` through — see below).
  */
 export async function loadActiveGroups(
   read: (filename: string) => Promise<string | null>,
@@ -201,14 +200,10 @@ export async function loadActiveGroups(
     // subprocess. roles.yaml and access.md already fail the build closed on
     // the same error; groups cannot be the one input that does not.
     if (err instanceof AccessUnreadableError) throw err;
-    if (isAbsence(err)) {
-      syncedText = null;
-    } else {
-      // A non-absence read error on the SYNCED source must NOT fall back to
-      // groups.yaml — the synced file may exist and its manual predecessor is
-      // retired. Broken-groups instead.
-      return broken(SYNCED_GROUPS_YAML, err instanceof Error ? err.message : String(err));
-    }
+    // A read error on the SYNCED source must NOT fall back to groups.yaml —
+    // the synced file may exist and its manual predecessor is retired.
+    // Broken-groups instead.
+    return broken(SYNCED_GROUPS_YAML, err instanceof Error ? err.message : String(err));
   }
 
   const sourceFile = syncedText !== null ? SYNCED_GROUPS_YAML : GROUPS_YAML;
@@ -220,8 +215,7 @@ export async function loadActiveGroups(
       text = await read(GROUPS_YAML);
     } catch (err) {
       if (err instanceof AccessUnreadableError) throw err; // see above
-      if (isAbsence(err)) text = null;
-      else return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
+      return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
     }
   }
   if (text === null) return { groups: new Map(), sourceFile, warnings: [], health: { ok: true } };
@@ -301,7 +295,7 @@ function accessFileListener(
   repoDir: string,
   out: Map<string, AccessFile>,
   pluginDirs: Map<string, string>,
-): KbWalkListener {
+): WalkListener {
   return {
     async onFile(dir, name) {
       const rel = dir ? `${dir}/${name}` : name;
@@ -1028,6 +1022,7 @@ export class AccessControlService implements IAccessControl {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
     /**
      * Emails that count as Admin for the two hardcoded `write` rescues,
      * whatever `roles.yaml` says — in practice `ADMIN_EMAIL`. Optional so the
@@ -1645,8 +1640,7 @@ export class AccessControlService implements IAccessControl {
       try {
         return await fs.readFile(path.join(repoDir, filename), 'utf-8');
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        if (isAbsence(err)) return null;
         throw err;
       }
     });
@@ -1679,7 +1673,7 @@ export class AccessControlService implements IAccessControl {
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
     const pluginDirs = new Map<string, string>();
-    await walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
+    await this.disk.walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
     // folder's own access.md — a plugin being a folder with a manifest, at

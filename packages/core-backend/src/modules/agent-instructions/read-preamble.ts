@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { isAbsence, type IFsProbe } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { PREAMBLE_FILE } from './compose.js';
 
@@ -15,8 +16,9 @@ export type PreambleWorkspace = Pick<WorkspaceService, 'getOrCreateForBranch' | 
  * The raw content of `mcp-description.md` on the default branch, read with
  * PLATFORM privileges: the root is default-deny for reads, and the preamble is
  * a broadcast the admin writes for every connected agent, so it is never read
- * as the caller. `null` only for an ABSENT file (ENOENT); any other failure
- * throws, so a disk fault never masquerades as "no preamble". The workspace is
+ * as the caller. `null` only for an ABSENT file (the disk's own definition of
+ * absence); any other failure throws, so a disk fault never masquerades as
+ * "no preamble". The workspace is
  * created first when it does not exist yet, exactly as the plugin archive
  * route does.
  *
@@ -39,22 +41,23 @@ export type PreambleWorkspace = Pick<WorkspaceService, 'getOrCreateForBranch' | 
  * path is `<kbDirName>/mcp-description.md`, the same shape `SkillService` and
  * the archive route use.
  */
-export async function readAgentPreamble(workspace: PreambleWorkspace, kbDirName: string): Promise<string | null> {
+export async function readAgentPreamble(
+  workspace: PreambleWorkspace,
+  kbDirName: string,
+  disk: IFsProbe,
+): Promise<string | null> {
   await workspace.getOrCreateForBranch(DEFAULT_BRANCH);
   const wsDir = await workspace.getWorkspacePath(workspaceIdForBranch(DEFAULT_BRANCH));
   const abs = path.join(wsDir, kbDirName, PREAMBLE_FILE);
 
-  const found = await fs.lstat(abs).catch((err: NodeJS.ErrnoException) => {
-    if (err.code === 'ENOENT') return null;
-    throw err;
-  });
+  const found = await disk.lstatOrNull(abs);
   if (found === null) return null;
   if (!found.isFile()) throw notRegular(found.isSymbolicLink() ? 'symlink' : found.isDirectory() ? 'directory' : 'special file');
 
   const [realWorkspace, realFile] = await Promise.all([
     fs.realpath(wsDir),
-    fs.realpath(abs).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') return null; // deleted since the lstat: an absence, not a failure
+    fs.realpath(abs).catch((err: unknown) => {
+      if (isAbsence(err)) return null; // deleted since the lstat: an absence, not a failure
       throw err;
     }),
   ]);
@@ -64,7 +67,7 @@ export async function readAgentPreamble(workspace: PreambleWorkspace, kbDirName:
   const handle = await fs
     .open(abs, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0))
     .catch((err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') return null; // deleted since the lstat: an absence, not a failure
+      if (isAbsence(err)) return null; // deleted since the lstat: an absence, not a failure
       if (err.code === 'ELOOP') throw notRegular('symlink'); // O_NOFOLLOW's spelling of "the final component is a link"
       throw err;
     });

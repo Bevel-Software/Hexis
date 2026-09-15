@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const api = vi.hoisted(() => ({
@@ -16,6 +16,16 @@ vi.mock('../services/setup.api', async () => {
   );
   return { ...actual, ...api };
 });
+
+// The Marketplace section renders on first run too. Registration state is
+// read on mount; the credentials only once its drawer opens.
+const facade = vi.hoisted(() => ({
+  fetchGitHubFacade: vi.fn(),
+  rotateGitHubFacade: vi.fn(),
+  fetchMarketplaceRegistration: vi.fn(async () => false),
+  setMarketplaceRegistration: vi.fn(),
+}));
+vi.mock('../../settings/services/github-facade.api', () => facade);
 
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
@@ -126,6 +136,32 @@ describe('SetupScreen', () => {
       ),
     );
     await waitFor(() => expect(reload).toHaveBeenCalled());
+  });
+
+  /**
+   * The first-run host of the Marketplace section: marked optional, skippable,
+   * and never in the way — setup finishes without anyone touching it, and
+   * nothing in it is fetched or saved on the way.
+   */
+  it('offers the Marketplace section as optional, and finishes setup with it skipped', async () => {
+    facade.fetchGitHubFacade.mockClear();
+    facade.setMarketplaceRegistration.mockClear();
+    await renderScreen();
+    const section = await screen.findByTestId('marketplace-deployment-section');
+    expect(section).toHaveTextContent('Optional');
+    expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
+    expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    expect(screen.getByTestId('marketplace-deployment-section')).toHaveTextContent('Marketplace skipped');
+
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://example.com/kb.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+    expect(facade.fetchGitHubFacade).not.toHaveBeenCalled();
+    expect(facade.setMarketplaceRegistration).not.toHaveBeenCalled();
   });
 
   /**
@@ -344,6 +380,34 @@ describe('SetupScreen', () => {
 
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
     expect(api.testConnection).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The third outcome: the host lets the token read, but not push. That is not
+   * "connected" — every save anyone makes would fail — and not "rejected"
+   * either: the fix is a permission, and the screen has to say which.
+   */
+  it('shows a token that can read but not write as its own outcome, and will not save it', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: false,
+      outcome: 'read-only',
+      field: 'gitToken',
+      error:
+        'This token can read the repository but cannot write to it. Grant it write access: on GitHub, “Contents: Read and write” for this repository.',
+      branches: ['main'],
+      defaultBranch: 'main',
+      empty: false,
+    });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://github.com/acme/kb.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_readonly');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    expect(await screen.findByText(/Contents: Read and write/)).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+    expect(screen.getByText(/can read the repository but cannot write to it\. Grant write access/)).toBeInTheDocument();
+    expect(api.saveSettings).not.toHaveBeenCalled();
   });
 
   /** An empty repository is a supported starting point, not a failure. */
@@ -731,7 +795,9 @@ describe('SetupScreen', () => {
   /** Single sign-on is skippable, and the screen has to say so. */
   it('marks the optional section optional', async () => {
     await renderScreen();
-    expect(screen.getByText('Optional')).toBeInTheDocument();
+    // Scoped: the Marketplace section below the form is optional too.
+    const signIn = screen.getByRole('heading', { name: 'Single sign-on' }).closest('section')!;
+    expect(within(signIn).getByText('Optional')).toBeInTheDocument();
   });
 
   it('says so when a saved setting needs a restart', async () => {

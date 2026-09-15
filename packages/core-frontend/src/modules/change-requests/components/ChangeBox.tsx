@@ -14,7 +14,11 @@ export interface ChangeBoxProps {
   when: string;
   /** The caller wrote this one. */
   mine: boolean;
-  /** The caller decides this one (owns the skill). */
+  /**
+   * The caller decides this one: they can write the file. That is not
+   * ownership — a writer decides without being named in an `owner:` grant —
+   * so the box never tells them they own it.
+   */
   canDecide: boolean;
   /** The proposal diffed against the file as it stands NOW; null while loading. */
   diff: DiffLine[] | null;
@@ -193,7 +197,7 @@ export function ChangeBox({
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide ? 'You decide. You own this.' : `Waiting on ${owner ?? 'the owner'}`}
+                {canDecide ? 'You can decide this.' : `Waiting on ${owner ?? 'the owner'}`}
               </span>
             )}
             {/* What the server said, verbatim. The gate names the files and the

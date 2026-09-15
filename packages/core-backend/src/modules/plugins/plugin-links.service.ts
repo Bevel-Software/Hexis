@@ -12,6 +12,7 @@ import {
   type AuthUser,
 } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { AccessMutationService, accessMdPathForFolder } from '../access/access-mutation.service.js';
 import { pluginPrincipalKey } from '../access-model/access-grammar.js';
@@ -328,8 +329,7 @@ export class PluginLinksService {
       // folder deserves. Any other failure must surface: the caller writes the
       // manifest back, and a skeleton over a real one would erase its
       // version, description and MCP extension block.
-      const code = (err as { code?: unknown } | null)?.code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      if (!isAbsence(err)) throw err;
     }
     if (text !== null) {
       try {

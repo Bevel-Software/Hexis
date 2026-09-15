@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -76,7 +77,7 @@ beforeEach(async () => {
     }),
   } as unknown as IToolManualService;
 
-  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, KB);
+  svc = new McpServerEditService(workspaceService, commits, accessControl, toolManuals, KB, new NodeFs());
 });
 
 afterEach(async () => {

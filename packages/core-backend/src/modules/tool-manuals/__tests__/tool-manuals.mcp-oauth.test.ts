@@ -1,4 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
+
+/** The one disk, as production wires it: the service and its discovery read the same one. */
+const disk = new NodeFs();
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,7 +62,7 @@ describe('ToolManualService — MCP OAuth auto-discovery decoration', () => {
   });
 
   function svcWith(discovery: McpAuthDiscoveryPort) {
-    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR);
+    const svc = new ToolManualService(workspaceService, allowAll, KB_DIR, disk, new KbPluginSource(disk));
     svc.setMcpAuthDiscovery(discovery);
     return svc;
   }

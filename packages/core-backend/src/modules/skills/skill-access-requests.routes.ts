@@ -9,6 +9,7 @@ import {
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { spliceGrant } from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { JoinRequestsService } from '../plugins/join-requests.service.js';
@@ -113,8 +114,7 @@ export function createSkillAccessRequestRoutes(deps: {
       // Only a PROVEN absence reads as "no rules yet": any other failure must
       // not be turned into an empty file that a splice then overwrites.
       const current = await workspaceService.readFile(ws.id, accessPath).catch((err: unknown) => {
-        const code = (err as { code?: unknown } | null)?.code;
-        if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+        if (!isAbsence(err)) throw err;
         return '';
       });
       const spliced = spliceGrant(

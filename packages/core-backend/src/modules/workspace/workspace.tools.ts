@@ -21,7 +21,9 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo } from '../kb-fs/repo-path.js';
+import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
@@ -209,10 +211,10 @@ async function assertNotBinaryOverwrite(
     existing = asBytes(await fs.readFile(path));
   } catch (err) {
     // Only a MISSING file is a create (both raw Node errors and Mastra's
-    // FileNotFoundError carry code 'ENOENT'). Any other failure — permissions,
-    // I/O — means the existing content could not be inspected: propagate it
-    // rather than let the write destroy bytes the gate never saw.
-    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return undefined; // nothing there yet
+    // FileNotFoundError carry the disk's absence codes). Any other failure —
+    // permissions, I/O — means the existing content could not be inspected:
+    // propagate it rather than let the write destroy bytes the gate never saw.
+    if (isAbsence(err)) return undefined; // nothing there yet
     throw err;
   }
   const refusal = reader.editRefusalForExisting(existing, path);
@@ -301,12 +303,12 @@ async function searchRootKind(
   try {
     return (await fs.stat(path)).type === 'directory' ? 'directory' : 'file';
   } catch (err) {
-    // "Nothing there" is absence: plain ENOENT, and ENOTDIR for a path whose
-    // parent is an existing FILE (`notes.md/deeper`) — nothing can live there
-    // either, so it earns the same honest 404 rather than a raw failure.
-    // (Mastra's FileNotFoundError carries these codes, as do raw Node errors.)
-    const code = (err as { code?: unknown } | null)?.code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+    // "Nothing there" is the disk's own definition of absence: plain ENOENT,
+    // and ENOTDIR for a path whose parent is an existing FILE
+    // (`notes.md/deeper`) — nothing can live there either, so it earns the
+    // same honest 404 rather than a raw failure. (Mastra's
+    // FileNotFoundError carries these codes, as do raw Node errors.)
+    if (isAbsence(err)) return 'missing';
     // Any OTHER stat failure — permissions, I/O, a symlink loop — is not
     // absence and is not this helper's to report. Calling it a file sends the
     // path down the ordinary single-file route: the gate answers 403 if the
@@ -764,7 +766,7 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
-      await assertNotBinaryOverwrite(readers, a.path as string, fs);
+      await assertNotBinaryOverwrite(readers,a.path as string, fs);
       await fs.writeFile(a.path as string, a.content as string);
       return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8') };
     },
@@ -820,7 +822,7 @@ export function registerWorkspaceTools(
         writeFiles(writes: { path: string; content: string }[], summary: string): Promise<void>;
         readFile(p: string): Promise<string | Buffer>;
       };
-      for (const f of files) await assertNotBinaryOverwrite(readers, f.path, fs);
+      for (const f of files) await assertNotBinaryOverwrite(readers,f.path, fs);
       await fs.writeFiles(
         files.map((f) => ({ path: f.path, content: f.content })),
         `Write ${files.length} file(s)`,
@@ -863,7 +865,7 @@ export function registerWorkspaceTools(
       const newStr = a.new_string as string;
       // The overwrite gate already read the file when its reader asked the
       // binary question — reuse those bytes instead of reading twice.
-      const existing = await assertNotBinaryOverwrite(readers, path, fs);
+      const existing = await assertNotBinaryOverwrite(readers,path, fs);
       const content = asText(existing ?? (await fs.readFile(path)));
       const count = oldStr ? content.split(oldStr).length - 1 : 0;
       if (count === 0) throw new ToolError('old_string not found in the file.', 400);
@@ -1052,6 +1054,14 @@ export function registerWorkspaceTools(
           // An entry that would land beside the repository is skipped with the
           // corrected-path reason, like any other refused entry.
           assertInsideRepo(wsRelPath, kbDirName);
+          // Extraction writes straight to disk, past the filesystem's roles.yaml
+          // gate — so an archive may not carry one at all.
+          if (isRolesYamlPath(wsRelPath, kbDirName)) {
+            throw new ToolError(
+              'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
+              422,
+            );
+          }
           writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
           return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
         },

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isPersonalPluginDir, normalizeSkillRoot, pluginManifestName } from '@bevel-software/platform-shared';
-import { isAbsence } from '../../../../shared/fs-errors.js';
+import { isAbsence } from '../../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from '../plugin-source.js';
 import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 

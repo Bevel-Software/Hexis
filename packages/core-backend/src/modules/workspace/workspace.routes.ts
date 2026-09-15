@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { IGNORE_FILENAME } from './bevel-ignore.js';
+import { IGNORE_FILENAME, isAbsence, type ITreeWalker } from '../../shared/fs.contract.js';
+import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
@@ -14,7 +15,8 @@ import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../acces
 import type { ICreatorAccess } from '../access-model/creator.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -63,6 +65,7 @@ export function createWorkspaceRoutes(
   kbDirName: string,
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
+  disk: ITreeWalker,
 ): express.Router {
   const router = express.Router();
 
@@ -256,10 +259,6 @@ export function createWorkspaceRoutes(
     const status = (err as { status?: number } | null)?.status;
     if (typeof status === 'number') {
       res.status(status).json({ error: msg });
-      return;
-    }
-    if (msg === 'Path traversal detected') {
-      res.status(403).json({ error: msg });
       return;
     }
     if (msg.startsWith('Invalid path') || msg.startsWith('Only .zip')) {
@@ -662,9 +661,10 @@ export function createWorkspaceRoutes(
       res.setHeader('Cache-Control', 'private, no-cache');
       res.send(buffer);
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      // A traversal is the caller's 403; every other read failure here is the
+      // route's honest 404 (the image either is not there or cannot be shown).
+      if (error instanceof PathTraversalError) {
+        sendError(res, error);
         return;
       }
       res.status(404).json({ error: 'File not found' });
@@ -729,11 +729,11 @@ export function createWorkspaceRoutes(
         res.status(413).json({ error: error.message });
         return;
       }
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      if (msg === 'Path traversal detected') {
-        res.status(403).json({ error: msg });
+      if (error instanceof PathTraversalError) {
+        sendError(res, error);
         return;
       }
+      const msg = error instanceof Error ? error.message : 'Unknown error';
       if (msg === 'Not a directory') {
         res.status(400).json({ error: msg });
         return;
@@ -768,14 +768,14 @@ export function createWorkspaceRoutes(
       // than the template has no such file yet), so dressing an unreadable
       // file up as a missing one would offer an empty editor over content the
       // save then overwrites.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
+      if (isAbsence(error) || (error as NodeJS.ErrnoException).code === 'EISDIR') {
         res.status(404).json({ error: 'File not found' });
         return;
       }
       // Traversal stays a 403 and a malformed workspace id its domain status:
-      // both carry messages written to be read by the caller.
-      if (error instanceof WorkflowDomainError || (error as Error)?.message === 'Path traversal detected') {
+      // both carry messages written to be read by the caller. (A traversal IS
+      // a domain error now, so the one check covers both.)
+      if (error instanceof WorkflowDomainError) {
         sendError(res, error);
         return;
       }
@@ -821,12 +821,7 @@ export function createWorkspaceRoutes(
       // ourselves and then `fs.stat` / `fs.rm` / `enumerateFilesUnder`
       // it. Without this guard, a `../escape` `filePath` would let the
       // dir-delete branch operate on directories outside the workspace.
-      const workspaceRoot = path.resolve(workspaceDir);
-      if (absolute !== workspaceRoot && !absolute.startsWith(workspaceRoot + path.sep)) {
-        const err: Error & { status?: number } = new Error('Path traversal detected');
-        err.status = 403;
-        throw err;
-      }
+      assertWithinDirectory(absolute, workspaceDir);
       let stat: { isDirectory: () => boolean } | null = null;
       try {
         stat = await fs.stat(absolute);
@@ -834,7 +829,7 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        const filesInDir = await enumerateFilesUnder(absolute, workspaceDir);
+        const filesInDir = await enumerateFilesUnder(disk, absolute, workspaceDir);
         const branch = branchForWorkspaceId(id);
         for (const relFile of filesInDir) {
           await withLock(
@@ -1215,30 +1210,37 @@ export function createWorkspaceRoutes(
  * deletion lands as its own one-file change.
  *
  * Skips `.git` to avoid trying to commit the internal git index when a
- * caller targets it accidentally. Returns paths in stable lexical order
- * for predictable commit sequencing.
+ * caller targets it accidentally. Returns paths in the walk's order — stable
+ * and lexical — for predictable commit sequencing. A link counts as a file:
+ * it is deleted as one, never followed. A folder that cannot be listed is
+ * the delete's error: an enumeration with a hole in it would delete what it
+ * saw and report success over what it did not.
  */
-async function enumerateFilesUnder(absoluteDir: string, workspaceDir: string): Promise<string[]> {
+async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, workspaceDir: string): Promise<string[]> {
   const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (entry.name === '.git' && entry.isDirectory()) continue;
-      const child = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(child);
-      } else {
-        out.push(path.relative(workspaceDir, child).replace(/\\/g, '/'));
-      }
-    }
+  const relOf = (dir: string, name: string) =>
+    path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
+  try {
+    await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory(), unreadable: 'throw' }, [
+      {
+        onFile: (dir, name) => void out.push(relOf(dir, name)),
+        onOther: (dir, e) => void out.push(relOf(dir, e.name)),
+      },
+    ]);
+  } catch (err) {
+    // The operator's line carries the errno and the path; the caller's answer
+    // names only the folder they asked about — an OS message would leak the
+    // server's spelling of the workspace, and would not help them anyway.
+    // Both halves of the log line are user- or disk-controlled text, so both
+    // go through `printable`: a folder name or an OS message carrying a
+    // control character must not steer the terminal or forge a log line.
+    const folder = path.relative(workspaceDir, absoluteDir).replace(/\\/g, '/');
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[workspace] could not list every file under ${printable(folder)} for a delete: ${printable(reason)}`);
+    throw Object.assign(new Error(`Could not list every file under "${folder}" — nothing was deleted. Try again, or ask an admin.`), {
+      status: 500,
+    });
   }
-  await walk(absoluteDir);
   return out;
 }
 

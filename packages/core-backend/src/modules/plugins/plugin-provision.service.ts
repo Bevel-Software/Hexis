@@ -34,9 +34,8 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isAbsence } from '../../shared/fs-errors.js';
+import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { Discovery, PluginSource } from './discovery/plugin-source.js';
-import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 import {
   DEFAULT_BRANCH,
@@ -77,13 +76,13 @@ export interface ProvisionCommitDriver {
  * first is a 404 to a caller, the second an outage an operator must see.
  */
 async function listDirOrIncomplete(
+  disk: IFsProbe,
   dir: string,
   repoRel: string,
 ): Promise<Array<{ name: string; isDirectory(): boolean }> | null> {
   try {
-    return await fs.readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (isAbsence(err)) return null;
+    return await disk.listDir(dir);
+  } catch {
     // The same refusal a hole in discovery gets: this listing is one more
     // read the operation needed and could not have.
     throw incompleteDiscovery([repoRel]);
@@ -144,9 +143,10 @@ export class PluginProvisionService {
     private readonly commits: ProvisionCommitDriver,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
-    private readonly events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void },
+    private readonly events: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void } | undefined,
     /** Which names are TAKEN is discovery's answer — the same one every catalog gets. */
-    private readonly source: PluginSource = new KbPluginSource(),
+    private readonly source: PluginSource,
+    private readonly disk: IFsProbe,
   ) {}
 
   /**
@@ -411,7 +411,7 @@ export class PluginProvisionService {
     let dir = root;
     let rel = PLUGINS_DIR;
     for (const segment of segments) {
-      const entries = await listDirOrIncomplete(dir, rel);
+      const entries = await listDirOrIncomplete(this.disk, dir, rel);
       if (!entries?.some((e) => e.isDirectory() && e.name === segment)) return false;
       dir = path.join(dir, segment);
       rel = `${rel}/${segment}`;
@@ -428,7 +428,7 @@ export class PluginProvisionService {
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     const rel = parent ? `${PLUGINS_DIR}/${parent}` : PLUGINS_DIR;
     // No Plugins/ root yet — nothing can collide.
-    const children = await listDirOrIncomplete(path.join(wsDir, this.kbDirName, rel), rel);
+    const children = await listDirOrIncomplete(this.disk, path.join(wsDir, this.kbDirName, rel), rel);
     if (!children) return null;
     const lower = name.toLowerCase();
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;

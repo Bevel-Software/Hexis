@@ -1,4 +1,4 @@
-import type { KbWalkListener } from '../../../shared/kb-walk.js';
+import type { WalkListener } from '../../../shared/fs.contract.js';
 
 /**
  * Plugin DISCOVERY as an interface — the one seam between "what a plugin is
@@ -104,5 +104,5 @@ export interface PluginSource {
    * one set of holes. Optional: a source that cannot share its walk is
    * discovered on its own and the caller walks separately.
    */
-  walkWith?(kbRoot: string, listeners: readonly KbWalkListener[]): Promise<PluginSourceWalk>;
+  walkWith?(kbRoot: string, listeners: readonly WalkListener[]): Promise<PluginSourceWalk>;
 }

@@ -486,6 +486,54 @@ describe('the GitHub facade', () => {
     }
   });
 
+  /**
+   * The disclosure boundary. Whether the deployment is registered is what
+   * every signed-in person needs, so the External agent access page can show
+   * them the tutorial or the notice; the credentials stay admin-only exactly
+   * as before, and the boolean endpoint carries nothing else.
+   */
+  it('tells any signed-in person whether it is registered — a boolean only — and keeps the credentials and the switch admin-only', async () => {
+    const read = async (base: string, who?: string) =>
+      fetch(`${base}/api/github-facade/registration`, { headers: who ? { 'x-test-user': who } : {} });
+
+    // Unregistered to start with, for a non-admin as much as an admin.
+    const fresh = await read(a.base, 'bob');
+    expect(fresh.status).toBe(200);
+    expect(await fresh.json()).toEqual({ registered: false });
+    expect((await read(a.base)).status).toBe(401);
+
+    // A non-admin can neither flip it nor reach the credentials.
+    const put = (base: string, who: string, body: unknown) =>
+      fetch(`${base}/api/admin/github-facade/registration`, {
+        method: 'PUT',
+        headers: { 'x-test-user': who, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await put(a.base, 'bob', { registered: true })).status).toBe(403);
+    expect((await fetch(`${a.base}/api/admin/github-facade`, { headers: { 'x-test-user': 'bob' } })).status).toBe(403);
+    expect(await (await read(a.base, 'bob')).json()).toEqual({ registered: false });
+
+    // An admin marks it on one replica; everyone reads it on the other.
+    expect((await put(a.base, 'alice', { registered: 'yes' })).status).toBe(400);
+    const marked = await put(a.base, 'alice', { registered: true });
+    expect(marked.status).toBe(200);
+    expect(await marked.json()).toEqual({ registered: true });
+    const seen = await read(b.base, 'bob');
+    const raw = await seen.text();
+    expect(JSON.parse(raw)).toEqual({ registered: true });
+    // Not one credential value in what a non-admin was sent.
+    const creds = await a.credentials.ensure();
+    for (const secret of [creds.appId, creds.clientId, creds.clientSecret, creds.webhookSecret, creds.privateKeyPem]) {
+      expect(raw).not.toContain(secret);
+    }
+
+    // A rotation does not unregister it; an admin clearing it does.
+    await fetch(`${b.base}/api/admin/github-facade/rotate`, { method: 'POST', headers: { 'x-test-user': 'alice' } });
+    expect(await (await read(a.base, 'bob')).json()).toEqual({ registered: true });
+    await put(b.base, 'alice', { registered: false });
+    expect(await (await read(a.base, 'bob')).json()).toEqual({ registered: false });
+  });
+
   it('hands an admin the registration fields uncached, and a rotation on one replica is what the other checks', async () => {
     const forbidden = await fetch(`${a.base}/api/admin/github-facade`, { headers: { 'x-test-user': 'bob' } });
     expect(forbidden.status).toBe(403);

@@ -133,6 +133,8 @@ const CATALOG: LibraryData = {
   pendingSkills: [],
   tools: [connectedTool()],
   ownedSkills: new Set(['outreach']),
+  writableSkills: new Set(['outreach']),
+  ownedTools: new Set(),
   allowedToolsBySkill: new Map(),
   crs: [],
   myCrNumbers: new Set<number>(),

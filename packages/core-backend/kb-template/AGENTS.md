@@ -221,6 +221,41 @@ Access to any path — reading it as much as writing it — is governed by
 Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
 when access is resolved.
 
+### Roles are pre-set — a "new role" is usually a group
+
+**What a role is.** A role in `roles.yaml` is an app role: a capability the
+platform defines and acts on (`Admin` is one), listed with the people who hold
+it. The set of roles is pre-set by the platform. A role is not a way to name a
+team.
+
+**Agents never create roles.** Add people to a role that already exists, or
+remove them, and nothing more: never add a role name to `roles.yaml`, and never
+rename one — a rename is a delete plus a create. Such a write is refused with a
+422 that names the role and says: app roles are pre-set — add people to
+existing roles, and use a GROUP for a task- or team-scoped set of people.
+Relay that refusal to your user as it stands; do not look for another way to
+write the file.
+
+**Is it really a group?** When someone asks for a "new role", it almost always
+is. It is a group when any of these hold:
+
+- the name says who the people are — a team, a project, a customer, a
+  committee — rather than a capability the platform already has;
+- it would change or disappear when the project ends or the team reshuffles;
+- its purpose is to give those people access to some folders or files.
+
+A request that matches a role that already exists is membership, not a new
+role.
+
+**What to do instead.**
+
+1. If an existing role already carries the capability, add the people to it.
+2. Otherwise make it a group: add or extend the group in `groups.yaml` (or
+   point your user at the app's Groups page), then grant the group in the
+   `access.md` of the folders it should reach.
+3. If your user still needs a role the platform does not have, that is not an
+   edit you can make — say so, and leave the decision to an admin.
+
 ### Direct writes vs change requests
 
 File-level write access decides how a change lands on the default branch:

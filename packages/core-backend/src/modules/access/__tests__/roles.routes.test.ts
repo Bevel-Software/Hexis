@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { IAccessControl } from '../access-control.interface.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -58,6 +59,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
   const realAccess = new AccessControlService(
     { getWorkspacePath: async () => workspaceDir, readFile: async () => ROLES } as unknown as WorkspaceService,
     KB,
+    new NodeFs(),
   );
   const accessControl = {
     // Admin gate: the route's assertCanMutate calls canWrite('roles.yaml').
