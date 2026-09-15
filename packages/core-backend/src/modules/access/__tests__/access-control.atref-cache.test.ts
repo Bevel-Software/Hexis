@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -133,7 +134,7 @@ describe('AccessControlService — at-ref model cache', () => {
         await git(repo, 'fetch', '-q', 'origin');
       },
     } as unknown as WorkspaceService;
-    svc = new AccessControlService(stub, PROCESS_MAP_DIR);
+    svc = new AccessControlService(stub, PROCESS_MAP_DIR, new NodeFs());
     spawnLog.length = 0;
     injected.failNext = null;
   });

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import type { TreeWalkOptions, WalkListener, WalkResult } from '../../../shared/fs.contract.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -12,23 +14,24 @@ import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { PluginRenameError, PluginRenameService, renamePluginPrincipalInText } from '../plugin-rename.service.js';
 
 // The one walk of the checkout, with a switch that makes it report a hole —
-// the way a folder it cannot list would — to every listener on it.
-const walkMock = vi.hoisted(() => ({ holeInTheWalk: false }));
-vi.mock('../../../shared/kb-walk.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../shared/kb-walk.js')>();
-  return {
-    ...actual,
-    walkKb: async (root: string, listeners: readonly import('../../../shared/kb-walk.js').KbWalkListener[]) => {
-      const result = await actual.walkKb(root, listeners);
-      if (walkMock.holeInTheWalk) {
-        const err = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
-        for (const l of listeners) await l.onHole?.('KnowledgeBase/Notes', err);
-        result.holes.push('KnowledgeBase/Notes');
-      }
-      return result;
-    },
-  };
-});
+// the way a folder it cannot list would — to every listener on it. The
+// walk is injected, so the switch is a disk that lies, not a module mock.
+const walkMock = { holeInTheWalk: false };
+class HoledFs extends NodeFs {
+  override async walkKb(
+    root: string,
+    listeners: readonly WalkListener[],
+    options?: Omit<TreeWalkOptions, 'skip'>,
+  ): Promise<WalkResult> {
+    const result = await super.walkKb(root, listeners, options);
+    if (walkMock.holeInTheWalk) {
+      const err = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      for (const l of listeners) await l.onHole?.('KnowledgeBase/Notes', err);
+      result.holes.push('KnowledgeBase/Notes');
+    }
+    return result;
+  }
+}
 
 /**
  * Renaming over a real tree: the real resolver decides who may rename and
@@ -110,8 +113,9 @@ describe('PluginRenameService', () => {
     await write('Skills/Eng/deploy/access.md', DEPLOY_RULES);
     await write('Skills/Eng/deploy/SKILL.md', '---\ndescription: Ship it.\n---\n');
 
-    access = new AccessControlService(workspaceService, KB_DIR);
-    svc = new PluginRenameService(workspaceService, driver, access, new KbPluginSource(), KB_DIR, undefined, () => {
+    access = new AccessControlService(workspaceService, KB_DIR, new NodeFs());
+    const disk = new HoledFs();
+    svc = new PluginRenameService(workspaceService, driver, access, new KbPluginSource(disk), disk, KB_DIR, undefined, () => {
       invalidated += 1;
     });
   });
@@ -120,7 +124,7 @@ describe('PluginRenameService', () => {
   it('refuses to claim a name against a listing with a hole in it — an unreadable folder may hold that very plugin', async () => {
     // Discovery as the walker reports it when a folder exists but could not
     // be read: the plugins it did see, plus the hole.
-    const real = new KbPluginSource();
+    const real = new KbPluginSource(new NodeFs());
     const holed = {
       dialect: 'kb',
       discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
@@ -130,6 +134,7 @@ describe('PluginRenameService', () => {
       { commitChanges: async () => { throw new Error('must not commit'); } },
       access,
       holed,
+      new NodeFs(),
       KB_DIR,
     );
     await expect(svcOverHole.rename(manager, 'gtm', { name: 'go-to-market' })).rejects.toMatchObject({
@@ -150,7 +155,7 @@ describe('PluginRenameService', () => {
   });
 
   it('tells a NON-manager nothing about the tree — a holed discovery is still just "unknown plugin" to them', async () => {
-    const real = new KbPluginSource();
+    const real = new KbPluginSource(new NodeFs());
     const holed = {
       dialect: 'kb',
       discover: async (root: string) => ({ ...(await real.discover(root)), unreadable: ['Plugins/Hidden'] }),
@@ -160,6 +165,7 @@ describe('PluginRenameService', () => {
       { commitChanges: async () => { throw new Error('must not commit'); } },
       access,
       holed,
+      new NodeFs(),
       KB_DIR,
     );
     const refusal = await svcOverHole.rename(member, 'gtm', { name: 'go-to-market' }).catch((e: unknown) => e);

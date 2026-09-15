@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -78,14 +80,25 @@ describe('compileMarketplace', () => {
     await write('Skills/Sales/access.md', '---\n---\nread:\n  - everyone\n');
     await write('Skills/Sales/pitch/SKILL.md', '---\ndescription: Pitch.\n---\n');
 
-    const access = new AccessControlService(workspaceService, KB_DIR);
-    const skills = new SkillService(workspaceService, access, KB_DIR);
-    const links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR);
-    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, {
-      name: 'acme-hexis',
-      owner: 'Acme',
-      knowledgeBaseMcp: { name: 'hexis', url: 'https://kb.acme.com/api/mcp' },
-    });
+    const disk = new NodeFs();
+    const source = new KbPluginSource(disk);
+    const access = new AccessControlService(workspaceService, KB_DIR, disk);
+    const skills = new SkillService(workspaceService, access, KB_DIR, disk);
+    const links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
+    compiler = new MarketplaceCompilerService(
+      workspaceService,
+      access,
+      skills,
+      links,
+      KB_DIR,
+      {
+        name: 'acme-hexis',
+        owner: 'Acme',
+        knowledgeBaseMcp: { name: 'hexis', url: 'https://kb.acme.com/api/mcp' },
+      },
+      source,
+      disk,
+    );
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 

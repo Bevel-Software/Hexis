@@ -6,9 +6,8 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { extractFrontmatter, resolveDeclaredId, dedupeById } from '../../shared/frontmatter-id.js';
-import { walkKb, walkTree } from '../../shared/kb-walk.js';
+import type { IgnoreRules, ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
-import type { BevelIgnoreStack } from '../../shared/bevel-ignore.js';
 import type {
   ISkillService,
   GetSkillResult,
@@ -37,6 +36,7 @@ export class SkillService implements ISkillService {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
     now: () => number = Date.now,
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
@@ -141,8 +141,9 @@ export class SkillService implements ISkillService {
     const out: ParsedSkill[] = [];
     const isSkillFolder = (entries: readonly { name: string; isFile(): boolean }[]) =>
       entries.some((e) => e.isFile() && e.name === 'SKILL.md');
+    const disk = this.disk;
     const walkRoot = async (rootRel: string): Promise<void> => {
-      await walkTree(
+      await disk.walk(
         path.join(kbRoot, rootRel),
         {
           skip: (e) => e.isDirectory() && e.name.startsWith('.'),
@@ -184,7 +185,7 @@ export class SkillService implements ISkillService {
                 },
                 body: fm.body,
                 allowedTools: fm.allowedTools,
-                files: await listBundledFiles(dir, relFolder, ignore),
+                files: await listBundledFiles(disk, dir, relFolder, ignore),
               });
             },
           },
@@ -304,9 +305,9 @@ export function parseSkillFrontmatter(raw: string): {
  * hides an asset from the listing, and therefore (see `getSkill`) from
  * being served.
  */
-async function listBundledFiles(dir: string, relFolder: string, rules: BevelIgnoreStack): Promise<string[]> {
+async function listBundledFiles(disk: ITreeWalker, dir: string, relFolder: string, rules: IgnoreRules): Promise<string[]> {
   const rels: string[] = [];
-  await walkKb(
+  await disk.walkKb(
     dir,
     [
       {

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
@@ -98,7 +99,7 @@ describe('access routes on a proposal branch (real git)', () => {
       },
     } as unknown as WorkspaceService;
 
-    access = new AccessControlService(workspaceService, KB);
+    access = new AccessControlService(workspaceService, KB, new NodeFs());
 
     const authService = {
       getUserById: async (id: string) => Object.values(USERS).find((u) => u.id === id) ?? null,

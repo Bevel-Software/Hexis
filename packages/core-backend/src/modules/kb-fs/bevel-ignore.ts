@@ -1,13 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
+import { IGNORE_FILENAME, type IgnoreRules } from '../../shared/fs.contract.js';
 import { isAbsence } from './fs-errors.js';
-
-/**
- * The ignore file's own name. Exported because the file-tree filter hides it
- * from non-admins, and both places must agree on the spelling.
- */
-export const IGNORE_FILENAME = '.bevelignore';
 
 /** One .bevelignore file's rules, scoped to the directory it lives in. */
 interface IgnoreLayer {
@@ -24,12 +19,12 @@ interface IgnoreLayer {
  * Deeper files combine with — and can override — rules from shallower files,
  * mirroring how git layers `.gitignore` files.
  *
- * A reader honours the files by walking with `ignore: true` (see
- * `walkTree`); the walk layers them on the way down. The stack is used
- * directly only to judge a single path, or to hand a walk the rules in force
- * above its root.
+ * The one implementation of {@link IgnoreRules}. A reader honours the files
+ * by walking with `ignore: true` (see `ITreeWalker.walk`); the walk layers
+ * them on the way down. The stack is used directly only to judge a single
+ * path, or to hand a walk the rules in force above its root.
  */
-export class BevelIgnoreStack {
+export class BevelIgnoreStack implements IgnoreRules {
   private constructor(private readonly layers: readonly IgnoreLayer[]) {}
 
   static empty(): BevelIgnoreStack {

@@ -12,7 +12,7 @@ import {
   type Verb,
 } from '../../../access-model/access-grammar.js';
 import { spliceGrant } from '../../../access-model/access-splice.js';
-import { isAbsence } from '../../../../shared/fs-errors.js';
+import type { IFsProbe } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -41,23 +41,20 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 export class PersonalSpacesStep implements OnServerStart {
   readonly name = 'personal-spaces';
 
+  constructor(private readonly disk: IFsProbe) {}
+
   async run(ctx: ServerStartContext): Promise<StepResult> {
     for (const branch of await ctx.allBranches()) {
-      await closePersonalSpaces(branch);
+      await closePersonalSpaces(branch, this.disk);
     }
     return { outcome: 'ok' };
   }
 }
 
-async function closePersonalSpaces(branch: KbBranch): Promise<void> {
+async function closePersonalSpaces(branch: KbBranch, disk: IFsProbe): Promise<void> {
   const repoDir = await branch.repoDir();
-  let entries: import('node:fs').Dirent[];
-  try {
-    entries = await fs.readdir(path.join(repoDir, PLUGINS_DIR), { withFileTypes: true });
-  } catch (err) {
-    if (isAbsence(err)) return;
-    throw err;
-  }
+  const entries = await disk.listDir(path.join(repoDir, PLUGINS_DIR));
+  if (entries === null) return;
   const closed: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || !isPersonalPluginFolder(entry.name)) continue;
@@ -66,7 +63,7 @@ async function closePersonalSpaces(branch: KbBranch): Promise<void> {
     try {
       text = await fs.readFile(path.join(repoDir, rel), 'utf8');
     } catch (err) {
-      if (isAbsence(err)) continue; // a folder with no rules is not a provisioned space
+      if (disk.isAbsence(err)) continue; // a folder with no rules is not a provisioned space
       throw err;
     }
     const next = closePersonalSpaceRules(text, rel);

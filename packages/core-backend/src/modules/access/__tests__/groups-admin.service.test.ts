@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -106,7 +107,7 @@ describe('GroupsAdminService', () => {
     service = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -301,7 +302,7 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -347,7 +348,7 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -386,7 +387,7 @@ describe('GroupsAdminService', () => {
     const svc = new GroupsAdminService(
       workspace,
       workflow.svc,
-      new AccessControlService(workspace as never, KB),
+      new AccessControlService(workspace as never, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
     );
@@ -434,7 +435,7 @@ describe('groups roster referencedBy — the mirror of the roles roster attribut
       const svc = new GroupsAdminService(
         workspace,
         stubWorkflow().svc,
-        new AccessControlService(workspace as never, KB),
+        new AccessControlService(workspace as never, KB, new NodeFs()),
         KB,
         () => DEFAULT_BRANCH,
       );

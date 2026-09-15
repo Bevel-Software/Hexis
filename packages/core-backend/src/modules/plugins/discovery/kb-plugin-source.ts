@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, pluginManifestName } from '@bevel-software/platform-shared';
 import type { DiscoveredPlugin, Discovery, PluginSource, PluginSourceWalk } from './plugin-source.js';
-import { walkKb, type KbWalkListener } from '../../../shared/kb-walk.js';
+import type { IFsProbe, ITreeWalker, WalkListener } from '../../../shared/fs.contract.js';
 import { readNativePlugin } from './native.source.js';
 import { BUNDLE_FILE, loadRegistry, readBundlePlugin } from './bundle-dialect/bundle.source.js';
 import type { McpRegistry } from './bundle-dialect/registry.js';
@@ -38,25 +38,28 @@ import type { McpRegistry } from './bundle-dialect/registry.js';
 export class KbPluginSource implements PluginSource {
   readonly dialect = 'kb';
 
+  constructor(private readonly disk: ITreeWalker & IFsProbe) {}
+
   async discover(kbRoot: string): Promise<Discovery> {
     return (await this.walkWith(kbRoot, [])).discovery;
   }
 
-  async walkWith(kbRoot: string, listeners: readonly KbWalkListener[]): Promise<PluginSourceWalk> {
+  async walkWith(kbRoot: string, listeners: readonly WalkListener[]): Promise<PluginSourceWalk> {
     const warnings: string[] = [];
-    const registry = await loadRegistry(kbRoot, warnings);
-    const listener = pluginListener(kbRoot, registry, warnings);
-    const { holes } = await walkKb(kbRoot, [listener.listener, ...listeners]);
+    const registry = await loadRegistry(this.disk, kbRoot, warnings);
+    const listener = pluginListener(this.disk, kbRoot, registry, warnings);
+    const { holes } = await this.disk.walkKb(kbRoot, [listener.listener, ...listeners]);
     return { discovery: listener.result(), holes };
   }
 }
 
 /** The discovery listener over one walk, and the `Discovery` it has built once the walk is done. */
 function pluginListener(
+  disk: IFsProbe,
   kbRoot: string,
   registry: McpRegistry | null,
   warnings: string[],
-): { listener: KbWalkListener; result(): Discovery } {
+): { listener: WalkListener; result(): Discovery } {
   const unreadable: string[] = [];
   const plugins: DiscoveredPlugin[] = [];
   const seen = new Map<string, string>();
@@ -91,11 +94,11 @@ function pluginListener(
         if (has(PLUGIN_MANIFEST_FILE)) {
           claimed.push(rel);
           // A manifest that could not be read: a hole, and still claimed.
-          const native = await readNativePlugin(dir, rel, relFolder, warnings, unreadable);
+          const native = await readNativePlugin(disk, dir, rel, relFolder, warnings, unreadable);
           if (native) claim(native);
         } else if (has(BUNDLE_FILE)) {
           claimed.push(rel);
-          const bundle = await readBundlePlugin(dir, rel, relFolder, registry, warnings, unreadable);
+          const bundle = await readBundlePlugin(disk, dir, rel, relFolder, registry, warnings, unreadable);
           if (bundle) claim(bundle);
         }
       },

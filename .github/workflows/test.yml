@@ -57,7 +57,14 @@ jobs:
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
 
-      - run: pnpm test
+      # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
+      # child line with its package ("packages/core-backend test: …"). Vitest's
+      # built-in GitHub Actions reporter prints `::error file=…` annotations,
+      # but a workflow command only counts at the start of a line — so a failing
+      # test left nothing but "Process completed with exit code 1", and the job
+      # log that names it needs admin rights. Hiding the prefix turns every
+      # failure into a public annotation on the check.
+      - run: pnpm -r --reporter-hide-prefix run test
 
       # Design-system ratchet. The UI is migrating onto semantic tokens, so a
       # hard ban would fail against the remaining ~520 off-system call sites.

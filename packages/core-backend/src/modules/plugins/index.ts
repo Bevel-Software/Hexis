@@ -12,7 +12,6 @@ export { PluginRenameService, PluginRenameError, renamePluginPrincipalInText } f
 export { compileMarketplace, type VirtualTree, type CompileInput, type MarketplaceOptions } from './compile/compile-marketplace.js';
 export { MarketplaceCompilerService, type CompileAudience } from './compile/marketplace-compiler.service.js';
 export type { PluginSource, PluginSourceWalk, DiscoveredPlugin, Discovery } from './discovery/plugin-source.js';
-export { walkKb, type KbWalkListener, type KbWalkResult } from '../../shared/kb-walk.js';
 export { KbPluginSource } from './discovery/kb-plugin-source.js';
 export { DEFAULT_REGISTRY_PATH } from './discovery/bundle-dialect/bundle.source.js';
 export { pendingProposals, type JoinProposal } from './join-proposals.js';

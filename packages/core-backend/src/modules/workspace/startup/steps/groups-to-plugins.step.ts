@@ -15,11 +15,10 @@ import type { ToolManualDescriptor } from '../../../tool-manuals/tool-manuals.co
 import { normalizeToolManual } from '../../../tool-manuals/tool-manuals.service.js';
 import { parseOwnAccessEntries } from '../../../access-model/access-grammar.js';
 import { containsVariableReference } from '../../../../shared/variable-refs.js';
-import { isAbsence } from '../../../../shared/fs-errors.js';
-import { IGNORE_FILENAME } from '../../../../shared/bevel-ignore.js';
+import { IGNORE_FILENAME, isSkippedEntry, type IFsProbe, type ITreeWalker } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { withoutIgnoreLine } from './template-files.step.js';
-import { hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
+import { hasManifestEntry, hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step.js';
 
 /**
  * One-way migration of a knowledge base from `Groups/` to the Agent Plugins
@@ -64,35 +63,22 @@ import { hasPluginBeneath, looksLikeLegacyPlugin } from './plugin-manifests.step
 export class GroupsToPluginsStep implements OnServerStart {
   readonly name = 'groups-to-plugins';
 
+  constructor(private readonly disk: IFsProbe & ITreeWalker) {}
+
   async run(ctx: ServerStartContext): Promise<StepResult> {
     const refusals: string[] = [];
     for (const branch of await ctx.allBranches()) {
-      await migrateBranch(branch, refusals);
+      await migrateBranch(this.disk, branch, refusals);
     }
     return refusals.length > 0 ? { outcome: 'partial', reason: refusals.join('; ') } : { outcome: 'ok' };
   }
 }
 
-// lstat, both helpers: SYMLINKS ARE NOT SUPPORTED IN PLUGINS, anywhere, so a
-// link never counts as the thing it points at — following one here would let
-// a symlinked directory pull files from outside the plugin into the sweep
-// (and delete them from wherever they really live).
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.lstat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function isDir(p: string): Promise<boolean> {
-  try {
-    return (await fs.lstat(p)).isDirectory();
-  } catch {
-    return false;
-  }
-}
+// The probes here are `lstat`-based (`exists`, `isDirectory`): SYMLINKS ARE
+// NOT SUPPORTED IN PLUGINS, anywhere, so a link never counts as the thing it
+// points at — following one here would let a symlinked directory pull files
+// from outside the plugin into the sweep (and delete them from wherever they
+// really live).
 
 /**
  * A header value referencing a vault variable rather than carrying a literal.
@@ -116,18 +102,6 @@ function splitHeaders(headers: Record<string, string> | undefined): {
     (isCredentialReference(v) ? credential : literal)[k] = v;
   }
   return { literal, credential };
-}
-
-/** Read+parse a JSON file, or `null` when absent or unparsable. */
-async function readJson(p: string): Promise<Record<string, unknown> | null> {
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(p, 'utf-8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -196,13 +170,13 @@ interface ConvertedManual {
  * nothing — the same contract the in-place migration's `migrated` flag
  * carried.
  */
-async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void> {
+async function migrateBranch(disk: IFsProbe & ITreeWalker, branch: KbBranch, refusals: string[]): Promise<void> {
   const repoDir = await branch.repoDir();
   const legacyDir = path.join(repoDir, LEGACY_GROUPS_DIR);
   const pluginsDir = path.join(repoDir, PLUGINS_DIR);
 
-  const hasLegacy = await isDir(legacyDir);
-  const hasPlugins = await isDir(pluginsDir);
+  const hasLegacy = await disk.isDirectory(legacyDir);
+  const hasPlugins = await disk.isDirectory(pluginsDir);
 
   // `hasPlugins` is false for a FILE or SYMLINK squatting the `Plugins` name.
   // Checked BEFORE the nothing-to-do early return below: a branch with a
@@ -212,7 +186,7 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // either way: under the phase's fail-closed contract this stops the boot,
   // which a squatted reserved root deserves (same stance as
   // template-files.step.ts's reserved-dir check).
-  if (!hasPlugins && (await exists(pluginsDir))) {
+  if (!hasPlugins && (await disk.exists(pluginsDir))) {
     throw new Error(
       `Branch "${branch.name}": "${PLUGINS_DIR}" exists but is not a directory` +
         (hasLegacy ? `, so ${LEGACY_GROUPS_DIR}/ cannot be renamed to ${PLUGINS_DIR}/` : '') +
@@ -230,7 +204,7 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // protected branches, never visits a draft. BEFORE the early returns: a
   // branch with both roots (refused below) or neither (nothing to migrate)
   // is no less stale. Idempotent: nothing to drop, nothing declared.
-  const changed = await retireIgnoreRootRules(repoDir, branch, details);
+  const changed = await retireIgnoreRootRules(disk, repoDir, branch, details);
   const retiredSubject = `Retire the stale ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ ignore rules`;
 
   if (hasLegacy && hasPlugins) {
@@ -278,9 +252,12 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
   // Runs whether or not the rename just happened, so a KB already on
   // `Plugins/` still gets missing manifests and any half-done reorganisation
   // finished. That is what makes this idempotent rather than once-only.
-  for (const entry of await fs.readdir(rootOnDisk, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+  // The catalog walk's own skip list: a vendored `node_modules` under the
+  // root is nobody's plugin, and this step must not reorganise it.
+  for (const entry of (await disk.listDir(rootOnDisk)) ?? []) {
+    if (!entry.isDirectory() || isSkippedEntry(entry.name)) continue;
     const folderChanged = await migratePluginFolder(
+      disk,
       branch,
       path.join(rootOnDisk, entry.name),
       entry.name,
@@ -322,7 +299,12 @@ async function migrateBranch(branch: KbBranch, refusals: string[]): Promise<void
  * touched, since the first pass is what makes the run a no-op. A `!…`
  * negation is not the rule and stays.
  */
-async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details: string[]): Promise<boolean> {
+async function retireIgnoreRootRules(
+  disk: IFsProbe,
+  repoDir: string,
+  branch: KbBranch,
+  details: string[],
+): Promise<boolean> {
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf-8');
@@ -331,7 +313,7 @@ async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details:
     // its place, a permission hole) is NOT "no file": a rule that may still
     // be there would hide the tree while the run reports success, so the
     // hole surfaces as the step's failure instead.
-    if (isAbsence(err)) return false;
+    if (disk.isAbsence(err)) return false;
     throw err;
   }
   const stale = [`${LEGACY_GROUPS_DIR}/`, `${PLUGINS_DIR}/`];
@@ -351,6 +333,7 @@ async function retireIgnoreRootRules(repoDir: string, branch: KbBranch, details:
  * paths always speak `Plugins/<folder>/…`. Returns whether ops were declared.
  */
 async function migratePluginFolder(
+  disk: IFsProbe & ITreeWalker,
   branch: KbBranch,
   folderDir: string,
   folderName: string,
@@ -360,19 +343,23 @@ async function migratePluginFolder(
   const relPlugin = `${PLUGINS_DIR}/${folderName}`;
   let changed = false;
 
-  const entries = await fs.readdir(folderDir, { withFileTypes: true });
+  const entries = await disk.listDir(folderDir);
+  if (entries === null) return false; // vanished since the root was listed: nothing to reorganise
 
   // When the manifest is written this run its content is remembered: the
   // buffered write is not on disk yet, and the fold below must see it.
+  // "Has a manifest" is the manifests step's own judgement — a REGULAR file
+  // entry, bundle dialect included — so a folder squatted by a link or a
+  // directory named `plugin.json` is not mistaken for a plugin that has one.
   let renderedManifest: string | null = null;
-  if (!(await exists(path.join(folderDir, PLUGIN_MANIFEST_FILE)))) {
+  if (!hasManifestEntry(entries)) {
     // A folder is made a plugin only when it IS one — by the same rule the
     // manifests step applies: legacy plugin content inside it, and no
     // plugin beneath it. A plain folder somebody made under the root (a
     // `.gitkeep`), or a grouping folder holding plugins, is neither, and a
     // manifest written there would turn a grouping folder into a plugin
     // that hides everything beneath it.
-    if (!(await looksLikeLegacyPlugin(folderDir, entries)) || (await hasPluginBeneath(folderDir))) return false;
+    if (!(await looksLikeLegacyPlugin(disk, folderDir, entries)) || (await hasPluginBeneath(disk, folderDir))) return false;
     renderedManifest = renderPluginManifest(folderName);
     branch.write(`${relPlugin}/${PLUGIN_MANIFEST_FILE}`, renderedManifest);
     details.push(`${folderName}: wrote ${PLUGIN_MANIFEST_FILE}`);
@@ -404,7 +391,7 @@ async function migratePluginFolder(
     // got there first (or a human did), and clobbering it would destroy the
     // newer copy. The check is against the pre-step tree — the only tree that
     // exists while this step runs.
-    if (abs !== destDisk && !(await exists(destDisk))) {
+    if (abs !== destDisk && !(await disk.exists(destDisk))) {
       branch.move(rel, `${relPlugin}/${HEXIS_TOOLS_DIR}/${path.basename(abs)}`);
       details.push(`${folderName}: ${note} → ${HEXIS_TOOLS_DIR}/${path.basename(abs)}`);
       changed = true;
@@ -420,8 +407,8 @@ async function migratePluginFolder(
     const abs = path.join(folderDir, entry.name);
 
     // A skill is a folder carrying SKILL.md — the same rule the catalog uses.
-    if (entry.isDirectory() && (await exists(path.join(abs, 'SKILL.md')))) {
-      if (!(await exists(path.join(folderDir, PLUGIN_SKILLS_DIR, entry.name)))) {
+    if (entry.isDirectory() && (await disk.exists(path.join(abs, 'SKILL.md')))) {
+      if (!(await disk.exists(path.join(folderDir, PLUGIN_SKILLS_DIR, entry.name)))) {
         branch.move(`${relPlugin}/${entry.name}`, `${relPlugin}/${PLUGIN_SKILLS_DIR}/${entry.name}`);
         details.push(`${folderName}: ${entry.name}/ → ${PLUGIN_SKILLS_DIR}/${entry.name}/`);
         changed = true;
@@ -437,7 +424,7 @@ async function migratePluginFolder(
   // Second sweep: mcp `.tool`s an EARLIER run moved into the extension dir
   // (when mcp.json was a projection, not the authority). Converting them here
   // is what makes the migration complete itself rather than strand a twin.
-  // `isDir` is lstat-based, so a SYMLINK planted at this path is not swept:
+  // `isDirectory` is lstat-based, so a SYMLINK planted at this path is not swept:
   // this sweep DELETES what it converts, and following a link would delete
   // `.tool` files from wherever the link really points.
   //
@@ -449,8 +436,8 @@ async function migratePluginFolder(
   // same-run moves and no-op on them; the buffered read makes that a
   // non-event by construction.)
   const extToolsDir = path.join(folderDir, ...HEXIS_TOOLS_DIR.split('/'));
-  if (await isDir(extToolsDir)) {
-    for (const entry of await fs.readdir(extToolsDir, { withFileTypes: true })) {
+  if (await disk.isDirectory(extToolsDir)) {
+    for (const entry of (await disk.listDir(extToolsDir)) ?? []) {
       if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.tool')) continue;
       const abs = path.join(extToolsDir, entry.name);
       const rel = `${relPlugin}/${HEXIS_TOOLS_DIR}/${entry.name}`;
@@ -465,7 +452,7 @@ async function migratePluginFolder(
   }
 
   changed =
-    (await foldIntoPluginFiles(branch, folderDir, relPlugin, folderName, renderedManifest, converted, details, refusals)) ||
+    (await foldIntoPluginFiles(disk, branch, folderDir, relPlugin, folderName, renderedManifest, converted, details, refusals)) ||
     changed;
   return changed;
 }
@@ -479,6 +466,7 @@ async function migratePluginFolder(
  * that does not parse costs the extension write (logged), not the migration.
  */
 async function foldIntoPluginFiles(
+  disk: IFsProbe,
   branch: KbBranch,
   folderDir: string,
   relPlugin: string,
@@ -490,7 +478,7 @@ async function foldIntoPluginFiles(
 ): Promise<boolean> {
   if (manuals.length === 0) return false;
 
-  const mcp = (await readJson(path.join(folderDir, PLUGIN_MCP_FILE))) ?? {
+  const mcp = (await disk.readJsonObject(path.join(folderDir, PLUGIN_MCP_FILE))) ?? {
     $schema: PLUGIN_MCP_SCHEMA,
     mcpServers: {},
   };
@@ -508,7 +496,7 @@ async function foldIntoPluginFiles(
   const manifest =
     renderedManifest !== null
       ? (JSON.parse(renderedManifest) as Record<string, unknown>)
-      : await readJson(path.join(folderDir, PLUGIN_MANIFEST_FILE));
+      : await disk.readJsonObject(path.join(folderDir, PLUGIN_MANIFEST_FILE));
   if (manifest === null) {
     console.warn(
       `[groups-to-plugins] ${branch.name}: ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +

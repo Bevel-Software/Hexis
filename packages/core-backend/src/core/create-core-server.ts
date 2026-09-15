@@ -409,7 +409,7 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
+    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName, disk: core.disk },
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -465,6 +465,7 @@ export async function createCoreServer(
     core.kbDirName,
     core.creatorAccess,
     core.adminAccess,
+    core.disk,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes

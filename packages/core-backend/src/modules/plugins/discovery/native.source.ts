@@ -9,7 +9,7 @@ import {
   pluginDisplayNameOf,
   pluginIdentityOf,
 } from '@bevel-software/platform-shared';
-import { isAbsence } from '../../../shared/fs-errors.js';
+import type { IFsProbe } from '../../../shared/fs.contract.js';
 import type { DiscoveredPlugin } from './plugin-source.js';
 
 /**
@@ -25,6 +25,7 @@ import type { DiscoveredPlugin } from './plugin-source.js';
  * failure is a warning and nothing more.
  */
 export async function readNativePlugin(
+  disk: IFsProbe,
   dir: string,
   folder: string,
   relFolder: string,
@@ -32,7 +33,7 @@ export async function readNativePlugin(
   unreadable: string[],
 ): Promise<DiscoveredPlugin | null> {
   const folderName = path.posix.basename(relFolder);
-  const manifestRead = await readText(path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings);
+  const manifestRead = await readText(disk, path.join(dir, PLUGIN_MANIFEST_FILE), folder, warnings);
   if (manifestRead.failed) {
     unreadable.push(`${folder}/${PLUGIN_MANIFEST_FILE}`);
     return null;
@@ -41,7 +42,7 @@ export async function readNativePlugin(
   // between probe and read — then this is no plugin, not one under a guessed name.
   if (manifestRead.text === null) return null;
   const manifestText = manifestRead.text;
-  const mcpJsonText = (await readText(path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
+  const mcpJsonText = (await readText(disk, path.join(dir, PLUGIN_MCP_FILE), folder, warnings)).text;
   const manifest = parseObject(manifestText);
   if (manifest === null) {
     warnings.push(`${folder}/${PLUGIN_MANIFEST_FILE} is not a JSON object — treated as absent`);
@@ -72,7 +73,18 @@ export async function readNativePlugin(
     mcp && typeof mcp.mcpServers === 'object' && mcp.mcpServers !== null && !Array.isArray(mcp.mcpServers)
       ? (mcp.mcpServers as Record<string, unknown>)
       : null;
-  const exists = await fs.stat(path.join(dir, 'access.md')).then((s) => s.isFile(), () => false);
+  // The plugin EXISTS to the index when its folder carries an `access.md`
+  // (links followed). Absence is "no rules yet"; a probe that fails for any
+  // other reason is a hole like an unreadable manifest — the plugin is not
+  // listed under a guessed answer, and a writer can refuse.
+  let exists: boolean;
+  try {
+    exists = (await disk.statOrNull(path.join(dir, 'access.md')))?.isFile() ?? false;
+  } catch (err) {
+    warnings.push(`${folder}/access.md could not be read — ${err instanceof Error ? err.message : String(err)}`);
+    unreadable.push(`${folder}/access.md`);
+    return null;
+  }
   return {
     name,
     displayName,
@@ -96,6 +108,7 @@ export async function readNativePlugin(
  * the caller decides what a failure means for the file in question.
  */
 async function readText(
+  disk: IFsProbe,
   abs: string,
   folder: string,
   warnings: string[],
@@ -103,7 +116,7 @@ async function readText(
   try {
     return { text: await fs.readFile(abs, 'utf-8'), failed: false };
   } catch (err) {
-    if (isAbsence(err)) return { text: null, failed: false };
+    if (disk.isAbsence(err)) return { text: null, failed: false };
     warnings.push(`${folder}/${path.basename(abs)} could not be read — ${err instanceof Error ? err.message : String(err)}`);
     return { text: null, failed: true };
   }

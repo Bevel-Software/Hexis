@@ -1,8 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
-import { walkTree } from '../../../../shared/kb-walk.js';
-import { isAbsence } from '../../../../shared/fs-errors.js';
+import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
 
@@ -22,6 +21,7 @@ import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './t
  * somebody's knowledge base.
  */
 export function buildSeedTree(
+  disk: IFsProbe & ITreeWalker,
   templateDir: string,
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
@@ -29,7 +29,7 @@ export function buildSeedTree(
   const requiredDirs = reservedRootDirs(extraRootDirs);
   return async (dir) => {
     const generated: string[] = [];
-    await copyTemplateTree(templateDir, dir);
+    await copyTemplateTree(disk, templateDir, dir);
     // Reserved roots the template does not carry. Without this the seed commit
     // would hold only what the template has, and a distribution's own roots
     // would appear a step later, when the first startup phase tops them up —
@@ -38,7 +38,7 @@ export function buildSeedTree(
     // root never gets a pointless placeholder beside it.
     for (const rootDir of requiredDirs) {
       const abs = path.join(dir, rootDir);
-      const found = await lstatOrNull(abs);
+      const found = await disk.lstatOrNull(abs);
       if (found) {
         if (found.isDirectory()) continue;
         // Only a template shipping a FILE under a reserved name reaches this —
@@ -58,12 +58,12 @@ export function buildSeedTree(
 }
 
 /** Copy the entire template tree into `dest` (roles.yaml isn't in it — it's generated). */
-async function copyTemplateTree(templateDir: string, dest: string): Promise<void> {
+async function copyTemplateTree(disk: IFsProbe & ITreeWalker, templateDir: string, dest: string): Promise<void> {
   const packableToReal = new Map(
     Object.entries(TEMPLATE_SOURCE_FALLBACKS).map(([real, packable]) => [packable, real]),
   );
   // A template that is not there is a broken build, not an empty seed.
-  const templateStat = await fs.stat(templateDir).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
+  const templateStat = await disk.statOrNull(templateDir);
   if (templateStat === null || !templateStat.isDirectory()) {
     throw new Error(`KB template "${templateDir}" is not a directory.`);
   }
@@ -75,17 +75,17 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
     // walk entry; copying the packable twin too would clobber it.
     const realName = relDir === '' ? packableToReal.get(name) : undefined;
     if (realName !== undefined) {
-      if (!(await exists(path.join(templateDir, realName)))) {
-        await copyTemplateFile(templateDir, realName, dest);
+      if ((await disk.statOrNull(path.join(templateDir, realName))) === null) {
+        await copyTemplateFile(disk, templateDir, realName, dest);
       }
       return;
     }
-    await copyTemplateFile(templateDir, relDir ? path.join(relDir, name) : name, dest);
+    await copyTemplateFile(disk, templateDir, relDir ? path.join(relDir, name) : name, dest);
   };
   // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
   // (this repo in a Docker build) must not seed its history into the KB.
   // Every other entry is template content, dot-files included.
-  await walkTree(templateDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+  await disk.walk(templateDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
     {
       onFile: seedFile,
       async onOther(relDir, entry) {
@@ -95,7 +95,7 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
         // else — a link to a folder or to nothing, a socket — is a broken
         // template, and the error says what was found.
         const rel = relDir ? path.join(relDir, entry.name) : entry.name;
-        const target = await fs.stat(path.join(templateDir, rel)).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
+        const target = await disk.statOrNull(path.join(templateDir, rel));
         if (target === null || !target.isFile()) {
           const what = target === null ? 'nothing' : target.isDirectory() ? 'a directory' : 'a special file';
           throw new Error(
@@ -119,8 +119,8 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
  * anything that does not decode is copied byte for byte. Either way the
  * source's mode survives — a template script keeps its executable bit.
  */
-async function copyTemplateFile(templateDir: string, relPath: string, dest: string): Promise<void> {
-  const from = await templateSource(templateDir, relPath);
+async function copyTemplateFile(disk: IFsProbe, templateDir: string, relPath: string, dest: string): Promise<void> {
+  const from = await templateSource(disk, templateDir, relPath);
   const to = path.join(dest, relPath);
   await fs.mkdir(path.dirname(to), { recursive: true });
   // A binary is spotted from its first bytes (a NUL turns up early in any
@@ -152,24 +152,6 @@ function asText(bytes: Buffer): string | null {
   if (bytes.includes(0)) return null;
   try {
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** `lstat` without the throw — null when nothing is at `p`. */
-async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.lstat(p);
   } catch {
     return null;
   }

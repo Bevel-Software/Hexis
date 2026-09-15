@@ -23,6 +23,8 @@ import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.ste
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
+import { NodeFs } from '../modules/kb-fs/node-fs.js';
+import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -141,6 +143,13 @@ import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.j
 export interface CoreServices {
   config: CoreConfig;
   db: Database;
+  /**
+   * Reading the disk without locks — the one tree walk and the one path
+   * probe (see `shared/fs.contract.ts`). Every core module that reads a
+   * checkout is handed this; an overlay's own readers take it too, rather
+   * than carrying a `readdir` loop or an errno check of their own.
+   */
+  disk: ITreeWalker & IFsProbe;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -309,10 +318,13 @@ export async function createCoreServices(
   // The remote URL and username are read per-operation instead, so an admin
   // finishing setup can clone immediately without bouncing the process.
   const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
+  // The disk: one walk, one probe, for every reader below.
+  const disk = new NodeFs();
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => settings.resolve('kbRepoUrl'),
     kbDirName,
+    disk,
     () => settings.resolve('gitUsername') || 'x-access-token',
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
@@ -326,11 +338,11 @@ export async function createCoreServices(
   // reshapes trees the template top-up would otherwise re-scaffold — then
   // whatever the distribution appends.
   const kbStartupSteps = [
-    new GroupsToPluginsStep(),
-    new PluginManifestsStep(),
-    new PersonalSpacesStep(),
-    new TemplateFilesStep(extraDirs),
-    new RolesYamlStep([config.adminEmail]),
+    new GroupsToPluginsStep(disk),
+    new PluginManifestsStep(disk),
+    new PersonalSpacesStep(disk),
+    new TemplateFilesStep(disk, extraDirs),
+    new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
   const kbStartupRunner = new KbStartupRunner({
@@ -348,7 +360,7 @@ export async function createCoreServices(
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     seedAdminEmails: [config.adminEmail],
     steps: kbStartupSteps,
-    buildSeedTree: buildSeedTree(config.kbTemplateDir, extraDirs, [config.adminEmail]),
+    buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail]),
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
@@ -362,13 +374,13 @@ export async function createCoreServices(
   // gate cannot disagree about who the owner is. They did: the owner could
   // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
-  const accessControl = new AccessControlService(workspaceService, kbDirName, [
+  const accessControl = new AccessControlService(workspaceService, kbDirName, disk, [
     config.adminEmail,
   ]);
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
-  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName);
+  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName, disk);
 
   // Ontology-session boundary: records each agent run's touched ontologies and
   // blocks writes once a run has crossed ontologies. Postgres-backed so the
@@ -380,31 +392,32 @@ export async function createCoreServices(
   // one run, unlike the Postgres-backed ontology touched-set above.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
-  const skillService = new SkillService(workspaceService, accessControl, kbDirName);
+  const skillService = new SkillService(workspaceService, accessControl, kbDirName, disk);
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   // Where plugins come from: one walk of the plugins root that reads every
   // plugin folder in whichever file shape it carries (see
   // modules/plugins/discovery). Nothing to configure, nothing to document.
-  const pluginSource = new KbPluginSource();
-  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, Date.now, pluginSource);
+  const pluginSource = new KbPluginSource(disk);
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, disk, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
-  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, Date.now, pluginSource);
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, pluginSource);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
     toolManualService,
     kbDirName,
+    pluginSource,
+    disk,
     Date.now,
     pluginLinkIndex,
-    pluginSource,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
@@ -451,6 +464,7 @@ export async function createCoreServices(
     config.workspacesRoot,
     config.backupsRoot,
     kbDirName,
+    disk,
   );
   // Late-bind the diff service into WorkspaceService so file writes/moves
   // trigger backup updates. (GitService used to take a diffService too — for
@@ -539,6 +553,7 @@ export async function createCoreServices(
     workflowService,
     accessControl,
     pluginSource,
+    disk,
     kbDirName,
     eventBus,
     () => {
@@ -565,6 +580,7 @@ export async function createCoreServices(
       knowledgeBaseMcp: { name: 'hexis', url: mcpEndpointUrl(config.publicBackendUrl) },
     },
     pluginSource,
+    disk,
   );
   // Sibling of the workspaces root, like the spill store: one bare repo, one
   // git namespace per caller (see marketplace-repo.service.ts).
@@ -586,6 +602,7 @@ export async function createCoreServices(
     accessControl,
     toolManualService,
     kbDirName,
+    disk,
   );
 
   // Plugin provisioning — the one privileged door that brings `Plugins/<name>/`
@@ -598,6 +615,8 @@ export async function createCoreServices(
     accessControl,
     kbDirName,
     eventBus,
+    pluginSource,
+    disk,
   );
 
   // Pending skills: the other half of the catalog — skills that exist only on
@@ -938,6 +957,7 @@ export async function createCoreServices(
   return {
     config,
     db,
+    disk,
     mcpServerEditService,
     workspaceService,
     kbStartupRunner,

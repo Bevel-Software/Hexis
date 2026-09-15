@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -165,7 +166,7 @@ describe('RolesAdminService', () => {
     repo = path.join(workspaceDir, KB);
     await write(repo, 'roles.yaml', ROLES);
     ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB);
+    access = new AccessControlService(ws, KB, new NodeFs());
     workflow = stubWorkflow();
     bus = stubEventBus();
     svc = new RolesAdminService(ws, workflow.svc, access, KB, () => DEFAULT_BRANCH, bus.bus, [
@@ -558,7 +559,7 @@ describe('roster referencedBy under group shadowing', () => {
     svc = new RolesAdminService(
       ws,
       stubWorkflow().svc,
-      new AccessControlService(ws, KB),
+      new AccessControlService(ws, KB, new NodeFs()),
       KB,
       () => DEFAULT_BRANCH,
       stubEventBus().bus,

@@ -4,7 +4,7 @@ import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '
 import type { IDiffService } from './diff.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { walkTree, type TreeWalkOptions } from '../../shared/kb-walk.js';
+import type { IFsProbe, ITreeWalker, TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from './diff-paths.js';
 import { countLineChanges } from './line-diff.js';
@@ -21,6 +21,7 @@ export class DiffService implements IDiffService {
     private readonly workspacesRoot: string,
     private readonly backupsRoot: string,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker & IFsProbe,
   ) {}
 
   // ── public API ──────────────────────────────────────────────────────────
@@ -160,8 +161,7 @@ export class DiffService implements IDiffService {
           // discards it". Any other read failure (EACCES, EMFILE, …) must
           // abort the plan — misclassifying it as no-backup would DELETE a
           // file whose baseline we merely failed to read.
-          const code = (err as NodeJS.ErrnoException | null)?.code;
-          if (code !== 'ENOENT') throw err;
+          if (!this.disk.isAbsence(err)) throw err;
           deletes.push(rel);
         }
       }
@@ -188,8 +188,8 @@ export class DiffService implements IDiffService {
     const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
     const backupDir = await this.getBackupDir(workspaceId);
     const candidates = new Set<string>();
-    await walkDiffable(workspaceDir, candidates);
-    await walkAll(backupDir, candidates);
+    await walkDiffable(this.disk, workspaceDir, candidates);
+    await walkAll(this.disk, backupDir, candidates);
     const pending: PendingChange[] = [];
     for (const rel of candidates) {
       const change = await computePending(workspaceDir, backupDir, rel);
@@ -263,8 +263,7 @@ export class DiffService implements IDiffService {
       try {
         await fs.rename(backupDir, oldBackupTrash);
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code !== 'ENOENT') throw err; // no existing backup is fine
+        if (!this.disk.isAbsence(err)) throw err; // no existing backup is fine
       }
       await fs.rename(stagingDir, backupDir);
       await fs.rm(oldBackupTrash, { recursive: true, force: true }).catch(() => undefined);
@@ -344,7 +343,7 @@ export class DiffService implements IDiffService {
 
   /** Mirror every diffable file under `currentDir` into `backupDir`, at the same path relative to `workspaceDir`. */
   private async copyDiffableTree(workspaceDir: string, backupDir: string, currentDir: string): Promise<void> {
-    await walkTree(currentDir, diffableWalk(), [
+    await this.disk.walk(currentDir, diffableWalk(), [
       {
         async onFile(dir, name) {
           if (!isDiffable(name)) return;
@@ -406,8 +405,8 @@ function diffableWalk(): TreeWalkOptions {
 }
 
 /** Every diffable file under `root`, as `/`-separated paths relative to it. */
-async function walkDiffable(root: string, out: Set<string>): Promise<void> {
-  await walkTree(root, diffableWalk(), [
+async function walkDiffable(disk: ITreeWalker, root: string, out: Set<string>): Promise<void> {
+  await disk.walk(root, diffableWalk(), [
     {
       onFile(dir, name) {
         if (isDiffable(name)) out.add(dir ? `${dir}/${name}` : name);
@@ -417,8 +416,8 @@ async function walkDiffable(root: string, out: Set<string>): Promise<void> {
 }
 
 /** Every file under the backup `root`, as `/`-separated paths relative to it. */
-async function walkAll(root: string, out: Set<string>): Promise<void> {
-  await walkTree(root, {}, [
+async function walkAll(disk: ITreeWalker, root: string, out: Set<string>): Promise<void> {
+  await disk.walk(root, {}, [
     {
       onFile(dir, name) {
         // Strip the .tmp suffix from in-flight atomic writes so a crashed write
