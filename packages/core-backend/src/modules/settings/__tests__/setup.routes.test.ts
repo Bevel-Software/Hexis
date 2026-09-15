@@ -2,6 +2,12 @@ import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  DEFAULT_KB_LAYOUT,
+  configureKbLayout,
+  currentKbLayout,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
@@ -18,7 +24,16 @@ let server: HttpServer | null = null;
  * that runs later in the same worker would otherwise see a different
  * environment than the one it was written against.
  */
-const KB_ENV = ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME', 'GITHUB_TOKEN'] as const;
+const KB_ENV = [
+  'KB_REPO_URL',
+  'GIT_TOKEN',
+  'GIT_USERNAME',
+  'KB_DIR_NAME',
+  'GITHUB_TOKEN',
+  'KB_KNOWLEDGE_BASE_DIR',
+  'KB_SKILLS_DIR',
+  'KB_PLUGINS_DIR',
+] as const;
 let savedEnv: Partial<Record<(typeof KB_ENV)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -300,6 +315,66 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     expect(res2.status).toBe(200);
     expect(runs).toBe(1);
     expect((await (await fetch(`${base}/api/setup/status`)).json()).complete).toBe(true);
+  });
+});
+
+/**
+ * The folder names are applied once at boot, so a first-run choice would be
+ * ignored by the phase — `Skills/` scaffolded beside the `skills/` the admin
+ * named — until a restart. The completing save applies them first, while the
+ * process still holds the defaults; after that they stay restart-to-apply.
+ */
+describe('POST /setup/settings — the folder names on the completing save', () => {
+  const completing = { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_x' };
+  afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
+
+  it('applies them before the phase runs, and asks for no restart over them', async () => {
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    });
+    const res = await post(base, '/api/setup/settings', {
+      settings: { ...completing, knowledgeBaseDir: 'Docs', skillsDir: 'skills' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.complete).toBe(true);
+    expect(body.restartRequired).toBe(false);
+    expect(seenByPhase).toEqual([{ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' }]);
+    expect(currentKbLayout()).toEqual({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+  });
+
+  it('applies names stored by an earlier, incomplete save', async () => {
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    });
+    await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
+    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+    await post(base, '/api/setup/settings', { settings: completing });
+    expect(seenByPhase[0]?.pluginsDir).toBe('plugins');
+  });
+
+  it('leaves them restart-to-apply once setup is complete', async () => {
+    const { base } = listen();
+    await post(base, '/api/setup/settings', { settings: completing });
+    const res = await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).restartRequired).toBe(true);
+    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+  });
+
+  it('does not replace a layout the process already runs', async () => {
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    });
+    const res = await post(base, '/api/setup/settings', {
+      settings: { ...completing, skillsDir: 'capabilities' },
+    });
+    expect((await res.json()).restartRequired).toBe(true);
+    expect(seenByPhase[0]?.skillsDir).toBe('skills');
   });
 });
 

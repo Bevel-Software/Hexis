@@ -165,6 +165,12 @@ export interface ConnectionTest {
    * exactly, and being one character off is a failure nobody can see.
    */
   defaultBranch?: string | null;
+  /**
+   * The repository's top-level folder names on that branch — empty for an
+   * empty repository, null (or absent, from an older server) when they could
+   * not be listed. The screen checks the three root folder fields against it.
+   */
+  rootFolders?: string[] | null;
   error?: string;
 }
 

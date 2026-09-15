@@ -9,12 +9,24 @@ import {
 } from './deployment-settings.service.js';
 import {
   configureBranchModel,
+  configureKbLayout,
   isBranchModelConfigured,
+  isDefaultKbLayout,
   validateBranchModel,
+  validateKbLayout,
 } from '@bevel-software/platform-shared';
+import {
+  connectionCredentialArgs,
+  connectionGitEnv,
+  listRootFolders,
+  pickListingBranch,
+} from './git-root-folders.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const execFileAsync = promisify(execFile);
+
+/** The three renameable roots, as setting keys. */
+const LAYOUT_KEYS: readonly string[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
 
 /**
  * The slice of a sync record the status endpoint publishes. Declared here
@@ -166,7 +178,9 @@ export function createSetupRoutes(
       // one that must run the KB startup phase, regardless of which save
       // configured the branch model.
       const wasComplete = isComplete(settings);
-      const { restartRequired } = await settings.save(entries, req.userId ?? null);
+      const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      /** Whether this save put the stored folder names into the running process. */
+      let layoutApplied = false;
       /**
        * Apply the branch model to THIS process, so pressing Save finishes
        * setup instead of asking for a restart.
@@ -203,6 +217,21 @@ export function createSetupRoutes(
        * gate open, sessions may be live and that is no longer a quiet moment.
        */
       if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
+        /**
+         * The folder names, applied BEFORE the phase for the same reason as
+         * the branch model above: they are otherwise applied once at boot, so
+         * the phase would scaffold `Skills/` beside the `skills/` the admin
+         * just named, and the app would read the defaults until a restart.
+         * Only while the process still holds the defaults — a layout already
+         * in effect (from the environment, or an earlier run) is left alone.
+         */
+        if (isDefaultKbLayout()) {
+          const layout = settings.resolveKbLayout();
+          if (!validateKbLayout(layout)) {
+            configureKbLayout(layout);
+            layoutApplied = true;
+          }
+        }
         try {
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`
@@ -235,7 +264,11 @@ export function createSetupRoutes(
       }
       res.json({
         ok: true,
-        restartRequired,
+        // Folder names this save just applied are in effect; a restart is
+        // owed only for whatever else changed.
+        restartRequired: layoutApplied
+          ? restartKeys.some((key) => !LAYOUT_KEYS.includes(key))
+          : restartRequired,
         complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
@@ -323,54 +356,67 @@ export function createSetupRoutes(
       return;
     }
 
+    let lsRemote: string;
     try {
-      // The helper reads the token from the environment at call time, so it
-      // never appears in argv (and so never in a process listing or a crash
-      // dump). Same shape the real clone uses.
-      const args = ['-c', 'credential.helper=', ...(token
-        ? ['-c', `credential.helper=!f() { echo "username=${username}"; echo "password=$BEVEL_TEST_TOKEN"; }; f`]
-        : []),
+      // The token travels in the environment, read by the credential helper
+      // at call time — same shape the real clone uses.
+      const args = [
+        ...connectionCredentialArgs(username, token),
         // `--end-of-options` on top of the validation above: belt and braces,
         // so nothing that arrives here can ever be read as a flag.
-        'ls-remote', '--heads', '--end-of-options', url];
-      const { stdout } = await execFileAsync('git', args, {
+        'ls-remote', '--heads', '--end-of-options', url,
+      ];
+      ({ stdout: lsRemote } = await execFileAsync('git', args, {
         timeout: 20_000,
-        env: {
-          ...process.env,
-          BEVEL_TEST_TOKEN: token,
-          // Never let git stop for a prompt: without this a bad credential
-          // hangs the request until the timeout instead of failing.
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_ASKPASS: 'echo',
-        },
-      });
-      const lines = stdout.split('\n');
-      // `<sha>\trefs/heads/<name>` — tag refs and the bare HEAD row are not
-      // branches, so they are filtered rather than sliced blindly.
-      const branches = lines
-        .filter((line) => !line.startsWith('ref:'))
-        .map((line) => line.split('\t')[1]?.trim())
-        .filter((ref): ref is string => !!ref && ref.startsWith('refs/heads/'))
-        .map((ref) => ref.slice('refs/heads/'.length));
-      // `ref: refs/heads/<name>\tHEAD` — what the remote calls its own trunk.
-      const defaultBranch =
-        lines
-          .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
-          ?.slice('ref: refs/heads/'.length)
-          .split('\t')[0]
-          ?.trim() || null;
-      res.json({
-        ok: true,
-        // An EMPTY repository is a success, not a failure — seeding one is a
-        // supported path, and saying "no branches yet" beats an error that
-        // reads like the credentials are wrong.
-        empty: branches.length === 0,
-        branches,
-        defaultBranch,
-      });
+        env: connectionGitEnv(token),
+      }));
     } catch (err) {
       res.status(200).json({ ok: false, error: explainGitFailure(err, token) });
+      return;
     }
+    const lines = lsRemote.split('\n');
+    // `<sha>\trefs/heads/<name>` — tag refs and the bare HEAD row are not
+    // branches, so they are filtered rather than sliced blindly.
+    const branches = lines
+      .filter((line) => !line.startsWith('ref:'))
+      .map((line) => line.split('\t')[1]?.trim())
+      .filter((ref): ref is string => !!ref && ref.startsWith('refs/heads/'))
+      .map((ref) => ref.slice('refs/heads/'.length));
+    // `ref: refs/heads/<name>\tHEAD` — what the remote calls its own trunk.
+    const defaultBranch =
+      lines
+        .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
+        ?.slice('ref: refs/heads/'.length)
+        .split('\t')[0]
+        ?.trim() || null;
+    /**
+     * The repository's top-level folders on the branch it serves, so the
+     * screen can say whether each configured root is there — and catch the
+     * `skills/` a `Skills` setting would silently scaffold a twin beside.
+     * An empty repository has no tree: an empty list, not a lookup. A listing
+     * that fails is null — the connection itself was just proven.
+     */
+    const listingBranch = pickListingBranch(
+      defaultBranch,
+      supplied('defaultBranch') ?? (settings.resolve('defaultBranch') || null),
+      branches,
+    );
+    const rootFolders =
+      branches.length === 0
+        ? []
+        : listingBranch
+          ? await listRootFolders({ url, branch: listingBranch, username, token })
+          : null;
+    res.json({
+      ok: true,
+      // An EMPTY repository is a success, not a failure — seeding one is a
+      // supported path, and saying "no branches yet" beats an error that
+      // reads like the credentials are wrong.
+      empty: branches.length === 0,
+      branches,
+      defaultBranch,
+      rootFolders,
+    });
   });
 
   return router;
