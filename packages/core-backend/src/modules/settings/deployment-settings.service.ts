@@ -378,6 +378,12 @@ export class DeploymentSettingsService {
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
    * leave the screen implying otherwise.
+   *
+   * `restartRequired` is this service's view: some restart-to-apply setting
+   * changed. It cannot know what the caller then applies to the running
+   * process, so `restartKeys` names the settings behind it — the setup route
+   * leaves out the folder names and the branch model when the save that
+   * completes setup has just applied them, and reports only what remains.
    */
   async save(
     entries: Record<string, string>,
