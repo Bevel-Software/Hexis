@@ -47,10 +47,9 @@
 
 import path from 'node:path';
 
-import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
+import { LockingFilesystem, type WriteValidator } from '../kb-fs/locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import type { FileContent } from '@mastra/core/workspace';
 
 export interface LockedCommitDeps {
   workspaceService: IWorkspaceService;
@@ -65,7 +64,7 @@ export interface LockedCommitDeps {
   /** Contention wording: what is "being edited by <holder>". */
   contendedSubject: string;
   /** Pre-disk write validator handed to LockingFilesystem writes. */
-  validateWrite?: (path: string, content: FileContent) => void;
+  validateWrite?: WriteValidator;
 }
 
 export interface LockedWrite {

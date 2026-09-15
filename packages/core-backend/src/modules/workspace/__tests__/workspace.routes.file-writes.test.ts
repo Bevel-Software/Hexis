@@ -163,8 +163,8 @@ function close(s: Server): Promise<void> {
   return new Promise((resolve, reject) => s.close((e) => (e ? reject(e) : resolve())));
 }
 
-function put(h: Harness, body: unknown): Promise<Response> {
-  return fetch(`${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(FILE)}`, {
+function put(h: Harness, body: unknown, file = FILE): Promise<Response> {
+  return fetch(`${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(file)}`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -181,6 +181,32 @@ function errno(code: string, message: string): NodeJS.ErrnoException {
   err.code = code;
   return err;
 }
+
+describe('PUT /workspace/:id/file — roles.yaml from the editor', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  it('can still create a role: the agents-never-create-roles rule is not the editor\'s', async () => {
+    h = await makeHarness();
+    const roles = `${KB}/roles.yaml`;
+    const content = 'roles:\n  Admin:\n    - alice@example.com\n  Project Phoenix:\n    - p@example.com\n';
+
+    const res = await put(h, { content }, roles);
+
+    expect(res.status).toBe(200);
+    expect(h.writeFileMock).toHaveBeenCalledWith(WS, roles, content, expect.anything());
+  });
+
+  it('still refuses an unparseable roles.yaml with the 422', async () => {
+    h = await makeHarness();
+    const res = await put(h, { content: 'roles: [oops' }, `${KB}/roles.yaml`);
+    expect(res.status).toBe(422);
+    expect(h.writeFileMock).not.toHaveBeenCalled();
+  });
+});
 
 describe('PUT /workspace/:id/file — ifMatch', () => {
   let h: Harness | null = null;

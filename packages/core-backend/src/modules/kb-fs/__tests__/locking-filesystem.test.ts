@@ -6,6 +6,11 @@ import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { LockingFilesystem } from '../locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowValidationError } from '../../../shared/domain-errors.js';
+import {
+  makeAgentRolesYamlWriteValidator,
+  RolesYamlInvalidError,
+  RolesYamlNewRoleError,
+} from '../../access-model/roles-yaml-guard.js';
 
 /** The clone folder at the workspace root: every path the filesystem mutates lives under it. */
 const KB = 'knowledge-base';
@@ -952,5 +957,206 @@ describe('LockingFilesystem refuses to create anything outside the repository fo
     await fsLayer.moveFile(STRAY, CORRECTED);
     expect(await fs.readFile(path.join(root, CORRECTED), 'utf-8')).toBe('stray');
     await expect(fs.access(path.join(root, STRAY))).rejects.toBeDefined();
+  });
+});
+
+describe('LockingFilesystem — the agent roles.yaml gate covers every op that lands bytes there', () => {
+  const ROLES = `${KB}/roles.yaml`;
+  const DRAFT = `${KB}/KnowledgeBase/draft.yaml`;
+  const CURRENT = 'roles:\n  Admin:\n    - a@x.eu\n';
+  const NEW_ROLE = '  Phoenix:\n    - p@x.eu\n';
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    await fs.mkdir(path.join(root, KB, 'KnowledgeBase'), { recursive: true });
+    await fs.writeFile(path.join(root, ROLES), CURRENT);
+    await fs.writeFile(path.join(root, DRAFT), CURRENT + NEW_ROLE);
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  function layer(workflow: IWorkflowService) {
+    const validateWrite = makeAgentRolesYamlWriteValidator(KB, () =>
+      fs.readFile(path.join(root, ROLES), 'utf-8').catch(() => null),
+    );
+    return new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+  }
+
+  async function expectRefused(op: Promise<unknown>, workflow: IWorkflowService): Promise<void> {
+    await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(CURRENT);
+  }
+
+  it('writeFile', async () => {
+    const workflow = makeWorkflow();
+    await expectRefused(layer(workflow).writeFile(ROLES, CURRENT + NEW_ROLE), workflow);
+  });
+
+  it('writeFiles refuses the whole batch', async () => {
+    const workflow = makeWorkflow();
+    await expectRefused(
+      layer(workflow).writeFiles([{ path: `${KB}/KnowledgeBase/ok.md`, content: 'fine' }, { path: ROLES, content: CURRENT + NEW_ROLE }], 'batch'),
+      workflow,
+    );
+    await expect(fs.access(path.join(root, KB, 'KnowledgeBase/ok.md'))).rejects.toBeDefined();
+  });
+
+  it('appendFile, judged by the file it would leave', async () => {
+    const workflow = makeWorkflow();
+    await expectRefused(layer(workflow).appendFile(ROLES, NEW_ROLE), workflow);
+  });
+
+  it('copyFile, judged by the source bytes', async () => {
+    const workflow = makeWorkflow();
+    await expectRefused(layer(workflow).copyFile(DRAFT, ROLES, { overwrite: true }), workflow);
+  });
+
+  it('moveFile, leaving the source where it was', async () => {
+    const workflow = makeWorkflow();
+    await expectRefused(layer(workflow).moveFile(DRAFT, ROLES, { overwrite: true }), workflow);
+    expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(CURRENT + NEW_ROLE);
+  });
+
+  it('a members-only write and append land as before', async () => {
+    const workflow = makeWorkflow();
+    const fsLayer = layer(workflow);
+    await fsLayer.writeFile(ROLES, `${CURRENT}    - b@x.eu\n`);
+    await fsLayer.appendFile(ROLES, '    - c@x.eu\n');
+    expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(`${CURRENT}    - b@x.eu\n    - c@x.eu\n`);
+    expect(workflow.releaseLock).toHaveBeenCalledTimes(2);
+  });
+
+  describe('judged again under the lock, against what a concurrent writer left there', () => {
+    const WITH_PHOENIX = CURRENT + NEW_ROLE;
+
+    /** A workflow whose acquire lets `race` rewrite disk first — the lock holder that finished just before us. */
+    function racingWorkflow(race: () => Promise<void>): IWorkflowService {
+      const workflow = makeWorkflow();
+      const acquired = (workflow.acquireLock as ReturnType<typeof vi.fn>).getMockImplementation()!;
+      let raced = false;
+      (workflow.acquireLock as ReturnType<typeof vi.fn>).mockImplementation(async (...args: unknown[]) => {
+        if (!raced) {
+          raced = true;
+          await race();
+        }
+        return acquired(...args);
+      });
+      return workflow;
+    }
+
+    async function expectRefusedUnderLock(op: Promise<unknown>, workflow: IWorkflowService, locks: number): Promise<void> {
+      await expect(op).rejects.toBeInstanceOf(RolesYamlNewRoleError);
+      expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(locks);
+      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+      expect(workflow.releaseLock).not.toHaveBeenCalled();
+      expect(workflow.commitChanges).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(CURRENT);
+    }
+
+    const deletePhoenix = () => fs.writeFile(path.join(root, ROLES), CURRENT);
+
+    beforeEach(async () => {
+      await fs.writeFile(path.join(root, ROLES), WITH_PHOENIX);
+    });
+
+    it('writeFile cannot reinstate a role deleted while it waited for the lock', async () => {
+      const workflow = racingWorkflow(deletePhoenix);
+      await expectRefusedUnderLock(layer(workflow).writeFile(ROLES, `${WITH_PHOENIX}    - q@x.eu\n`), workflow, 1);
+    });
+
+    it('writeFiles re-judges the whole batch once every lock is held', async () => {
+      const workflow = racingWorkflow(deletePhoenix);
+      await expectRefusedUnderLock(
+        layer(workflow).writeFiles([{ path: `${KB}/KnowledgeBase/ok.md`, content: 'fine' }, { path: ROLES, content: WITH_PHOENIX }], 'batch'),
+        workflow,
+        2,
+      );
+      await expect(fs.access(path.join(root, KB, 'KnowledgeBase/ok.md'))).rejects.toBeDefined();
+    });
+
+    it('appendFile is judged by the file it would leave after the concurrent write', async () => {
+      // Appending never adds a role the file had before, so what a race can
+      // change is validity: the same line appended to the rewritten file breaks it.
+      const rewritten = 'roles:\n  Admin:\n    - a@x.eu';
+      const workflow = racingWorkflow(() => fs.writeFile(path.join(root, ROLES), rewritten));
+      await expect(layer(workflow).appendFile(ROLES, '    - b@x.eu\n')).rejects.toBeInstanceOf(RolesYamlInvalidError);
+      expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(1);
+      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(rewritten);
+    });
+
+    it('copyFile judges — and writes — the source bytes read under the lock', async () => {
+      await fs.writeFile(path.join(root, DRAFT), WITH_PHOENIX);
+      const workflow = racingWorkflow(deletePhoenix);
+      await expectRefusedUnderLock(layer(workflow).copyFile(DRAFT, ROLES, { overwrite: true }), workflow, 1);
+    });
+
+    it('moveFile re-judges with both locks held, and both release untouched', async () => {
+      await fs.writeFile(path.join(root, DRAFT), WITH_PHOENIX);
+      const workflow = racingWorkflow(deletePhoenix);
+      await expectRefusedUnderLock(layer(workflow).moveFile(DRAFT, ROLES, { overwrite: true }), workflow, 2);
+      expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_PHOENIX);
+    });
+
+    it('a members-only write whose roles all survive the wait still lands', async () => {
+      const workflow = racingWorkflow(() => fs.writeFile(path.join(root, ROLES), `${WITH_PHOENIX}    - q@x.eu\n`));
+      await layer(workflow).writeFile(ROLES, `${CURRENT}    - b@x.eu\n`);
+      expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(`${CURRENT}    - b@x.eu\n`);
+      expect(workflow.releaseLock).toHaveBeenCalledTimes(1);
+    });
+
+    /** A validator that passes before the lock and refuses under it by throwing a bare string. */
+    function refusesUnderLockWith(reason: string) {
+      let calls = 0;
+      return Object.assign(
+        async () => {
+          if (++calls > 1) throw reason;
+        },
+        { appliesTo: (p: string) => p === ROLES },
+      );
+    }
+
+    it('a check that throws a non-Error still releases untouched, and the caller gets that value', async () => {
+      const workflow = makeWorkflow();
+      const fsLayer = new LockingFilesystem(
+        { basePath: root, contained: true },
+        { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite: refusesUnderLockWith('refused') },
+      );
+      await expect(fsLayer.writeFile(ROLES, CURRENT)).rejects.toBe('refused');
+      expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(1);
+      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, ROLES), 'utf-8')).toBe(WITH_PHOENIX);
+    });
+
+    it('a move whose check throws a non-Error releases BOTH locks untouched', async () => {
+      const workflow = makeWorkflow();
+      const fsLayer = new LockingFilesystem(
+        { basePath: root, contained: true },
+        { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite: refusesUnderLockWith('refused') },
+      );
+      await expect(fsLayer.moveFile(DRAFT, ROLES, { overwrite: true })).rejects.toBe('refused');
+      expect(workflow.releaseLockUntouched).toHaveBeenCalledTimes(2);
+      expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+      expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_PHOENIX);
+    });
+  });
+
+  it('a copy elsewhere never reads its source for a validator that does not claim the destination', async () => {
+    const workflow = makeWorkflow();
+    const validateWrite = Object.assign(vi.fn(), { appliesTo: vi.fn(() => false) });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB, validateWrite },
+    );
+    await fsLayer.copyFile(DRAFT, `${KB}/KnowledgeBase/copy.yaml`);
+    expect(validateWrite.appliesTo).toHaveBeenCalledWith(`${KB}/KnowledgeBase/copy.yaml`);
+    expect(validateWrite).not.toHaveBeenCalled();
   });
 });
