@@ -43,6 +43,14 @@ describe('frontmatter fences: where they DISAGREE — known, and deliberate', ()
     expect(hasShared(text)).toBe(false); // the catalog sees a file with no frontmatter
   });
 
+  it('an INDENTED OPENING fence: same split', () => {
+    // The shared regex is `^---\r?\n…` with no `m` flag, so `^` is the start
+    // of the STRING and the fence must sit at column 0. The line rule trims.
+    const text = '  ---\nread:\n  - everyone\n---\nbody\n';
+    expect(hasLines(text)).toBe(true);
+    expect(hasShared(text)).toBe(false);
+  });
+
   it('an indented closing fence: same split', () => {
     const text = '---\nread:\n  - everyone\n  ---\nbody\n';
     expect(hasLines(text)).toBe(true);

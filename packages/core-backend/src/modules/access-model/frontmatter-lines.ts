@@ -53,9 +53,41 @@ function isFence(line: string | undefined): boolean {
   return line?.trim() === '---';
 }
 
+/**
+ * The line ending a rewrite of `text` should use: the one MOST of its lines
+ * already use.
+ *
+ * A splice re-joins the whole file with a single separator — the frontmatter
+ * array is edited by index, so there is no surviving per-line ending to put
+ * back — which makes "which ending?" purely a question of whose lines get
+ * rewritten. The majority answers it with the fewest: a consistent file (all
+ * LF, or all CRLF, which is every file git checks out) comes back byte for
+ * byte, and a MIXED file is normalised towards whatever it mostly already is.
+ *
+ * The rule this replaces was "CRLF if the text contains one anywhere", which
+ * let a single stray CRLF — in the body, in a comment — rewrite every line of
+ * a knowledge base's access rules as churn in somebody's change request. Ties
+ * (and a file with no line breaks at all) go to the file's FIRST ending, so
+ * the answer is always the file's own.
+ */
+function dominantEol(text: string): string {
+  let crlf = 0;
+  let lf = 0;
+  let firstIsCrlf = false;
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) {
+    const isCrlf = i > 0 && text[i - 1] === '\r';
+    if (crlf + lf === 0) firstIsCrlf = isCrlf;
+    if (isCrlf) crlf++;
+    else lf++;
+  }
+  if (crlf > lf) return '\r\n';
+  if (lf > crlf) return '\n';
+  return firstIsCrlf ? '\r\n' : '\n';
+}
+
 /** Scan `text` for a leading `---` block. Decides nothing beyond the fences. */
 export function scanFrontmatter(text: string): FrontmatterScan {
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const eol = dominantEol(text);
   const lines = text.split(/\r?\n/);
   if (!isFence(lines[0])) return { kind: 'none', lines, eol };
   for (let i = 1; i < lines.length; i++) {
