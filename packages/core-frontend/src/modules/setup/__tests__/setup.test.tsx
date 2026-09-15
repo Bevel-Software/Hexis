@@ -851,22 +851,34 @@ describe('SetupScreen — the three root folders', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await waitFor(() =>
       expect(stateOf('skillsDir')).toHaveTextContent(
-        'Not found — the repository has skill (differs only by case and a trailing s)',
+        'Not found — the repository has skill (differs by case and a trailing s)',
       ),
     );
   });
 
-  it('offers the listed folders as suggestions on the three fields', async () => {
+  it('names a folder that differs only by a trailing s', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['Skill'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() =>
+      expect(stateOf('skillsDir')).toHaveTextContent(
+        'Not found — the repository has Skill (differs only by a trailing s): set this field to Skill or rename the folder.',
+      ),
+    );
+  });
+
+  it('offers the listed folders as suggestions on the three fields, less the ones no root may take', async () => {
     render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
     expect(screen.getByLabelText('Skills folder')).not.toHaveAttribute('list');
-    api.testConnection.mockResolvedValue(LISTED);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['.github', ...LISTED.rootFolders, 'Agents'] });
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     await screen.findByText(/Found 1 branch/);
     for (const label of FOLDER_LABELS) {
       const list = screen.getByLabelText(label).getAttribute('list');
       expect(list).toBeTruthy();
       const options = [...document.querySelectorAll(`#${list} option`)].map((o) => o.getAttribute('value'));
-      expect(options).toEqual(['KnowledgeBase', 'skills', 'Data']);
+      // `.github`, `Data` and `Agents` would each fail the save's validation.
+      expect(options).toEqual(['KnowledgeBase', 'skills']);
     }
   });
 

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +45,32 @@ export function connectionGitEnv(token: string): NodeJS.ProcessEnv {
     GIT_TERMINAL_PROMPT: '0',
     GIT_ASKPASS: 'echo',
   };
+}
+
+/**
+ * The `ls-remote` a connection check runs: the branches, plus `HEAD` with
+ * `--symref` so the remote says which branch it calls its trunk. `--heads`
+ * alone never reports `HEAD`, which would leave a repository whose trunk is
+ * not `main`/`master` listed from the wrong branch.
+ */
+export function lsRemoteArgs(url: string): string[] {
+  // `--end-of-options` on top of the route's validation: belt and braces, so
+  // nothing that arrives here can ever be read as a flag.
+  return ['ls-remote', '--symref', '--end-of-options', url, 'HEAD', 'refs/heads/*'];
+}
+
+/** The branches and the remote's default branch, read from {@link lsRemoteArgs}' output. */
+export function parseLsRemote(stdout: string): { branches: string[]; defaultBranch: string | null } {
+  const rows = stdout.split('\n').map((line) => line.trimEnd().split('\t'));
+  // `<sha>\trefs/heads/<name>` — the `ref:` rows are symrefs and the bare
+  // `<sha>\tHEAD` row is not a branch, so they are filtered rather than sliced blindly.
+  const branches = rows
+    .filter(([first, ref]) => !first?.startsWith('ref:') && ref?.startsWith('refs/heads/'))
+    .map(([, ref]) => ref!.slice('refs/heads/'.length));
+  // `ref: refs/heads/<name>\tHEAD` — what the remote calls its own trunk.
+  const head = rows.find(([first, ref]) => ref === 'HEAD' && first?.startsWith('ref: refs/heads/'));
+  const defaultBranch = head?.[0]?.slice('ref: refs/heads/'.length).trim() || null;
+  return { branches, defaultBranch };
 }
 
 /**
@@ -149,9 +176,11 @@ export async function listRootFolders(
     return stdout.split('\0').filter(Boolean);
   } catch (err) {
     const text = errorText(err);
+    // Git's error text echoes the remote host's response: token scrubbed, and
+    // escaped so a hostile host cannot forge or colour the log line.
     console.warn(
       '[setup] could not list the repository root folders:',
-      (token ? text.replaceAll(token, '***') : text).split('\n')[0]?.slice(0, 200),
+      printable((token ? text.replaceAll(token, '***') : text).split('\n')[0]?.slice(0, 200) ?? ''),
     );
     return null;
   } finally {

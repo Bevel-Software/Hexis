@@ -2,8 +2,15 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { listRootFolders, pickListingBranch, type GitRunner } from '../git-root-folders.js';
+import {
+  listRootFolders,
+  lsRemoteArgs,
+  parseLsRemote,
+  pickListingBranch,
+  type GitRunner,
+} from '../git-root-folders.js';
 
 const LISTING = {
   url: 'https://example.com/acme/kb.git',
@@ -117,6 +124,15 @@ describe('listRootFolders — the command git is given', () => {
     expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain(LISTING.token);
   });
 
+  it('logs the host-supplied error text escaped, so it cannot steer the terminal', async () => {
+    const { run } = scripted([new Error('fatal: remote said 31mred[0m')]);
+    expect(await listRootFolders(LISTING, { run, ...fakeDirs() })).toBeNull();
+    const logged = vi.mocked(console.warn).mock.calls.flat().join(' ');
+    expect(logged).not.toContain('');
+    expect(logged).not.toContain('');
+    expect(logged).toContain('\\u009b31mred\\u001b[0m');
+  });
+
   it('answers null and cleans up when the listing itself fails', async () => {
     const { run } = scripted(['', new Error('fatal: not a tree object')]);
     const dirs = fakeDirs();
@@ -181,12 +197,61 @@ describe('listRootFolders — against a real repository', () => {
     git('commit', '--quiet', '-m', 'seed');
 
     const folders = await listRootFolders({
-      url: `file://${origin}`,
+      url: pathToFileURL(origin).href,
       branch: 'main',
       username: 'x-access-token',
       token: '',
     });
     expect(folders).toEqual(['KnowledgeBase', 'Plugins', 'skills']);
+  });
+});
+
+/**
+ * `ls-remote --heads` never reports `HEAD`, so a repository whose trunk is not
+ * a conventional name had its folders listed from whichever branch came first.
+ */
+describe('lsRemoteArgs / parseLsRemote', () => {
+  let origin = '';
+  afterEach(() => {
+    if (origin) rmSync(origin, { recursive: true, force: true });
+    origin = '';
+  });
+
+  it('reads the branches and the symbolic HEAD, and skips symref and HEAD rows as branches', () => {
+    const sha = 'b8333ea72f4d4b1bb3f27657d8dcae08658eb064';
+    expect(
+      parseLsRemote(
+        [
+          'ref: refs/heads/production\tHEAD',
+          `${sha}\tHEAD`,
+          'ref: refs/heads/production\trefs/heads/alias',
+          `${sha}\trefs/heads/alias`,
+          `${sha}\trefs/heads/production`,
+          `${sha}\trefs/heads/staging`,
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual({ branches: ['alias', 'production', 'staging'], defaultBranch: 'production' });
+    expect(parseLsRemote('')).toEqual({ branches: [], defaultBranch: null });
+  });
+
+  it('reports a real remote’s unconventional default branch', () => {
+    origin = mkdtempSync(path.join(tmpdir(), 'hexis-ls-remote-origin-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], {
+        cwd: origin,
+        stdio: 'pipe',
+      });
+    git('init', '--quiet', '-b', 'production');
+    git('commit', '--quiet', '--allow-empty', '-m', 'seed');
+    git('branch', 'main');
+    git('tag', 'v1');
+
+    const stdout = execFileSync('git', lsRemoteArgs(pathToFileURL(origin).href), { encoding: 'utf8' });
+    const { branches, defaultBranch } = parseLsRemote(stdout);
+    expect(branches).toEqual(['main', 'production']);
+    expect(defaultBranch).toBe('production');
+    expect(pickListingBranch(defaultBranch, null, branches)).toBe('production');
   });
 });
 

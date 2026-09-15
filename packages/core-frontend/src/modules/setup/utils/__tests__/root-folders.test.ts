@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rootFolderState } from '../root-folders';
+import { isRootFolderSuggestion, rootFolderState } from '../root-folders';
 
 describe('rootFolderState', () => {
   it('is found only on an exact match', () => {
@@ -11,7 +11,7 @@ describe('rootFolderState', () => {
     expect(rootFolderState('Skills', ['skills'])).toEqual({
       kind: 'variant',
       candidate: 'skills',
-      caseOnly: true,
+      difference: 'case',
     });
   });
 
@@ -19,17 +19,54 @@ describe('rootFolderState', () => {
     expect(rootFolderState('Skills', ['skill'])).toEqual({
       kind: 'variant',
       candidate: 'skill',
-      caseOnly: false,
+      difference: 'case-and-trailing-s',
     });
-    expect(rootFolderState('Plugin', ['plugins'])).toMatchObject({ kind: 'variant', candidate: 'plugins' });
+    expect(rootFolderState('Plugin', ['plugins'])).toEqual({
+      kind: 'variant',
+      candidate: 'plugins',
+      difference: 'case-and-trailing-s',
+    });
+  });
+
+  it('names a folder that differs only by a trailing s, either way round', () => {
+    expect(rootFolderState('Skills', ['Skill'])).toEqual({
+      kind: 'variant',
+      candidate: 'Skill',
+      difference: 'trailing-s',
+    });
+    expect(rootFolderState('plugin', ['plugins'])).toEqual({
+      kind: 'variant',
+      candidate: 'plugins',
+      difference: 'trailing-s',
+    });
   });
 
   it('prefers the case-only match when both are there', () => {
-    expect(rootFolderState('Skills', ['skill', 'SKILLS'])).toMatchObject({ candidate: 'SKILLS', caseOnly: true });
+    expect(rootFolderState('Skills', ['skill', 'SKILLS'])).toEqual({
+      kind: 'variant',
+      candidate: 'SKILLS',
+      difference: 'case',
+    });
   });
 
   it('is missing when nothing is like it', () => {
     expect(rootFolderState('Plugins', ['KnowledgeBase', 'Skills', 'Data'])).toEqual({ kind: 'missing' });
     expect(rootFolderState('Skills', [])).toEqual({ kind: 'missing' });
+  });
+});
+
+describe('isRootFolderSuggestion', () => {
+  it('offers names a root may take', () => {
+    expect(['KnowledgeBase', 'skills', 'docs-2'].filter(isRootFolderSuggestion)).toEqual([
+      'KnowledgeBase',
+      'skills',
+      'docs-2',
+    ]);
+  });
+
+  it('holds back names the save would refuse: dot-folders and the reserved roots', () => {
+    for (const name of ['.github', '.bevel', 'Data', 'agents', 'PIPELINES']) {
+      expect(isRootFolderSuggestion(name)).toBe(false);
+    }
   });
 });

@@ -19,6 +19,8 @@ import {
   connectionCredentialArgs,
   connectionGitEnv,
   listRootFolders,
+  lsRemoteArgs,
+  parseLsRemote,
   pickListingBranch,
 } from './git-root-folders.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
@@ -27,6 +29,8 @@ const execFileAsync = promisify(execFile);
 
 /** The three renameable roots, as setting keys. */
 const LAYOUT_KEYS: readonly string[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
+/** The branch model, as setting keys. */
+const BRANCH_KEYS: readonly string[] = ['defaultBranch', 'protectedBranches'];
 
 /**
  * The slice of a sync record the status endpoint publishes. Declared here
@@ -96,6 +100,12 @@ export function createSetupRoutes(
    * at a time, phase included, so no second run can start while one executes.
    */
   let kbInitInFlight: Promise<void> | null = null;
+  /**
+   * Whether the folder names in effect were put there by a setup-time save
+   * rather than by boot. While that run stands failed the app is still gated
+   * shut, so a retrying save may apply names the admin corrected in between.
+   */
+  let layoutAppliedBySetup = false;
   /** The app-gate answer: settings complete AND the KB phase settled clean. */
   const kbReady = () => isComplete(settings) && !kbInitFailed && kbInitInFlight === null;
 
@@ -181,6 +191,8 @@ export function createSetupRoutes(
       const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
+      /** Whether this save put the stored branch model into the running process. */
+      let branchModelApplied = false;
       /**
        * Apply the branch model to THIS process, so pressing Save finishes
        * setup instead of asking for a restart.
@@ -200,7 +212,10 @@ export function createSetupRoutes(
           defaultBranch: settings.resolve('defaultBranch'),
           protectedBranches: settings.resolve('protectedBranches'),
         };
-        if (!validateBranchModel(model)) configureBranchModel(model);
+        if (!validateBranchModel(model)) {
+          configureBranchModel(model);
+          branchModelApplied = true;
+        }
       }
       /**
        * The save that COMPLETES setup is the KB startup phase's SECOND quiet
@@ -223,13 +238,16 @@ export function createSetupRoutes(
          * the phase would scaffold `Skills/` beside the `skills/` the admin
          * just named, and the app would read the defaults until a restart.
          * Only while the process still holds the defaults — a layout already
-         * in effect (from the environment, or an earlier run) is left alone.
+         * in effect from the environment or the boot is left alone — or holds
+         * the names an earlier setup save applied before a run that failed:
+         * the gate never opened, so the retry initializes what is saved now.
          */
-        if (isDefaultKbLayout()) {
+        if (isDefaultKbLayout() || (kbInitFailed && layoutAppliedBySetup)) {
           const layout = settings.resolveKbLayout();
           if (!validateKbLayout(layout)) {
             configureKbLayout(layout);
             layoutApplied = true;
+            layoutAppliedBySetup = true;
           }
         }
         try {
@@ -264,11 +282,16 @@ export function createSetupRoutes(
       }
       res.json({
         ok: true,
-        // Folder names this save just applied are in effect; a restart is
-        // owed only for whatever else changed.
-        restartRequired: layoutApplied
-          ? restartKeys.some((key) => !LAYOUT_KEYS.includes(key))
-          : restartRequired,
+        // Folder names and a branch model this save just applied are in
+        // effect; a restart is owed only for whatever else changed.
+        restartRequired:
+          layoutApplied || branchModelApplied
+            ? restartKeys.some(
+                (key) =>
+                  !(layoutApplied && LAYOUT_KEYS.includes(key)) &&
+                  !(branchModelApplied && BRANCH_KEYS.includes(key)),
+              )
+            : restartRequired,
         complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
@@ -360,12 +383,7 @@ export function createSetupRoutes(
     try {
       // The token travels in the environment, read by the credential helper
       // at call time — same shape the real clone uses.
-      const args = [
-        ...connectionCredentialArgs(username, token),
-        // `--end-of-options` on top of the validation above: belt and braces,
-        // so nothing that arrives here can ever be read as a flag.
-        'ls-remote', '--heads', '--end-of-options', url,
-      ];
+      const args = [...connectionCredentialArgs(username, token), ...lsRemoteArgs(url)];
       ({ stdout: lsRemote } = await execFileAsync('git', args, {
         timeout: 20_000,
         env: connectionGitEnv(token),
@@ -374,21 +392,7 @@ export function createSetupRoutes(
       res.status(200).json({ ok: false, error: explainGitFailure(err, token) });
       return;
     }
-    const lines = lsRemote.split('\n');
-    // `<sha>\trefs/heads/<name>` — tag refs and the bare HEAD row are not
-    // branches, so they are filtered rather than sliced blindly.
-    const branches = lines
-      .filter((line) => !line.startsWith('ref:'))
-      .map((line) => line.split('\t')[1]?.trim())
-      .filter((ref): ref is string => !!ref && ref.startsWith('refs/heads/'))
-      .map((ref) => ref.slice('refs/heads/'.length));
-    // `ref: refs/heads/<name>\tHEAD` — what the remote calls its own trunk.
-    const defaultBranch =
-      lines
-        .find((line) => line.startsWith('ref:') && line.trimEnd().endsWith('HEAD'))
-        ?.slice('ref: refs/heads/'.length)
-        .split('\t')[0]
-        ?.trim() || null;
+    const { branches, defaultBranch } = parseLsRemote(lsRemote);
     /**
      * The repository's top-level folders on the branch it serves, so the
      * screen can say whether each configured root is there — and catch the

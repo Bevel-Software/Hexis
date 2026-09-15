@@ -1,13 +1,34 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_KB_LAYOUT,
+  branchModelFromEnv,
+  configureBranchModel,
   configureKbLayout,
   currentKbLayout,
   type KbLayout,
 } from '@bevel-software/platform-shared';
+
+/**
+ * test-setup configures the branch model from the environment, and nothing
+ * unconfigures it; a test that needs the first-run "no branch model yet" state
+ * says so here. Everything else is the real module.
+ */
+const branchModel = vi.hoisted(() => ({ pretendUnconfigured: false }));
+vi.mock('@bevel-software/platform-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@bevel-software/platform-shared')>();
+  return {
+    ...actual,
+    isBranchModelConfigured: () => !branchModel.pretendUnconfigured && actual.isBranchModelConfigured(),
+    // Applying a model configures it, as the real module does.
+    configureBranchModel: (model: Parameters<typeof actual.configureBranchModel>[0]) => {
+      actual.configureBranchModel(model);
+      branchModel.pretendUnconfigured = false;
+    },
+  };
+});
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
@@ -376,6 +397,86 @@ describe('POST /setup/settings — the folder names on the completing save', () 
     expect((await res.json()).restartRequired).toBe(true);
     expect(seenByPhase[0]?.skillsDir).toBe('skills');
   });
+
+  it('applies names corrected between a failed run and its retry', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const seenByPhase: KbLayout[] = [];
+      let fail = true;
+      const { base } = listen(true, async () => {
+        seenByPhase.push(currentKbLayout());
+        if (fail) throw new Error('remote said no');
+      });
+      const first = await post(base, '/api/setup/settings', {
+        settings: { ...completing, skillsDir: 'skills' },
+      });
+      expect(first.status).toBe(500);
+      // The gate never opened, so the retry initializes what is saved NOW.
+      fail = false;
+      const retry = await post(base, '/api/setup/settings', { settings: { skillsDir: 'capabilities' } });
+      expect(retry.status).toBe(200);
+      const body = await retry.json();
+      expect(body.complete).toBe(true);
+      expect(body.restartRequired).toBe(false);
+      expect(seenByPhase.map((l) => l.skillsDir)).toEqual(['skills', 'capabilities']);
+      expect(currentKbLayout().skillsDir).toBe('capabilities');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  /**
+   * The vitest config pins the branch pair in the environment, which makes the
+   * settings env-sourced and so refused by a save; these tests store their own.
+   */
+  async function withoutBranchEnv(test: () => Promise<void>) {
+    const saved = { DEFAULT_BRANCH: process.env.DEFAULT_BRANCH, PROTECTED_BRANCHES: process.env.PROTECTED_BRANCHES };
+    delete process.env.DEFAULT_BRANCH;
+    delete process.env.PROTECTED_BRANCHES;
+    try {
+      await test();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      // Whatever the test applied, the rest of the worker runs on the pinned model.
+      configureBranchModel(branchModelFromEnv());
+    }
+  }
+
+  it('asks for no restart over a branch model the completing save also applied', () =>
+    withoutBranchEnv(async () => {
+    branchModel.pretendUnconfigured = true;
+    try {
+      const { base } = listen(true);
+      const res = await post(base, '/api/setup/settings', {
+        settings: {
+          ...completing,
+          skillsDir: 'skills',
+          defaultBranch: 'production',
+          protectedBranches: 'production,staging',
+        },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.complete).toBe(true);
+      expect(body.restartRequired).toBe(false);
+    } finally {
+      branchModel.pretendUnconfigured = false;
+    }
+    }));
+
+  it('still asks for a restart over a branch change once a branch model is in effect', () =>
+    withoutBranchEnv(async () => {
+      const { base } = listen(true);
+      const res = await post(base, '/api/setup/settings', {
+        settings: { ...completing, defaultBranch: 'production', protectedBranches: 'production,staging' },
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).restartRequired).toBe(true);
+    }));
 });
 
 describe('GET /setup/status', () => {

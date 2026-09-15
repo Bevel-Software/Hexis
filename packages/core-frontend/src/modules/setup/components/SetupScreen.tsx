@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
-import { rootFolderState } from '../utils/root-folders';
+import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
@@ -186,6 +186,13 @@ const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
 const ROOT_FOLDER_KEYS: readonly (keyof KbLayout)[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
 const isRootFolderKey = (key: string): key is keyof KbLayout =>
   (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
+
+/** How a near-miss folder differs from the configured name, as the warning words it. */
+const VARIANT_DIFFERENCE: Record<Extract<RootFolderState, { kind: 'variant' }>['difference'], string> = {
+  case: 'differs only by case',
+  'trailing-s': 'differs only by a trailing s',
+  'case-and-trailing-s': 'differs by case and a trailing s',
+};
 
 /** The blocks, in the order they are worked through. */
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
@@ -670,7 +677,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         {state.kind === 'variant' && (
           <>
             Not found — the repository has {folder(state.candidate)} (
-            {state.caseOnly ? 'differs only by case' : 'differs only by case and a trailing s'}): set
+            {VARIANT_DIFFERENCE[state.difference]}): set
             this field to {folder(state.candidate)} or rename the folder.
           </>
         )}
@@ -683,7 +690,11 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
     if (!copy) return null;
     const isBranchField = setting.key === 'defaultBranch' || setting.key === 'protectedBranches';
     const isFolderField = isRootFolderKey(setting.key);
-    const suggestions = isBranchField ? remoteBranches : isFolderField ? (remoteRootFolders ?? []) : [];
+    const suggestions = isBranchField
+      ? remoteBranches
+      : isFolderField
+        ? (remoteRootFolders ?? []).filter(isRootFolderSuggestion)
+        : [];
     const listId = suggestions.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>
