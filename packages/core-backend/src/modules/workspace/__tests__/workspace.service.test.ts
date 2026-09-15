@@ -552,7 +552,23 @@ describe('WorkspaceService.withPathTurn', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const holder = svc.withPathTurn(workspaceId, rel, () => held);
+    // The turn is claimed ASYNCHRONOUSLY: `withPathTurn` awaits the workspace
+    // directory before it reaches the queue, so its call does NOT mean the
+    // turn is held yet. Racing the mutators against the bare call let
+    // whichever resolved that lookup first take the turn — usually the
+    // holder, but under load the delete, which then completed and failed the
+    // assertion below with a `deleted: true` that said nothing about
+    // turn-taking. The callback runs only once the turn IS held, so awaiting
+    // it is the signal the rest of the test actually needs.
+    let entered: () => void = () => {};
+    const inTurn = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const holder = svc.withPathTurn(workspaceId, rel, () => {
+      entered();
+      return held;
+    });
+    await inTurn;
 
     let deleted = false;
     let uploaded = false;
