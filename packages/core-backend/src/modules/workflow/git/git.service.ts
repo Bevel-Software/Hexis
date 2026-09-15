@@ -329,6 +329,22 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The most recent attempt any workspace made to reach the remote, and
+   * whether it succeeded — for the readiness answer. Null before the first
+   * attempt of this process's life. Read off the per-workspace fetch record
+   * above rather than kept separately, so it cannot disagree with it.
+   */
+  lastRemoteContact(): { at: number; ok: boolean } | null {
+    let latest: { at: number; ok: boolean } | null = null;
+    for (const [workspaceId, at] of this.lastImplicitFetchAt) {
+      if (latest === null || at > latest.at) {
+        latest = { at, ok: this.lastImplicitFetchOk.get(workspaceId) ?? false };
+      }
+    }
+    return latest;
+  }
+
+  /**
    * Run the registered ADVISORY commit-validation hooks at a commit site.
    * Preserves the semantics of the injected validator this replaced: a
    * `mustFix` report is logged (via `formatWarning`) but never blocks, and a

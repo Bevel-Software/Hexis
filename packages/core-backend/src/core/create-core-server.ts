@@ -53,6 +53,7 @@ import {
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import { publicConfig } from './public-config.js';
+import { createReadiness } from './readiness.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -177,6 +178,24 @@ export async function createCoreServer(
   // rollout matches the merged commit before smoke-testing it.
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', sha: GIT_SHA, timestamp: Date.now() });
+  });
+
+  // Readiness: the facts `/api/health` never carried — is the database
+  // reachable, is the commit queue draining and how far behind is it, did the
+  // last attempt to reach the git remote succeed, how much disk is left.
+  // Computed per request, never stored; 503 only when the database is gone,
+  // because a restart cures none of the other conditions and costs every
+  // in-flight request. See `core/readiness.ts`.
+  const readiness = createReadiness({
+    db: core.db,
+    oldestQueuedAt: () => core.pendingCommitsService.oldestQueuedAt(),
+    drains: () => core.commitWorker.held,
+    lastRemoteContact: () => core.gitService.lastRemoteContact(),
+    freeBytes: () => core.disk.freeBytes(core.config.workspacesRoot),
+  });
+  app.get('/api/ready', async (_req, res) => {
+    const report = await readiness();
+    res.status(report.status === 'unavailable' ? 503 : 200).json(report);
   });
 
   /**

@@ -207,4 +207,11 @@ export interface IFsProbe {
   listDir(p: string): Promise<WalkedEntry[] | null>;
   /** The JSON object in the file at `p`; null when the file is absent, not JSON, or not an object. */
   readJsonObject(p: string): Promise<Record<string, unknown> | null>;
+  /**
+   * Bytes still writable on the volume holding `p`, as an unprivileged process
+   * sees them; null when the volume cannot say. The one question the readiness
+   * answer asks of the disk: a volume that fills turns every git write into a
+   * failure, and the queue behind those writes stops moving.
+   */
+  freeBytes(p: string): Promise<number | null>;
 }

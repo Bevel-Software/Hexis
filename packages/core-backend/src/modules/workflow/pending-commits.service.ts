@@ -34,7 +34,7 @@
  *                                                    (status='needs_attention')
  */
 
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, min, or, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { pendingCommits } from '../database/schema.js';
 
@@ -378,6 +378,24 @@ export class PendingCommitsService {
         lastAttemptedAt: new Date(),
       })
       .where(eq(pendingCommits.id, id));
+  }
+
+  /**
+   * When the oldest commit still waiting to land was queued, or null when
+   * nothing waits — the readiness answer's one number. `pending` and
+   * `running` both count: a row the worker holds is still not in git, and a
+   * row it holds for too long is exactly the stall this measures.
+   * `needs_attention` does not: that row has already been escalated through
+   * the notice sink and sits on the admin surface, and counting it here would
+   * keep the deployment "degraded" until triage rather than saying whether
+   * draining keeps up.
+   */
+  async oldestQueuedAt(): Promise<Date | null> {
+    const [row] = await this.db
+      .select({ oldest: min(pendingCommits.queuedAt) })
+      .from(pendingCommits)
+      .where(inArray(pendingCommits.status, ['pending', 'running']));
+    return row?.oldest ?? null;
   }
 
   /**
