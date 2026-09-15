@@ -54,7 +54,7 @@ describe('readAgentPreamble', () => {
     expect(await readAgentPreamble(workspace(), KB, disk)).toBeNull(); // the default-named root has none
   });
 
-  it('only ENOENT is an absence', async () => {
+  it('a file that is not there is an absence, not a fault', async () => {
     expect(await readAgentPreamble(workspace(), KB, disk)).toBeNull();
   });
 

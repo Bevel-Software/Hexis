@@ -687,15 +687,25 @@ export class WorkspaceService implements IWorkspaceService {
     // propagate to the caller instead of getting silently swallowed by an
     // outer catch (the previous shape let an inner rethrow fall through
     // to a clone-into-non-empty-dir, producing a confusing 500).
-    let targetExists = true;
-    try {
-      await fs.access(targetDir);
-    } catch (err) {
-      if (!isAbsence(err)) throw err;
-      targetExists = false;
+    //
+    // A FILE squatting the clone's name is refused outright, never wiped:
+    // the recovery below exists for a crashed bootstrap's directory shell,
+    // and a regular file here is a state a human put the deployment in — so
+    // it is named and stopped, the same stance the startup phase takes on a
+    // squatted reserved root. (Links are followed: one clone mounted
+    // elsewhere is the operator's business, as it is at the workspace root.)
+    const target = await fs.stat(targetDir).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (target !== null && !target.isDirectory()) {
+      throw new Error(
+        `The clone path "${this.kbDirName}" in this workspace exists but is not a directory. ` +
+          'Remove or rename it — the platform requires this name to be the knowledge-base clone.',
+      );
     }
 
-    if (targetExists) {
+    if (target !== null) {
       // The directory exists, but a previous bootstrap may have crashed
       // mid-clone — leaving a directory shell without `.git`. Treat
       // anything missing `.git` as not-cloned and re-clone. (Can't be
@@ -712,6 +722,8 @@ export class WorkspaceService implements IWorkspaceService {
         // re-clone". A transient EACCES / EIO / EBUSY must NOT delete
         // what might be a perfectly valid repo whose `.git` we couldn't
         // read this moment — surface the error so the caller can retry.
+        // (`targetDir` is known to be a directory here, so ENOTDIR can only
+        // mean `.git` itself vanished under us — an absence either way.)
         if (!isAbsence(err)) throw err;
       }
       if (alreadyCloned) {
