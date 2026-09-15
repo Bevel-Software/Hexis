@@ -54,9 +54,10 @@ function connectedCheck() {
  * Mount the setup router on a throwaway port and hand back its base URL.
  * `checkConnection` defaults to the REAL check — the test-connection suites
  * aim it at a port nothing listens on — and save suites pass a stand-in.
+ * `isAdmin` may be a function, for suites that change who is asking mid-test.
  */
 function listen(
-  isAdmin = true,
+  isAdmin: boolean | (() => boolean) = true,
   runAll: () => Promise<void> = async () => {},
   checkConnection?: (connection: RepositoryConnection) => Promise<ConnectionCheck>,
 ) {
@@ -77,7 +78,9 @@ function listen(
     '/api',
     createSetupRoutes(
       settings,
-      { isAdmin: async () => isAdmin } as IAdminAccessService,
+      {
+        isAdmin: async () => (typeof isAdmin === 'function' ? isAdmin() : isAdmin),
+      } as IAdminAccessService,
       // Default no-op: most suites never complete setup, so the runner is
       // never reached. The completion-transition suite passes its own spy.
       { runAll },
@@ -269,23 +272,173 @@ describe('POST /setup/settings — the completion transition and the KB startup 
       }, connectedCheck().check);
       const res = await post(base, '/api/setup/settings', { settings: completing });
       expect(res.status).toBe(500);
-      expect((await res.json()).error).toMatch(/could not be initialized/i);
+      const body = await res.json();
+      expect(body.error).toMatch(/could not be initialized/i);
+      expect(body.kbInit.kind).toBe('unknown');
       expect(attempts).toBe(1);
-      // The gate stays shut: status reports incomplete, with the admin's hint.
+      // The gate stays shut: status reports incomplete, with the same classified cause.
       let status = await (await fetch(`${base}/api/setup/status`)).json();
       expect(status.complete).toBe(false);
-      expect(status.kbInitError).toMatch(/remote said no/);
-      // Any save while the failure stands retries the phase.
+      expect(status.kbInit).toEqual(body.kbInit);
+      // An EMPTY save — what "Retry initialization" sends — retries the phase.
       fail = false;
-      const retry = await post(base, '/api/setup/settings', {
-        settings: { gitUsername: 'x-access-token' },
-      });
+      const retry = await post(base, '/api/setup/settings', { settings: {} });
       expect(retry.status).toBe(200);
       expect(attempts).toBe(2);
       expect((await retry.json()).complete).toBe(true);
       status = await (await fetch(`${base}/api/setup/status`)).json();
       expect(status.complete).toBe(true);
-      expect(status.kbInitError).toBeUndefined();
+      expect(status.kbInit).toBeUndefined();
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('a retry that fails again answers with the fresh classification', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const failures = [
+        'git ls-remote failed: fatal: Authentication failed for x',
+        'KB startup step "template-files" failed: disk full',
+      ];
+      const { base } = listen(true, async () => {
+        throw new Error(failures.shift());
+      }, connectedCheck().check);
+      const first = await (await post(base, '/api/setup/settings', { settings: completing })).json();
+      expect(first.kbInit.kind).toBe('credentials-rejected');
+      const second = await post(base, '/api/setup/settings', { settings: {} });
+      expect(second.status).toBe(500);
+      const body = await second.json();
+      expect(body.kbInit.kind).toBe('step-failed');
+      expect(body.kbInit.cause).toContain('"template-files"');
+      const status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status.kbInit).toEqual(body.kbInit);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('sends the browser { kind, cause } and never the raw message; the raw message is logged', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const raw =
+        "git push failed: Command failed: git push origin HEAD:refs/heads/main\nremote: Permission to acme/kb.git denied to bot-7f3a.\nfatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403";
+      const { base } = listen(true, async () => {
+        throw new Error(raw);
+      }, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', { settings: completing });
+      const body = await res.json();
+      expect(Object.keys(body.kbInit).sort()).toEqual(['cause', 'kind']);
+      expect(body.kbInit.kind).toBe('write-refused');
+      const statusText = await (await fetch(`${base}/api/setup/status`)).text();
+      for (const text of [JSON.stringify(body), statusText]) {
+        expect(text).not.toContain('bot-7f3a');
+        expect(text).not.toContain('Permission to');
+        expect(text).not.toContain('kbInitError');
+      }
+      expect(logged.some((line) => line.includes('bot-7f3a'))).toBe(true);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('scrubs the settings-stored token from the logged message, even when the environment has none', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const { base } = listen(true, async () => {
+        // The save publishes a stored token to GITHUB_TOKEN; take it away so
+        // only the settings service still knows it.
+        delete process.env.GITHUB_TOKEN;
+        throw new Error('fatal: helper answered ghp_storedsecret12345 and was refused');
+      }, connectedCheck().check);
+      await post(base, '/api/setup/settings', {
+        settings: { ...completing, gitToken: 'ghp_storedsecret12345' },
+      });
+      expect(logged.length).toBeGreaterThan(0);
+      expect(logged.join('\n')).not.toContain('ghp_storedsecret12345');
+      expect(logged.join('\n')).toContain('***');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('logs the failure as one line: git text cannot forge a log entry', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const { base } = listen(true, async () => {
+        throw new Error('git push failed: remote: boom\n[setup] everything is fine[31m');
+      }, connectedCheck().check);
+      await post(base, '/api/setup/settings', { settings: completing });
+      const line = logged.find((l) => l.includes('KB initialization failed'));
+      expect(line).toBeDefined();
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('classifies the text as thrown, not the scrubbed copy', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const { base } = listen(true, async () => {
+        delete process.env.GITHUB_TOKEN;
+        // A token that spells part of git's own wording: scrubbing it first
+        // would turn "not found" into "not ***" and read as unknown.
+        throw new Error("git ls-remote failed: remote: Repository not found.\nfatal: repository 'x' not found");
+      }, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', { settings: { ...completing, gitToken: 'found' } });
+      expect((await res.json()).kbInit.kind).toBe('not-found');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it("answers with the classification the runner's failure carries, not a re-read of its scrubbed message", async () => {
+    const { ClassifiedFailure, classifyGitFailure } = await import('../../../shared/git-failure.js');
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const carried = classifyGitFailure('git push failed: remote: Permission to acme/kb.git denied to bot.');
+      const { base } = listen(true, async () => {
+        throw new ClassifiedFailure('git push failed: *** *** ***', carried);
+      }, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', { settings: completing });
+      expect((await res.json()).kbInit).toEqual(carried);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('tells a non-admin nothing about a standing failure', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      let admin = true;
+      const { base } = listen(
+        () => admin,
+        async () => {
+          throw new Error('KB startup step "roles-yaml" failed: boom');
+        },
+      );
+      await post(base, '/api/setup/settings', { settings: completing });
+      admin = false;
+      const status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status).toEqual({ complete: false, isAdmin: false });
     } finally {
       console.error = consoleError;
     }

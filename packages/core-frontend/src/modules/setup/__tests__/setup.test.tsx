@@ -29,7 +29,7 @@ vi.mock('../../settings/services/github-facade.api', () => facade);
 
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
-import { SettingsProblems, type SettingStatus } from '../services/setup.api';
+import { KbInitFailed, SettingsProblems, type SettingStatus } from '../services/setup.api';
 
 const KB = 'knowledge-base' as const;
 const SETTINGS: SettingStatus[] = [
@@ -901,6 +901,211 @@ describe('SetupScreen — remote sync panel', () => {
     await waitFor(() =>
       expect(screen.getByText(/main is not in sync yet: a\.md changed both/)).toBeTruthy(),
     );
+  });
+});
+
+/**
+ * The completing save stored everything, but the knowledge base behind the
+ * gate could not be initialized. The admin is told what to fix — the server's
+ * classified sentence, never git's raw words — and can retry without typing
+ * anything again.
+ */
+describe('SetupScreen — a failed knowledge-base initialization', () => {
+  const WRITE_REFUSED = {
+    kind: 'write-refused' as const,
+    cause: 'The token can read the repository but not write to it — grant it write (push) access to the repository, then retry.',
+  };
+  const POLICY = {
+    kind: 'push-refused-by-policy' as const,
+    cause: "A branch protection rule or hook on the repository refused the initialization push — allow the deployment's account to push to the protected branches, then retry.",
+  };
+  const HEADLINE = 'Saved, but the knowledge base could not be initialized';
+
+  it('shows a standing failure when the screen is opened, without a new save', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: WRITE_REFUSED });
+    render(<SetupGate>{APP}</SetupGate>);
+    const banner = await screen.findByTestId('kb-init-failure');
+    expect(banner).toHaveTextContent(HEADLINE);
+    expect(banner).toHaveTextContent(WRITE_REFUSED.cause);
+    expect(within(banner).getByRole('button', { name: 'Retry initialization' })).toBeEnabled();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    // Nothing tells the admin that restarting is the remedy.
+    expect(banner).not.toHaveTextContent(/restart/i);
+  });
+
+  it('shows the classified banner right after the failing save, not a generic error', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+    api.testConnection.mockResolvedValue({ ok: true, branches: ['main'], defaultBranch: 'main' });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByRole('heading', { name: /Set up this deployment/ });
+    api.saveSettings.mockRejectedValue(new KbInitFailed(POLICY));
+    // The refetch after the save carries the same standing failure.
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: POLICY });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    const banner = await screen.findByTestId('kb-init-failure');
+    expect(banner).toHaveTextContent(HEADLINE);
+    expect(banner).toHaveTextContent(POLICY.cause);
+    // One banner, not the failure AND a generic "could not save".
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('retry: re-runs with nothing re-entered, shows it running, then opens the app', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: WRITE_REFUSED });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByTestId('kb-init-failure');
+    let finish!: (v: unknown) => void;
+    api.saveSettings.mockReturnValue(new Promise((r) => (finish = r)));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    expect(api.saveSettings).toHaveBeenCalledWith({});
+    const running = screen.getByRole('button', { name: 'Initializing…' });
+    expect(running).toBeDisabled();
+    // The form's own save cannot race the run.
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+
+    finish({ restartRequired: false, complete: true, settings: SETTINGS });
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+  });
+
+  it('retry: a fresh failure replaces the banner, and the button can be pressed again', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: WRITE_REFUSED });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByTestId('kb-init-failure');
+    api.saveSettings.mockRejectedValue(new KbInitFailed(POLICY));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    const banner = await screen.findByTestId('kb-init-failure');
+    await waitFor(() => expect(banner).toHaveTextContent(POLICY.cause));
+    expect(banner).not.toHaveTextContent(WRITE_REFUSED.cause);
+    expect(within(banner).getByRole('button', { name: 'Retry initialization' })).toBeEnabled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('settings mode: a retry that succeeds clears the banner and refreshes', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={WRITE_REFUSED} />);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+    expect(onSaved).toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('settings mode: a retry that lands awaiting a restart still refreshes the host', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={WRITE_REFUSED} />);
+    api.saveSettings.mockResolvedValue({ restartRequired: true, complete: false, awaitingRestart: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    expect(await screen.findByText(/needs a restart/)).toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalled();
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
+  });
+
+  it('retry waits while the form has unsaved changes — Save is the retry that carries them', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+    expect(retry).toBeEnabled();
+
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_corrected');
+
+    expect(retry).toBeDisabled();
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(/unsaved changes/i);
+    await userEvent.click(retry);
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('retry comes back once an edit is put back — an unchanged value is not an unsaved change', async () => {
+    const REPO = 'https://github.com/acme/kb.git';
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl'
+        ? { ...s, source: 'stored' as const, value: REPO, configured: true }
+        : s.key === 'gitUsername'
+          ? { ...s, source: 'stored' as const, value: 'x-access-token', configured: true }
+          : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const address = screen.getByLabelText('Repository address');
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+
+    await userEvent.type(address, '-old');
+    expect(retry).toBeDisabled();
+    await userEvent.type(address, '{Backspace}{Backspace}{Backspace}{Backspace}');
+
+    expect(retry).toBeEnabled();
+    expect(screen.getByTestId('kb-init-failure')).not.toHaveTextContent(/unsaved changes/i);
+  });
+
+  it('a username filled in from the address is not an unsaved change of its own', async () => {
+    // Stored username blank: the address fills in x-access-token, which differs from it.
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl' ? { ...s, source: 'stored' as const, value: 'https://github.com/acme/kb.git', configured: true } : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const address = screen.getByLabelText('Repository address');
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+
+    // Inside the closed Advanced block, but in the form all the same.
+    const username = screen.getByLabelText('Token username');
+    expect(username).toHaveValue('');
+
+    await userEvent.type(address, '-x');
+    // The address DID fill the username in — that is what this test is about.
+    expect(username).toHaveValue('x-access-token');
+    expect(retry).toBeDisabled();
+    await userEvent.type(address, '{Backspace}{Backspace}');
+    expect(retry).toBeEnabled();
+
+    // Cleared, the address means "leave it alone". The username it filled in
+    // stays filled in, and is still not an edit.
+    await userEvent.clear(address);
+    expect(username).toHaveValue('x-access-token');
+    expect(retry).toBeEnabled();
+  });
+
+  it('a late status answer cannot bring back a failure this screen just saw cleared', async () => {
+    const onSaved = vi.fn();
+    const screenWith = (kbInit?: typeof WRITE_REFUSED | typeof POLICY) => (
+      <SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={kbInit} />
+    );
+    const { rerender } = render(screenWith(WRITE_REFUSED));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    // The read sent before the retry answers now: a new object, the same failure.
+    rerender(screenWith({ ...WRITE_REFUSED }));
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
+    // A DIFFERENT failure is news, and shows.
+    rerender(screenWith(POLICY));
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(POLICY.cause);
+  });
+
+  it('after a read agrees the failure cleared, the same failure reported again is shown', async () => {
+    const onSaved = vi.fn();
+    const screenWith = (kbInit?: typeof WRITE_REFUSED) => (
+      <SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={kbInit} />
+    );
+    const { rerender } = render(screenWith(WRITE_REFUSED));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    rerender(screenWith(undefined));
+    rerender(screenWith({ ...WRITE_REFUSED }));
+
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(WRITE_REFUSED.cause);
   });
 });
 

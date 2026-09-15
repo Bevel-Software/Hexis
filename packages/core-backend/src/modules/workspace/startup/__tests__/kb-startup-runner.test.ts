@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { KbStartupRunner } from '../kb-startup-runner.js';
 import { WorkspaceService } from '../../workspace.service.js';
-import { redactSecret } from '../kb-git.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 const execFileAsync = promisify(execFile);
@@ -475,24 +475,58 @@ describe('KbStartupRunner', () => {
   });
 });
 
-describe('redactSecret', () => {
-  it('scrubs the configured token wherever it appears', () => {
+describe('KbStartupRunner — what a failed phase throws', () => {
+  it('a scrubbed message (tokens, a presigned query) that still carries what git said', async () => {
     const prev = process.env.GITHUB_TOKEN;
-    process.env.GITHUB_TOKEN = 'ghp_supersecret';
+    // Tokens that spell parts of git's own wording: scrubbing them rewrites the
+    // diagnostic, so the scrubbed message alone would no longer read as unreachable.
+    process.env.GITHUB_TOKEN = 'onnect';
     try {
-      expect(redactSecret('fatal: ghp_supersecret was rejected')).toBe('fatal: *** was rejected');
+      const err = await makeRunner([step('noop', async () => ({ outcome: 'ok' }))], {
+        kbRepoUrl: () => 'https://127.0.0.1:1/kb.git?X-Amz-Signature=SECRETSIG',
+        gitToken: () => 'access',
+      })
+        .runAll()
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(err).toBeInstanceOf(ClassifiedFailure);
+      const message = (err as Error).message;
+      expect(message).not.toContain('SECRETSIG');
+      expect(message).not.toMatch(/onnect|access/);
+      expect(failureOf(err).kind).toBe('unreachable');
+      expect(classifyGitFailure(message).kind).not.toBe('unreachable');
     } finally {
       if (prev === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = prev;
     }
   });
+});
 
-  it('scrubs URL userinfo — a user:pass@ remote must not leak the password', () => {
-    expect(redactSecret("fetch of 'https://alice:hunter2@example.com/kb.git' failed")).toBe(
-      "fetch of 'https://***@example.com/kb.git' failed",
-    );
-    // A plain URL is untouched.
-    expect(redactSecret('https://example.com/kb.git')).toBe('https://example.com/kb.git');
+describe('KbStartupRunner redaction', () => {
+  it('scrubs the token in effect from a failure, even one that never reached the environment', async () => {
+    const saved = process.env.GITHUB_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    try {
+      await populatedUpstream();
+      const runner = makeRunner(
+        [
+          step('leaky', async () => {
+            throw new Error('the host said ghp_settingsonly42 is not welcome');
+          }),
+        ],
+        { gitToken: () => 'ghp_settingsonly42' },
+      );
+      const err = await runner.runAll().then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err?.message).toContain('KB startup step "leaky" failed');
+      expect(err?.message).not.toContain('ghp_settingsonly42');
+    } finally {
+      if (saved !== undefined) process.env.GITHUB_TOKEN = saved;
+    }
   });
 });
 
