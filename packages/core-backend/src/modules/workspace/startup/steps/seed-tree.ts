@@ -26,8 +26,11 @@ export function buildSeedTree(
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
 ): (dir: string) => Promise<string[]> {
-  const requiredDirs = reservedRootDirs(extraRootDirs);
+  // Validated eagerly; resolved per seed. The core roots are live bindings the
+  // setup-completing save may configure after this builder was composed.
+  reservedRootDirs(extraRootDirs);
   return async (dir) => {
+    const requiredDirs = reservedRootDirs(extraRootDirs);
     const generated: string[] = [];
     await copyTemplateTree(disk, templateDir, dir);
     // Reserved roots the template does not carry. Without this the seed commit
