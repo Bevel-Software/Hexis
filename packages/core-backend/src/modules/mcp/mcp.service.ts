@@ -49,6 +49,7 @@ import { seedBevelHostedManualVars } from '../../shared/utcp-namespace.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
+import { SurfaceLogThrottle } from './surface-log-throttle.js';
 import {
   composeAgentInstructions,
   prefixToolDescription,
@@ -167,6 +168,7 @@ export class McpService {
   // Circuit breaker for manuals whose credentials just failed — see the memo.
   // Retry policy, not session state: it survives the move to statelessness.
   private readonly manualFailures = new ManualFailureMemo();
+  private readonly surfaceLog = new SurfaceLogThrottle();
 
   // The downstream connection pool for `mcp` manuals — see the class doc.
   private readonly downstream: DownstreamPool<PooledDownstream>;
@@ -404,11 +406,17 @@ export class McpService {
     const client = await this.buildClient(loopbackBearer, userId, manuals);
     const tools = await this.discoverTools(client, manuals, userId);
     const totalMs = performance.now() - started;
-    console.log(
-      `[mcp] request surface: user=${userId} tokenId=${tokenId ?? 'none'} — ` +
-        `${tools.length} tool(s) across ${manuals.length} manual(s) in ${totalMs.toFixed(0)}ms ` +
-        `(catalog ${catalogMs.toFixed(0)}ms, registration ${(totalMs - catalogMs).toFixed(0)}ms)`,
-    );
+    // Per user: on a shape change or once per interval, never per request —
+    // see SurfaceLogThrottle for why both halves matter.
+    const decision = this.surfaceLog.decide(userId, { tools: tools.length, manuals: manuals.length });
+    if (decision.log) {
+      console.log(
+        `[mcp] request surface: user=${userId} tokenId=${tokenId ?? 'none'} — ` +
+          `${tools.length} tool(s) across ${manuals.length} manual(s) in ${totalMs.toFixed(0)}ms ` +
+          `(catalog ${catalogMs.toFixed(0)}ms, registration ${(totalMs - catalogMs).toFixed(0)}ms)` +
+          (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
+      );
+    }
     return { client, tools };
   }
 
@@ -571,11 +579,28 @@ export class McpService {
     userId: string,
   ): Promise<ProxiedTool[]> {
     const routes = new Map<string, () => Promise<Lease<PooledDownstream>>>();
+    // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
+    // route by the rewritten prefix, so two manuals whose names rewrite to one
+    // identifier would silently share it. Sequential registration used to
+    // throw "already registered" for the second; concurrent registration
+    // (below) would let both pass the shared layer's pre-check, one
+    // overwriting the other in the repository while `routes` kept whichever
+    // resolved last — tools/list from one server, tools/call to the other.
+    // Decided here, over the whole list, before anything is registered: every
+    // manual in a colliding group fails with a message naming the others. The
+    // KB manual always keeps its name — a `.tool` colliding with it fails,
+    // the KB manual does not.
+    const byRewrittenName = new Map<string, string[]>();
+    for (const m of manuals) {
+      const rewritten = utcpManualName(m);
+      byRewrittenName.set(rewritten, [...(byRewrittenName.get(rewritten) ?? []), String(m.name)]);
+    }
     const outcomes = await Promise.all(
       manuals.map(async (m) => {
         const isKb = m.name === EXTERNAL_KB_MANUAL_NAME;
         const name = String(m.name);
-        // Taken before registration, which renames the template in place.
+        // Both taken before registration, which renames the template in place.
+        const rewritten = utcpManualName(m);
         const memoKey = `${name}${POOL_KEY_SEPARATOR}${templateFingerprint(m)}`;
         if (!isKb) {
           const recent = this.manualFailures.recentFailure(userId, memoKey);
@@ -593,10 +618,18 @@ export class McpService {
           // Neither path throws: a discovery/network failure and a validation
           // failure both come back as `{ ok: false }`, because the retry
           // policy — this memo — is ours, not the shared layer's.
-          const result =
-            m.call_template_type === 'mcp'
-              ? await this.attachDownstream(client, m, userId, routes)
-              : await registerManual(client, m);
+          const siblings = (byRewrittenName.get(rewritten) ?? []).filter((s) => s !== name);
+          const result: { ok: true } | { ok: false; error: string } =
+            !isKb && siblings.length > 0
+              ? {
+                  ok: false,
+                  error:
+                    `manual name "${name}" rewrites to "${rewritten}", the same identifier as ` +
+                    `${siblings.map((s) => `"${s}"`).join(', ')} — rename one; a colliding manual is not registered`,
+                }
+              : m.call_template_type === 'mcp'
+                ? await this.attachDownstream(client, m, userId, routes)
+                : await registerManual(client, m);
           if (!result.ok) {
             if (isKb) return { isKb, ok: false as const, error: result.error };
             this.manualFailures.recordFailure(userId, memoKey, result.error, generation);

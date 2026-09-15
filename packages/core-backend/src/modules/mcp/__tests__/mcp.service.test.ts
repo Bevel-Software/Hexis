@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { CallTemplate } from '@utcp/sdk';
 import { McpService } from '../mcp.service.js';
 import { SpillStore } from '../../workspace/spill-store.js';
 import { createManualRoutes } from '../../tool-registry/manual.routes.js';
@@ -28,6 +29,12 @@ const cleanups: Array<() => Promise<void>> = [];
 async function setup(deps?: {
   secretsVault?: unknown;
   toolManuals?: unknown;
+  /**
+   * Manuals the loopback catalog (`GET /api/agent/all-tools`) lists beside the
+   * KB manual. Without this the harness serves no catalog at all and every
+   * request sees the KB manual alone — which is what most cases want.
+   */
+  extraManuals?: CallTemplate[];
   /** Caller auth kind: a connection-key id (default), or null for an OAuth/JWT caller. */
   tokenId?: string | null;
   /** Spy for the session-grant reset fired on broken sign-ins. */
@@ -84,6 +91,10 @@ async function setup(deps?: {
     res.json({ text: `echo: ${b.prompt}`, sessionId: typeof b.sessionId === 'string' ? b.sessionId : 'new-sess' });
   });
   app.post('/api/agent/tools/boom', (_req, res) => res.status(500).json({ error: 'kaboom' }));
+  if (deps?.extraManuals) {
+    const manuals = deps.extraManuals;
+    app.get('/api/agent/all-tools', (_req, res) => res.json({ manuals }));
+  }
   app.use('/api', createManualRoutes(registry, noAuth));
   httpServer = await new Promise<HttpServer>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -495,5 +506,38 @@ describe('McpService — agent instructions', () => {
     for (const name of KB_TOOLS) {
       expect(tools.find((t) => t.name === name)?.description.startsWith(`${TOOL_PREFIX_LINE} Acme.`)).toBe(true);
     }
+  });
+});
+
+describe('McpService — manual names that rewrite to one identifier', () => {
+  // The shared layer rewrites `[^\w]` to `_`, so these two are one name to it.
+  const colliding = (name: string): CallTemplate =>
+    ({ name, call_template_type: 'http', url: 'http://127.0.0.1:9/never-dialed', http_method: 'GET' }) as CallTemplate;
+
+  it('registers neither colliding manual, names both in the warning, and keeps the rest of the surface', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = await setup({ extraManuals: [colliding('notion-eu'), colliding('notion.eu')] });
+
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    // The KB manual's tools are untouched by the collision.
+    expect(names).toContain('ask');
+    // Neither collider made it into the surface — no tool carries the shared prefix.
+    expect(names.some((n) => n.startsWith('notion_eu'))).toBe(false);
+
+    // Each warning names BOTH manuals, so pick each by the one it is about.
+    const messages = warn.mock.calls.map((c) => String(c[0]));
+    const forEu = messages.find((m) => m.includes('skipping manual "notion-eu"'));
+    const forDotEu = messages.find((m) => m.includes('skipping manual "notion.eu"'));
+    expect(forEu).toMatch(/rewrites to "notion_eu".*"notion\.eu"/);
+    expect(forDotEu).toMatch(/rewrites to "notion_eu".*"notion-eu"/);
+  });
+
+  it('a manual whose name rewrites to the KB manual’s loses; the KB manual keeps its name', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const client = await setup({ extraManuals: [colliding('KNOWLEDGE-BASE')] });
+
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    expect(names).toContain('ask');
+    expect(warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes('"KNOWLEDGE-BASE"') && m.includes('rewrites to'))).toBe(true);
   });
 });
