@@ -13,6 +13,8 @@
 
 import { parse as parseFullYaml } from 'yaml';
 import { pluginManifestName } from '@bevel-software/platform-shared';
+import { canonicalEmail } from '../../shared/email-identity.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -494,26 +496,18 @@ export function parseYamlSubset(
 export function extractFrontmatter(
   text: string,
 ): { ok: true; frontmatter: string } | { ok: false; error: string } {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') {
-    return { ok: false, error: 'expected `---` on the first line' };
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return { ok: false, error: 'expected `---` on the first line' };
+  if (scan.kind === 'unterminated') {
+    return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
   }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return { ok: true, frontmatter: lines.slice(1, i).join('\n') };
-    }
-  }
-  return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
+  return { ok: true, frontmatter: scan.fm.join('\n') };
 }
 
-/** The text AFTER the closing frontmatter fence ('' when there is no fence). */
+/** The text AFTER the closing frontmatter fence ('' when there is no closed block). */
 export function bodyAfterFrontmatter(text: string): string {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') return '';
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return lines.slice(i + 1).join('\n');
-  }
-  return '';
+  const scan = scanFrontmatter(text);
+  return scan.kind === 'frontmatter' ? scan.post.slice(1).join('\n') : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -526,9 +520,13 @@ export function canonicalRoleName(name: string): string {
   return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-export function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
+/**
+ * Re-exported from `shared/email-identity.ts`, where it lives beside the
+ * identity HASH that must normalise identically. The grammar keeps the name
+ * because its parsers and splices read as prose with it, and its own callers
+ * keep importing it from here.
+ */
+export { canonicalEmail };
 
 // ---------------------------------------------------------------------------
 // Entry parser

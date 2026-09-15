@@ -61,7 +61,7 @@ import { sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { hashEmail } from '../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
@@ -1719,7 +1719,7 @@ export class WorkflowService implements IWorkflowService {
           targetBranch: input.targetBranch,
           title: input.title.trim(),
           body,
-          authorEmail: user.email.trim().toLowerCase(),
+          authorEmail: canonicalEmail(user.email),
           authorName: user.name,
         })
         .returning({ number: changeRequests.number });

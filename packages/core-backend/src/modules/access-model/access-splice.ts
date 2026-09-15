@@ -35,6 +35,7 @@ import {
   accessMdDeclaresBodyRules,
 } from './access-grammar.js';
 import { freshAccessMd } from './access-template.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 
 /**
  * Which rule block a mutation edits.
@@ -196,24 +197,14 @@ interface Frontmatter {
  * grant into a fresh file synthesise one.
  */
 function splitFrontmatter(text: string): Frontmatter & { hasFrontmatter: boolean } {
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const lines = text.split(/\r?\n/);
-  // Opening fence must be the very first line.
-  if (lines[0]?.trim() !== '---') {
-    return { pre: [], fm: [], post: lines, eol, hasFrontmatter: false };
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'unterminated') {
+    throw new AccessSpliceError('unterminated frontmatter — no closing `---`');
   }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return {
-        pre: lines.slice(0, 1), // the opening ---
-        fm: lines.slice(1, i),
-        post: lines.slice(i), // closing --- onward (body preserved)
-        eol,
-        hasFrontmatter: true,
-      };
-    }
+  if (scan.kind === 'none') {
+    return { pre: [], fm: [], post: scan.lines, eol: scan.eol, hasFrontmatter: false };
   }
-  throw new AccessSpliceError('unterminated frontmatter — no closing `---`');
+  return { pre: scan.open, fm: scan.fm, post: scan.post, eol: scan.eol, hasFrontmatter: true };
 }
 
 function joinFrontmatter(f: Frontmatter): string {
