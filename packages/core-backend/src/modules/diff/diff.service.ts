@@ -4,7 +4,7 @@ import type { FileDiffPayload, PendingChange, ReviewSession, ChangeKind } from '
 import type { IDiffService } from './diff.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { BevelIgnoreStack } from '../workspace/bevel-ignore.js';
+import { walkTree, type TreeWalkOptions } from '../../shared/kb-walk.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from './diff-paths.js';
 import { countLineChanges } from './line-diff.js';
@@ -188,8 +188,8 @@ export class DiffService implements IDiffService {
     const workspaceDir = await this.workspaceService.getWorkspacePath(workspaceId);
     const backupDir = await this.getBackupDir(workspaceId);
     const candidates = new Set<string>();
-    await walkDiffable(workspaceDir, workspaceDir, candidates);
-    await walkAll(backupDir, backupDir, candidates);
+    await walkDiffable(workspaceDir, candidates);
+    await walkAll(backupDir, candidates);
     const pending: PendingChange[] = [];
     for (const rel of candidates) {
       const change = await computePending(workspaceDir, backupDir, rel);
@@ -342,32 +342,19 @@ export class DiffService implements IDiffService {
     return { workspaceDir, backupDir, fileAbs, backupAbs };
   }
 
-  private async copyDiffableTree(
-    workspaceDir: string,
-    backupDir: string,
-    currentDir: string,
-    parentIgnore: BevelIgnoreStack = BevelIgnoreStack.empty(),
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await fs.readdir(currentDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    const ignoreStack = await parentIgnore.extendedWith(currentDir);
-    for (const entry of entries) {
-      if (entry.name === '.git' || entry.name === '.workspace.json') continue;
-      const srcPath = path.join(currentDir, entry.name);
-      if (ignoreStack.isIgnored(srcPath, entry.isDirectory())) continue;
-      const rel = path.relative(workspaceDir, srcPath);
-      const dstPath = path.join(backupDir, rel);
-      if (entry.isDirectory()) {
-        await this.copyDiffableTree(workspaceDir, backupDir, srcPath, ignoreStack);
-      } else if (entry.isFile() && isDiffable(entry.name)) {
-        await fs.mkdir(path.dirname(dstPath), { recursive: true });
-        await fs.copyFile(srcPath, dstPath);
-      }
-    }
+  /** Mirror every diffable file under `currentDir` into `backupDir`, at the same path relative to `workspaceDir`. */
+  private async copyDiffableTree(workspaceDir: string, backupDir: string, currentDir: string): Promise<void> {
+    await walkTree(currentDir, diffableWalk(), [
+      {
+        async onFile(dir, name) {
+          if (!isDiffable(name)) return;
+          const srcPath = path.join(currentDir, dir, name);
+          const dstPath = path.join(backupDir, path.relative(workspaceDir, srcPath));
+          await fs.mkdir(path.dirname(dstPath), { recursive: true });
+          await fs.copyFile(srcPath, dstPath);
+        },
+      },
+    ]);
   }
 
   /**
@@ -409,49 +396,38 @@ function looksBinary(buf: Buffer): boolean {
   return sample.indexOf(0) !== -1;
 }
 
-async function walkDiffable(
-  root: string,
-  dir: string,
-  out: Set<string>,
-  parentIgnore: BevelIgnoreStack = BevelIgnoreStack.empty(),
-): Promise<void> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  const ignoreStack = await parentIgnore.extendedWith(dir);
-  for (const entry of entries) {
-    if (entry.name === '.git' || entry.name === '.workspace.json') continue;
-    const abs = path.join(dir, entry.name);
-    if (ignoreStack.isIgnored(abs, entry.isDirectory())) continue;
-    if (entry.isDirectory()) {
-      await walkDiffable(root, abs, out, ignoreStack);
-    } else if (entry.isFile() && isDiffable(entry.name)) {
-      out.add(path.relative(root, abs).replace(/\\/g, '/'));
-    }
-  }
+/**
+ * The walk of a workspace the diff ledger mirrors: no git internals, no
+ * workspace marker, `.bevelignore` honoured on the way down, and a folder
+ * that cannot be listed is left out — the ledger shows what it can.
+ */
+function diffableWalk(): TreeWalkOptions {
+  return { skip: (e) => e.name === '.git' || e.name === '.workspace.json', ignore: true };
 }
 
-async function walkAll(root: string, dir: string, out: Set<string>): Promise<void> {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const abs = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walkAll(root, abs, out);
-    } else if (entry.isFile()) {
-      // Strip the .tmp suffix from in-flight atomic writes so a crashed write
-      // doesn't surface as a phantom "modified" entry on the next list call.
-      if (entry.name.endsWith('.tmp')) continue;
-      out.add(path.relative(root, abs).replace(/\\/g, '/'));
-    }
-  }
+/** Every diffable file under `root`, as `/`-separated paths relative to it. */
+async function walkDiffable(root: string, out: Set<string>): Promise<void> {
+  await walkTree(root, diffableWalk(), [
+    {
+      onFile(dir, name) {
+        if (isDiffable(name)) out.add(dir ? `${dir}/${name}` : name);
+      },
+    },
+  ]);
+}
+
+/** Every file under the backup `root`, as `/`-separated paths relative to it. */
+async function walkAll(root: string, out: Set<string>): Promise<void> {
+  await walkTree(root, {}, [
+    {
+      onFile(dir, name) {
+        // Strip the .tmp suffix from in-flight atomic writes so a crashed write
+        // doesn't surface as a phantom "modified" entry on the next list call.
+        if (name.endsWith('.tmp')) return;
+        out.add(dir ? `${dir}/${name}` : name);
+      },
+    },
+  ]);
 }
 
 async function computePending(

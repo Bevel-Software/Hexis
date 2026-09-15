@@ -5,6 +5,7 @@ import AdmZip from 'adm-zip';
 import { DEFAULT_BRANCH, PLUGINS_DIR } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { walkTree } from '../../shared/kb-walk.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
@@ -116,31 +117,24 @@ export function createToolManualsAgentRoutes(
         return void res.status(404).json({ error: 'Not found' });
       }
       const rels: string[] = [];
-      const walk = async (dir: string, rel: string): Promise<void> => {
-        let entries;
-        try {
-          entries = await fs.readdir(dir, { withFileTypes: true });
-        } catch (err) {
-          // Only an absent directory is a non-event; anything else (EACCES,
-          // EIO) silently missing from the archive would hand the client an
-          // incomplete plugin stamped as success.
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-          throw err;
-        }
-        for (const e of entries) {
-          if (e.name === '.git') continue;
-          const childRel = rel ? `${rel}/${e.name}` : e.name;
-          // Dirent's isDirectory/isFile are both false for a symlink, so a
-          // link is never walked and never listed — but say so, once, because
-          // an author who committed one deserves to know it went nowhere.
-          if (e.isDirectory()) await walk(path.join(dir, e.name), childRel);
-          else if (e.isFile()) rels.push(childRel);
-          else if (e.isSymbolicLink()) {
+      // Only an absent folder is a non-event; anything else (EACCES, EIO)
+      // silently missing from the archive would hand the client an
+      // incomplete plugin stamped as success — so a hole is the error.
+      await walkTree(pluginDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+        {
+          onFile(dir, name) {
+            rels.push(dir ? `${dir}/${name}` : name);
+          },
+          onOther(dir, e) {
+            // A link is never walked and never listed — but say so, once,
+            // because an author who committed one deserves to know it went
+            // nowhere.
+            if (!e.isSymbolicLink()) return;
+            const childRel = dir ? `${dir}/${e.name}` : e.name;
             console.warn(`[tool-manuals] archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
-          }
-        }
-      };
-      await walk(pluginDir, '');
+          },
+        },
+      ]);
       if (rels.length === 0) return void res.status(404).json({ error: 'Not found' });
       const verdicts = await accessControl.canReadBatch(
         wsId,

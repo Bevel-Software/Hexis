@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
+  type FileTreeEntry,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
 import '../../library.css';
@@ -44,6 +45,8 @@ import { AccessRequestsBanner } from '../AccessRequestsBanner';
 import { useJoinRequests, type JoinRequestsApi } from '../../hooks/useJoinRequests';
 import { listSkillAccessRequests, reconcileSkillAccessRequest } from '../../services/library.api';
 import { ManageAccessDialog } from '../../../access/components/ManageAccessDialog';
+import { offersManageAccess } from '../../../access/manage-access-affordance';
+import { ShareButton } from '../ShareButton';
 import { ChangeRequestDock } from '../ChangeRequestDock';
 import { ChangeRequestDialog } from '../../../change-requests/components/ChangeRequestDialog';
 import { SkillFileTabs } from './SkillFileTabs';
@@ -154,7 +157,25 @@ export function SkillPage({
     [],
   );
   const accessRequests = useJoinRequests(name, skillPath || null, skillRequestsApi);
-  const [manageOpen, setManageOpen] = useState(false);
+  /**
+   * The skill FOLDER as the access dialog addresses it — the same entry the
+   * explorer's right-click hands over for a folder. Null until both the KB dir
+   * and the skill have resolved: a half-built path would manage the wrong
+   * folder, or the KB root.
+   */
+  const skillFolderEntry = useMemo<FileTreeEntry | null>(
+    () =>
+      kbDirName && skillPath
+        ? { name, relativePath: `${kbDirName}/${skillPath}`, type: 'directory' }
+        : null,
+    [kbDirName, skillPath, name],
+  );
+  /**
+   * What the ONE access dialog is open on. Share and the access-requests
+   * banner both set it to the skill folder; the dialog's own "Manage <Folder>"
+   * link retargets it at an ancestor (the plugin), as it does in the explorer.
+   */
+  const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
 
   /**
    * Who has to say yes. A skill has no owner of its own — it inherits its plugin
@@ -624,38 +645,49 @@ export function SkillPage({
               Owner
             </Badge>
           )}
-
+          {/* Share IS the manage-access dialog, on the skill's own folder —
+              standalone or inside a plugin. A rule written here sits beside
+              the plugin's, and the resolver reads both at their depths. Shown
+              wherever the explorer would offer `Manage access` on the same
+              folder; for someone who cannot change the rules the dialog
+              renders read-only, and the grant route refuses regardless. */}
+          {skillFolderEntry && offersManageAccess(skillFolderEntry) && (
+            <div className="ml-auto flex flex-none items-center gap-1.5">
+              <ShareButton onClick={() => setManageTarget(skillFolderEntry)} />
+            </div>
+          )}
         </div>
         {/* No description line here — the file pane renders the raw SKILL.md,
             and its frontmatter panel already says what the skill is for.
             Repeating it above the pane said the same sentence twice on the
             first screenful. */}
-        {/* No `Manage access` here, deliberately — a skill inherits its plugin
-            folder's `access.md`, and the plugin's Share panel is the one place
-            those rules are decided. Same call the tool page made. */}
       </header>
 
       {/* Not before the folder is known: Accept grants ON the folder and
           Manage access opens it, and both are no-ops against ''. */}
-      {canWrite && skillPath && (
+      {canWrite && skillFolderEntry && (
         <AccessRequestsBanner
           plugin={name}
           folders={[skillPath]}
           requests={accessRequests.requests}
-          onManage={() => setManageOpen(true)}
+          onManage={() => setManageTarget(skillFolderEntry)}
           onAccept={(r, p) => void accessRequests.accept(r, p)}
           onDecline={(r) => void accessRequests.decline(r)}
         />
       )}
-      {manageOpen && kbDirName && skillPath && (
+      {manageTarget && (
         <ManageAccessDialog
+          // Keyed on the path, so retargeting at an ancestor remounts it
+          // against that folder — the explorer's arrangement exactly.
+          key={manageTarget.relativePath}
           // The Library speaks the DEFAULT branch: a skill's rules are edited
           // where the catalog reads them, whatever branch the ambient
           // workspace happens to be on.
           workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
-          entry={{ name, relativePath: `${kbDirName}/${skillPath}`, type: 'directory' }}
+          entry={manageTarget}
+          onManageAncestor={setManageTarget}
           onClose={() => {
-            setManageOpen(false);
+            setManageTarget(null);
             accessRequests.reload();
             data.reload();
           }}

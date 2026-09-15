@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import ignore, { type Ignore } from 'ignore';
+import { isAbsence } from './fs-errors.js';
 
 /**
  * The ignore file's own name. Exported because the file-tree filter hides it
@@ -22,6 +23,11 @@ interface IgnoreLayer {
  * using standard gitignore syntax (negations, `**`, directory-only patterns, anchoring).
  * Deeper files combine with — and can override — rules from shallower files,
  * mirroring how git layers `.gitignore` files.
+ *
+ * A reader honours the files by walking with `ignore: true` (see
+ * `walkTree`); the walk layers them on the way down. The stack is used
+ * directly only to judge a single path, or to hand a walk the rules in force
+ * above its root.
  */
 export class BevelIgnoreStack {
   private constructor(private readonly layers: readonly IgnoreLayer[]) {}
@@ -31,36 +37,43 @@ export class BevelIgnoreStack {
   }
 
   /**
-   * Return a new stack that additionally includes a `.bevelignore` from `dir`
-   * (if present). If no `.bevelignore` exists in `dir`, returns this stack unchanged.
+   * Return a new stack that additionally includes a `.bevelignore` from `dir`.
+   * No file is no rules: the stack comes back unchanged. A file that is there
+   * but cannot be read is NOT — the rules are unknown and nothing under `dir`
+   * can be judged — so that error is the caller's (the walk makes it a hole).
    */
   async extendedWith(dir: string): Promise<BevelIgnoreStack> {
     const file = path.join(dir, IGNORE_FILENAME);
     let contents: string;
     try {
       contents = await fs.readFile(file, 'utf-8');
-    } catch {
-      return this;
+    } catch (err) {
+      if (isAbsence(err)) return this;
+      throw err;
     }
     const matcher = ignore().add(contents);
     return new BevelIgnoreStack([...this.layers, { root: dir, matcher }]);
   }
 
   /**
-   * Whether the given entry should be hidden from the file tree.
+   * Whether the given entry should be hidden from the file tree — layered
+   * like git: shallow to deep, the LAST rule that speaks wins, so a deeper
+   * `!pattern` restores what a shallower file hid.
    * @param absolutePath absolute path of the entry
    * @param isDirectory needed because gitignore patterns ending in `/` match directories only
    */
   isIgnored(absolutePath: string, isDirectory: boolean): boolean {
+    let ignored = false;
     for (const layer of this.layers) {
       const rel = path.relative(layer.root, absolutePath).replace(/\\/g, '/');
       // Skip entries that aren't under this layer's root (shouldn't happen in normal
       // recursion, but guards against absolute-path quirks on Windows).
       if (!rel || rel.startsWith('..')) continue;
       // Append trailing slash for directories so `foo/`-style rules match correctly.
-      const probe = isDirectory ? `${rel}/` : rel;
-      if (layer.matcher.ignores(probe)) return true;
+      const verdict = layer.matcher.test(isDirectory ? `${rel}/` : rel);
+      if (verdict.ignored) ignored = true;
+      else if (verdict.unignored) ignored = false;
     }
-    return false;
+    return ignored;
   }
 }

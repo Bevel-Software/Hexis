@@ -1,12 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { IGNORE_FILENAME } from './bevel-ignore.js';
+import { IGNORE_FILENAME } from '../../shared/bevel-ignore.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH, KNOWLEDGE_DIR, canonicalRelativePath, reservedRootDirNames } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
+import { walkTree } from '../../shared/kb-walk.js';
 import type { WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -1215,30 +1216,21 @@ export function createWorkspaceRoutes(
  * deletion lands as its own one-file change.
  *
  * Skips `.git` to avoid trying to commit the internal git index when a
- * caller targets it accidentally. Returns paths in stable lexical order
- * for predictable commit sequencing.
+ * caller targets it accidentally. Returns paths in the walk's order — stable
+ * and lexical — for predictable commit sequencing. A link counts as a file:
+ * it is deleted as one, never followed. A folder that cannot be listed is
+ * left out.
  */
 async function enumerateFilesUnder(absoluteDir: string, workspaceDir: string): Promise<string[]> {
   const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (entry.name === '.git' && entry.isDirectory()) continue;
-      const child = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(child);
-      } else {
-        out.push(path.relative(workspaceDir, child).replace(/\\/g, '/'));
-      }
-    }
-  }
-  await walk(absoluteDir);
+  const relOf = (dir: string, name: string) =>
+    path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
+  await walkTree(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory() }, [
+    {
+      onFile: (dir, name) => void out.push(relOf(dir, name)),
+      onOther: (dir, e) => void out.push(relOf(dir, e.name)),
+    },
+  ]);
   return out;
 }
 
