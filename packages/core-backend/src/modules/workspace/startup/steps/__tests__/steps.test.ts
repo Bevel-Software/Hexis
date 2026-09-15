@@ -727,6 +727,24 @@ describe('buildSeedTree', () => {
       /KB template entry "dirlink" links to a directory/,
     );
   });
+
+  it('seeds a template file whose name collides with Object.prototype', async () => {
+    // The packable-spelling lookup is keyed by FILENAME. Asked about a file
+    // called `constructor` an object map answers from the prototype and hands
+    // a function to path.join, failing the seed of a whole knowledge base
+    // with a type error that names nothing.
+    const templateDir = path.join(root, 'proto-template');
+    await fs.mkdir(templateDir, { recursive: true });
+    await fs.writeFile(path.join(templateDir, 'access.md'), 'policy', 'utf8');
+    await fs.writeFile(path.join(templateDir, 'constructor'), 'not a function', 'utf8');
+    await fs.writeFile(path.join(templateDir, 'toString'), 'nor this', 'utf8');
+
+    const dest = path.join(root, 'proto-dest');
+    await fs.mkdir(dest, { recursive: true });
+    await buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com'])(dest);
+    expect(await fs.readFile(path.join(dest, 'constructor'), 'utf8')).toBe('not a function');
+    expect(await fs.readFile(path.join(dest, 'toString'), 'utf8')).toBe('nor this');
+  });
 });
 
 describe('PluginManifestsStep', () => {
@@ -1162,6 +1180,12 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
       // still the plugin it was.
       'Plugins/Vendored/access.md': 'write:\n  - Admin\n',
       'Plugins/Vendored/node_modules/some-pkg/plugin.json': '{"name":"some-pkg"}',
+      // A folder whose ONLY plugin-shaped entry is one the walk skips. The
+      // migration's own sweep never moves a dot-entry, so counting it as
+      // legacy content wrote a manifest for a folder and then moved nothing
+      // into it — and the manifests step, reading a walk that had already
+      // dropped it, disagreed about the same folder.
+      'Plugins/HiddenOnly/.hidden.tool': 'name: hidden\n',
     });
     await migrate();
     const dir = await checkout(DEFAULT_BRANCH);
@@ -1170,6 +1194,7 @@ describe('GroupsToPluginsStep — migration edge cases', () => {
     expect(await exists(dir, 'Plugins/Teams/plugin.json')).toBe(false);
     expect(await exists(dir, 'Plugins/Teams/Agent Made/plugin.json')).toBe(true);
     expect(await exists(dir, 'Plugins/Vendored/plugin.json')).toBe(true);
+    expect(await exists(dir, 'Plugins/HiddenOnly/plugin.json')).toBe(false);
   });
 
   it('leaves a personal folder a valid plugin', async () => {
