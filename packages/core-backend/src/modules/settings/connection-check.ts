@@ -173,15 +173,31 @@ export function classifyReadFailure(text: string): FailureReason {
  * push side says so at that same door: GitHub "Permission to … denied" or
  * "Write access to repository not granted", GitLab "not allowed to push",
  * Bitbucket "lack one or more required privilege scopes", Azure DevOps
- * "GenericContribute", or plainly a 401/403. A 404 here is the same refusal —
+ * "GenericContribute", or plainly a 403. A 404 here is the same refusal —
  * the credentials just listed the repository, so it exists; the host is hiding
  * the write side from this token.
+ *
+ * AN AUTHENTICATION failure is NOT that refusal. On a PUBLIC repository the
+ * read succeeds anonymously — git only offers credentials when challenged,
+ * and nobody challenges a public `ls-remote` — so the push is the FIRST time
+ * the token is presented at all. A made-up token then fails there with a 401
+ * ("Authentication failed", GitHub's "Invalid username or token"), and calling
+ * that "can read but cannot write" would send the admin off to grant a
+ * permission to a token that does not exist. Checked before the refusal
+ * patterns for that reason.
  */
 export function classifyWriteFailure(text: string): 'writable' | 'read-only' | FailureReason {
   if (/remote ref does not exist/i.test(text)) return 'writable';
   if (/timed out|ETIMEDOUT/i.test(text)) return 'unreachable';
   if (
-    /Permission to .* denied|Write access to repository not granted|not allowed to push|lack one or more required privilege scopes|GenericContribute|denied|forbidden|Authentication failed|could not read Username|could not read Password|error: 40[134]\b|not found/i.test(
+    /Authentication failed|could not read Username|could not read Password|Invalid username or (token|password)|invalid credentials|error: 401\b/i.test(
+      text,
+    )
+  ) {
+    return 'credentials';
+  }
+  if (
+    /Permission to .* denied|Write access to repository not granted|not allowed to push|lack one or more required privilege scopes|GenericContribute|denied|forbidden|error: 40[34]\b|not found/i.test(
       text,
     )
   ) {

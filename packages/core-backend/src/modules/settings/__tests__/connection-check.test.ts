@@ -68,6 +68,22 @@ describe('classifyWriteFailure — a receive-pack refusal vs "remote ref does no
     expect(classifyWriteFailure(text)).toBe('read-only');
   });
 
+  /**
+   * A public repository reads anonymously, so the push is where a token is
+   * first presented — a made-up one fails THERE, and that is bad credentials,
+   * not a permission to grant.
+   */
+  it.each([
+    [
+      'GitHub invalid token',
+      "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/Bevel-Software/Hexis.git/'",
+    ],
+    ['a bare 401', "fatal: unable to access 'https://git.example.com/kb.git/': The requested URL returned error: 401"],
+    ['no credential offered', "fatal: could not read Username for 'https://github.com': terminal prompts disabled"],
+  ])('reads an authentication failure at push (%s) as credentials, not read-only', (_case, text) => {
+    expect(classifyWriteFailure(text)).toBe('credentials');
+  });
+
   it('keeps an unreachable host unreachable, not read-only', () => {
     expect(
       classifyWriteFailure("fatal: unable to access 'https://x/': Could not resolve host: x"),
@@ -130,6 +146,22 @@ describe('checkRepositoryConnection', () => {
     if (result.outcome !== 'read-only') return;
     expect(result.field).toBe('gitToken');
     expect(result.error).toMatch(/Contents: Read and write/);
+  });
+
+  it('is rejected as bad credentials when a public repository reads but the push fails authentication', async () => {
+    const git = fakeGit({
+      // Anonymous read of a public repository: the token was never asked for.
+      listing: 'abc\trefs/heads/main\n',
+      push: gitError(
+        "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/acme/kb.git/'",
+      ),
+    });
+    const result = await checkRepositoryConnection(CONNECTION, git.run);
+    expect(result).toMatchObject({ outcome: 'rejected', reason: 'credentials', field: 'gitToken' });
+    if (result.outcome === 'rejected') {
+      expect(result.error).toMatch(/rejected those credentials/);
+      expect(result.error).not.toMatch(/Read and write/);
+    }
   });
 
   it('is rejected, against the token, when the read is refused — and never tries to write', async () => {
