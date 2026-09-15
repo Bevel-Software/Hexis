@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { computeViewerCanCancel } from '../pull-request.service.js';
-import { hashEmail } from '../../../../shared/hash-email.js';
+import { hashEmail } from '../../../../shared/email-identity.js';
 
 const EMAIL = 'juan@bevel.software';
 const AUTHOR_HASH = hashEmail(EMAIL);
