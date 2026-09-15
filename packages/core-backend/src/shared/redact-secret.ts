@@ -31,7 +31,10 @@ export function redactSecret(text: string, secrets: readonly (string | null | un
   }
   return (
     scrubbed
-      .replace(/:\/\/[^/@\s]+@/g, '://***@')
+      // Through the LAST `@` before the path: a password can carry an
+      // unencoded `@` of its own (`https://user:p@ss@host`), and stopping at
+      // the first would leave the rest of it in the log.
+      .replace(/:\/\/[^/\s]*@/g, '://***@')
       // A presigned remote carries its credential in the query instead
       // (`?X-Amz-Signature=…`, `?access_token=…`). A git remote has no query
       // worth keeping in a log, so the whole of it goes.

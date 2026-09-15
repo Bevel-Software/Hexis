@@ -1027,13 +1027,21 @@ describe('SetupScreen — a failed knowledge-base initialization', () => {
     const address = screen.getByLabelText('Repository address');
     const retry = screen.getByRole('button', { name: 'Retry initialization' });
 
+    // Inside the closed Advanced block, but in the form all the same.
+    const username = screen.getByLabelText('Token username');
+    expect(username).toHaveValue('');
+
     await userEvent.type(address, '-x');
+    // The address DID fill the username in — that is what this test is about.
+    expect(username).toHaveValue('x-access-token');
     expect(retry).toBeDisabled();
     await userEvent.type(address, '{Backspace}{Backspace}');
     expect(retry).toBeEnabled();
 
-    // Cleared, the address means "leave it alone" — and the username it filled in is still not an edit.
+    // Cleared, the address means "leave it alone". The username it filled in
+    // stays filled in, and is still not an edit.
     await userEvent.clear(address);
+    expect(username).toHaveValue('x-access-token');
     expect(retry).toBeEnabled();
   });
 

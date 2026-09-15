@@ -21,6 +21,14 @@ describe('redactSecret', () => {
     expect(redactSecret('https://example.com/kb.git')).toBe('https://example.com/kb.git');
   });
 
+  it('scrubs userinfo whole when the password carries an unencoded @ of its own', () => {
+    expect(redactSecret("unable to access 'https://alice:p@ss@w0rd@example.com/kb.git/': 401")).toBe(
+      "unable to access 'https://***@example.com/kb.git/': 401",
+    );
+    // An @ past the host — in the path — is not userinfo.
+    expect(redactSecret('https://example.com/acme/@team/kb.git')).toBe('https://example.com/acme/@team/kb.git');
+  });
+
   it('scrubs URL query strings — a presigned remote keeps its credential there', () => {
     expect(
       redactSecret("unable to access 'https://git.example.com/kb.git?X-Amz-Signature=abc123&X-Amz-Credential=AKIA/x': 403"),
@@ -32,13 +40,22 @@ describe('redactSecret', () => {
   });
 
   it('scrubs every token in effect: env aliases and tokens the caller names', () => {
-    const saved = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GIT_TOKEN: process.env.GIT_TOKEN };
-    delete process.env.GITHUB_TOKEN;
+    const saved = {
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      GIT_TOKEN: process.env.GIT_TOKEN,
+      GH_TOKEN: process.env.GH_TOKEN,
+    };
+    process.env.GITHUB_TOKEN = 'ghp_fromgithubenv';
     process.env.GIT_TOKEN = 'glpat_fromenv';
+    process.env.GH_TOKEN = 'gho_legacyenv';
     try {
-      expect(redactSecret('a glpat_fromenv b ghp_fromsettings c', ['ghp_fromsettings', '', null])).toBe(
-        'a *** b *** c',
-      );
+      expect(
+        redactSecret('a glpat_fromenv b ghp_fromsettings c gho_legacyenv d ghp_fromgithubenv', [
+          'ghp_fromsettings',
+          '',
+          null,
+        ]),
+      ).toBe('a *** b *** c *** d ***');
       // A token containing another is scrubbed whole, not half.
       expect(redactSecret('x ghp_abc_long y', ['ghp_abc', 'ghp_abc_long'])).toBe('x *** y');
     } finally {
