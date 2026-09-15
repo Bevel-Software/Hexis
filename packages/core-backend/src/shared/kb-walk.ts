@@ -114,8 +114,13 @@ export async function walkTree(
   const visit = async (abs: string, rel: string, inherited: BevelIgnoreStack): Promise<void> => {
     if (until?.()) return;
     let raw: import('node:fs').Dirent[];
+    let rules: BevelIgnoreStack;
     try {
       raw = await fs.readdir(abs, { withFileTypes: true });
+      // A folder whose own `.bevelignore` is there but cannot be read is as
+      // much a hole as one that cannot be listed: its rules are unknown, so
+      // nothing in it can be judged. (No file is no rules, never an error.)
+      rules = ignore ? await inherited.extendedWith(abs) : inherited;
     } catch (err) {
       if (isAbsence(err)) {
         // The root: a checkout without this tree, an empty walk. Deeper: a
@@ -128,19 +133,18 @@ export async function walkTree(
       return;
     }
     const seen = raw.filter((e) => !skip?.(e)).sort((a, b) => comparePathComponents(a.name, b.name));
-    const listed: WalkedEntry[] = seen.filter((e) => e.isDirectory() || e.isFile());
-    const rules = ignore ? await inherited.extendedWith(abs) : inherited;
-    const entries = ignore ? listed.filter((e) => !rules.isIgnored(path.join(abs, e.name), e.isDirectory())) : listed;
+    const isEntry = (e: WalkedEntry) => e.isDirectory() || e.isFile();
+    const listed = seen.filter(isEntry);
+    // The rules apply to everything that is there — a link a rule names is as hidden as a file.
+    const visible = ignore ? seen.filter((e) => !rules.isIgnored(path.join(abs, e.name), e.isDirectory())) : seen;
+    const entries = visible.filter(isEntry);
     const dir: WalkedDir = { rel, abs, listed, ignore: rules };
     for (const l of listeners) await l.onDir?.(rel, entries, dir);
     if (leaf?.(dir, entries)) return;
-    const kept = new Set(entries.map((e) => e.name));
-    for (const entry of seen) {
+    for (const entry of visible) {
       if (until?.()) return;
-      if (!entry.isDirectory() && !entry.isFile()) {
+      if (!isEntry(entry)) {
         for (const l of listeners) await l.onOther?.(rel, entry);
-      } else if (!kept.has(entry.name)) {
-        continue;
       } else if (entry.isDirectory()) {
         await visit(path.join(abs, entry.name), rel ? `${rel}/${entry.name}` : entry.name, rules);
       } else {

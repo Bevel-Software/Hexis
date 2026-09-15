@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 import { walkTree } from '../../../../shared/kb-walk.js';
+import { isAbsence } from '../../../../shared/fs-errors.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { TEMPLATE_SOURCE_FALLBACKS, reservedRootDirs, templateSource } from './template-files.step.js';
 
@@ -62,27 +63,44 @@ async function copyTemplateTree(templateDir: string, dest: string): Promise<void
     Object.entries(TEMPLATE_SOURCE_FALLBACKS).map(([real, packable]) => [packable, real]),
   );
   // A template that is not there is a broken build, not an empty seed.
-  if (!(await fs.stat(templateDir)).isDirectory()) {
+  const templateStat = await fs.stat(templateDir).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
+  if (templateStat === null || !templateStat.isDirectory()) {
     throw new Error(`KB template "${templateDir}" is not a directory.`);
   }
+  /** Seed one template file, by the name the walk saw it under. */
+  const seedFile = async (relDir: string, name: string): Promise<void> => {
+    // A packable spelling at the template root seeds under its REAL name
+    // — unless the template also carries the literal file (a
+    // distribution's own template), which wins and is copied by its own
+    // walk entry; copying the packable twin too would clobber it.
+    const realName = relDir === '' ? packableToReal.get(name) : undefined;
+    if (realName !== undefined) {
+      if (!(await exists(path.join(templateDir, realName)))) {
+        await copyTemplateFile(templateDir, realName, dest);
+      }
+      return;
+    }
+    await copyTemplateFile(templateDir, relDir ? path.join(relDir, name) : name, dest);
+  };
   // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
   // (this repo in a Docker build) must not seed its history into the KB.
   // Every other entry is template content, dot-files included.
   await walkTree(templateDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
     {
-      async onFile(relDir, name) {
-        // A packable spelling at the template root seeds under its REAL name
-        // — unless the template also carries the literal file (a
-        // distribution's own template), which wins and is copied by its own
-        // walk entry; copying the packable twin too would clobber it.
-        const realName = relDir === '' ? packableToReal.get(name) : undefined;
-        if (realName !== undefined) {
-          if (!(await exists(path.join(templateDir, realName)))) {
-            await copyTemplateFile(templateDir, realName, dest);
-          }
-          return;
+      onFile: seedFile,
+      async onOther(relDir, entry) {
+        // A template may LINK to a file (a distribution's checkout, a Docker
+        // build's copy): its content is template content, read through the
+        // link and seeded under the link's own name like any file. A link to
+        // anything else — a folder, nothing — is a broken template, and says so.
+        const rel = relDir ? path.join(relDir, entry.name) : entry.name;
+        const target = await fs.stat(path.join(templateDir, rel)).catch((err: unknown) => (isAbsence(err) ? null : Promise.reject(err)));
+        if (target === null || !target.isFile()) {
+          throw new Error(
+            `KB template entry "${rel}" links to ${target === null ? 'nothing' : 'a directory'} — a template may link only to a file.`,
+          );
         }
-        await copyTemplateFile(templateDir, relDir ? path.join(relDir, name) : name, dest);
+        await seedFile(relDir, entry.name);
       },
     },
   ]);

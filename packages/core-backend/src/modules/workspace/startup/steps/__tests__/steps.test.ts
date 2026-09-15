@@ -665,6 +665,39 @@ describe('buildSeedTree', () => {
     expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
   });
+
+  it('names a template that is not there — a missing directory is a broken build, not an empty seed', async () => {
+    const dest = path.join(root, 'seed-dest-missing');
+    await fs.mkdir(dest, { recursive: true });
+    await expect(buildSeedTree(path.join(root, 'no-such-template'), [], ['admin@example.com'])(dest)).rejects.toThrow(
+      /KB template ".*no-such-template" is not a directory/,
+    );
+  });
+
+  it('seeds a file the template links to, and refuses a link to anything else', async () => {
+    const templateDir = path.join(root, 'seed-template-links');
+    const elsewhere = path.join(root, 'elsewhere-template');
+    await fs.mkdir(path.join(templateDir, 'docs'), { recursive: true });
+    await fs.mkdir(elsewhere, { recursive: true });
+    await fs.writeFile(path.join(elsewhere, 'shared.md'), 'shared', 'utf8');
+    await fs.writeFile(path.join(templateDir, 'access.md'), 'policy', 'utf8');
+    await fs.symlink(path.join(elsewhere, 'shared.md'), path.join(templateDir, 'docs', 'linked.md'), 'file');
+
+    const dest = path.join(root, 'seed-dest-links');
+    await fs.mkdir(dest, { recursive: true });
+    await buildSeedTree(templateDir, [], ['admin@example.com'])(dest);
+    // The link's CONTENT, under the link's own name, as a real file.
+    expect(await fs.readFile(path.join(dest, 'docs/linked.md'), 'utf8')).toBe('shared');
+    expect((await fs.lstat(path.join(dest, 'docs/linked.md'))).isSymbolicLink()).toBe(false);
+
+    // A link to nothing is a broken template, named as such.
+    await fs.symlink(path.join(root, 'nowhere.md'), path.join(templateDir, 'dangling.md'), 'file');
+    const dest2 = path.join(root, 'seed-dest-links-2');
+    await fs.mkdir(dest2, { recursive: true });
+    await expect(buildSeedTree(templateDir, [], ['admin@example.com'])(dest2)).rejects.toThrow(
+      /KB template entry "dangling.md" links to nothing/,
+    );
+  });
 });
 
 describe('PluginManifestsStep', () => {

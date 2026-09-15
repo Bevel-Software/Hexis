@@ -155,6 +155,36 @@ describe('walkTree', () => {
     expect(listed).toEqual(['.: 3 listed, 2 kept', 'keep: 4 listed, 2 kept']);
   });
 
+  it('`ignore` layers the rules like git: a deeper `!` restores what a shallower file hid', async () => {
+    await write('.bevelignore', '*.log\n');
+    await write('a.log');
+    await write('keep/.bevelignore', '!important.log\n');
+    await write('keep/important.log');
+    await write('keep/other.log');
+    expect(await files({ ignore: true })).toEqual(['.bevelignore', 'keep/.bevelignore', 'keep/important.log']);
+  });
+
+  it('a `.bevelignore` that is there but cannot be read makes its folder a hole — never a folder walked without its rules', async () => {
+    await write('locked/.bevelignore', 'secret.md\n');
+    await write('locked/secret.md');
+    await write('open/a.md');
+    const real = fs.readFile;
+    const spy = vi.spyOn(fs, 'readFile').mockImplementation(((file: string, ...rest: unknown[]) =>
+      String(file).endsWith(path.join('locked', '.bevelignore'))
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (f: string, ...r: unknown[]) => Promise<unknown>).call(fs, file, ...rest)) as never);
+    try {
+      const holes: string[] = [];
+      expect(await files({ ignore: true }, { onHole: (rel) => void holes.push(rel) })).toEqual(['open/a.md']);
+      expect(holes).toEqual(['locked']);
+      await expect(walkTree(root, { ignore: true, unreadable: 'throw' }, [])).rejects.toThrow('EACCES');
+      // A walk that does not honour the file never reads it: no hole.
+      expect(await files({})).toEqual(['locked/.bevelignore', 'locked/secret.md', 'open/a.md']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('`ignore` given a stack starts from the rules in force above the root', async () => {
     await write('.bevelignore', '*.png\n');
     await write('skill/a.md');
@@ -224,5 +254,10 @@ describe('walkTree', () => {
     const found = await files({}, { onOther: (dir, e) => void others.push(`${dir ? `${dir}/` : ''}${e.name}:${e.isSymbolicLink()}`) });
     expect(found).toEqual(['real/a.md']);
     expect(others).toEqual(['link:true']);
+    // …and a rule that names it hides it from onOther as it would a file.
+    await write('.bevelignore', 'link\n');
+    const hidden: string[] = [];
+    await files({ ignore: true }, { onOther: (_dir, e) => void hidden.push(e.name) });
+    expect(hidden).toEqual([]);
   });
 });
