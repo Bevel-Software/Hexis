@@ -207,4 +207,12 @@ export interface IFsProbe {
   listDir(p: string): Promise<WalkedEntry[] | null>;
   /** The JSON object in the file at `p`; null when the file is absent, not JSON, or not an object. */
   readJsonObject(p: string): Promise<Record<string, unknown> | null>;
+  /**
+   * The file at `p` as UTF-8 text. THROWS as the filesystem does — absence
+   * included — because a caller that can stand in for a missing file must say
+   * so itself (`isAbsence`), and one that cannot should fail. The sibling
+   * above answers `null` instead because "not JSON" and "not there" are the
+   * same non-answer to it; there is no such collapse for raw text.
+   */
+  readTextFile(p: string): Promise<string>;
 }
