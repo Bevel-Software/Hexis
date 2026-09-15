@@ -15,7 +15,6 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (native MCP-server `.tool` sources)
-import { McpCommunicationProtocol } from '@utcp/mcp';
 import {
   UtcpClientConfigSerializer,
   CallTemplateSerializer,
@@ -121,10 +120,11 @@ interface RequestSurface {
   tools: ProxiedTool[];
 }
 
-/** One pooled downstream connection: a client holding one `mcp` manual, and the protocol it alone owns. */
+/** One pooled downstream connection: a client holding one `mcp` manual, named so it can be deregistered. */
 interface PooledDownstream {
   client: CodeModeUtcpClient;
-  protocol: McpCommunicationProtocol;
+  /** The rewritten manual name this client registered — what `dispose` deregisters. */
+  manualName: string;
 }
 
 /**
@@ -192,7 +192,13 @@ export class McpService {
   ) {
     this.downstream = new DownstreamPool<PooledDownstream>({
       ...opts.downstreamPool,
-      dispose: (entry) => entry.protocol.close(),
+      // Deregister, never `client.close()`: the protocol is process-wide, so
+      // closing the client would drain every MCP session in the process.
+      // Deregistering releases this manual's reference and closes the session
+      // only if no other manual still holds it (@utcp/mcp >= 1.1.8).
+      dispose: async (entry) => {
+        await entry.client.deregisterManual(entry.manualName);
+      },
     });
   }
 
@@ -699,15 +705,21 @@ export class McpService {
 
   /**
    * Create one pooled downstream connection: a client registering just this
-   * manual through a PRIVATE `McpCommunicationProtocol`.
+   * manual, on the process-wide `mcp` protocol.
    *
-   * Why private: `@utcp/mcp` registers one protocol instance process-wide and
-   * caches sessions on it by server config — shared across users, never
-   * idle-evicted, and not closable per manual (`deregisterManual` does not
-   * reach the cached session). A protocol of its own is what makes this entry
-   * the sole owner of its connection, so the pool's eviction can actually
-   * close it (`protocol.close()`), and what keeps one user's connection from
-   * ever serving another's request.
+   * The protocol keeps its sessions keyed by (server name, server config,
+   * auth) — and the config it keys on is the SUBSTITUTED one, so a manual
+   * carrying a per-user credential resolves to a key nobody else can produce.
+   * Two users share a downstream session only when their resolved
+   * configuration and credentials are byte-identical (a plugin-level shared
+   * key), which is the same connection identity in every sense the server can
+   * see.
+   *
+   * Closing one manual's session is `deregisterManual`, which since
+   * `@utcp/mcp@1.1.8` releases that manual's reference and closes the session
+   * when its last holder lets go — so a pooled entry can be disposed without
+   * touching anyone else's connection. `client.close()` must NEVER be used
+   * here: it drains every MCP session in the process.
    *
    * SESSION RECOVERY is installed on the pooled client: a downstream server
    * that restarts (or expires a session) answers our next call with the spec's
@@ -716,26 +728,23 @@ export class McpService {
    * breaker for manuals whose REGISTRATION failed, so a recovery neither
    * consults it nor records into it.
    *
-   * A registration that fails closes what it opened and throws, so the pool
-   * caches nothing and the caller's memo records the failure.
+   * A registration that fails throws, so the pool caches nothing and the
+   * caller's memo records the failure. Whatever that attempt opened is closed
+   * by the protocol itself (a failed registration releases its references),
+   * so there is nothing for this method to clean up.
    */
   private async connectDownstream(userId: string, template: CallTemplate): Promise<PooledDownstream> {
-    const protocol = new McpCommunicationProtocol();
     // Third-party manuals are never seeded loopback credentials (see
     // `buildClient`), so a pooled client carries no request-scoped bearer.
     const client = await CodeModeUtcpClient.create(process.cwd(), utcpClientConfig(userId, {}));
-    useOwnMcpProtocol(client, protocol);
     // Our own copy: registration renames the template in place, and recovery
     // re-registers from exactly what discovery used.
     const own = structuredClone(template);
     const manualName = utcpManualName(own);
     installSessionRecovery(client, { manualTemplate: (name) => (name === manualName ? own : undefined) });
     const result = await registerManual(client, own);
-    if (!result.ok) {
-      await protocol.close().catch(() => {});
-      throw new Error(result.error);
-    }
-    return { client, protocol };
+    if (!result.ok) throw new Error(result.error);
+    return { client, manualName };
   }
 
   /**
@@ -898,21 +907,6 @@ function downstreamPoolKey(userId: string, template: CallTemplate): string {
 /** A short, log-safe hash of a manual's whole definition: changes whenever the definition does. */
 function templateFingerprint(template: CallTemplate): string {
   return createHash('sha256').update(JSON.stringify(template)).digest('hex').slice(0, 16);
-}
-
-/**
- * Point `client`'s `mcp` protocol at `protocol` instead of the process-wide
- * instance. `UtcpClient` exposes no API for this; it copies the global registry
- * into a per-client map at construction, which is the seam used here. Fails
- * loudly if a UTCP upgrade removes that map — silently falling back to the
- * shared protocol would reintroduce cross-user session sharing.
- */
-function useOwnMcpProtocol(client: CodeModeUtcpClient, protocol: McpCommunicationProtocol): void {
-  const protocols = (client as unknown as { _registeredCommProtocols?: unknown })._registeredCommProtocols;
-  if (!(protocols instanceof Map)) {
-    throw new Error('UTCP client internals changed: cannot give a pooled MCP connection its own protocol.');
-  }
-  protocols.set('mcp', protocol);
 }
 
 /**
