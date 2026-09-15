@@ -53,14 +53,126 @@ export interface KbStartupRunnerOptions {
   buildSeedTree: (dir: string) => Promise<string[]>;
 }
 
+/**
+ * The remote could not be reached or refused us: a host that is down, a DNS
+ * name that does not resolve, a token that was rotated. Told apart from every
+ * other way the phase can fail because it is the one that says nothing about
+ * the knowledge base — what we would write is not known to be wrong, we
+ * simply cannot get there right now — and so the one a boot may survive:
+ * the deployment comes up gated and unmaintained, and tries again.
+ */
+export class KbRemoteUnreachableError extends Error {
+  constructor(message: string, opts?: { cause?: unknown }) {
+    super(message, opts);
+    this.name = 'KbRemoteUnreachableError';
+  }
+}
+
+export interface RetryOptions {
+  /** First wait before trying again. Default 30s. */
+  initialDelayMs?: number;
+  /** The wait doubles up to this. Default 10 minutes. */
+  maxDelayMs?: number;
+  /** Test seam — defaults to `setTimeout` wrapped as a promise, unref'd. */
+  sleep?: (ms: number) => Promise<void>;
+  log?: (message: string) => void;
+}
+
 export class KbStartupRunner {
   constructor(private readonly opts: KbStartupRunnerOptions) {}
+
+  /** The run in progress, so two invokers share one rather than racing clones. */
+  private inFlight: Promise<void> | null = null;
+  /** Why the last run failed, redacted; null after a run that finished. */
+  private failure: string | null = null;
+
+  /**
+   * Why the most recent run failed, or null when the last run finished — the
+   * gate reads this so a boot that survived an unreachable remote keeps the
+   * deployment shut until a later run succeeds, exactly as a failed
+   * setup-time run does.
+   */
+  lastFailure(): string | null {
+    return this.failure;
+  }
 
   /**
    * Run the whole phase. Throws to stop the boot; returns normally when the
    * KB is fully maintained (or safe boot abandoned the phase, loudly).
+   *
+   * One run at a time: a second caller — the setup save while a background
+   * retry is under way, or the reverse — joins the run in progress rather
+   * than starting another over the same clones.
    */
-  async runAll(): Promise<void> {
+  runAll(): Promise<void> {
+    this.inFlight ??= this.runAllOnce()
+      .then(() => {
+        this.failure = null;
+      })
+      .catch((err: unknown) => {
+        this.failure = redactGitToken(err instanceof Error ? err.message : String(err));
+        throw err;
+      })
+      .finally(() => {
+        this.inFlight = null;
+      });
+    return this.inFlight;
+  }
+
+  /**
+   * Keep running the phase until it finishes, for a boot that survived an
+   * unreachable remote. Safe to run while the process serves, because the
+   * deployment is GATED for as long as `lastFailure` stands: no session can
+   * be holding a working clone the phase would race. Doubles the wait up to a
+   * ceiling — a host that is down for an hour is asked every ten minutes,
+   * not every thirty seconds — and stops on the first success, or on a
+   * failure that is NOT the remote being unreachable: that one says the
+   * knowledge base itself is wrong, and asking again will not change it.
+   * The timer never holds the process open.
+   */
+  retryUntilMaintained(opts: RetryOptions = {}): { stop(): void } {
+    const initial = opts.initialDelayMs ?? 30_000;
+    const max = opts.maxDelayMs ?? 10 * 60_000;
+    const log = opts.log ?? ((message: string) => console.warn(message));
+    const sleep =
+      opts.sleep ??
+      ((ms: number) =>
+        new Promise<void>((resolve) => {
+          setTimeout(resolve, ms).unref();
+        }));
+    let stopped = false;
+
+    void (async () => {
+      let delay = initial;
+      while (!stopped) {
+        await sleep(delay);
+        if (stopped) return;
+        try {
+          await this.runAll();
+          log('[kb-startup] the remote is reachable again and the knowledge base is maintained — the deployment is open.');
+          return;
+        } catch (err) {
+          if (!(err instanceof KbRemoteUnreachableError)) {
+            log(
+              `[kb-startup] the retry stopped on a failure that is not the remote being unreachable — ` +
+                `saving the setup form retries once it is fixed: ${this.failure ?? String(err)}`,
+            );
+            return;
+          }
+          delay = Math.min(delay * 2, max);
+          log(`[kb-startup] remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
+        }
+      }
+    })();
+
+    return {
+      stop() {
+        stopped = true;
+      },
+    };
+  }
+
+  private async runAllOnce(): Promise<void> {
     if (!isBranchModelConfigured()) {
       console.log('[kb-startup] branch model not configured yet — phase skipped until setup completes.');
       return;
@@ -180,7 +292,20 @@ export class KbStartupRunner {
   private async ensureRemote(): Promise<Set<string>> {
     const url = this.opts.kbRepoUrl();
     const user = this.opts.gitUsername();
-    const heads = await lsRemoteHeads(this.opts.gitRunner, url, user);
+    // The first question asked of the remote, and the one that answers
+    // "can we get there at all". Everything after it — seeding, pushing —
+    // fails for reasons of ours; this fails for reasons of the host's.
+    let heads: Set<string>;
+    try {
+      heads = await lsRemoteHeads(this.opts.gitRunner, url, user);
+    } catch (err) {
+      throw new KbRemoteUnreachableError(
+        `The knowledge-base remote could not be reached: ${redactGitToken(
+          err instanceof Error ? err.message : String(err),
+        )}`,
+        { cause: err },
+      );
+    }
     const protectedBranches = this.opts.protectedBranches();
     const defaultBranch = this.opts.defaultBranch();
 

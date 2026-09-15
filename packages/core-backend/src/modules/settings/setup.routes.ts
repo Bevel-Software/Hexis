@@ -45,7 +45,15 @@ export function createSetupRoutes(
    * (`isComplete`), so no session can be holding a working clone the phase
    * would race.
    */
-  kbStartupRunner: { runAll(): Promise<void> },
+  kbStartupRunner: {
+    runAll(): Promise<void>;
+    /**
+     * Why the runner's most recent run failed, if it did — including a BOOT
+     * run that survived an unreachable remote. Optional so a minimal mount
+     * (tests, a distribution's own runner) reads as never having failed.
+     */
+    lastFailure?(): string | null;
+  },
   /** How git is run, for the connection test — see `shared/git.contract.ts`. */
   gitRunner: IGitRunner,
   /**
@@ -83,8 +91,15 @@ export function createSetupRoutes(
    * at a time, phase included, so no second run can start while one executes.
    */
   let kbInitInFlight: Promise<void> | null = null;
-  /** The app-gate answer: settings complete AND the KB phase settled clean. */
-  const kbReady = () => isComplete(settings) && !kbInitFailed && kbInitInFlight === null;
+  /**
+   * A failure the RUNNER itself is standing on — a boot that survived an
+   * unreachable remote. Read live, because the runner's own background retry
+   * clears it without any save passing through here.
+   */
+  const bootFailure = () => kbStartupRunner.lastFailure?.() ?? null;
+  /** The app-gate answer: settings complete AND the KB phase settled clean, whoever ran it. */
+  const kbReady = () =>
+    isComplete(settings) && !kbInitFailed && kbInitInFlight === null && bootFailure() === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -122,7 +137,7 @@ export function createSetupRoutes(
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
-      ...(kbInitFailed ? { kbInitError } : {}),
+      ...(kbInitFailed ? { kbInitError } : bootFailure() !== null ? { kbInitError: bootFailure() } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
   });
@@ -201,7 +216,7 @@ export function createSetupRoutes(
        * the retry. Never on a re-save of a complete, healthy setup: with the
        * gate open, sessions may be live and that is no longer a quiet moment.
        */
-      if ((!wasComplete || kbInitFailed) && isComplete(settings)) {
+      if ((!wasComplete || kbInitFailed || bootFailure() !== null) && isComplete(settings)) {
         try {
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`

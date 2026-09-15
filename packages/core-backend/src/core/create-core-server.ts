@@ -54,6 +54,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import { publicConfig } from './public-config.js';
 import { createReadiness } from './readiness.js';
+import { KbRemoteUnreachableError } from '../modules/workspace/startup/kb-startup-runner.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -276,7 +277,25 @@ export async function createCoreServer(
   // from that template; the runner then brings every branch up to this build
   // before any route can serve KB content. Throws to stop the boot (the
   // container's restart policy is the retry) — see kb-startup-runner.ts.
-  await core.kbStartupRunner.runAll();
+  try {
+    await core.kbStartupRunner.runAll();
+  } catch (err) {
+    // The one failure a boot survives: the remote cannot be reached. That
+    // says nothing about the knowledge base — what we would write is not
+    // known to be wrong, we cannot get there — so refusing to boot only took
+    // away the login and setup screens an operator needs to fix it (a
+    // rotated token, say). The deployment comes up GATED: the setup routes
+    // read the runner's standing failure and keep the app shut, the setup
+    // screen shows why, saving it retries, and the runner keeps trying on
+    // its own. Every other failure still stops the boot, because it means
+    // the template or a step would write something wrong.
+    if (!(err instanceof KbRemoteUnreachableError)) throw err;
+    console.error(
+      '[kb-startup] booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:',
+      err.message,
+    );
+    core.kbStartupRunner.retryUntilMaintained();
+  }
 
   // Close change requests whose source branch has been deleted. SEQUENCED
   // AFTER the startup phase above, for two reasons: the sweep's fresh fetch
