@@ -8,7 +8,7 @@ import {
   renderPluginManifest,
 } from '@bevel-software/platform-shared';
 import { BUNDLE_FILE } from '../../../plugins/discovery/bundle-dialect/bundle.source.js';
-import { walkKb, type WalkedEntry } from '../../../../shared/kb-walk.js';
+import type { ITreeWalker, WalkedEntry } from '../../../../shared/fs.contract.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -43,15 +43,17 @@ import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '..
 export class PluginManifestsStep implements OnServerStart {
   readonly name = 'plugin-manifests';
 
+  constructor(private readonly disk: ITreeWalker) {}
+
   async run(ctx: ServerStartContext): Promise<StepResult> {
     for (const branch of await ctx.allBranches()) {
-      await addManifests(branch);
+      await addManifests(this.disk, branch);
     }
     return { outcome: 'ok' };
   }
 }
 
-async function addManifests(branch: KbBranch): Promise<void> {
+async function addManifests(disk: ITreeWalker, branch: KbBranch): Promise<void> {
   const repoDir = await branch.repoDir();
   const root = path.join(repoDir, PLUGINS_DIR);
   const added: string[] = [];
@@ -63,7 +65,7 @@ async function addManifests(branch: KbBranch): Promise<void> {
   // rather than quietly leave legacy plugins without manifests.
   const plugins: string[] = [];
   const topLevel: { rel: string; entries: readonly WalkedEntry[] }[] = [];
-  await walkKb(
+  await disk.walkKb(
     root,
     [
       {
@@ -78,7 +80,7 @@ async function addManifests(branch: KbBranch): Promise<void> {
   for (const { rel, entries } of topLevel) {
     // A grouping folder — plugins beneath it — is never a plugin itself.
     if (plugins.some((p) => p.startsWith(`${rel}/`))) continue;
-    if (!(await looksLikeLegacyPlugin(path.join(root, rel), entries))) continue;
+    if (!(await looksLikeLegacyPlugin(disk, path.join(root, rel), entries))) continue;
     branch.write(`${PLUGINS_DIR}/${rel}/${PLUGIN_MANIFEST_FILE}`, renderPluginManifest(rel));
     added.push(rel);
   }
@@ -94,14 +96,14 @@ async function addManifests(branch: KbBranch): Promise<void> {
  * which folders under the root are plugins. A folder with nothing of the
  * kind (a `.gitkeep`, a grouping folder someone made in the tree) is not.
  */
-export async function looksLikeLegacyPlugin(dir: string, entries: readonly WalkedEntry[]): Promise<boolean> {
+export async function looksLikeLegacyPlugin(disk: ITreeWalker, dir: string, entries: readonly WalkedEntry[]): Promise<boolean> {
   for (const entry of entries) {
     if (entry.isFile() && (entry.name === 'access.md' || entry.name === PLUGIN_MCP_FILE || entry.name.toLowerCase().endsWith('.tool'))) {
       return true;
     }
     if (entry.isDirectory() && (entry.name === PLUGIN_SKILLS_DIR || entry.name === HEXIS_EXTENSION_NS)) return true;
   }
-  return hasSkillBeneath(dir);
+  return hasSkillBeneath(disk, dir);
 }
 
 /**
@@ -114,8 +116,8 @@ export async function looksLikeLegacyPlugin(dir: string, entries: readonly Walke
  * `node_modules`) hold nothing here either. Anything looser would let an
  * ignored or unsupported entry hide a legacy plugin from its manifest.
  */
-export async function hasPluginBeneath(dir: string): Promise<boolean> {
-  return anyFolderIn(dir, (rel, entries) => rel !== '' && hasManifestEntry(entries));
+export async function hasPluginBeneath(disk: ITreeWalker, dir: string): Promise<boolean> {
+  return anyFolderIn(disk, dir, (rel, entries) => rel !== '' && hasManifestEntry(entries));
 }
 
 /** Whether a folder's listing carries a plugin manifest or a bundle as a regular file. */
@@ -124,8 +126,8 @@ function hasManifestEntry(entries: readonly WalkedEntry[]): boolean {
 }
 
 /** The pre-`skills/` shape: `Plugins/<Plugin>/<skill>/SKILL.md`, at any depth (`dir` itself included). */
-async function hasSkillBeneath(dir: string): Promise<boolean> {
-  return anyFolderIn(dir, (_rel, entries) => entries.some((e) => e.isFile() && e.name === 'SKILL.md'));
+async function hasSkillBeneath(disk: ITreeWalker, dir: string): Promise<boolean> {
+  return anyFolderIn(disk, dir, (_rel, entries) => entries.some((e) => e.isFile() && e.name === 'SKILL.md'));
 }
 
 /**
@@ -134,9 +136,13 @@ async function hasSkillBeneath(dir: string): Promise<boolean> {
  * a plugin — has a listing that satisfies `test`. Stops at the first. A
  * missing `dir` has none; a folder that cannot be listed is the error.
  */
-async function anyFolderIn(dir: string, test: (rel: string, entries: readonly WalkedEntry[]) => boolean): Promise<boolean> {
+async function anyFolderIn(
+  disk: ITreeWalker,
+  dir: string,
+  test: (rel: string, entries: readonly WalkedEntry[]) => boolean,
+): Promise<boolean> {
   let found = false;
-  await walkKb(
+  await disk.walkKb(
     dir,
     [
       {

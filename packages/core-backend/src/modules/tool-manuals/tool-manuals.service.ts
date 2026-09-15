@@ -18,14 +18,13 @@ import {
 } from '@bevel-software/platform-shared';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type { PluginSource } from '../plugins/discovery/plugin-source.js';
-import { KbPluginSource } from '../plugins/discovery/kb-plugin-source.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
-import { walkFiles } from '../../shared/fs-walk.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
 import { TtlCache } from '../../shared/ttl-cache.js';
 import {
   utcpNamespacePrefix,
@@ -149,9 +148,10 @@ export class ToolManualService implements IToolManualService {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
+    /** Where plugins (and their MCP servers) come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
-    /** Where plugins (and their MCP servers) come from — native manifests unless a dialect is configured. */
-    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -650,7 +650,7 @@ export class ToolManualService implements IToolManualService {
     // A `.tool` sits under `Plugins/`, beside the skills that use it.
     const files: { abs: string; rel: string }[] = [];
     const root = path.join(kbRoot, PLUGINS_DIR);
-    for (const rel of await walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
+    for (const rel of await this.disk.walkFiles(root, (n) => n.toLowerCase().endsWith('.tool'))) {
       files.push({ abs: path.join(root, rel), rel: `${PLUGINS_DIR}/${rel}` });
     }
 

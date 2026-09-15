@@ -1,13 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { IGNORE_FILENAME } from '../../shared/bevel-ignore.js';
+import { IGNORE_FILENAME, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH, KNOWLEDGE_DIR, canonicalRelativePath, reservedRootDirNames } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
-import { walkTree } from '../../shared/kb-walk.js';
 import type { WorkspaceService } from './workspace.service.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -64,6 +63,7 @@ export function createWorkspaceRoutes(
   kbDirName: string,
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
+  disk: ITreeWalker & IFsProbe,
 ): express.Router {
   const router = express.Router();
 
@@ -769,8 +769,7 @@ export function createWorkspaceRoutes(
       // than the template has no such file yet), so dressing an unreadable
       // file up as a missing one would offer an empty editor over content the
       // save then overwrites.
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') {
+      if (disk.isAbsence(error) || (error as NodeJS.ErrnoException).code === 'EISDIR') {
         res.status(404).json({ error: 'File not found' });
         return;
       }
@@ -835,7 +834,7 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        const filesInDir = await enumerateFilesUnder(absolute, workspaceDir);
+        const filesInDir = await enumerateFilesUnder(disk, absolute, workspaceDir);
         const branch = branchForWorkspaceId(id);
         for (const relFile of filesInDir) {
           await withLock(
@@ -1221,11 +1220,11 @@ export function createWorkspaceRoutes(
  * it is deleted as one, never followed. A folder that cannot be listed is
  * left out.
  */
-async function enumerateFilesUnder(absoluteDir: string, workspaceDir: string): Promise<string[]> {
+async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, workspaceDir: string): Promise<string[]> {
   const out: string[] = [];
   const relOf = (dir: string, name: string) =>
     path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
-  await walkTree(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory() }, [
+  await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory() }, [
     {
       onFile: (dir, name) => void out.push(relOf(dir, name)),
       onOther: (dir, e) => void out.push(relOf(dir, e.name)),

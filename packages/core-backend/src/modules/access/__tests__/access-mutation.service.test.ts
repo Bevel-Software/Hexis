@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -58,7 +59,7 @@ describe('AccessMutationService', () => {
     await write(repo, 'roles.yaml', ROLES_YAML);
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n# Root\n');
     const ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB);
+    access = new AccessControlService(ws, KB, new NodeFs());
     mutation = new AccessMutationService(ws, access, KB);
   });
 
@@ -562,7 +563,7 @@ describe('token-kind family — shadow-aware revoke, exact-token grant (real res
     await write(repo, 'roles.yaml', ROLES_YAML);
     await write(repo, 'access.md', '---\nwrite:\n  - Admin\n---\n');
     const ws = stubWorkspace(workspaceDir);
-    access = new AccessControlService(ws, KB);
+    access = new AccessControlService(ws, KB, new NodeFs());
     mutation = new AccessMutationService(ws, access, KB);
   });
 

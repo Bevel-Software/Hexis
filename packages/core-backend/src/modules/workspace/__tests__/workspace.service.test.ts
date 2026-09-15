@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
@@ -64,7 +65,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
   });
 
   it('a malformed workspace id (bad percent-escape) rejects as a 400 BranchNameError, not a 500', async () => {
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     // `%zz` fails decodeURIComponent, falls back to itself, and `%` never
     // passes the branch-name rules — the cold-path bootstrap must surface
     // that as the status-carrying domain error, not a wrapped plain Error.
@@ -76,7 +77,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
 
   it('returns workspace info derived from the branch — no .workspace.json on disk', async () => {
     const { workspaceId, workspaceDir } = await seedBranchWorkspace(root, 'target-company-state');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     const info = await svc.getOrCreateForBranch('target-company-state');
 
     expect(info.id).toBe(workspaceId);
@@ -89,7 +90,7 @@ describe('WorkspaceService — branch-keyed identity', () => {
   it('two branches map to distinct directories', async () => {
     const a = await seedBranchWorkspace(root, 'target-company-state');
     const b = await seedBranchWorkspace(root, 'alice/feature');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
 
     const infoA = await svc.getOrCreateForBranch('target-company-state');
     const infoB = await svc.getOrCreateForBranch('alice/feature');
@@ -102,21 +103,21 @@ describe('WorkspaceService — branch-keyed identity', () => {
   });
 
   it('rejects invalid branch names before touching disk', async () => {
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await expect(svc.getOrCreateForBranch('')).rejects.toThrow();
     await expect(svc.getOrCreateForBranch('-bad-leading-dash')).rejects.toThrow();
   });
 
   it('getOrCreateForUser falls back to target-company-state when no branch is supplied', async () => {
     await seedBranchWorkspace(root, 'target-company-state');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     const info = await svc.getOrCreateForUser({ id: 'u', email: 'a@b.c', name: 'A' });
     expect(info.id).toBe(workspaceIdForBranch('target-company-state'));
   });
 
   it('getOrCreateForUser respects an explicit branch override', async () => {
     await seedBranchWorkspace(root, 'alice/feature');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     const info = await svc.getOrCreateForUser({ id: 'u', email: 'a@b.c', name: 'A' }, 'alice/feature');
     expect(info.id).toBe(workspaceIdForBranch('alice/feature'));
   });
@@ -133,7 +134,7 @@ describe('WorkspaceService.createDirectory', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     // Hydrate the in-memory map so subsequent ops resolve fast.
     await svc.getWorkspacePath(workspaceId);
   });
@@ -242,7 +243,7 @@ describe('WorkspaceService.writeFile — expectedContent', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
   });
 
   afterEach(async () => {
@@ -387,7 +388,7 @@ describe('WorkspaceService.withPathTurn', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
   });
 
   afterEach(async () => {
@@ -568,7 +569,7 @@ describe('WorkspaceService.assertContentMatches', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
   });
 
   afterEach(async () => {
@@ -610,7 +611,7 @@ describe('WorkspaceService.createFolderZip', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await svc.getWorkspacePath(workspaceId);
   });
 
@@ -759,7 +760,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 
   it('clones a branch on first bootstrap and checks out the right ref', async () => {
-    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs());
     const info = await svc.getOrCreateForBranch('target-company-state');
 
     const repo = path.join(info.absolutePath, 'knowledge-base');
@@ -768,7 +769,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 
   it('uses an existing sibling clone as a --reference and stays dissociated', async () => {
-    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs());
     // First branch: plain clone — becomes the sibling for the next bootstrap.
     await svc.getOrCreateForBranch('target-company-state');
     // Second branch: should borrow the first clone's objects, then dissociate.
@@ -796,7 +797,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   // post-merge pull of a target branch. Every clone this service hands out must
   // therefore track exactly one upstream ref through exactly one refspec.
   it('stamps a single fetch refspec and upstream ref on a fresh clone', async () => {
-    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs());
     const info = await svc.getOrCreateForBranch('target-company-state');
     const repo = path.join(info.absolutePath, 'knowledge-base');
 
@@ -820,7 +821,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
     await runGit(repo, ['config', '--add', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
     await runGit(repo, ['config', '--add', 'branch.alice/draft.merge', 'refs/heads/target-company-state']);
 
-    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs());
     await svc.getOrCreateForBranch('alice/draft');
 
     expect(await gitOut(repo, ['config', '--get-all', 'remote.origin.fetch']))
@@ -832,7 +833,7 @@ describe('WorkspaceService — clone bootstrap & sibling reference', () => {
   });
 
   it('notifies the cloned-workspace listener with the workspace id after a clone', async () => {
-    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base');
+    const svc = new WorkspaceService(workspacesRoot, upstream, 'knowledge-base', new NodeFs());
     const cloned: string[] = [];
     svc.setWorkspaceClonedListener((id) => cloned.push(id));
 
@@ -860,7 +861,7 @@ describe('WorkspaceService — symbolic links', () => {
     const seeded = await seedBranchWorkspace(root, 'main');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
   });
 
   afterEach(async () => {
@@ -945,7 +946,7 @@ describe('WorkspaceService — symbolic links', () => {
     // A mounted-volume shape: the whole workspaces root reached through a link.
     const mount = path.join(root, 'mount');
     await fs.symlink(root, mount, linkType);
-    const viaMount = new WorkspaceService(mount, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const viaMount = new WorkspaceService(mount, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     expect(await viaMount.readFile(workspaceId, rel)).toBe('Hello.');
     await viaMount.writeFile(workspaceId, rel, 'Hello again.');
     expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('Hello again.');
@@ -978,7 +979,7 @@ describe('WorkspaceService.sweepOrphanedWorkspaces', () => {
 
   it('removes the clone of a branch that is not in the known set', async () => {
     const { workspaceId, workspaceDir } = await seedBranchWorkspace(root, 'target-company-state');
-    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    const svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await svc.getOrCreateForBranch('target-company-state');
 
     // The branch vanishes from the known set; the sweep reclaims its clone.
@@ -999,7 +1000,7 @@ describe('WorkspaceService.readAllKbFiles', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     repoRoot = path.join(seeded.workspaceDir, 'knowledge-base');
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await svc.getWorkspacePath(workspaceId);
   });
 
@@ -1055,7 +1056,7 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     const seeded = await seedBranchWorkspace(root, 'target-company-state');
     workspaceDir = seeded.workspaceDir;
     workspaceId = seeded.workspaceId;
-    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base');
+    svc = new WorkspaceService(root, 'https://github.com/Bevel-Software/knowledge-base.git', 'knowledge-base', new NodeFs());
     await svc.getWorkspacePath(workspaceId);
   });
 

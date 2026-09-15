@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -138,6 +139,7 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       KB,
       stubCreatorAccess,
       { isAdmin: async () => true } as unknown as IAdminAccessService,
+      new NodeFs(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {

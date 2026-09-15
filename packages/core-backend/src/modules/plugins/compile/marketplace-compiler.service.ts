@@ -8,7 +8,7 @@ import type { ISkillService } from '../../skills/skills.contract.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
 import type { PluginSource } from '../discovery/plugin-source.js';
-import { KbPluginSource } from '../discovery/kb-plugin-source.js';
+import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { compileMarketplace, type VirtualTree } from './compile-marketplace.js';
 
 const execFileAsync = promisify(execFile);
@@ -42,7 +42,8 @@ export class MarketplaceCompilerService {
       /** The hosted MCP endpoint to ship in the skills plugin (URL only). */
       knowledgeBaseMcp?: { name: string; url: string };
     },
-    private readonly source: PluginSource = new KbPluginSource(),
+    private readonly source: PluginSource,
+    private readonly disk: ITreeWalker,
   ) {}
 
   /**
@@ -91,6 +92,7 @@ export class MarketplaceCompilerService {
     const { plugins, warnings: discoveryWarnings } = await this.source.discover(kbRoot);
     const readable = await this.readPredicate(wsId, audience, skills.map((s) => `${s.path}/SKILL.md`));
     const tree = await compileMarketplace({
+      disk: this.disk,
       kbRoot,
       skills,
       plugins,

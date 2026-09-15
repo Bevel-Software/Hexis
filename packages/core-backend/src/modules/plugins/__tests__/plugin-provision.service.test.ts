@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,7 +50,7 @@ async function makeHarness() {
   const commits = { runPendingCommit: vi.fn(async () => undefined) };
   const accessControl = { invalidate: vi.fn() } as unknown as IAccessControl;
   const events = { emit: vi.fn() };
-  const svc = new PluginProvisionService(workspaceService, commits, accessControl, KB, events);
+  const svc = new PluginProvisionService(workspaceService, commits, accessControl, KB, events, new KbPluginSource(new NodeFs()), new NodeFs());
   return { svc, dir, commits, accessControl, events, writeFile };
 }
 

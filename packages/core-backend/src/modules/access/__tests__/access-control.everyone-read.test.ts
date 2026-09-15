@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -59,7 +60,7 @@ describe('canReadAsEveryoneBatch', () => {
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, contents);
     }
-    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
   }
 
   const TREE = {

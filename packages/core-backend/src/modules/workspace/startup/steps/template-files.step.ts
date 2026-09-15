@@ -7,7 +7,7 @@ import {
   renderKbLayoutPlaceholders,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
-import { IGNORE_FILENAME } from '../../../../shared/bevel-ignore.js';
+import { IGNORE_FILENAME, type IFsProbe } from '../../../../shared/fs.contract.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
@@ -151,33 +151,17 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
  * KB_TEMPLATE_DIR, or this repo's tree in a Docker build) wins outright:
  * the mapping is a fallback, never a rename.
  */
-export async function templateSource(templateDir: string, relPath: string): Promise<string> {
+export async function templateSource(disk: IFsProbe, templateDir: string, relPath: string): Promise<string> {
+  // Links followed: a template file reached through a link is there.
+  const there = async (p: string) => (await disk.statOrNull(p)) !== null;
   const direct = path.join(templateDir, relPath);
-  if (await exists(direct)) return direct;
+  if (await there(direct)) return direct;
   const packable = TEMPLATE_SOURCE_FALLBACKS[relPath];
   if (packable !== undefined) {
     const fallback = path.join(templateDir, packable);
-    if (await exists(fallback)) return fallback;
+    if (await there(fallback)) return fallback;
   }
   return direct; // let the ENOENT surface under the name the caller asked for
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** `lstat` without the throw — null when nothing is at `p`. */
-async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.lstat(p);
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -207,7 +191,10 @@ export class TemplateFilesStep implements OnServerStart {
    *                      claim a root without also shipping a template entry
    *                      for it.
    */
-  constructor(extraRootDirs: readonly string[] = []) {
+  constructor(
+    private readonly disk: IFsProbe,
+    extraRootDirs: readonly string[] = [],
+  ) {
     this.requiredDirs = reservedRootDirs(extraRootDirs);
   }
 
@@ -228,7 +215,7 @@ export class TemplateFilesStep implements OnServerStart {
       // would then report success over a knowledge base whose root access
       // policy (say) cannot be read. Fail-closed, same as the reserved-root
       // squatting check below: this is a state a human must fix.
-      const found = await lstatOrNull(path.join(repoDir, rel));
+      const found = await this.disk.lstatOrNull(path.join(repoDir, rel));
       if (found) {
         if (found.isFile()) continue;
         throw new Error(
@@ -237,7 +224,7 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content = await readTemplate(templateDir, rel);
+      let content = await readTemplate(this.disk, templateDir, rel);
       // The on-disk merge below only runs against an EXISTING ignore file; a
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
@@ -298,7 +285,7 @@ export class TemplateFilesStep implements OnServerStart {
     // all the rules: separate passes would each read the on-disk file and
     // a later declared write would lose an earlier one's.
     added.push(
-      ...(await reconcileIgnoreRules(repoDir, branch, {
+      ...(await reconcileIgnoreRules(this.disk, repoDir, branch, {
         // The preamble rule is respelled before it is added: a knowledge base
         // that booted the release shipping the unanchored spelling carries the
         // platform's own line, and that line hides a nested namesake too.
@@ -314,8 +301,8 @@ export class TemplateFilesStep implements OnServerStart {
     // phase. The file's own header says so, which is what makes overwriting
     // edits a stated contract instead of a surprise.
     let agentsRefreshed = false;
-    if (!added.includes('AGENTS.md') && (await templateDiffers(templateDir, repoDir, 'AGENTS.md'))) {
-      branch.write('AGENTS.md', await readTemplate(templateDir, 'AGENTS.md'));
+    if (!added.includes('AGENTS.md') && (await templateDiffers(this.disk, templateDir, repoDir, 'AGENTS.md'))) {
+      branch.write('AGENTS.md', await readTemplate(this.disk, templateDir, 'AGENTS.md'));
       added.push('AGENTS.md');
       agentsRefreshed = true;
     }
@@ -346,7 +333,7 @@ export class TemplateFilesStep implements OnServerStart {
   private async missingDirs(repoDir: string): Promise<string[]> {
     const missing: string[] = [];
     for (const rootDir of this.requiredDirs) {
-      const found = await lstatOrNull(path.join(repoDir, rootDir));
+      const found = await this.disk.lstatOrNull(path.join(repoDir, rootDir));
       if (found) {
         if (found.isDirectory()) continue;
         throw new Error(
@@ -383,20 +370,20 @@ export class TemplateFilesStep implements OnServerStart {
  * names in effect. Every required file is text; a template without
  * placeholders passes through unchanged.
  */
-async function readTemplate(templateDir: string, relPath: string): Promise<string> {
+async function readTemplate(disk: IFsProbe, templateDir: string, relPath: string): Promise<string> {
   let raw: string;
   try {
-    raw = await fs.readFile(await templateSource(templateDir, relPath), 'utf8');
+    raw = await fs.readFile(await templateSource(disk, templateDir, relPath), 'utf8');
   } catch (err) {
     const packaged = defaultKbTemplateDir();
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
+    if (!disk.isAbsence(err) || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
       throw err;
     }
     console.warn(
       `[kb-startup] template-files: the configured KB template has no "${relPath}"; ` +
         'using the packaged copy. Add the file to the template to silence this.',
     );
-    raw = await fs.readFile(await templateSource(packaged, relPath), 'utf8');
+    raw = await fs.readFile(await templateSource(disk, packaged, relPath), 'utf8');
   }
   return renderKbLayoutPlaceholders(raw);
 }
@@ -408,11 +395,11 @@ async function readTemplate(templateDir: string, relPath: string): Promise<strin
  * forever. Rendered, so a renamed root is compared against the guide that
  * names it, not against the placeholders.
  */
-async function templateDiffers(templateDir: string, repoDir: string, relPath: string): Promise<boolean> {
+async function templateDiffers(disk: IFsProbe, templateDir: string, repoDir: string, relPath: string): Promise<boolean> {
   const norm = (text: string) => text.replace(/\r\n?/g, '\n');
   const [current, template] = await Promise.all([
     fs.readFile(path.join(repoDir, relPath), 'utf8'),
-    readTemplate(templateDir, relPath),
+    readTemplate(disk, templateDir, relPath),
   ]);
   return norm(current) !== norm(template);
 }
@@ -434,6 +421,7 @@ async function templateDiffers(templateDir: string, repoDir: string, relPath: st
  * the mismatch this exists to close.
  */
 async function reconcileIgnoreRules(
+  disk: IFsProbe,
   repoDir: string,
   branch: KbBranch,
   rules: {
@@ -447,10 +435,13 @@ async function reconcileIgnoreRules(
   let current: string;
   try {
     current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
-  } catch {
+  } catch (err) {
     // No ignore file — the copy declared from the template arrives with the
     // right rules in it (guaranteed at declaration time, see the
-    // required-files loop above).
+    // required-files loop above). A file that is there but cannot be read is
+    // NOT "no file": its rules may still be hiding the tree, so the hole is
+    // the step's failure, as it is for the migration's retirement.
+    if (!disk.isAbsence(err)) throw err;
     return [];
   }
   const respelled = (rules.respell ?? []).reduce(

@@ -1,4 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,7 +66,7 @@ describe('ToolManualService', () => {
       new Map(paths.map((p) => [p, !p.includes('weather')])),
   } as unknown as IAccessControl;
 
-  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR);
+  const svc = (access: IAccessControl = allowAll) => new ToolManualService(workspaceService, access, KB_DIR, new NodeFs(), new KbPluginSource(new NodeFs()));
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'tools-'));

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { createToolManualsAgentRoutes } from '../tool-manuals.routes.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -46,7 +47,7 @@ async function baseUrl(): Promise<string> {
       {} as unknown as IToolManualService,
       manualAuth,
       async () => 'ali@example.com',
-      { workspaceService, accessControl, kbDirName: KB },
+      { workspaceService, accessControl, kbDirName: KB, disk: new NodeFs() },
     ),
   );
   httpServer = await new Promise<HttpServer>((resolve) => {

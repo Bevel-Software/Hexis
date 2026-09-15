@@ -5,6 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
@@ -139,7 +141,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
 
   const index =
     opts.index ??
-    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB);
+    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB, new KbPluginSource(new NodeFs()), new NodeFs());
 
   const email = opts.email === undefined ? ALI : opts.email;
   const app = express();
