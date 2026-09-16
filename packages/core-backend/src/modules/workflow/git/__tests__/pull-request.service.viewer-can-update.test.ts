@@ -13,11 +13,18 @@ const EMAIL = 'juan@bevel.software';
 const AUTHOR = hashEmail(EMAIL);
 const SOMEONE_ELSE = hashEmail('someone-else@bevel.software');
 
-const file = (isApproved: boolean, viewerCanApprove: boolean, path = 'Sales/Deal.md', owned = true) =>
+const file = (
+  isApproved: boolean,
+  viewerCanApprove: boolean,
+  path = 'Sales/Deal.md',
+  owned = true,
+  eligibilityResolved = true,
+) =>
   ({
     path,
     isApproved,
     viewerCanApprove,
+    eligibilityResolved,
     eligibleApprovers: { roles: owned ? ['Sales'] : [], users: [] },
     approvedBy: [],
   }) as FileApprovalState;
@@ -56,6 +63,25 @@ describe('computeViewerCanUpdate', () => {
     ).toBe(false);
     // roles.yaml is bound by the gate even though it is not Markdown.
     expect(computeViewerCanUpdate({ ...base, approvals: [file(false, false, 'roles.yaml')] })).toBe(false);
+  });
+
+  it('an unresolved access tree fails closed — empty approvers are unknown, not outside the gate', () => {
+    // No workspace or a failed lookup: every file comes back with no eligible
+    // approvers, which must not read as "nobody needs to approve".
+    expect(
+      computeViewerCanUpdate({
+        ...base,
+        approvals: [file(false, false, 'Sales/deal.yaml', false, false), file(false, false, 'Notes/Loose.md', false, false)],
+      }),
+    ).toBe(false);
+    // A detail built without the flag at all is treated the same way.
+    const legacy = { ...file(false, false, 'Notes/Loose.md', false) } as Partial<FileApprovalState>;
+    delete legacy.eligibilityResolved;
+    expect(computeViewerCanUpdate({ ...base, approvals: [legacy as FileApprovalState] })).toBe(false);
+    // The author and an admin are unaffected.
+    expect(
+      computeViewerCanUpdate({ ...base, authorId: AUTHOR, approvals: [file(false, false, 'Notes/Loose.md', false, false)] }),
+    ).toBe(true);
   });
 
   it('an admin, who may apply over missing approvals, may update', () => {

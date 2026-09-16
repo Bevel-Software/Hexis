@@ -146,6 +146,14 @@ export interface FileApprovalState {
   };
   approvedBy: FileApprovalEntry[];
   /**
+   * True only when `eligibleApprovers` is the access tree's actual answer for
+   * this file. False (or absent) when it could not be resolved — no workspace,
+   * no usable access config on the base, a failed lookup — in which case the
+   * empty approver set means "unknown", not "outside the gate", and anything
+   * granted on the strength of that emptiness must fail closed.
+   */
+  eligibilityResolved?: boolean;
+  /**
    * True iff at least one eligible approver has submitted a non-stale
    * approval. Always `false` when `eligibleApprovers` is empty — with no
    * eligible set, nobody can satisfy the check.

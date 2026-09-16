@@ -516,7 +516,9 @@ export function computeViewerCanCancel(input: {
  * the gate binds (`isGateRelevant`) already approved or approvable by this
  * viewer — files outside the gate need nobody's approval to apply, so they
  * cannot withhold Update either — or an admin, who may apply over missing
- * approvals. Fail-closed on no viewer, and nothing but an open request can be
+ * approvals. That exemption holds only for a file whose approvers were
+ * actually resolved (`eligibilityResolved`): when the access tree could not
+ * be read, an empty approver set is "unknown", and Update fails closed. Fail-closed on no viewer, and nothing but an open request can be
  * updated. The update route enforces exactly this.
  */
 export function computeViewerCanUpdate(input: {
@@ -531,7 +533,9 @@ export function computeViewerCanUpdate(input: {
   const viewerIsAuthor = !!(input.authorId && input.authorId === hashEmail(input.viewerEmail));
   const viewerMayApply =
     input.approvals.length > 0 &&
-    input.approvals.every((a) => !isGateRelevant(a) || a.isApproved || a.viewerCanApprove);
+    input.approvals.every(
+      (a) => (a.eligibilityResolved === true && !isGateRelevant(a)) || a.isApproved || a.viewerCanApprove,
+    );
   return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
 }
 
