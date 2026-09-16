@@ -5,16 +5,21 @@
 The codebase is organized by **domain**, not by technical layer. Each domain module owns its models, interfaces, and implementations.
 
 ```
-src/
-  modules/
-    canvas/        # viewport, layout, connections
-    nodes/         # node types, capabilities, rendering
-    chat/          # agent, messages, tool dispatch
-    generation/    # LLM calls, image generation
-    session/       # persistence, save/restore
-  shared/          # cross-cutting contracts (interfaces, types)
-``` 
-(The above is just an example structure)
+packages/
+  shared/            # cross-cutting contracts (IWorkspaceService, git/auth/workflow types)
+  core-backend/
+    src/modules/
+      workspace/     # branches, files, the file readers behind read_file/grep
+      access/        # roles, groups, access rules
+      auth/          # sessions, OIDC, rate limiting
+      mcp/           # the agent tool surface
+      skills/        # the skill catalog
+      ...
+  core-frontend/     # the web app
+  mcp-core/          # the transport-agnostic MCP surface, shared by the hosted proxy and hexis-mcp
+  hexis-mcp/         # the local MCP server
+```
+(Abridged — `packages/core-backend/src/modules/` holds one folder per domain.)
 
 A domain module **never** reaches into another module's internals. All cross-module communication goes through exported interfaces.
 
@@ -23,37 +28,38 @@ A domain module **never** reaches into another module's internals. All cross-mod
 All business logic is defined as **interfaces** before any implementation is written.
 
 ```ts
-// Define the contract in the shared module
-interface ImageGenerator {
-  generate(prompt: string, format: ImageFormat): Promise<GenerationResult>;
+// Define the contract (modules/workspace/file-readers/file-reader.ts)
+interface FileReader {
+  readonly extensions: readonly string[];
+  read(bytes: Buffer, path: string): Promise<ReadResult>;
+  greppableText?(bytes: Buffer, path: string): Promise<string | null>;
 }
 
-// Implement separately in the respective module
-class GeminiImageGenerator implements ImageGenerator { ... }
+// Implement separately, one class per kind of file
+class DocumentReader implements FileReader { ... }
+class ImageReader implements FileReader { ... }
 ```
 
-- Every service, repository, and use-case exposes an interface.
+- Every service, repository, and use-case exposes an interface (`IWorkspaceService`, `IAccessControl`, `FileReader`).
 - Consumers depend on the interface, never the concrete class.
-- This applies to node capabilities too: `EditableField`, `NodeAction`, and `ChatTool` are contracts that node types implement.
+- This applies to per-format capabilities too: `read_file` and `grep` dispatch through `FileReaderRegistry` and never name a format; adding one is a new `FileReader`, not a new branch in the tools.
 
 ## 3. Data Classes — Controlled Access
 
 Domain data is encapsulated in **data classes** with private fields. Public methods return data in the format the caller actually needs — no leaking internal structure.
 
 ```ts
-class CampaignSettings {
-  private objectives: Objective[];
-  private budget: number;
-  private currency: Currency;
+// modules/auth/rate-limit.ts
+class FixedWindowRateLimiter {
+  private readonly hits = new Map<string, { count: number; resetAt: number }>();
 
-  // Returns what the UI needs, not the raw internals
-  formattedBudget(): string {
-    return `${this.currency.symbol}${this.budget.toLocaleString()}`;
-  }
+  constructor(private readonly max: number, private readonly windowMs: number) {}
 
-  objectivesByGroup(): Record<'b2c' | 'b2b', Objective[]> {
-    return groupBy(this.objectives, o => o.type);
-  }
+  // Answers the caller's question — "is this attempt allowed?" — not the map
+  consume(key: string): boolean { ... }
+
+  // A successful login clears the window; nobody edits `hits` from outside
+  reset(key: string): void { ... }
 }
 ```
 
@@ -66,22 +72,23 @@ class CampaignSettings {
 All dependencies are **injected**, never instantiated inline.
 
 ```ts
-// Good — dependency is injected
-class BriefGenerationService {
+// Good — dependencies are injected (modules/access/access-control.service.ts)
+class AccessControlService implements IAccessControl {
   constructor(
-    private readonly llm: LLMClient,
-    private readonly brandContext: BrandContextProvider
+    private readonly workspaceService: WorkspaceService,
+    private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
   ) {}
 }
 
 // Bad — hardcoded dependency
-class BriefGenerationService {
-  private llm = new GeminiClient();
+class AccessControlService {
+  private workspaceService = new WorkspaceService(...);
 }
 ```
 
 - Use constructor injection as the default.
-- A composition root (or DI container) wires everything together at app startup.
+- A composition root wires everything together at app startup: `createCoreServices()` in `packages/core-backend/src/core/create-core-services.ts` constructs every service once and hands each its collaborators.
 - This makes every component testable in isolation — swap real services for test doubles via the same interface.
 
 ## 5. Summary of Non-Negotiables
