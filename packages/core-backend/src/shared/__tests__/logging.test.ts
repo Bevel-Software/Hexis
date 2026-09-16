@@ -63,6 +63,24 @@ describe('createConsoleLogger', () => {
     expect(log).toHaveBeenCalledWith('[cr] merged', { workspaceId: 'ws-1', number: 7 });
   });
 
+  /**
+   * The property: whatever a message or a string field carries, the sink
+   * writes one line. A newline is the forged-line case, U+009B the one-byte
+   * escape that steers a terminal; both arrive routinely in text the process
+   * did not write (a request's branch name, git's stderr).
+   */
+  it('keeps every event on one line, whatever the text carried', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    createConsoleLogger({ module: 'sync' }).warn('branch "x\n[forged] admin signed in31m" is behind', {
+      detail: 'line one\r\nline two',
+      rows: 2,
+    });
+    expect(warn).toHaveBeenCalledWith('[sync] branch "x\\n[forged] admin signed in\\u009b31m" is behind', {
+      detail: 'line one\\r\\nline two',
+      rows: 2,
+    });
+  });
+
   it('maps levels onto the console method a reader expects', () => {
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);

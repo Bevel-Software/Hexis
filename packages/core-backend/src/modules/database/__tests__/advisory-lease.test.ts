@@ -91,6 +91,49 @@ describe('AdvisoryLease', () => {
     expect(await release.tryAcquire()).toBe(true);
   });
 
+  it('a connection that drops before the grant is not a lease, and not a loss either', async () => {
+    const conn = fakeClient({ grants: true });
+    const failing: LeaseClient = {
+      ...conn.client,
+      async query() {
+        // The drop lands while the lock query is in flight, as a 'error' on
+        // the client and a rejection of the query.
+        conn.drop();
+        throw new Error('connection terminated');
+      },
+    };
+    const lease = new AdvisoryLease(db, AdvisoryLock.CommitWorker, { connect: async () => failing });
+    let told = 0;
+    lease.onLost(() => {
+      told += 1;
+    });
+
+    await expect(lease.tryAcquire()).rejects.toThrow('connection terminated');
+    expect(lease.held).toBe(false);
+    expect(told).toBe(0);
+  });
+
+  it('a stale connection ending later cannot clear a lease held on a new one', async () => {
+    const first = fakeClient({ grants: true });
+    const second = fakeClient({ grants: true });
+    const clients = [first.client, second.client];
+    const lease = new AdvisoryLease(db, AdvisoryLock.CommitWorker, { connect: async () => clients.shift()! });
+    await lease.tryAcquire();
+    first.drop();
+    expect(lease.held).toBe(false);
+    expect(await lease.tryAcquire()).toBe(true);
+    let told = 0;
+    lease.onLost(() => {
+      told += 1;
+    });
+
+    // The first connection's own 'end', delivered late.
+    first.drop();
+
+    expect(lease.held).toBe(true);
+    expect(told).toBe(0);
+  });
+
   it('does not report a loss for a release it performed itself', async () => {
     const conn = fakeClient({ grants: true });
     const lease = new AdvisoryLease(db, AdvisoryLock.CommitWorker, { connect: async () => conn.client });

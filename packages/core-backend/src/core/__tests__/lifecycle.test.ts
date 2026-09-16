@@ -4,6 +4,7 @@ import {
   holdCommitWorkerLease,
   leasedWorkers,
   periodicTask,
+  withStartupTask,
   type LeasedWorker,
 } from '../lifecycle.js';
 import type { AdvisoryLease } from '../../modules/database/advisory-lock.js';
@@ -234,6 +235,52 @@ describe('periodicTask', () => {
     finishRun();
     await stopping;
     expect(stopped).toBe(true);
+  });
+});
+
+describe('withStartupTask', () => {
+  it('runs the task to completion before the worker starts, and a stop meanwhile waits for both', async () => {
+    const events: string[] = [];
+    let finishTask: () => void = () => undefined;
+    const worker: LeasedWorker = {
+      start: () => void events.push('start'),
+      stop: async () => void events.push('stop'),
+    };
+    const leased = withStartupTask(
+      worker,
+      () =>
+        new Promise<void>((resolve) => {
+          events.push('task');
+          finishTask = resolve;
+        }),
+    );
+
+    leased.start();
+    await settle();
+    expect(events).toEqual(['task']);
+
+    const stopping = leased.stop();
+    await settle();
+    expect(events).toEqual(['task']);
+    finishTask();
+    await stopping;
+    expect(events).toEqual(['task', 'start', 'stop']);
+  });
+
+  it('starts the worker even when the task fails, and says so', async () => {
+    const events: string[] = [];
+    const logged: string[] = [];
+    const leased = withStartupTask(
+      { start: () => void events.push('start'), stop: async () => undefined },
+      async () => {
+        throw new Error('reconcile broke');
+      },
+      (m) => logged.push(m),
+    );
+    leased.start();
+    await settle();
+    expect(events).toEqual(['start']);
+    expect(logged).toEqual(['startup task failed; the worker starts regardless: Error: reconcile broke']);
   });
 });
 

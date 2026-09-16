@@ -246,7 +246,16 @@ export class PendingCommitsWorker {
         while (this.running) {
           const id = queue.shift();
           if (id === undefined) return;
-          await this.drainWorkspace(id);
+          // Contained here, in the slot: a rejection that escaped would settle
+          // the `Promise.all` below while the other slots were still draining,
+          // and the loop would start the next pass — and possibly the same
+          // clone — alongside them. The failure is the workspace's, logged;
+          // the pass ends when every slot has.
+          try {
+            await this.drainWorkspace(id);
+          } catch (err) {
+            log.error(`drain failed for ws=${id}; its rows wait for the next pass:`, { err });
+          }
         }
       }),
     );

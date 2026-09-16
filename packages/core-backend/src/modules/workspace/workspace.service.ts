@@ -3,13 +3,13 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('workspace');
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import type { IGitRunner } from '../../shared/git.contract.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { PathTraversalError } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
@@ -103,7 +103,13 @@ export class FolderTooLargeError extends Error {
   }
 }
 
-const execFileAsync = promisify(execFile);
+/**
+ * A floor under the git deadline for a clone: a first clone of a large
+ * knowledge base over a slow link legitimately takes minutes, and the port's
+ * default is sized for a running deployment's operations. A configured
+ * ceiling above this applies as configured.
+ */
+const CLONE_TIMEOUT_MS = 600_000;
 
 /**
  * Identity stamped on the per-branch clone's git config. Every workflow
@@ -248,6 +254,13 @@ export class WorkspaceService implements IWorkspaceService {
     private readonly kbDirName: string,
     private readonly disk: ITreeWalker,
     gitUsername: string | (() => string) = 'x-access-token',
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner carrying the deployment's deadline; the default
+     * is the same runner on its default deadline, for a directly constructed
+     * service.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
     this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
@@ -426,10 +439,12 @@ export class WorkspaceService implements IWorkspaceService {
     branch: string,
     referenceRepo: string | null,
   ): Promise<void> {
+    // Long enough for a first clone, whatever the configured ceiling says.
+    const timeoutMs = Math.max(this.gitRunner.defaultTimeoutMs, CLONE_TIMEOUT_MS);
     if (referenceRepo) {
       try {
-        await execFileAsync('git', this.gitCloneArgs(targetDir, branch, referenceRepo), {
-          env: { ...process.env },
+        await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch, referenceRepo), {
+          timeoutMs,
         });
         return;
       } catch (err) {
@@ -440,9 +455,7 @@ export class WorkspaceService implements IWorkspaceService {
         await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       }
     }
-    await execFileAsync('git', this.gitCloneArgs(targetDir, branch), {
-      env: { ...process.env },
-    });
+    await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch), { timeoutMs });
   }
 
   /**
@@ -576,13 +589,21 @@ export class WorkspaceService implements IWorkspaceService {
     const now = Date.now();
     const last = this.lastStampAt.get(branch);
     if (last !== undefined && now - last < STAMP_INTERVAL_MS) return;
-    this.lastStampAt.set(branch, now);
     const stamp = this.stampPath(workspaceDir);
     const when = new Date(now);
     try {
-      await fs.utimes(stamp, when, when);
+      try {
+        await fs.utimes(stamp, when, when);
+      } catch {
+        await fs.writeFile(stamp, '');
+      }
+      // Recorded only once the stamp is on disk: a throttle set on a failed
+      // write would hold every retry off for an hour while the clone's
+      // recorded age fell further behind its use.
+      this.lastStampAt.set(branch, now);
     } catch {
-      await fs.writeFile(stamp, '').catch(() => undefined);
+      // The next open tries again; see `lastOpenedAt` for what the sweep
+      // reads meanwhile.
     }
   }
 
@@ -687,7 +708,7 @@ export class WorkspaceService implements IWorkspaceService {
   private async normalizeCloneConfig(repoDir: string, branch: string): Promise<void> {
     try {
       for (const args of cloneTrackingConfigArgs(branch)) {
-        await execFileAsync('git', ['-C', repoDir, ...args]);
+        await this.gitRunner.run(repoDir, args);
       }
     } catch (err) {
       // One line per branch, not per key: every key writes to the same
@@ -740,12 +761,12 @@ export class WorkspaceService implements IWorkspaceService {
     let stamped = true;
     for (const args of argLists) {
       try {
-        await execFileAsync('git', ['-C', repoDir, ...args]);
+        await this.gitRunner.run(repoDir, args);
       } catch (err) {
         // `--unset-all` with no matching value (exit 5) is the expected no-op
         // for a clone that never carried an app helper; anything else is a
         // real failure.
-        const code = (err as { code?: number } | null)?.code;
+        const code = (err as { exitCode?: number } | null)?.exitCode;
         if (!(args.includes('--unset-all') && code === 5)) {
           stamped = false;
           log.warn(`could not stamp the credential helper of the "${branch}" clone:`, {
@@ -845,12 +866,12 @@ export class WorkspaceService implements IWorkspaceService {
       await this.runClone(targetDir, branch, reference);
       // Persist longpaths in the cloned repo's config so subsequent
       // checkouts also honor it.
-      await execFileAsync('git', ['-C', targetDir, 'config', 'core.longpaths', 'true']);
+      await this.gitRunner.run(targetDir, ['config', 'core.longpaths', 'true']);
       // Generic bot identity for the clone — every workflow commit
       // overrides via `--author=…` so the real human shows up in
       // `git log`. This is purely the fallback committer.
-      await execFileAsync('git', ['-C', targetDir, 'config', 'user.name', BOT_NAME]);
-      await execFileAsync('git', ['-C', targetDir, 'config', 'user.email', BOT_EMAIL]);
+      await this.gitRunner.run(targetDir, ['config', 'user.name', BOT_NAME]);
+      await this.gitRunner.run(targetDir, ['config', 'user.email', BOT_EMAIL]);
       // Pin the clone to exactly one fetch refspec and one upstream ref for
       // this branch. `git clone -b` already produces that shape; stamping it
       // explicitly means the shape is asserted rather than assumed, and the
@@ -1091,11 +1112,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     for (const candidate of candidates) {
       try {
-        const { stdout } = await execFileAsync(
-          'git',
-          ['-C', repoDir, 'show', `${candidate}:${relativePath}`],
-          { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-        );
+        const { stdout } = await this.gitRunner.run(repoDir, ['show', `${candidate}:${relativePath}`]);
         return stdout;
       } catch {
         // Try next candidate.
@@ -1133,11 +1150,8 @@ export class WorkspaceService implements IWorkspaceService {
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
     // in `kb-fs/clone-config.ts` for the full rationale.
-    const promise = execFileAsync(
-      'git',
-      ['-C', repoDir, ...SAFE_IMPLICIT_FETCH_ARGS],
-      { env: { ...process.env } },
-    )
+    const promise = this.gitRunner
+      .run(repoDir, [...SAFE_IMPLICIT_FETCH_ARGS])
       .then(() => {
         this.lastFetchAt.set(repoDir, Date.now());
         this.lastFetchOk.set(repoDir, true);
@@ -1697,10 +1711,7 @@ export class WorkspaceService implements IWorkspaceService {
     }
     let stdout: string;
     try {
-      ({ stdout } = await execFileAsync('git', ['-C', repoDir, 'status', '--porcelain=v1', '-z'], {
-        encoding: 'utf-8',
-        maxBuffer: 16 * 1024 * 1024,
-      }));
+      ({ stdout } = await this.gitRunner.run(repoDir, ['status', '--porcelain=v1', '-z']));
     } catch (err) {
       log.warn(`orphan scan via git status failed for ${workspaceId}:`, { err });
       return [];

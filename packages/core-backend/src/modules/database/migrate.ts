@@ -40,7 +40,7 @@ import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 
 /** Apply the CORE migration history from `folder`, tracked in `__drizzle_migrations_core`. */
 export async function runCoreMigrations(db: Database, folder: string): Promise<void> {
-  await withAdvisoryLock(db, AdvisoryLock.CoreMigrations, async () => {
+  await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
     log.info('Running core database migrations...');
     await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core' });
     log.info('Core migrations complete.');
@@ -53,7 +53,7 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
  * enterprise tables FK into core tables.
  */
 export async function runEnterpriseMigrations(db: Database, folder: string): Promise<void> {
-  await withAdvisoryLock(db, AdvisoryLock.EnterpriseMigrations, async () => {
+  await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
     log.info('Running enterprise database migrations...');
     await migrate(db, {
       migrationsFolder: folder,

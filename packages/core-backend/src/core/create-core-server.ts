@@ -196,7 +196,17 @@ export async function createCoreServer(
     db: core.db,
     oldestQueuedAt: () => core.pendingCommitsService.oldestQueuedAt(),
     drains: () => core.commitWorker.held,
-    lastRemoteContact: () => core.gitService.lastRemoteContact(),
+    // Whichever of the two layers reached the remote most recently: the
+    // workspace layer's fetches once the deployment is open, the startup
+    // phase's `ls-remote` at boot — which on a gated deployment is the only
+    // contact there is, and the one that says why it is gated.
+    lastRemoteContact: () => {
+      const contacts = [core.gitService.lastRemoteContact(), core.kbStartupRunner.lastRemoteContact()];
+      return contacts.reduce<{ at: number; ok: boolean } | null>(
+        (latest, c) => (c !== null && (latest === null || c.at > latest.at) ? c : latest),
+        null,
+      );
+    },
     freeBytes: () => core.disk.freeBytes(core.config.workspacesRoot),
   });
   app.get('/api/ready', async (_req, res) => {

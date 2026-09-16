@@ -73,7 +73,7 @@ export function createOAuthConsentRoutes(deps: OAuthConsentRoutesDeps): express.
     } catch (err) {
       // Message only — the raw error object can carry sensitive context
       // (redirect URIs with tokens, DB details) that must not hit stdout.
-      log.error(`complete failed for client=${st.c}:`, { err });
+      log.error(`complete failed for client=${st.c}:`, { detail: err instanceof Error ? err.message : String(err) });
       res.status(500).json({ error: 'Internal error' });
     }
   });

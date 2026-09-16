@@ -68,17 +68,43 @@ export function createConsoleLogger(bindings: LogFields = {}): ILogger {
   const prefix = typeof bindings.module === 'string' ? `[${bindings.module}] ` : '';
   const rest = Object.fromEntries(Object.entries(bindings).filter(([k]) => k !== 'module'));
   const extra = (fields: LogFields | undefined): unknown[] => {
-    const merged = { ...rest, ...fields };
+    const merged = Object.fromEntries(
+      Object.entries({ ...rest, ...fields }).map(([k, v]) => [k, typeof v === 'string' ? oneLine(v) : v]),
+    );
     const keys = Object.keys(merged);
     if (keys.length === 0) return [];
     if (keys.length === 1 && keys[0] === 'err') return [merged.err];
     return [merged];
   };
   return {
-    debug: (message, fields) => console.debug(`${prefix}${message}`, ...extra(fields)),
-    info: (message, fields) => console.log(`${prefix}${message}`, ...extra(fields)),
-    warn: (message, fields) => console.warn(`${prefix}${message}`, ...extra(fields)),
-    error: (message, fields) => console.error(`${prefix}${message}`, ...extra(fields)),
+    debug: (message, fields) => console.debug(`${prefix}${oneLine(message)}`, ...extra(fields)),
+    info: (message, fields) => console.log(`${prefix}${oneLine(message)}`, ...extra(fields)),
+    warn: (message, fields) => console.warn(`${prefix}${oneLine(message)}`, ...extra(fields)),
+    error: (message, fields) => console.error(`${prefix}${oneLine(message)}`, ...extra(fields)),
     child: (more) => createConsoleLogger({ ...bindings, ...more }),
   };
+}
+
+/**
+ * C0 and C1 control characters (U+009B among them: the one-byte CSI that
+ * starts an ANSI sequence by itself) and the JS line separators. The rule
+ * against control characters in a regex guards against accidental ones; these
+ * are the point.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS =/[\x00-\x1F\x7F-\x9F\u2028\u2029]/g;
+const NAMED: Record<string, string> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+
+/**
+ * `text` as one terminal-safe line. A message often carries text the process
+ * did not write — a branch name from a request, a path from a plugin, git's
+ * stderr — and written raw, a newline in it starts a forged line and an
+ * escape sequence paints the terminal. The sink is the one place every line
+ * passes, so the rule "one event, one line" is kept here rather than by each
+ * call site remembering `printable`. (pino's JSON escapes the same characters
+ * by construction.) Error objects are left as they are: their stacks are the
+ * console's to print, and they are the process's own text.
+ */
+function oneLine(text: string): string {
+  return text.replace(CONTROL_CHARS, (c) => NAMED[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }

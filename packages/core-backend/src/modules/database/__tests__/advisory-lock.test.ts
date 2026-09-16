@@ -47,7 +47,7 @@ describe('withAdvisoryLock', () => {
     const { clients, db } = fakePool();
     let queriesWhenBodyRan: string[] = [];
 
-    const result = await withAdvisoryLock(db, AdvisoryLock.CoreMigrations, async () => {
+    const result = await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
       queriesWhenBodyRan = [...clients[0].queries];
       return 'migrated';
     });
@@ -66,7 +66,7 @@ describe('withAdvisoryLock', () => {
   it('bounds the wait rather than blocking the boot forever', async () => {
     const { clients, db } = fakePool();
 
-    await withAdvisoryLock(db, AdvisoryLock.CoreMigrations, async () => undefined, { waitMs: 1234 });
+    await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => undefined, { waitMs: 1234 });
 
     // Transaction-local, so the setting leaves with the transaction and the
     // connection goes back to the pool as it arrived.
@@ -80,7 +80,7 @@ describe('withAdvisoryLock', () => {
     const boom = new Error('migration 0004 failed');
 
     await expect(
-      withAdvisoryLock(db, AdvisoryLock.CoreMigrations, async () => {
+      withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
         throw boom;
       }),
     ).rejects.toBe(boom);
@@ -96,10 +96,10 @@ describe('withAdvisoryLock', () => {
     let ran = false;
 
     await expect(
-      withAdvisoryLock(db, AdvisoryLock.EnterpriseMigrations, async () => {
+      withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
         ran = true;
       }),
-    ).rejects.toThrow(/EnterpriseMigrations advisory lock/);
+    ).rejects.toThrow(/Migrations advisory lock/);
 
     expect(ran).toBe(false);
     // Still cleaned up: a failed acquire leaves an open transaction behind
@@ -113,7 +113,7 @@ describe('withAdvisoryLock', () => {
       failOn: (sql) => (sql === 'rollback' ? new Error('connection terminated') : undefined!),
     });
 
-    await withAdvisoryLock(db, AdvisoryLock.CoreMigrations, async () => undefined);
+    await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => undefined);
 
     // Releasing with an error is how `pg` is told to discard the connection.
     // Ending its session is also what actually releases a lock we may still

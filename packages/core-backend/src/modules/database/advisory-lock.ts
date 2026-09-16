@@ -66,10 +66,13 @@ const LOCK_NAMESPACE = 0x48455849;
  * belongs here beside the others rather than as a number at a call site.
  */
 export const AdvisoryLock = {
-  /** Serializes {@link runCoreMigrations} across processes. */
-  CoreMigrations: 1,
-  /** Serializes {@link runEnterpriseMigrations} across processes. */
-  EnterpriseMigrations: 2,
+  /**
+   * Serializes every schema migration across processes — core's and a
+   * distribution's alike, under ONE lock: the enterprise migrations reference
+   * core's tables, so two boots overlapping with one lock each could still
+   * run core's DDL while the other ran enterprise's over it.
+   */
+  Migrations: 1,
   /**
    * Held by the ONE process allowed to drain the commit queue — see
    * {@link AdvisoryLease}. Row-level `SKIP LOCKED` already stops two workers
@@ -162,7 +165,7 @@ export interface LeaseClient {
 export interface AdvisoryLeaseOptions {
   /** How the lease opens its connection. Default: a `pg.Client` on the pool's connection string. */
   connect?: () => Promise<LeaseClient>;
-  /** Bound on the connect itself, so an unreachable database fails rather than waits. Default 10s. */
+  /** Bound on the connect and on each query, so an unreachable or half-dead database fails rather than waits. Default 10s. */
   connectTimeoutMs?: number;
 }
 
@@ -219,11 +222,19 @@ export class AdvisoryLease {
   async tryAcquire(): Promise<boolean> {
     if (this.heldFlag) return true;
     const client = await (this.opts.connect ?? this.defaultConnect)();
-    // Watched BEFORE the lock is asked for, so a connection that drops during
-    // the very query is seen as a loss rather than missed. Also required of a
-    // `pg.Client`: an 'error' with no listener is thrown at the process.
-    client.on('error', () => this.markLost());
-    client.on('end', () => this.markLost());
+    // Watched BEFORE the lock is asked for — a `pg.Client` throws an 'error'
+    // with no listener at the process — and bound to THIS client: a loss is
+    // only a loss while this is the connection the lease is held on. Before
+    // the grant below the client is not that connection, so a drop during
+    // the query surfaces as the query's own rejection and nothing is marked
+    // held; after a release or a later reacquisition it is not that
+    // connection either, so a stale client's delayed 'end' cannot clear a
+    // lease held on a healthy one.
+    const lost = () => {
+      if (this.client === client) this.markLost();
+    };
+    client.on('error', lost);
+    client.on('end', lost);
     try {
       const { rows } = await client.query('select pg_try_advisory_lock($1, $2) as held', [
         LOCK_NAMESPACE,
@@ -268,9 +279,14 @@ export class AdvisoryLease {
   }
 
   private readonly defaultConnect = async (): Promise<LeaseClient> => {
+    const timeout = this.opts.connectTimeoutMs ?? 10_000;
     const client = new pg.Client({
       connectionString: this.db.$client.options.connectionString,
-      connectionTimeoutMillis: this.opts.connectTimeoutMs ?? 10_000,
+      connectionTimeoutMillis: timeout,
+      // The same bound on each query: a connection that opened and then went
+      // half-dead would otherwise hold `tryAcquire` open indefinitely, and
+      // with it the loop that should be asking again in five seconds.
+      query_timeout: timeout,
     });
     await client.connect();
     return client;

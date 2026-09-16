@@ -118,7 +118,7 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
  * `WorkspaceMutex`'s job and stays the caller's to have done.
  */
 export class NodeGitRunner implements IGitRunner {
-  constructor(private readonly defaultTimeoutMs: number = DEFAULT_GIT_TIMEOUT_MS) {}
+  constructor(readonly defaultTimeoutMs: number = DEFAULT_GIT_TIMEOUT_MS) {}
 
   run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
   run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
@@ -198,7 +198,7 @@ export class NodeGitRunner implements IGitRunner {
         throw new GitRunError(
           `git ${subcommand} timed out after ${timeoutMs}ms and was killed. ` +
             'The remote or the local repository stopped responding.',
-          { timedOut: true, cause: err },
+          { timedOut: true },
         );
       }
 
@@ -213,7 +213,6 @@ export class NodeGitRunner implements IGitRunner {
       throw new GitRunError(`git ${subcommand} failed: ${redactGitToken(message)}`, {
         exitCode: typeof original.code === 'number' ? original.code : undefined,
         stderr: stderr === undefined ? undefined : redactGitToken(stderr),
-        cause: err,
       });
     } finally {
       // Every timer is cleared on every path. The later ones in particular

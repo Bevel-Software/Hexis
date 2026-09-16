@@ -37,6 +37,7 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
 import {
+  isGitTimeout,
   redactGitToken,
   type GitRunOptions,
   type GitRunResult,
@@ -1605,7 +1606,9 @@ export class GitService implements IGitService {
     try {
       const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
       return stdout.trim() || null;
-    } catch {
+    } catch (err) {
+      // Null is "no such rev"; a deadline is not that answer (see GitRunError).
+      if (isGitTimeout(err)) throw err;
       return null;
     }
   }

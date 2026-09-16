@@ -28,7 +28,13 @@ import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
-import { holdCommitWorkerLease, leasedWorkers, periodicTask, type LeaseLoopHandle } from './lifecycle.js';
+import {
+  holdCommitWorkerLease,
+  leasedWorkers,
+  periodicTask,
+  withStartupTask,
+  type LeaseLoopHandle,
+} from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -349,6 +355,7 @@ export async function createCoreServices(
     kbDirName,
     disk,
     () => settings.resolve('gitUsername') || 'x-access-token',
+    gitRunner,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -885,16 +892,17 @@ export async function createCoreServices(
   // retry budget AND recovery-agent budget exhausted) the worker emits
   // a `'system'` feedback notice that admins triage out of band.
   //
-  // The orphan-startup sweep runs BEFORE start() so any rows that
-  // previous deploys left as `running` (process crashed mid-commit) get
-  // reset to `pending` before the worker starts claiming. The sweep
-  // also enqueues working-tree dirt that pre-dates the queue (the
-  // existing `target-company-state` orphans).
-  await pendingCommitsService.startupReconcile(
-    workspaceService.knownWorkspaces(),
-    { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
-    { email: recoveryBot.email, name: recoveryBot.name },
-  );
+  // The queue's recovery — rows a dead process left `running` go back to
+  // `pending`, and working-tree dirt that pre-dates the queue is enqueued —
+  // runs under the commit-worker lease, right before the worker starts (see
+  // `withStartupTask` below). At boot, before the lease, it would reset rows
+  // the outgoing process of a redeploy is still committing.
+  const reconcileQueue = () =>
+    pendingCommitsService.startupReconcile(
+      workspaceService.knownWorkspaces(),
+      { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
+      { email: recoveryBot.email, name: recoveryBot.name },
+    );
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
     // The service IS the driver — passed directly rather than wrapped in a
@@ -929,8 +937,8 @@ export async function createCoreServices(
     },
     { label: 'idle-clone sweep', intervalMs: 60 * 60 * 1000, initialDelayMs: 10 * 60 * 1000 },
   );
-  const leased =
-    config.workspaceRetentionMs > 0 ? leasedWorkers(pendingCommitsWorker, idleCloneSweep) : pendingCommitsWorker;
+  const drain = withStartupTask(pendingCommitsWorker, reconcileQueue);
+  const leased = config.workspaceRetentionMs > 0 ? leasedWorkers(drain, idleCloneSweep) : drain;
   // Not `start()`: the worker runs only while this process holds the
   // commit-worker lease. On a redeploy the outgoing container still holds it,
   // so this one serves requests and declines to drain until that one exits;

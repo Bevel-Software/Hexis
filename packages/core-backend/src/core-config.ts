@@ -10,6 +10,8 @@ dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 /** See `CoreConfig.workspaceRetentionMs`. */
 const DEFAULT_WORKSPACE_RETENTION_DAYS = 30;
+/** The largest delay a Node timer honours; anything larger fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * The Postgres connection string: `DATABASE_URL` if given, otherwise built
@@ -396,10 +398,14 @@ export class CoreConfig {
     this.trustProxy = (process.env.TRUST_PROXY || (domain ? '1' : '')).trim();
     // A non-numeric or non-positive value is a misconfiguration whose effect
     // would be "no deadline at all", so it falls back to the default rather
-    // than being honoured.
+    // than being honoured. So does one past Node's largest timer delay
+    // (2^31-1 ms, ~24.8 days): `setTimeout` silently coerces that to 1ms,
+    // which would time every git command out on the spot.
     const gitTimeout = Number(process.env.GIT_TIMEOUT_MS);
     this.gitTimeoutMs =
-      Number.isFinite(gitTimeout) && gitTimeout > 0 ? gitTimeout : DEFAULT_GIT_TIMEOUT_MS;
+      Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS
+        ? gitTimeout
+        : DEFAULT_GIT_TIMEOUT_MS;
     // Zero is a meaning ("never retire"), so it is honoured; anything that is
     // not a non-negative number is a misconfiguration and gets the default.
     const retentionDays = Number((process.env.WORKSPACE_RETENTION_DAYS ?? '').trim() || NaN);

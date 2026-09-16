@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Server as HttpServer } from 'node:http';
 import {
   CoreConfig,
   createCoreServices,
@@ -7,6 +8,7 @@ import {
   createShutdown,
   setLogger,
   logger,
+  type ShutdownDeps,
 } from '@bevel-software/platform-core-backend';
 import { createPinoLogger } from './logging.js';
 
@@ -29,21 +31,6 @@ const log = logger('server');
  * for the Docker image layout).
  */
 async function main(): Promise<void> {
-  const config = new CoreConfig();
-  const core = await createCoreServices(config, {});
-
-  const staticDir =
-    process.env.STATIC_DIR ||
-    (config.nodeEnv === 'production'
-      ? path.resolve(__dirname, '..', '..', 'web', 'dist')
-      : undefined);
-
-  const app = await createCoreServer(core, {}, { staticDir });
-
-  const server = app.listen(config.port, () => {
-    log.info(`Bevel core server listening on http://localhost:${config.port}`, { port: config.port });
-  });
-
   /**
    * How this process stops. The sequence itself is the core's (it owns the
    * things being let go of); the shell's job is to run it on every way the
@@ -55,17 +42,35 @@ async function main(): Promise<void> {
    * word, the commit-worker lease held until the server noticed the session
    * was gone.
    *
+   * Registered BEFORE boot, over what exists at the time: a stop that lands
+   * during boot — a redeploy cancelled, a Ctrl-C on a slow first clone —
+   * finds the services built so far (the lease loop starts inside
+   * `createCoreServices`, so there may already be a lease to release) and
+   * lets go of those; what is not built yet is nothing to let go of.
+   *
    * An unhandled rejection or uncaught exception is a bug, and Node 22's
    * default is to die on the spot for it. The default is right about ending
    * the process — continuing on unknown state is worse — and wrong about
    * skipping the shutdown, so the same sequence runs first, and the exit
    * code says it was not a clean stop.
    */
-  const shutdown = createShutdown({ server, commitWorker: core.commitWorker, db: core.db });
+  let core: Awaited<ReturnType<typeof createCoreServices>> | null = null;
+  let server: HttpServer | null = null;
   let exiting = false;
   const exitAfter = (reason: string, code: number): void => {
     if (exiting) return;
     exiting = true;
+    // What is not built yet is stood in for by a no-op of the same shape.
+    const notListening: ShutdownDeps['server'] = {
+      close: (cb?: (err?: Error) => void) => void cb?.(),
+      closeAllConnections: () => undefined,
+    } as unknown as ShutdownDeps['server'];
+    const noPool = { $client: { end: async () => undefined } } as unknown as ShutdownDeps['db'];
+    const shutdown = createShutdown({
+      server: server ?? notListening,
+      commitWorker: core?.commitWorker ?? { stop: async () => undefined },
+      db: core?.db ?? noPool,
+    });
     shutdown(reason)
       .catch((err: unknown) => log.error('shutdown itself failed', { err }))
       .finally(() => process.exit(code));
@@ -79,6 +84,21 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (err) => {
     log.error('uncaught exception', { err });
     exitAfter('uncaught exception', 1);
+  });
+
+  const config = new CoreConfig();
+  core = await createCoreServices(config, {});
+
+  const staticDir =
+    process.env.STATIC_DIR ||
+    (config.nodeEnv === 'production'
+      ? path.resolve(__dirname, '..', '..', 'web', 'dist')
+      : undefined);
+
+  const app = await createCoreServer(core, {}, { staticDir });
+
+  server = app.listen(config.port, () => {
+    log.info(`Bevel core server listening on http://localhost:${config.port}`, { port: config.port });
   });
 }
 

@@ -6,7 +6,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
-import type { IGitRunner } from '../../shared/git.contract.js';
+import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
@@ -1928,7 +1928,11 @@ export class AccessControlService implements IAccessControl {
       ]);
       const sha = stdout.trim();
       return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
-    } catch {
+    } catch (err) {
+      // Null means "does not resolve". A deadline says nothing about the ref,
+      // and as a null it would turn a stalled git into a gate that quietly
+      // reads no roles at that ref; it surfaces instead, as a read failure.
+      if (isGitTimeout(err)) throw err;
       return null;
     }
   }

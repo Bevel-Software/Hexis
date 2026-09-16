@@ -35,6 +35,7 @@ export {
   createShutdown,
   periodicTask,
   leasedWorkers,
+  withStartupTask,
   type ShutdownDeps,
   type ShutdownOptions,
   type LeaseLoopHandle,

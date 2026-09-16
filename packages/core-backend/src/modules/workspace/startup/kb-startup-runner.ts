@@ -10,7 +10,7 @@ const startupLog = logger('kb-startup');
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
-import { redactGitToken, type IGitRunner } from '../../../shared/git.contract.js';
+import { GitRunError, redactGitToken, type IGitRunner } from '../../../shared/git.contract.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -91,6 +91,18 @@ export class KbStartupRunner {
   private inFlight: Promise<void> | null = null;
   /** Why the last run failed, redacted; null after a run that finished. */
   private failure: string | null = null;
+  /** The phase's last attempt to reach the remote — for the readiness answer. */
+  private remoteContact: { at: number; ok: boolean } | null = null;
+
+  /**
+   * When this runner last tried the remote and whether it answered. The
+   * phase's `ls-remote` is often the FIRST contact a boot makes, and on a
+   * gated deployment the only one, so a readiness answer that read only the
+   * workspace layer's fetches would call an unreachable remote "ok".
+   */
+  lastRemoteContact(): { at: number; ok: boolean } | null {
+    return this.remoteContact;
+  }
 
   /**
    * Why the most recent run failed, or null when the last run finished — the
@@ -152,7 +164,10 @@ export class KbStartupRunner {
       let delay = initial;
       while (!stopped) {
         await sleep(delay);
-        if (stopped) return;
+        // Another caller — the setup save — may have finished the phase while
+        // this loop slept. The deployment is open then, sessions may hold
+        // clones, and one more run here would be maintenance over live work.
+        if (stopped || this.failure === null) return;
         try {
           await this.runAll();
           log('the remote is reachable again and the knowledge base is maintained — the deployment is open.');
@@ -303,7 +318,14 @@ export class KbStartupRunner {
     let heads: Set<string>;
     try {
       heads = await lsRemoteHeads(this.opts.gitRunner, url, user);
+      this.remoteContact = { at: Date.now(), ok: true };
     } catch (err) {
+      // Git that never ran — no executable, a spawn refused — is a fact about
+      // this host, not the remote, and retrying the remote would not change
+      // it: that failure stops the boot with its own words. What git itself
+      // reported (an exit) or a deadline is the remote's answer, and survivable.
+      if (err instanceof GitRunError && err.exitCode === undefined && !err.timedOut) throw err;
+      this.remoteContact = { at: Date.now(), ok: false };
       throw new KbRemoteUnreachableError(
         `The knowledge-base remote could not be reached: ${redactGitToken(
           err instanceof Error ? err.message : String(err),

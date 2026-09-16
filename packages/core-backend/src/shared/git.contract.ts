@@ -129,11 +129,14 @@ export class GitRunError extends Error {
   /** True when the deadline expired and the child was killed. */
   readonly timedOut: boolean;
 
-  constructor(
-    message: string,
-    opts: { exitCode?: number; stderr?: string; timedOut?: boolean; cause?: unknown } = {},
-  ) {
-    super(message, { cause: opts.cause });
+  /**
+   * No `cause`, on purpose: the child-process error it would carry holds the
+   * unredacted command line and stderr, and a logger that serializes errors
+   * walks the cause chain. Everything a caller can act on is on the fields
+   * above, redacted.
+   */
+  constructor(message: string, opts: { exitCode?: number; stderr?: string; timedOut?: boolean } = {}) {
+    super(message);
     this.name = 'GitRunError';
     this.exitCode = opts.exitCode;
     this.stderr = opts.stderr;
@@ -154,6 +157,14 @@ export function isGitTimeout(err: unknown): boolean {
  * failure, the deadline included.
  */
 export interface IGitRunner {
+  /**
+   * The deadline a call gets when it names none — the deployment's configured
+   * ceiling. A caller whose command is legitimately long (a first clone) asks
+   * for `Math.max(defaultTimeoutMs, itsOwnFloor)`, so an operator who raised
+   * the ceiling raises it there too rather than being overridden by a
+   * constant.
+   */
+  readonly defaultTimeoutMs: number;
   run(cwd: string, args: string[], opts: GitRunOptions & { encoding: 'buffer' }): Promise<GitRunResult<Buffer>>;
   run(cwd: string, args: string[], opts?: GitRunOptions & { encoding?: 'utf8' }): Promise<GitRunResult>;
 }

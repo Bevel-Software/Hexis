@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { KbRemoteUnreachableError, KbStartupRunner } from '../kb-startup-runner.js';
 import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
+import { GitRunError, type IGitRunner } from '../../../../shared/git.contract.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /**
@@ -64,9 +65,9 @@ async function waitFor(condition: () => boolean, timeoutMs = 20_000): Promise<vo
   }
 }
 
-function makeRunner(steps: OnServerStart[], url: () => string) {
+function makeRunner(steps: OnServerStart[], url: () => string, gitRunner: IGitRunner = new NodeGitRunner()) {
   return new KbStartupRunner({
-    gitRunner: new NodeGitRunner(),
+    gitRunner,
     kbRepoUrl: url,
     gitUsername: () => 'x-access-token',
     workspacesRoot,
@@ -95,6 +96,30 @@ describe('KbStartupRunner with an unreachable remote', () => {
     const healthy = makeRunner([], () => upstream);
     await healthy.runAll();
     expect(healthy.lastFailure()).toBeNull();
+  });
+
+  it('a git that never ran is not "unreachable" either: that failure is this host, and it stops the boot', async () => {
+    const noGit: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: (async () => {
+        throw new GitRunError('git ls-remote failed: spawn git ENOENT');
+      }) as IGitRunner['run'],
+    };
+    const runner = makeRunner([], () => upstream, noGit);
+    const err = await runner.runAll().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitRunError);
+    expect(err).not.toBeInstanceOf(KbRemoteUnreachableError);
+  });
+
+  it('records its attempts to reach the remote, for the readiness answer', async () => {
+    const runner = makeRunner([], () => path.join(root, 'nowhere.git'));
+    expect(runner.lastRemoteContact()).toBeNull();
+    await runner.runAll().catch(() => undefined);
+    expect(runner.lastRemoteContact()).toMatchObject({ ok: false });
+
+    const healthy = makeRunner([], () => upstream);
+    await healthy.runAll();
+    expect(healthy.lastRemoteContact()).toMatchObject({ ok: true });
   });
 
   it('a broken step is not "unreachable": that failure is the knowledge base being wrong', async () => {
@@ -157,6 +182,40 @@ describe('KbStartupRunner with an unreachable remote', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(waits).toHaveLength(3);
     retry.stop();
+  });
+
+  it('does not run again when another caller finished the phase while it slept', async () => {
+    let url = path.join(root, 'nowhere.git');
+    let runs = 0;
+    const runner = makeRunner(
+      [
+        step('count', async () => {
+          runs += 1;
+          return { outcome: 'ok' };
+        }),
+      ],
+      () => url,
+    );
+    await runner.runAll().catch(() => undefined);
+    expect(runs).toBe(0);
+
+    let slept = 0;
+    runner.retryUntilMaintained({
+      initialDelayMs: 10,
+      log: () => undefined,
+      sleep: async () => {
+        slept += 1;
+        // The setup save, landing while the loop sleeps: the remote is
+        // reachable and the phase finishes through that caller.
+        url = upstream;
+        await runner.runAll();
+      },
+    });
+    await waitFor(() => runs === 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The loop woke to a finished phase and did not run it a second time.
+    expect(runs).toBe(1);
+    expect(slept).toBe(1);
   });
 
   it('stops retrying on a failure that is not the remote — asking again would not change it', async () => {

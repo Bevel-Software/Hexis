@@ -59,7 +59,11 @@ export async function git(
   args: string[],
 ): Promise<string> {
   const argv = [...credArgs(gitUsername), ...withPersistedCloneConfig(gitUsername, args)];
-  const { stdout } = await runner.run(cwd, argv, { timeoutMs: STARTUP_GIT_TIMEOUT_MS });
+  // A floor under the configured ceiling, not a replacement for it: an
+  // operator who raised GIT_TIMEOUT_MS past ten minutes gets that here too.
+  const { stdout } = await runner.run(cwd, argv, {
+    timeoutMs: Math.max(runner.defaultTimeoutMs, STARTUP_GIT_TIMEOUT_MS),
+  });
   return stdout;
 }
 

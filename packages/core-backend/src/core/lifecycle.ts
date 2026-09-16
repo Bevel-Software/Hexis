@@ -60,6 +60,17 @@ function defaultSleep(ms: number): Promise<void> {
  * back to asking; on acquisition it starts. A worker mid-`stop` is awaited
  * before any restart, so a loss-then-reacquire within one commit's duration
  * cannot leave two drain loops running in one process.
+ *
+ * THE ONE WINDOW THIS LEAVES OPEN. A loss is the holding session dying, and
+ * from that instant Postgres no longer holds the lock for anyone: the commit
+ * in flight here finishes (it cannot be abandoned mid-write without leaving
+ * the clone worse), and a replacement that asks in the meantime is granted.
+ * Fencing that window would need every git write to carry a token the
+ * volume checked, which a filesystem does not do. What bounds it instead:
+ * the replacement asks every `retryMs`, a commit takes seconds, and the
+ * session dies only when the database or the network does — a fault the
+ * whole deployment is already reporting, not a redeploy, where the outgoing
+ * holder releases only after its worker has stopped.
  */
 export function holdCommitWorkerLease(
   lease: AdvisoryLease,
@@ -203,6 +214,36 @@ export function periodicTask(run: () => Promise<void>, opts: PeriodicTaskOptions
       wake?.();
       await loop;
       loop = null;
+    },
+  };
+}
+
+/**
+ * A worker whose start is preceded by one asynchronous task, run under the
+ * same lease: the commit queue's recovery, which resets rows a dead holder
+ * left `running` and must therefore run only once this process IS the holder
+ * — run at boot, before the lease, it would reset rows the outgoing process
+ * is still committing. A task that fails is logged and the worker starts
+ * anyway; a stop during the task waits for it, then stops the worker.
+ */
+export function withStartupTask(
+  worker: LeasedWorker,
+  task: () => Promise<void>,
+  log: (message: string) => void = (message) => logger('lifecycle').warn(message),
+): LeasedWorker {
+  let starting: Promise<void> | null = null;
+  return {
+    start() {
+      starting ??= task()
+        .catch((err: unknown) => log(`startup task failed; the worker starts regardless: ${String(err)}`))
+        .then(() => worker.start())
+        .finally(() => {
+          starting = null;
+        });
+    },
+    async stop() {
+      if (starting) await starting;
+      await worker.stop();
     },
   };
 }
