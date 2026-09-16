@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   listRootFolders,
   pickListingBranch,
+  rootFolderListerFor,
   type GitRunner,
 } from '../git-root-folders.js';
+import type { IGitRunner } from '../../../shared/git.contract.js';
 
 const LISTING = {
   url: 'https://example.com/acme/kb.git',
@@ -77,7 +79,7 @@ describe('listRootFolders — the command git is given', () => {
     // Authenticated through the helper, the token itself only in the environment.
     expect(clone.slice(0, sub).join(' ')).toContain('credential.helper=');
     expect(JSON.stringify(calls.map((c) => c.args))).not.toContain(LISTING.token);
-    expect(calls[0]!.env.BEVEL_TEST_TOKEN).toBe(LISTING.token);
+    expect(calls[0]!.env.BEVEL_PROBE_TOKEN).toBe(LISTING.token);
     expect(calls[0]!.env.GIT_TERMINAL_PROMPT).toBe('0');
 
     expect(calls[1]!.args).toEqual([
@@ -215,5 +217,31 @@ describe('pickListingBranch', () => {
   it('then the first branch, and nothing for an empty remote', () => {
     expect(pickListingBranch(null, null, ['production', 'staging'])).toBe('production');
     expect(pickListingBranch(null, null, [])).toBeNull();
+  });
+});
+
+describe('rootFolderListerFor — the listing runs through the deployment git port', () => {
+  it('hands every git call to the port with the listing deadline, the token only in the environment', async () => {
+    const calls: Array<{ cwd: string; args: string[]; opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } }> = [];
+    const outcomes = ['', 'KnowledgeBase\0Plugins\0'];
+    const port: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: (async (cwd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) => {
+        calls.push({ cwd, args, opts });
+        return { stdout: outcomes.shift() ?? '', stderr: '' };
+      }) as IGitRunner['run'],
+    };
+    const dirs = fakeDirs();
+
+    const folders = await rootFolderListerFor(port)(LISTING, dirs);
+
+    expect(folders).toEqual(['KnowledgeBase', 'Plugins']);
+    expect(calls.map((c) => c.args[c.args.indexOf('clone') === -1 ? 2 : c.args.indexOf('clone')])).toEqual(['clone', 'ls-tree']);
+    for (const c of calls) {
+      // The port's deadline, not a bare execFile timeout that kills git alone.
+      expect(c.opts.timeoutMs).toBe(30_000);
+      expect(c.opts.env?.BEVEL_PROBE_TOKEN).toBe(LISTING.token);
+      expect(JSON.stringify(c.args)).not.toContain(LISTING.token);
+    }
   });
 });

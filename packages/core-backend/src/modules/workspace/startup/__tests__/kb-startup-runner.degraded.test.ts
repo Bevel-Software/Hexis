@@ -241,3 +241,71 @@ describe('KbStartupRunner with an unreachable remote', () => {
     expect(runner.lastFailure()).toMatch(/template is wrong/);
   });
 });
+
+describe('KbStartupRunner with a remote that rejects the credentials', () => {
+  it('survives the boot as that failure, not as "unreachable" — the admin is told the token is wrong', async () => {
+    // A rotated token: git exits 128 with the host's refusal. The port
+    // classifies it as credentials-rejected on the way up; a boot must not
+    // re-label it as a network the server cannot reach — the setup screen
+    // would send the admin to check the address and the retry loop would
+    // re-dial a host that will never accept the token.
+    const rejecting: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: (async () => {
+        // The shape `NodeGitRunner` throws: git's words in the message (that
+        // is what the boot classifies) and again in `stderr`.
+        const said = "remote: Invalid username or token.\nfatal: Authentication failed for 'https://example.com/acme/kb.git/'";
+        throw new GitRunError(`git ls-remote failed: Command failed: git ls-remote\n${said}`, {
+          exitCode: 128,
+          stderr: said,
+        });
+      }) as IGitRunner['run'],
+    };
+    const runner = makeRunner([], () => 'https://example.com/acme/kb.git', rejecting);
+
+    const err = await runner.runAll().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KbRemoteUnreachableError);
+    expect((err as KbRemoteUnreachableError).failure.kind).toBe('credentials-rejected');
+    expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
+  });
+});
+
+describe('KbStartupRunner retry after a boot that survived a rejected token', () => {
+  it('does not re-dial on a timer: only an unreachable remote is worth asking again unchanged', async () => {
+    let dials = 0;
+    const rejecting: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: (async () => {
+        dials += 1;
+        const said = "fatal: Authentication failed for 'https://example.com/acme/kb.git/'";
+        throw new GitRunError(`git ls-remote failed: Command failed: git ls-remote\n${said}`, {
+          exitCode: 128,
+          stderr: said,
+        });
+      }) as IGitRunner['run'],
+    };
+    const runner = makeRunner([], () => 'https://example.com/acme/kb.git', rejecting);
+    await runner.runAll().catch(() => undefined);
+    expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
+    expect(dials).toBe(1);
+
+    const waits: number[] = [];
+    const logged: string[] = [];
+    const retry = runner.retryUntilMaintained({
+      initialDelayMs: 5,
+      log: (m) => logged.push(m),
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    retry.stop();
+
+    // No timer, no second dial: the standing failure is still there for the
+    // setup screen, and the save that fixes the token runs the phase itself.
+    expect(waits).toEqual([]);
+    expect(dials).toBe(1);
+    expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
+    expect(logged.join('\n')).toMatch(/saving the setup form retries/);
+  });
+});
