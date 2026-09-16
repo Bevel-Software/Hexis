@@ -1,52 +1,46 @@
-import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import type { IGitRunner } from '../../shared/git.contract.js';
 import { printable } from '../../shared/printable.js';
 import { logger } from '../../shared/logging.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { probeCredentialArgs, probeGitEnv } from './connection-check.js';
 
 const log = logger('setup');
-const execFileAsync = promisify(execFile);
 
-/** How one `git` invocation is run. Injected by tests; `execFile` otherwise. */
+/** How one `git` invocation is run. Injected by tests; the deployment's git port otherwise. */
 export type GitRunner = (
   args: string[],
   options: { env: NodeJS.ProcessEnv; timeout: number },
 ) => Promise<{ stdout: string }>;
 
-const runGit: GitRunner = async (args, options) => {
-  const { stdout } = await execFileAsync('git', args, { ...options, maxBuffer: 16 * 1024 * 1024 });
-  return { stdout: String(stdout) };
-};
-
 /**
- * The `-c` pairs that authenticate a connection-check invocation. The helper
- * reads the token from the environment at call time, so it never appears in
- * argv (and so never in a process listing or a crash dump). The username is
- * interpolated into the snippet, which is why the route refuses anything but
- * a plain token before it gets here.
+ * The listing's git, run through the deployment's git port (see
+ * `shared/git.contract.ts`) — the same port the connection check runs
+ * through — so it carries the same environment, deadline handling and token
+ * redaction as every other git the backend runs, and a clone whose host
+ * stalls mid-transfer is killed with its transport helpers at the deadline
+ * rather than left holding the request open.
  */
-export function connectionCredentialArgs(username: string, token: string): string[] {
-  return [
-    '-c',
-    'credential.helper=',
-    ...(token
-      ? ['-c', `credential.helper=!f() { echo "username=${username}"; echo "password=$BEVEL_TEST_TOKEN"; }; f`]
-      : []),
-  ];
+export function listingRunnerFor(runner: IGitRunner): GitRunner {
+  return async (args, { env, timeout }) => {
+    const { stdout } = await runner.run(process.cwd(), args, { env, timeoutMs: timeout });
+    return { stdout };
+  };
 }
 
-/** The environment a connection-check invocation runs with. */
-export function connectionGitEnv(token: string): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    BEVEL_TEST_TOKEN: token,
-    // Never let git stop for a prompt: without this a bad credential hangs the
-    // request until the timeout instead of failing.
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_ASKPASS: 'echo',
-  };
+/** The listing bound to one runner: what the composition root hands the setup routes. */
+export function rootFolderListerFor(runner: IGitRunner): typeof listRootFolders {
+  const run = listingRunnerFor(runner);
+  return (listing, deps = {}) => listRootFolders(listing, { run, ...deps });
+}
+
+let defaultRun: GitRunner | undefined;
+/** A runner on default settings, for callers that did not bind one; built once. */
+function runGit(): GitRunner {
+  defaultRun ??= listingRunnerFor(new NodeGitRunner());
+  return defaultRun;
 }
 
 /**
@@ -103,7 +97,7 @@ export async function listRootFolders(
   { url, branch, username, token }: RootFolderListing,
   deps: RootFolderListingDeps = {},
 ): Promise<string[] | null> {
-  const run = deps.run ?? runGit;
+  const run = deps.run ?? runGit();
   const makeTempDir = deps.makeTempDir ?? (() => mkdtemp(path.join(tmpdir(), 'hexis-root-folders-')));
   const removeDir = deps.removeDir ?? ((dir: string) => rm(dir, { recursive: true, force: true }));
 
@@ -114,8 +108,9 @@ export async function listRootFolders(
     return null;
   }
   const target = path.join(scratch, 'repo');
-  const credentials = connectionCredentialArgs(username, token);
-  const env = connectionGitEnv(token);
+  // The one credential helper every probe uses (see connection-check.ts).
+  const credentials = probeCredentialArgs(username, token);
+  const env = probeGitEnv(token);
   const clone = (filtered: boolean) =>
     run(
       [

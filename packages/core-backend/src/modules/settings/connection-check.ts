@@ -75,6 +75,38 @@ export function gitRunnerFor(runner: IGitRunner): GitRunner {
   };
 }
 
+/**
+ * The `-c` pairs that authenticate one probe invocation — the connection
+ * check and the root-folder listing alike, so a token reaches git ONE way.
+ * The helper reads the token from the environment at call time, so it never
+ * appears in argv (and so never in a process listing or a crash dump); the
+ * empty helper first clears any the host has configured, so the answer is
+ * about THIS token, not one sitting in a system credential store. The
+ * username is interpolated into the snippet, which is why the callers refuse
+ * anything but a plain one before it gets here.
+ */
+export function probeCredentialArgs(username: string, token: string): string[] {
+  return [
+    '-c',
+    'credential.helper=',
+    ...(token
+      ? ['-c', `credential.helper=!f() { printf '%s\\n' "username=${username}" "password=$${TOKEN_ENV}"; }; f`]
+      : []),
+  ];
+}
+
+/** The environment a probe invocation runs with: the token, and no prompts. */
+export function probeGitEnv(token: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    [TOKEN_ENV]: token,
+    // Never let git stop for a prompt: without this a bad credential hangs the
+    // request until the timeout instead of failing.
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: 'echo',
+  };
+}
+
 /** The check bound to one runner: what the composition root hands the setup routes. */
 export function repositoryConnectionCheck(
   runner: IGitRunner,
@@ -127,25 +159,8 @@ export async function checkRepositoryConnection(
   }
   if (!/^[A-Za-z0-9._-]+$/.test(username)) throw new Error('Refusing an unsupported git username.');
 
-  // The helper reads the token from the environment at call time, so it never
-  // appears in argv (and so never in a process listing or a crash dump). The
-  // empty helper first clears any the host has configured, so the answer is
-  // about THIS token, not one sitting in a system credential store.
-  const credArgs = [
-    '-c',
-    'credential.helper=',
-    ...(token
-      ? ['-c', `credential.helper=!f() { printf '%s\\n' "username=${username}" "password=$${TOKEN_ENV}"; }; f`]
-      : []),
-  ];
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    [TOKEN_ENV]: token,
-    // Never let git stop for a prompt: without this a bad credential hangs the
-    // request until the timeout instead of failing.
-    GIT_TERMINAL_PROMPT: '0',
-    GIT_ASKPASS: 'echo',
-  };
+  const credArgs = probeCredentialArgs(username, token);
+  const env = probeGitEnv(token);
   /** What git said, as git said it — the classifier's input. */
   const gitSaid = (err: unknown) => {
     let raw = err instanceof Error ? err.message : String(err);

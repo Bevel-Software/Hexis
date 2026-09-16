@@ -45,6 +45,7 @@ import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
+import { rootFolderListerFor } from '../modules/settings/git-root-folders.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -649,8 +650,10 @@ export async function createCoreServer(
         url: syncUrl.toString(),
         lastSync: () => core.kbSyncService.lastSync(),
       },
-      // The connection probe's git runs through the deployment's one runner.
+      // The connection probe's git — and the root-folder listing's — runs
+      // through the deployment's one runner.
       repositoryConnectionCheck(core.gitRunner),
+      rootFolderListerFor(core.gitRunner),
     ),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
