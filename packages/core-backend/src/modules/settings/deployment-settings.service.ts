@@ -1,4 +1,4 @@
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, like, ne } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
@@ -242,10 +242,17 @@ export interface OidcCredentials {
 }
 
 /**
- * The row holding the verification record. Not a setting — nobody types it —
- * so it has no catalogue entry, is never described, and `prune` leaves it be.
+ * The rows holding verification records: ONE PER SET OF VALUES, keyed
+ * `oidcVerification:<fingerprint>`. Not settings — nobody types them — so they
+ * have no catalogue entry, are never described or loaded, and `prune` leaves
+ * them be.
+ *
+ * A row per fingerprint rather than one shared row is what makes concurrent
+ * writers safe without a lock: a sign-in finishing through a provider built
+ * from OLD values records those old values under their own key, and can never
+ * overwrite what a save (or another replica) recorded about the new ones.
  */
-const OIDC_VERIFICATION_KEY = 'oidcVerification';
+const OIDC_VERIFICATION_PREFIX = 'oidcVerification:';
 
 /** Where a resolved value came from, which is what the UI renders as its status. */
 export type SettingSource = 'env' | 'stored' | 'unset';
@@ -294,8 +301,6 @@ export interface ResolvedSetting {
 export class DeploymentSettingsService {
   private readonly defs = new Map<string, SettingDef>();
   private stored = new Map<string, string>();
-  /** The rows that are records rather than settings — see {@link OIDC_VERIFICATION_KEY}. */
-  private records = new Map<string, string>();
   private readonly crypto: TokenCrypto | null;
 
   constructor(
@@ -317,12 +322,7 @@ export class DeploymentSettingsService {
   async load(): Promise<void> {
     const rows = await this.db.select().from(deploymentSettings);
     const next = new Map<string, string>();
-    const records = new Map<string, string>();
     for (const row of rows) {
-      if (row.key === OIDC_VERIFICATION_KEY) {
-        records.set(row.key, row.value);
-        continue;
-      }
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
@@ -344,7 +344,6 @@ export class DeploymentSettingsService {
       next.set(row.key, row.value);
     }
     this.stored = next;
-    this.records = records;
   }
 
   /**
@@ -542,7 +541,7 @@ export class DeploymentSettingsService {
     const rows = await this.db.select({ key: deploymentSettings.key }).from(deploymentSettings);
     const orphans = rows
       .map((r) => r.key)
-      .filter((k) => !known.includes(k) && k !== OIDC_VERIFICATION_KEY);
+      .filter((k) => !known.includes(k) && !k.startsWith(OIDC_VERIFICATION_PREFIX));
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
@@ -578,20 +577,25 @@ export class DeploymentSettingsService {
    * is proven again, with nothing to remember to reset. The secret itself is
    * never stored here, and a digest keyed with the secrets key cannot be
    * checked against a guess without that key.
+   *
+   * Read from the database, not the in-memory cache: unlike the settings, this
+   * changes on a live deployment (every first sign-in), and a sign-in on one
+   * replica must show as Verified on the others.
    */
-  oidcVerification(): OidcVerificationState {
+  async oidcVerification(): Promise<OidcVerificationState> {
     const current = this.resolveOidcCredentials();
     if (!current.issuerUrl || !current.clientId || !current.clientSecret) return 'not-configured';
-    const raw = this.records.get(OIDC_VERIFICATION_KEY);
-    if (!raw) return 'unverified';
-    try {
-      const record = JSON.parse(raw) as { state?: unknown; fingerprint?: unknown };
-      return record.state === 'verified' && record.fingerprint === this.oidcFingerprint(current)
-        ? 'verified'
-        : 'unverified';
-    } catch {
-      return 'unverified';
-    }
+    return this.oidcVerificationOf(current);
+  }
+
+  /** What is recorded about one set of single sign-on values — `unverified` when nothing is. */
+  async oidcVerificationOf(credentials: OidcCredentials): Promise<Exclude<OidcVerificationState, 'not-configured'>> {
+    const key = this.oidcVerificationKey(credentials);
+    const rows = await this.db
+      .select({ key: deploymentSettings.key, value: deploymentSettings.value })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    return rows.some((row) => row.key === key && row.value === 'verified') ? 'verified' : 'unverified';
   }
 
   /** Record what is known about one set of single sign-on values. */
@@ -599,23 +603,45 @@ export class DeploymentSettingsService {
     state: Exclude<OidcVerificationState, 'not-configured'>,
     credentials: OidcCredentials,
   ): Promise<void> {
-    const value = JSON.stringify({ state, fingerprint: this.oidcFingerprint(credentials) });
+    const key = this.oidcVerificationKey(credentials);
     await this.db
       .insert(deploymentSettings)
-      .values({ key: OIDC_VERIFICATION_KEY, value, encrypted: false, updatedBy: null })
+      .values({ key, value: state, encrypted: false, updatedBy: null })
       .onConflictDoUpdate({
         target: deploymentSettings.key,
-        set: { value, encrypted: false, updatedBy: null, updatedAt: new Date() },
+        set: { value: state, encrypted: false, updatedBy: null, updatedAt: new Date() },
       });
-    this.records.set(OIDC_VERIFICATION_KEY, value);
   }
 
-  private oidcFingerprint(credentials: OidcCredentials): string {
-    return createHmac('sha256', `hexis-oidc-verification:${this.secretsEncKey}`)
-      .update(
-        [credentials.issuerUrl.replace(/\/+$/, ''), credentials.clientId, credentials.clientSecret].join('\n'),
-      )
+  /**
+   * Drop the records about every set of values but these — once a save has put
+   * them in effect, the others describe nothing. Housekeeping only: a record
+   * that reappears (a sign-in through the old provider still finishing) is
+   * about values not in effect, so it is inert.
+   */
+  async dropOtherOidcVerifications(credentials: OidcCredentials): Promise<void> {
+    await this.db
+      .delete(deploymentSettings)
+      .where(
+        and(
+          like(deploymentSettings.key, `${OIDC_VERIFICATION_PREFIX}%`),
+          ne(deploymentSettings.key, this.oidcVerificationKey(credentials)),
+        ),
+      );
+  }
+
+  private oidcVerificationKey(credentials: OidcCredentials): string {
+    // JSON-encoded, so no issuer, id or secret containing the separator can
+    // make two different tuples hash alike.
+    const tuple = JSON.stringify([
+      credentials.issuerUrl.replace(/\/+$/, ''),
+      credentials.clientId,
+      credentials.clientSecret,
+    ]);
+    const fingerprint = createHmac('sha256', `hexis-oidc-verification:${this.secretsEncKey}`)
+      .update(tuple)
       .digest('hex');
+    return `${OIDC_VERIFICATION_PREFIX}${fingerprint}`;
   }
 
   /** Remove one stored row (used by tests and by `prune`). */

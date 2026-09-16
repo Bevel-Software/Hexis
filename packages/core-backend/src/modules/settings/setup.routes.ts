@@ -175,7 +175,7 @@ export function createSetupRoutes(
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
-      oidcVerification: settings.oidcVerification(),
+      oidcVerification: await settings.oidcVerification(),
       ...(kbInitFailed ? { kbInitError } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
@@ -222,9 +222,19 @@ export function createSetupRoutes(
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
       const oidc = await signInHoldsFor(entries, res);
       if (!oidc) return;
-      const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      // Recorded BEFORE the save: the record is keyed by the values it is
+      // about, so until the save puts them in effect it speaks for nothing —
+      // while a record written after a committed save could fail and leave
+      // those values unverified with no way back (the retry changes nothing,
+      // so it is not probed again).
       if (oidc.record) {
         await settings.recordOidcVerification(oidc.record.state, oidc.record.credentials);
+      }
+      const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      if (oidc.record) {
+        await settings.dropOtherOidcVerifications(oidc.record.credentials).catch((err: unknown) => {
+          console.error('[setup] could not drop old sign-in records:', err instanceof Error ? err.message : String(err));
+        });
       }
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
@@ -332,7 +342,7 @@ export function createSetupRoutes(
         complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
-        oidcVerification: settings.oidcVerification(),
+        oidcVerification: await settings.oidcVerification(),
       });
     } catch (err) {
       if (err instanceof SettingsValidationError) {
@@ -539,6 +549,8 @@ export function createSetupRoutes(
         return;
       }
       // Proving the configuration in effect is as good as signing in with it.
+      // A save landing while this check ran is harmless: the record is keyed
+      // by the values tested, so it never speaks for the ones saved since.
       const testsCurrent =
         tested.issuerUrl === current.issuerUrl &&
         tested.clientId === current.clientId &&
@@ -550,7 +562,7 @@ export function createSetupRoutes(
         ok: check.outcome === 'verified',
         outcome: check.outcome,
         ...(check.outcome === 'unverified' ? { error: check.error } : {}),
-        oidcVerification: settings.oidcVerification(),
+        oidcVerification: await settings.oidcVerification(),
       });
     } catch (err) {
       console.error('[setup] sign-in check failed:', err instanceof Error ? err.message : String(err));

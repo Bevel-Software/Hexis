@@ -39,9 +39,23 @@ export interface OidcAuthProviderOptions {
   onSignedIn?: () => void | Promise<void>;
 }
 
-/** The redirect URI to register with the provider — and the one the configuration check sends. */
+/**
+ * The redirect URI to register with the provider — and the one the
+ * configuration check sends. Userinfo is STRIPPED: a `PUBLIC_BACKEND_URL`
+ * spelled with `user:pass@` (a basic-auth proxy in front of the deployment)
+ * would otherwise hand that credential to the identity provider.
+ */
 export function oidcRedirectUri(publicBackendUrl: string): string {
-  return `${publicBackendUrl}/api/auth/oidc/callback`;
+  let base = publicBackendUrl;
+  try {
+    const url = new URL(publicBackendUrl);
+    url.username = '';
+    url.password = '';
+    base = url.toString();
+  } catch {
+    // Not a URL — nothing to strip; the provider refuses it either way.
+  }
+  return `${base.replace(/\/+$/, '')}/api/auth/oidc/callback`;
 }
 
 /** Read one named cookie from the raw header (no cookie-parser dep, matching auth.middleware). */

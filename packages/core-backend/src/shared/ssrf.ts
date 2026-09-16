@@ -29,9 +29,17 @@ export function isBlockedHost(hostname: string): boolean {
       const v4 = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
       if (isBlockedV4(v4)) return true;
     }
-    if (host === '::1' || host === '::') return true; // loopback / unspecified
-    // link-local fe80::/10 (fe80–febf) and unique-local fc00::/7 (fc/fd).
-    if (/^fe[89ab]/.test(host) || host.startsWith('fc') || host.startsWith('fd')) return true;
+    // A mapped public v4 connects to that public address.
+    if (/^::ffff:/.test(host) && (mappedDotted || mappedHex)) return false;
+    // Everything else must be global unicast (2000::/3). That excludes loopback
+    // and unspecified (`::1`, `::`, `::2`…), link-local fe80::/10, unique-local
+    // fc00::/7, multicast ff00::/8 — and anything that does not parse.
+    const first = /^([0-9a-f]{1,4}):/.exec(host);
+    if (!first) return true;
+    const hextet = parseInt(first[1], 16);
+    if (hextet < 0x2000 || hextet > 0x3fff) return true;
+    // Documentation 2001:db8::/32 is never a real host.
+    if (/^2001:0?db8:/.test(host)) return true;
     return false;
   }
   return isBlockedV4(host);

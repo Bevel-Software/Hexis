@@ -56,6 +56,21 @@ const REQUEST_TIMEOUT_MS = 10_000;
  */
 const CODE_REJECTIONS: readonly string[] = ['invalid_grant'];
 
+/**
+ * The other error codes RFC 6749 §5.2 (and OIDC Core §3.1.2.6) define — the
+ * only ones echoed back in an "unverified" message. Anything else in `error`
+ * is text of the provider's choosing, and could be the secret reflected back.
+ */
+const ECHOED_ERRORS: readonly string[] = [
+  'invalid_request',
+  'unauthorized_client',
+  'unsupported_grant_type',
+  'invalid_scope',
+  'access_denied',
+  'server_error',
+  'temporarily_unavailable',
+];
+
 /** The issuer as the provider appends `/.well-known/...` to it: no trailing slash. */
 export function normalizeIssuerUrl(issuerUrl: string): string {
   return issuerUrl.trim().replace(/\/+$/, '');
@@ -106,16 +121,20 @@ export async function checkOidcIssuer(
   if (!endpoint('authorization_endpoint') || !endpoint('token_endpoint') || !endpoint('userinfo_endpoint')) {
     return { outcome: 'not-oidc', field: 'oidcIssuerUrl', error: NOT_OIDC };
   }
-  // The secret is about to be sent here, so the endpoint the issuer names
-  // passes the same check the issuer did.
-  try {
-    assertSafeFetchUrl(endpoint('token_endpoint'), { requireHttps: true, label: 'token_endpoint' });
-  } catch {
-    return {
-      outcome: 'not-oidc',
-      field: 'oidcIssuerUrl',
-      error: 'The provider names a token endpoint that is not a public https:// address.',
-    };
+  // The secret is about to be sent to the token endpoint, and every sign-in
+  // sends its access token to the userinfo endpoint from the server — so both
+  // addresses the issuer names pass the same check the issuer did.
+  for (const key of ['token_endpoint', 'userinfo_endpoint'] as const) {
+    try {
+      assertSafeFetchUrl(endpoint(key), { requireHttps: true, label: key });
+    } catch {
+      const name = key === 'token_endpoint' ? 'token' : 'userinfo';
+      return {
+        outcome: 'not-oidc',
+        field: 'oidcIssuerUrl',
+        error: `The provider names a ${name} endpoint that is not a public https:// address.`,
+      };
+    }
   }
   return { outcome: 'verified', tokenEndpoint: endpoint('token_endpoint') };
 }
@@ -192,9 +211,9 @@ export async function checkOidcConfiguration(
     };
   }
   if (CODE_REJECTIONS.includes(errorCode)) return { outcome: 'verified' };
-  // Only a plain error code is echoed — anything else could be text of the
-  // provider's choosing.
-  const code = /^[a-z_]{1,64}$/.test(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
+  // Only a standard error code is echoed — anything else could be text of the
+  // provider's choosing, the secret included.
+  const code = ECHOED_ERRORS.includes(errorCode) ? ` (${errorCode})` : ` (HTTP ${status})`;
   return {
     outcome: 'unverified',
     error: `The application ID and secret could not be verified — the provider gave an answer that does not say whether they are right${code}.`,

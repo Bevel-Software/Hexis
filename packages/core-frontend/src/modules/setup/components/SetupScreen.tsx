@@ -295,12 +295,19 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
   const oidcEpoch = useRef(0);
   /**
    * A verification state newer than the one the host last passed in — what a
-   * save or a test just answered. It remembers which passed-in value it
-   * superseded, so the host's own refresh (a different value) takes over.
+   * save or a test just answered. Dropped for good the moment the host passes
+   * in anything new (its own refresh supersedes it, even one that comes back
+   * to the value it replaced) and when a sign-in field is edited.
    */
-  const [latest, setLatest] = useState<{ over: OidcVerification | undefined; value: OidcVerification } | null>(null);
-  const setLatestVerification = (value: OidcVerification) => setLatest({ over: oidcVerification, value });
-  const verification = latest && latest.over === oidcVerification ? latest.value : oidcVerification;
+  const [latest, setLatest] = useState<OidcVerification | null>(null);
+  const [hostVerification, setHostVerification] = useState(oidcVerification);
+  if (hostVerification !== oidcVerification) {
+    // Adjusting state to a changed prop during render, rather than in an
+    // effect: React re-renders at once, before anything stale is painted.
+    setHostVerification(oidcVerification);
+    setLatest(null);
+  }
+  const verification = latest ?? oidcVerification;
 
   /**
    * What a field would save as, given a set of typed answers: what is in them,
@@ -384,6 +391,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
     if (OIDC_KEYS.includes(key)) {
       oidcEpoch.current++;
       setOidcTest(null);
+      // A test's "Verified" was about the values before this edit.
+      setLatest(null);
     }
     if (CONNECTION_KEYS.includes(key)) {
       // Any in-flight test is now asking about values that are gone; the epoch
@@ -498,7 +507,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
       const result = await testOidc(fields);
       if (epoch !== oidcEpoch.current) return;
       setOidcTest(result);
-      if (result.oidcVerification) setLatestVerification(result.oidcVerification);
+      if (result.oidcVerification) setLatest(result.oidcVerification);
     } catch (err) {
       if (epoch === oidcEpoch.current) {
         setOidcTest({ ok: false, error: err instanceof Error ? err.message : 'Could not test the sign-in configuration.' });
@@ -657,7 +666,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (saving) return;
+    // A save during a sign-in check would clear the draft the check is about.
+    if (saving || oidcTesting) return;
     setSaving(true);
     setError(null);
     setProblems({});
@@ -724,7 +734,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
       const result = await saveSettings(payload);
       setRestartRequired(result.restartRequired);
       setDraft({});
-      if (result.oidcVerification) setLatestVerification(result.oidcVerification);
+      if (result.oidcVerification) setLatest(result.oidcVerification);
       // A save can succeed and STILL leave the deployment unusable: a blank
       // field means "leave it alone", not "this is wrong", so the server
       // accepts a batch that answers only some of what it needs. Saying so is
@@ -1124,7 +1134,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
             <Button
               type="submit"
               variant="primary"
-              disabled={saving || testing || connectionRejected}
+              disabled={saving || testing || oidcTesting || connectionRejected}
               // Described by the refusal, so a reader who lands on a button
               // that will not move is told why rather than left guessing.
               aria-describedby={connectionRejected ? 'connection-refusal' : undefined}

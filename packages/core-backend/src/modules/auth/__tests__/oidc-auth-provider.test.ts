@@ -212,12 +212,20 @@ describe('OidcAuthProvider', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const base = await listen(makeProvider(makeIdpFetch().impl, authService, onSignedIn));
     expect(await signIn(base)).toContain('#token=');
+    expect(onSignedIn).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveBeenCalledWith('OIDC sign-in record failed:', 'database down');
     errors.mockRestore();
   });
 
   it('exchanges the code with the same redirect URI the configuration check sends', () => {
     expect(oidcRedirectUri('https://hexis.example.com')).toBe(
       'https://hexis.example.com/api/auth/oidc/callback',
+    );
+  });
+
+  it('never puts proxy credentials from PUBLIC_BACKEND_URL into the redirect URI', () => {
+    expect(oidcRedirectUri('https://proxy:hunter2@hexis.example.com/base/')).toBe(
+      'https://hexis.example.com/base/api/auth/oidc/callback',
     );
   });
 });

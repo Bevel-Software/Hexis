@@ -4,7 +4,9 @@ import { checkOidcConfiguration, checkOidcIssuer, type OidcConfiguration } from 
 const ISSUER = 'https://login.example.com/tenant/v2.0';
 const DISCOVERY_URL = `${ISSUER}/.well-known/openid-configuration`;
 const TOKEN_URL = 'https://tokens.example.com/oauth2/token';
-const SECRET = 's3cr3t-value-never-echoed';
+// Lowercase letters and underscores only: shaped exactly like an OAuth error
+// code, so a provider reflecting it in `error` cannot slip past the echo rule.
+const SECRET = 'secret_value_never_echoed';
 
 const CONFIG: OidcConfiguration = {
   issuerUrl: ISSUER,
@@ -76,11 +78,35 @@ describe('checkOidcIssuer — discovery', () => {
     'https://169.254.169.254/latest',
     'https://localhost:8443',
     'https://[::1]/issuer',
+    // Non-global IPv6: unspecified-range, documentation, unique-local, link-local, mapped private.
+    'https://[::2]/issuer',
+    'https://[2001:db8::1]/issuer',
+    'https://[fd00::1]/issuer',
+    'https://[fe80::1]/issuer',
+    'https://[::ffff:10.0.0.1]/issuer',
     'http://login.example.com',
   ])('refuses %s before any request is made (outbound-URL check)', async (issuer) => {
     const fetchImpl = provider(() => json(200, DISCOVERY));
     expect(await checkOidcIssuer(issuer, fetchImpl)).toMatchObject({ outcome: 'unreachable', field: 'oidcIssuerUrl' });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('accepts an issuer on a public global-unicast IPv6 address', async () => {
+    const issuer = 'https://[2606:4700::1111]/tenant';
+    const fetchImpl = vi.fn(async () => json(200, DISCOVERY)) as unknown as typeof fetch;
+    expect(await checkOidcIssuer(issuer, fetchImpl)).toEqual({ outcome: 'verified', tokenEndpoint: TOKEN_URL });
+  });
+
+  it('refuses a userinfo endpoint on an internal or plain-http address, where sign-in would send the access token', async () => {
+    for (const userinfo of ['https://169.254.169.254/userinfo', 'http://login.example.com/userinfo']) {
+      const fetchImpl = provider(() => json(200, { ...DISCOVERY, userinfo_endpoint: userinfo }), () => json(400, { error: 'invalid_grant' }));
+      expect(await checkOidcConfiguration(CONFIG, fetchImpl)).toMatchObject({
+        outcome: 'rejected',
+        reason: 'not-oidc',
+        field: 'oidcIssuerUrl',
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('refuses a token endpoint on an internal address, so the secret is never sent there', async () => {
@@ -152,9 +178,12 @@ describe('checkOidcConfiguration — token probe', () => {
     const results = await Promise.all([
       checkOidcConfiguration(CONFIG, provider(() => json(200, DISCOVERY), () => json(401, { error: 'invalid_client', error_description: SECRET }))),
       checkOidcConfiguration(CONFIG, provider(() => json(200, DISCOVERY), () => json(400, { error: `weird ${SECRET}` }))),
+      // Reflected as a bare, well-formed error code.
+      checkOidcConfiguration(CONFIG, provider(() => json(200, DISCOVERY), () => json(400, { error: SECRET }))),
       checkOidcConfiguration(CONFIG, provider(() => json(404, {}))),
     ]);
     for (const result of results) expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(results[2]).toMatchObject({ outcome: 'unverified', error: expect.stringContaining('(HTTP 400)') });
   });
 
   it('a discovery failure stops before the token endpoint and rejects on the issuer field', async () => {

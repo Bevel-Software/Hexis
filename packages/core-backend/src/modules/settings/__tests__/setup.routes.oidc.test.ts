@@ -28,6 +28,8 @@ const ENV = [
   'OIDC_SCOPES',
   'OIDC_PROVIDER_LABEL',
   'ALLOWED_EMAIL_DOMAINS',
+  // Parameterized below as a non-sign-in setting, which an env value would own.
+  'KB_DIR_NAME',
 ] as const;
 let savedEnv: Partial<Record<(typeof ENV)[number], string | undefined>> = {};
 let server: HttpServer | null = null;
@@ -50,12 +52,35 @@ afterEach(() => {
   }
 });
 
-const fakeDb = () =>
-  ({
-    select: () => ({ from: () => Promise.resolve([]) }),
-    insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
-    delete: () => ({ where: () => Promise.resolve() }),
-  }) as unknown as Database;
+type Row = { key: string; value: string; encrypted: boolean };
+
+/**
+ * An in-memory table. Conditions are not evaluated — a select answers every
+ * row, which the service narrows by key itself — and deletes are only counted.
+ */
+function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
+  const all = () => Promise.resolve(rows);
+  return {
+    select: () => ({ from: () => Object.assign(all(), { where: all }) }),
+    insert: () => ({
+      values: (row: Row) => ({
+        onConflictDoUpdate: (conflict: { set: { value: string } }) => {
+          const existing = rows.find((r) => r.key === row.key);
+          if (existing) existing.value = conflict.set.value;
+          else rows.push({ ...row });
+          return Promise.resolve();
+        },
+      }),
+    }),
+    delete: () => ({
+      where: () => {
+        deleted.push(rows.map((r) => r.key));
+        return Promise.resolve();
+      },
+    }),
+  } as unknown as Database;
+}
+const fakeDb = () => memoryDb();
 
 /** Stands in for the provider: answers every check with `result` and records what was asked. */
 function provider(result: OidcCheck) {
@@ -132,7 +157,7 @@ describe('POST /setup/settings — a sign-in configuration is checked before it 
     ]);
     expect(settings.resolve('oidcIssuerUrl')).toBe('');
     expect(settings.resolve('oidcClientSecret')).toBe('');
-    expect(settings.oidcVerification()).toBe('not-configured');
+    expect(await settings.oidcVerification()).toBe('not-configured');
   });
 
   it('refuses credentials the provider rejects, on the secret field, and stores nothing', async () => {
@@ -195,7 +220,7 @@ describe('POST /setup/settings — a sign-in configuration is checked before it 
     const res = await post(base, '/api/setup/settings', { settings: { oidcClientSecret: 'typo' } });
     expect(res.status).toBe(400);
     expect(settings.resolve('oidcClientSecret')).toBe('secret-1');
-    expect(settings.oidcVerification()).toBe('verified');
+    expect(await settings.oidcVerification()).toBe('verified');
   });
 
   it.each([
@@ -328,7 +353,7 @@ describe('POST /setup/test-oidc', () => {
     const idp = provider({ outcome: 'verified' });
     const { base, settings } = listen({ checkOidc: idp.check });
     await settings.save(FULL, null);
-    expect(settings.oidcVerification()).toBe('unverified');
+    expect(await settings.oidcVerification()).toBe('unverified');
     const res = await post(base, '/api/setup/test-oidc', {});
     expect(await res.json()).toMatchObject({ ok: true, outcome: 'verified', oidcVerification: 'verified' });
     expect(idp.asked[0].clientSecret).toBe('secret-1');
@@ -345,9 +370,9 @@ describe('POST /setup/test-oidc', () => {
 describe('the verification state', () => {
   it('is not-configured, then unverified, then verified after a real sign-in', async () => {
     const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
-    expect(settings.oidcVerification()).toBe('not-configured');
+    expect(await settings.oidcVerification()).toBe('not-configured');
     await settings.save(FULL, null);
-    expect(settings.oidcVerification()).toBe('unverified');
+    expect(await settings.oidcVerification()).toBe('unverified');
 
     // The composition root's wiring: a sign-in through the provider built
     // from these values records them verified.
@@ -391,43 +416,25 @@ describe('the verification state', () => {
       headers: { cookie },
     });
 
-    expect(settings.oidcVerification()).toBe('verified');
+    expect(await settings.oidcVerification()).toBe('verified');
   });
 
   it('speaks only for the values it was made about', async () => {
     const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
     await settings.save(FULL, null);
     await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
-    expect(settings.oidcVerification()).toBe('verified');
+    expect(await settings.oidcVerification()).toBe('verified');
     // A different secret — here through the environment — is not the one proven.
     process.env.OIDC_CLIENT_SECRET = 'from-env';
-    expect(settings.oidcVerification()).toBe('unverified');
+    expect(await settings.oidcVerification()).toBe('unverified');
     delete process.env.OIDC_CLIENT_SECRET;
-    expect(settings.oidcVerification()).toBe('verified');
+    expect(await settings.oidcVerification()).toBe('verified');
   });
 
   it('survives a reload, and prune keeps it', async () => {
-    const rows: Array<{ key: string; value: string; encrypted: boolean }> = [];
+    const rows: Row[] = [];
     const deleted: string[][] = [];
-    const db = {
-      select: () => ({ from: () => Promise.resolve(rows) }),
-      insert: () => ({
-        values: (row: { key: string; value: string; encrypted: boolean }) => ({
-          onConflictDoUpdate: () => {
-            const i = rows.findIndex((r) => r.key === row.key);
-            if (i >= 0) rows.splice(i, 1);
-            rows.push(row);
-            return Promise.resolve();
-          },
-        }),
-      }),
-      delete: () => ({
-        where: () => {
-          deleted.push(rows.map((r) => r.key));
-          return Promise.resolve();
-        },
-      }),
-    } as unknown as Database;
+    const db = memoryDb(rows, deleted);
     const first = new DeploymentSettingsService(db, ENC_KEY);
     await first.save({ ...FULL, kbDirName: 'kb' }, null);
     await first.recordOidcVerification('verified', first.resolveOidcCredentials());
@@ -437,7 +444,37 @@ describe('the verification state', () => {
     expect(deleted).toEqual([]);
     const second = new DeploymentSettingsService(db, ENC_KEY);
     await second.load();
-    expect(second.oidcVerification()).toBe('verified');
-    expect(second.describe().some((s) => s.key === 'oidcVerification')).toBe(false);
+    expect(await second.oidcVerification()).toBe('verified');
+    expect(second.describe().some((s) => s.key.startsWith('oidcVerification'))).toBe(false);
+  });
+
+  it('is read from the database, so a sign-in on one replica shows on another without a reload', async () => {
+    const db = memoryDb();
+    const signedInOn = new DeploymentSettingsService(db, ENC_KEY);
+    const shownOn = new DeploymentSettingsService(db, ENC_KEY);
+    await signedInOn.save(FULL, null);
+    await shownOn.load();
+    expect(await shownOn.oidcVerification()).toBe('unverified');
+    await signedInOn.recordOidcVerification('verified', signedInOn.resolveOidcCredentials());
+    expect(await shownOn.oidcVerification()).toBe('verified');
+  });
+
+  it('a sign-in finishing through a provider built from old values never overwrites the record of the new ones', async () => {
+    const settings = new DeploymentSettingsService(memoryDb(), ENC_KEY);
+    await settings.save(FULL, null);
+    const old = settings.resolveOidcCredentials();
+    await settings.save({ oidcClientSecret: 'secret-2' }, null);
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+    // The old provider's onSignedIn lands late.
+    await settings.recordOidcVerification('verified', old);
+    await settings.recordOidcVerification('unverified', old);
+    expect(await settings.oidcVerification()).toBe('verified');
+  });
+
+  it('never mistakes one set of values for another that joins to the same text', async () => {
+    const settings = new DeploymentSettingsService(memoryDb(), ENC_KEY);
+    await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'app', oidcClientSecret: 'id\nsecret' }, null);
+    await settings.recordOidcVerification('verified', { issuerUrl: ISSUER, clientId: 'app\nid', clientSecret: 'secret' });
+    expect(await settings.oidcVerification()).toBe('unverified');
   });
 });

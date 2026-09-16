@@ -115,6 +115,38 @@ describe('SetupScreen — single sign-on check', () => {
     await waitFor(() => expect(screen.getByTestId('oidc-verification')).toHaveTextContent('Verified'));
   });
 
+  it('a host refresh supersedes a test answer for good, even one back to the value it replaced', async () => {
+    api.testOidc.mockResolvedValue({ ok: true, outcome: 'verified', oidcVerification: 'verified' });
+    const view = render(<SetupScreen settings={SETTINGS} onSaved={() => {}} variant="settings" oidcVerification="unverified" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Test sign-in configuration' }));
+    await waitFor(() => expect(screen.getByTestId('oidc-verification')).toHaveTextContent(/^Verified$/));
+    view.rerender(<SetupScreen settings={SETTINGS} onSaved={() => {}} variant="settings" oidcVerification="verified" />);
+    // A new secret saved since reads as unverified again: the old answer must not come back.
+    view.rerender(<SetupScreen settings={SETTINGS} onSaved={() => {}} variant="settings" oidcVerification="unverified" />);
+    expect(screen.getByTestId('oidc-verification')).toHaveTextContent('Unverified — sign in once to confirm');
+  });
+
+  it('editing a provider field drops a test answer about the old values', async () => {
+    api.testOidc.mockResolvedValue({ ok: true, outcome: 'verified', oidcVerification: 'verified' });
+    render(<SetupScreen settings={SETTINGS} onSaved={() => {}} variant="settings" oidcVerification="unverified" />);
+    await userEvent.click(screen.getByRole('button', { name: 'Test sign-in configuration' }));
+    await waitFor(() => expect(screen.getByTestId('oidc-verification')).toHaveTextContent(/^Verified$/));
+    await userEvent.type(field('Application secret'), 'x');
+    expect(screen.getByTestId('oidc-verification')).toHaveTextContent('Unverified — sign in once to confirm');
+  });
+
+  it('cannot save while a sign-in check is running', async () => {
+    let answer: (value: unknown) => void = () => {};
+    api.testOidc.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    render(<SetupScreen settings={SETTINGS} onSaved={() => {}} variant="settings" oidcVerification="unverified" />);
+    await userEvent.type(field('Application secret'), 'new');
+    await userEvent.click(screen.getByRole('button', { name: 'Test sign-in configuration' }));
+    expect(screen.getByRole('button', { name: /Save/ })).toBeDisabled();
+    answer({ ok: true, outcome: 'verified', oidcVerification: 'unverified' });
+    await waitFor(() => expect(screen.getByRole('button', { name: /Save/ })).toBeEnabled());
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
   it('still shows the state and the test when every provider setting comes from the environment', () => {
     const fromEnv = SETTINGS.map((s) => ({ ...s, source: 'env' as const, configured: true }));
     render(<SetupScreen settings={fromEnv} onSaved={() => {}} variant="settings" oidcVerification="verified" />);

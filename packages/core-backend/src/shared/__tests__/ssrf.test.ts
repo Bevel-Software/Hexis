@@ -29,6 +29,15 @@ describe('isBlockedHost', () => {
     // A public address in the same mapped-hex form stays allowed (8.8.8.8 → 0808:0808).
     expect(isBlockedHost('::ffff:808:808')).toBe(false);
   });
+
+  test('blocks IPv6 literals outside global unicast, and allows global unicast', () => {
+    for (const h of ['::2', '[::2]', '2001:db8::1', '2001:0db8::1', 'ff02::1', '100::1', '64:ff9b::a00:1', 'not:an:address']) {
+      expect(isBlockedHost(h)).toBe(true);
+    }
+    for (const h of ['2606:4700::1111', '[2a00:1450:4001::200e]', '2400:cb00::1']) {
+      expect(isBlockedHost(h)).toBe(false);
+    }
+  });
 });
 
 describe('assertSafeFetchUrl', () => {

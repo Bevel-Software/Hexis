@@ -910,10 +910,11 @@ export async function createCoreServices(
         publicFrontendUrl: config.publicFrontendUrl,
         cookieSecure: config.publicBackendUrl.startsWith('https'),
         // A real sign-in proves the configuration this process was built with.
-        // Recorded against those values, so it says nothing about any saved
-        // since that are still waiting for a restart.
+        // Recorded against those values — under their own key — so it says
+        // nothing about any saved since, and cannot overwrite what was
+        // recorded about them.
         onSignedIn: async () => {
-          if (settings.oidcVerification() === 'verified') return;
+          if ((await settings.oidcVerificationOf(oidcCredentials)) === 'verified') return;
           await settings.recordOidcVerification('verified', oidcCredentials);
         },
       }),
