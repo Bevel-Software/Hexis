@@ -17,7 +17,7 @@ const authService = {
 // Satisfies the route's narrow Pick<IAccountErasureService, 'eraseUser'>
 // contract directly — no concrete-service cast needed.
 const accountErasure = {
-  eraseUser: vi.fn(async (_userId: string, _opts?: { erasureId?: string }) => true),
+  eraseUser: vi.fn<(userId: string, opts?: { erasureId?: string }) => Promise<boolean>>(async () => true),
 };
 
 function makeApp(opts: { admin: boolean; email?: string }) {
