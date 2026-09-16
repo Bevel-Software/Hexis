@@ -54,3 +54,39 @@ export function assertInsideRepo(wsPath: string, kbDirName: string): void {
     { kind: 'path-outside-repo', path: wsPath, kbDirName, corrected },
   );
 }
+
+/**
+ * Accept the root-anchored form of a workspace path.
+ *
+ * The app's Copy path gives `/<kbDirName>/…`, because that is the form a
+ * Markdown link resolves from any folder, and people paste the same text into
+ * an agent. A single leading slash names the same workspace path, so it is
+ * dropped here; anything else (`//x`, `./x`, `KnowledgeBase/x`) passes through
+ * untouched and meets the usual outside-the-repository refusal.
+ */
+export function normalizeWorkspacePath<T>(input: T): T {
+  if (typeof input !== 'string' || !/^\/(?!\/)/.test(input)) return input;
+  return input.slice(1) as T;
+}
+
+/** The tool inputs that carry a workspace path. */
+const PATH_ARG_KEYS = ['path', 'src', 'dest', 'destination'] as const;
+
+/**
+ * `normalizeWorkspacePath` over a tool call's arguments: every path-shaped
+ * input, including each `files[].path` of a batch write. Returns a copy.
+ */
+export function normalizePathArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...args };
+  for (const key of PATH_ARG_KEYS) {
+    if (key in out) out[key] = normalizeWorkspacePath(out[key]);
+  }
+  if (Array.isArray(out.files)) {
+    out.files = out.files.map((f: unknown) =>
+      f && typeof f === 'object' && 'path' in f
+        ? { ...(f as Record<string, unknown>), path: normalizeWorkspacePath((f as Record<string, unknown>).path) }
+        : f,
+    );
+  }
+  return out;
+}

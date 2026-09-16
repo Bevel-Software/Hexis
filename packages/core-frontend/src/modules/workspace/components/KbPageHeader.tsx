@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Clock4,
   Copy,
+  FileText,
   History,
   Link2,
   Pencil,
@@ -13,6 +14,7 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
+import { rootAnchoredPath } from '../utils/pasteLink';
 
 /**
  * The document's title, and the page's actions beside it.
@@ -117,8 +119,8 @@ export interface KbPageHeaderProps {
   onShare(): void;
   /** The page as Markdown. Absent for a file that has no markdown to copy. */
   onCopyPage?: () => Promise<boolean>;
-  /** The canonical URL, via `useCanonicalFileUrl`. The only copy-a-reference
-   *  action on this page — see the note in the Share menu. */
+  /** The canonical URL, via `useCanonicalFileUrl`. Its sibling, Copy path,
+   *  needs nothing from the caller: it is `path`, root-anchored. */
   onCopyLink(): Promise<boolean>;
 }
 
@@ -183,6 +185,18 @@ export function KbPageHeader({
     setCopied((prev) => ({ ...prev, [key]: ok ? 'ok' : 'fail' }));
     window.setTimeout(() => setCopied((prev) => ({ ...prev, [key]: null })), COPY_FEEDBACK_MS);
   }, []);
+
+  // The root-anchored `/<kbDirName>/…` form, the same text the tree row's
+  // Copy path gives: pasted into a Markdown link it works from any folder.
+  const copyPath = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(rootAnchoredPath(path));
+      return true;
+    } catch (err) {
+      console.error('Failed to copy path:', err);
+      return false;
+    }
+  }, [path]);
 
   const copyLabel = (key: string, idle: string) =>
     copied[key] === 'ok' ? 'Copied' : copied[key] === 'fail' ? "Couldn't copy" : idle;
@@ -275,6 +289,19 @@ export function KbPageHeader({
                   <span className="flex items-center gap-2.5">
                     <Link2 size={14} />
                     {copyLabel('link', 'Copy link to this page')}
+                  </span>
+                </MenuItem>
+                {/* For linking this page from another one. */}
+                <MenuItem
+                  role="menuitem"
+                  onClick={async () => {
+                    await report('path', copyPath);
+                    window.setTimeout(closeShare, COPY_FEEDBACK_MS);
+                  }}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <FileText size={14} />
+                    {copyLabel('path', 'Copy path')}
                   </span>
                 </MenuItem>
                 {/* "Share the whole folder" lived here and was cut. Sharing a
