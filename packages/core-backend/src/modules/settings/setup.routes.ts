@@ -396,9 +396,13 @@ export function createSetupRoutes(
     // THE CONFIGURED TOKEN ONLY EVER GOES TO THE CONFIGURED REPOSITORY — the
     // same rule the connection test applies, for the same reason: probing a
     // new address with the stored token would hand it to whoever runs that
-    // host. A new address brings its own token.
+    // host. A new address brings its own token. Until an address is
+    // configured there is no repository the token was "set for": a first-run
+    // save that brings the address to a token already present (GIT_TOKEN in
+    // the environment, whose field the form cannot even edit) is that token's
+    // first and only pairing, not a change of it.
     const tokenSupplied = Boolean(entries.gitToken?.trim());
-    if (next.url !== now.url && next.token && !tokenSupplied) {
+    if (now.url && next.url !== now.url && next.token && !tokenSupplied) {
       return settings.sourceOf('gitToken') === 'env'
         ? refuse({
             kbRepoUrl:

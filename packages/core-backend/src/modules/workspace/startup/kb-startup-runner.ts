@@ -81,13 +81,22 @@ export interface KbStartupRunnerOptions {
  * simply cannot get there right now — and so the one a boot may survive:
  * the deployment comes up gated and unmaintained, and tries again.
  *
- * A {@link ClassifiedFailure} of the `unreachable` kind by construction: the
- * setup screen shows the same remediation for a boot that survived this as
- * for a setup-time run that hit it.
+ * A {@link ClassifiedFailure} that keeps the classification the remote
+ * contact already produced when it has one — `credentials-rejected`,
+ * `not-found` — and is `unreachable` only when nothing more specific is
+ * known. The setup screen shows the remediation for THAT kind, the same one a
+ * setup-time connection test shows for the same token: a rotated token reads
+ * as "the host rejected the credentials", not as a network the server cannot
+ * reach, and the retry loop is not left re-dialing a host that will never
+ * accept it.
  */
 export class KbRemoteUnreachableError extends ClassifiedFailure {
   constructor(message: string, opts?: { cause?: unknown }) {
-    super(message, gitFailure('unreachable'), opts);
+    super(
+      message,
+      opts?.cause instanceof ClassifiedFailure ? opts.cause.failure : gitFailure('unreachable'),
+      opts,
+    );
     this.name = 'KbRemoteUnreachableError';
   }
 }

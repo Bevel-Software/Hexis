@@ -299,6 +299,47 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     expect(runs).toBe(1);
   });
 
+  it('a first run with GIT_TOKEN in the environment completes on the save that brings the address', async () => {
+    // The form cannot edit an environment-sourced token, so if the save that
+    // first names the repository were refused as "a new address needs its own
+    // token", setup could never be completed through the UI at all. Until an
+    // address is configured there is no repository the token was set for.
+    process.env.GIT_TOKEN = 'ghp_from_env';
+    const remote = connectedCheck();
+    let runs = 0;
+    const { base } = listen(true, async () => {
+      runs++;
+    }, remote.check);
+
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://example.com/acme/kb.git' },
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).complete).toBe(true);
+    expect(runs).toBe(1);
+    // The environment's token went to the address the admin gave it, once.
+    expect(remote.asked.map((c) => [c.url, c.token])).toEqual([['https://example.com/acme/kb.git', 'ghp_from_env']]);
+  });
+
+  it('still refuses to move an environment-sourced token to a DIFFERENT repository once one is configured', async () => {
+    process.env.GIT_TOKEN = 'ghp_from_env';
+    const remote = connectedCheck();
+    const { base } = listen(true, async () => {}, remote.check);
+    // The first pairing: the address is stored, the token stays in the environment.
+    let res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://example.com/acme/kb.git' },
+    });
+    expect(res.status).toBe(200);
+
+    // Now there IS a repository the token was set for; a different one is refused.
+    res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://example.com/other/kb.git' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/GIT_TOKEN environment variable/);
+    expect(remote.asked.map((c) => c.url)).toEqual(['https://example.com/acme/kb.git']);
+  });
+
   it('keeps setup gated after a failed run; a re-save retries, and success clears the gate', async () => {
     const consoleError = console.error;
     console.error = () => {};
