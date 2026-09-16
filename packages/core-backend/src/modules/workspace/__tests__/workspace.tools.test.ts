@@ -1703,6 +1703,37 @@ describe('preflight for moves and deletes', () => {
       expect(collided.body.error).toContain('symbolic link');
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
+
+    it.skipIf(process.platform === 'win32')('a link inside the repository is not followed either, so a move cannot write into a folder whose rules it never judged', async () => {
+      const base = await seeded();
+      await symlink(join(tempDir, KB('Locked')), join(tempDir, KB('Sales/alias')));
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/alias/deal.md'), dryRun: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toContain(`the symbolic link "${KB('Sales/alias')}"`);
+      expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/alias/deal.md') })).status).toBe(400);
+      expect((await call(base, 'delete_file', { path: KB('Sales/alias/rules.md') })).status).toBe(400);
+      expect(await exists(KB('Locked/rules.md'))).toBe(true);
+      expect(await exists(KB('Locked/deal.md'))).toBe(false);
+    });
+
+    it('a move cannot create a platform file or folder at the destination', async () => {
+      const base = await seeded();
+      const dry = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/archive/access.md'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false, reason: 'access.md is a platform file name; a move cannot create a platform file.' });
+      expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/archive/access.md') })).status).toBe(400);
+      expect((await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Skills'), dryRun: true })).body).toMatchObject({ allowed: false });
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+      expect(await exists(KB('Sales/archive/access.md'))).toBe(false);
+    });
+
+    it.skipIf(process.platform !== 'linux')('on a case-sensitive disk a case-distinct destination is a collision, not an overwrite', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/Deal.md'), 'other deal');
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/Deal.md') });
+      expect(run.status).toBe(409);
+      expect(await fs.readFile(KB('Sales/Deal.md'), { encoding: 'utf-8' })).toBe('other deal');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
   });
 
   describe('descriptions match behaviour', () => {

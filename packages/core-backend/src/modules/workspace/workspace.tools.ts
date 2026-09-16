@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import nodeFs from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { join } from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import type { LocalFilesystem } from '@mastra/core/workspace';
 import type { IToolRegistry, JsonSchema } from '../tool-registry/tool.contract.js';
@@ -592,44 +592,51 @@ export function registerWorkspaceTools(
     return out.join('/');
   };
 
-  /** Whether anything — a dangling symbolic link included — sits at `absolute`. */
-  const occupied = async (absolute: string): Promise<boolean> => {
-    try {
-      await nodeFs.lstat(absolute);
-      return true;
-    } catch (err) {
-      if (isAbsence(err)) return false;
-      throw err;
+  /**
+   * Refuse `path` when any part of it inside the repository is a symbolic link
+   * — the last part too, unless `allowLast` (a link removed on its own is just
+   * the link). Moves and deletes are judged on the path as written: its access
+   * rules, its platform status, its lock. A link on the way would carry the
+   * write somewhere else — beside the clone, where git never sees it, or into
+   * another folder whose rules were never consulted — so none is followed.
+   * The workspace root and the clone folder itself are the operator's and are
+   * not judged.
+   */
+  const assertNoSymlinkOnPath = async (root: string, path: string, allowLast = false): Promise<void> => {
+    const segments = path.replace(/^\.?\/+/, '').replace(/\/+$/, '').split('/').filter(Boolean);
+    if (segments[0] !== kbDirName) return;
+    const last = allowLast ? segments.length - 1 : segments.length;
+    for (let i = 2; i <= last; i++) {
+      const prefix = segments.slice(0, i).join('/');
+      let isLink: boolean;
+      try {
+        isLink = (await nodeFs.lstat(join(root, prefix))).isSymbolicLink();
+      } catch (err) {
+        if (isAbsence(err)) return;
+        throw err;
+      }
+      if (isLink) {
+        throw new ToolError(`"${path}" goes through the symbolic link "${prefix}"; moves and deletes never follow links.`, 400);
+      }
     }
   };
 
   /**
-   * Refuse `path` unless what it really names lies inside the repository once
-   * every symbolic link on the way is followed. The nearest existing ancestor
-   * is resolved for a path not yet there; a dangling link on the way is refused
-   * outright, since whatever it would create lands wherever the link points.
-   * The lexical repository check alone would let `knowledge-base/link/x` write
-   * beside the clone, where git never sees it.
+   * Whether `dest` names something other than `src` already on disk. Judged by
+   * file identity, not by spelling: a case-only rename finds its own source at
+   * `dest` on a case-insensitive disk (no collision), while on a case-sensitive
+   * disk `Deal.md` beside `deal.md` is a different file (a collision).
    */
-  const assertReallyInsideRepo = async (root: string, path: string): Promise<void> => {
-    const repo = await nodeFs.realpath(join(root, kbDirName));
-    let current = join(root, path);
-    let remainder = '';
-    for (;;) {
-      try {
-        const real = join(await nodeFs.realpath(current), remainder);
-        const rel = relative(repo, real);
-        if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return;
-        break;
-      } catch (err) {
-        if (!isAbsence(err) || (await occupied(current))) break;
-      }
-      const parent = dirname(current);
-      if (parent === current) break;
-      remainder = join(basename(current), remainder);
-      current = parent;
+  const collides = async (root: string, src: string, dest: string): Promise<boolean> => {
+    let destStat: import('node:fs').Stats;
+    try {
+      destStat = await nodeFs.lstat(join(root, dest));
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
     }
-    throw new ToolError(`"${path}" leads outside the knowledge base repository through a symbolic link.`, 400);
+    const srcStat = await nodeFs.lstat(join(root, src));
+    return srcStat.dev !== destStat.dev || srcStat.ino !== destStat.ino;
   };
 
   const kindOf = async (fs: LocalFilesystem, path: string): Promise<'file' | 'folder' | null> => {
@@ -1229,7 +1236,7 @@ export function registerWorkspaceTools(
       if (managedReason(onDisk, 'file') !== undefined) {
         throw new ToolError(`${onDisk.slice(onDisk.lastIndexOf('/') + 1)} is a platform file and cannot be deleted through the agent tools.`, 400);
       }
-      if (toKbRelative(path, kbDirName) !== null) await assertReallyInsideRepo(root, path);
+      await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeDenied(branch, ctx, path, 'delete_file');
       await asStructuredDenial(branch, ctx, 'delete_file', () => fs.deleteFile(path));
       return { path, deleted: true };
@@ -1242,8 +1249,8 @@ export function registerWorkspaceTools(
       'Delete a workspace FOLDER and every file under it, at any depth; each file lands as its own committed + pushed change as you, then the empty folder is removed. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
-      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`. ' +
-      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it, deleted last, so the rest of its files stay governed by them until they are gone.' +
+      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
+      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it, deleted last, so the rest of its files stay governed by them until they are gone; you must be able to write those platform files too.' +
       PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1288,7 +1295,7 @@ export function registerWorkspaceTools(
         throw new ToolError(`"${path}" is a file, not a folder — use delete_file to delete it.`, 400);
       }
       const root = await workspaceRoot(branch, ctx);
-      await assertReallyInsideRepo(root, path);
+      await assertNoSymlinkOnPath(root, path);
       const { files } = await filesUnder(fs, path);
       // A restricted run is judged on what it would actually delete: the files.
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f);
@@ -1366,7 +1373,7 @@ export function registerWorkspaceTools(
     name: 'move_file',
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
-      'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) and git metadata are refused; a path that leads outside the repository through a symbolic link is refused; on a protected branch you must be able to write both ends. ' +
+      'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) and git metadata are refused; a move cannot create a platform file or folder at `dest` either (renaming a note to `access.md` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends. ' +
       'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
       'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.' +
       PROPOSAL_NOTE +
@@ -1417,8 +1424,8 @@ export function registerWorkspaceTools(
       const kind = await kindOf(fs, src);
       if (kind === null) throw new ToolError(`"${src}" does not exist.`, 404);
       const root = await workspaceRoot(branch, ctx);
-      if (toKbRelative(src, kbDirName) !== null) await assertReallyInsideRepo(root, src);
-      if (toKbRelative(dest, kbDirName) !== null) await assertReallyInsideRepo(root, dest);
+      await assertNoSymlinkOnPath(root, src);
+      await assertNoSymlinkOnPath(root, dest);
       const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
       // A restricted run is judged on what it would actually write: each file
       // at its old and its new path, not an extensionless folder path.
@@ -1430,16 +1437,29 @@ export function registerWorkspaceTools(
       const [before, after] = await Promise.all([accessAt(branch, ctx, src), accessAt(branch, ctx, dest)]);
       const accessChanges = (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
       const descendants = srcFiles.length;
-      const managedWhy = managedReason(await onDiskSpelling(root, src), kind) ?? (isGitMetadata(dest) ? managedReason(dest, kind) : undefined);
+      // Neither end may be the platform's own: a move neither takes a platform
+      // item away nor makes one (a note renamed to `access.md` would start
+      // governing its folder).
+      const destOnDisk = await onDiskSpelling(root, dest);
+      const destManaged = managedReason(destOnDisk, kind);
+      const srcManaged = managedReason(await onDiskSpelling(root, src), kind);
+      const collision = srcManaged === undefined && (await collides(root, src, dest));
+      // Checked after the collision: onto an existing platform file, "already
+      // exists" is the plainer answer.
+      const createsManaged = srcManaged !== undefined || collision || destManaged === undefined
+        ? undefined
+        : isGitMetadata(destOnDisk)
+          ? destManaged
+          : kind === 'file'
+            ? `${destOnDisk.slice(destOnDisk.lastIndexOf('/') + 1)} is a platform file name; a move cannot create a platform file.`
+            : `"${destOnDisk}" is a platform folder; a move cannot create one.`;
+      const managedWhy = srcManaged ?? createsManaged;
       const managed = managedWhy !== undefined;
-      // A case-only rename finds its own source at `dest` on a case-insensitive
-      // disk. A dangling symbolic link at `dest` is something there too.
-      const collision = src.toLowerCase() !== dest.toLowerCase() && (await occupied(join(root, dest)));
-      const blocked = managed ? [] : await writeBlocked(branch, ctx, [src, dest]);
-      const reason = managed
-        ? managedWhy
-        : collision
-          ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
+      const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest]);
+      const reason = collision
+        ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
+        : managed
+          ? managedWhy
           : blocked.length > 0
             ? `You may not write "${blocked[0]}", so the move cannot run.`
             : undefined;
