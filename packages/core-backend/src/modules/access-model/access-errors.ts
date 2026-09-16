@@ -7,6 +7,14 @@ export interface AccessDeniedDetails {
   eligibleRoles: string[];
   /** Direct user grants at this path, in `{name, email}` form. */
   eligibleUsers: { name: string; email: string }[];
+  /**
+   * Display names of the roles and groups the CALLER holds, when known. A
+   * listed principal the caller already holds cannot be the way in — they
+   * hold it and were still refused, so something nearer excludes it — and
+   * naming it as "eligible" reads as a contradiction. The message then says
+   * that principal is excluded here instead of listing who is eligible.
+   */
+  callerRoles?: string[];
 }
 
 /**
@@ -21,6 +29,19 @@ export class AccessDeniedError extends WorkflowDomainError {
   readonly access: AccessDeniedDetails;
 
   constructor(details: AccessDeniedDetails) {
+    const held = new Set((details.callerRoles ?? []).map((r) => r.toLowerCase()));
+    const excluded = details.eligibleRoles.filter((r) => held.has(r.toLowerCase()));
+    if (excluded.length) {
+      const names = excluded.join(', ');
+      super(
+        `You don't have permission to write to "${details.path}". ${excluded.length === 1 ? `The ${names} role is` : `The roles ${names} are`} excluded at this folder.`,
+        403,
+        { access: details },
+      );
+      this.name = 'AccessDeniedError';
+      this.access = details;
+      return;
+    }
     const rolesPart = details.eligibleRoles.length
       ? details.eligibleRoles.join(', ')
       : 'none';

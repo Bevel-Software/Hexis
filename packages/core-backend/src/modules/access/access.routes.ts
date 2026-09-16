@@ -243,11 +243,14 @@ export function createAccessRoutes(
     if (!user) return;
 
     const rawPath = req.query.path;
-    if (typeof rawPath !== 'string' || !rawPath) {
+    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
+    // The dialog addresses the repository root as the empty repo-relative path,
+    // so an empty `path` is the root FOLDER — refusing it left the root
+    // dialog unable to re-read its view after a change.
+    if (typeof rawPath !== 'string' || (!rawPath && kind !== 'folder')) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
 
     try {
       // Same sanitize/validate the POST routes apply: strip any kbDir prefix and
@@ -551,11 +554,15 @@ export function createAccessRoutes(
   ): Promise<void> {
     const writable = await accessControl.canWrite(workspaceId, userEmail, gatePath);
     if (!writable) {
-      const eligible = await accessControl.eligibleWriters(workspaceId, gatePath);
+      const [eligible, callerRoles] = await Promise.all([
+        accessControl.eligibleWriters(workspaceId, gatePath),
+        accessControl.heldPrincipalNames(workspaceId, userEmail),
+      ]);
       throw new AccessDeniedError({
         path: gatePath,
         eligibleRoles: eligible.roles,
         eligibleUsers: eligible.users,
+        callerRoles,
       });
     }
     // On a protected branch, write is admin-only for access.md/roles.yaml. The

@@ -441,6 +441,15 @@ export interface IAccessControl {
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null>;
 
   /**
+   * Display names of the roles and groups `userEmail` holds — with Admin for
+   * the deployment owner — read from the working-tree model, or from the
+   * model at `ref` when given (empty when no rules resolve there). Feeds
+   * `AccessDeniedError.callerRoles`, so a denial never names a principal the
+   * caller already holds as the way in.
+   */
+  heldPrincipalNames(workspaceId: string, userEmail: string, ref?: string): Promise<string[]>;
+
+  /**
    * Batched: resolve eligible writers + expanded emails for a list of paths
    * at a specific ref in one model load. Returns null with the same
    * semantics as `eligibleWritersAtRef` (ref unresolvable).

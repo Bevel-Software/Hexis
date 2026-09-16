@@ -94,6 +94,7 @@ function recordingAccessControl(opts: {
   canWriteAtRef?: (ref: string, email: string, path: string) => boolean | null;
   canWriteBatchAtRef?: (ref: string, email: string, paths: string[]) => Map<string, boolean> | null;
   eligible?: () => { roles: string[]; users: { name: string; email: string }[] };
+  heldPrincipalNames?: string[];
 } = {}): { ac: IAccessControl; calls: AccessRecord[] } {
   const calls: AccessRecord[] = [];
   const ac: IAccessControl = {
@@ -121,6 +122,7 @@ function recordingAccessControl(opts: {
       return opts.canWriteBatchAtRef?.(ref, userEmail, paths) ?? new Map(paths.map((p) => [p, true]));
     },
     eligibleWritersAtRef: async () => opts.eligible?.() ?? { roles: ['Admin'], users: [] },
+    heldPrincipalNames: async () => opts.heldPrincipalNames ?? [],
     eligibleWritersForPathsAtRef: async (_w, _ref, paths) =>
       new Map(paths.map((p) => [p, { roles: [], users: [], emails: new Set<string>() }])),
     findEmailByHash: async () => null,
@@ -185,6 +187,22 @@ describe('GitService — commit gate uses HEAD (not working tree)', () => {
     await writeFile(repo, 'Knowledge/Foo.md', 'modified\n');
 
     await expect(svc.commit(workspaceId, USER, SHARE_REQ)).rejects.toBeInstanceOf(AccessDeniedError);
+  });
+
+  it('never names a role the caller holds as eligible — it says that role is excluded here', async () => {
+    const { ac } = recordingAccessControl({
+      canWriteBatchAtRef: (_ref, _email, paths) => new Map(paths.map((p) => [p, false])),
+      eligible: () => ({ roles: ['Admin'], users: [] }),
+      heldPrincipalNames: ['Admin'],
+    });
+    const { svc, repo } = await makeSvc(root, workspaceId, ac);
+    await commitFile(repo, 'Knowledge/Foo.md', 'seed\n', 'seed');
+    await writeFile(repo, 'Knowledge/Foo.md', 'modified\n');
+
+    const err = await svc.commit(workspaceId, USER, SHARE_REQ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AccessDeniedError);
+    expect((err as Error).message).not.toContain('Eligible: Admin');
+    expect((err as Error).message).toContain('The Admin role is excluded at this folder.');
   });
 
   it('allows the commit (bootstrap) when canWriteBatchAtRef returns null', async () => {

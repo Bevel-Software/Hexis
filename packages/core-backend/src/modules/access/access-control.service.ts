@@ -112,10 +112,11 @@ interface AccessModel {
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
    *
-   * This exists for the two hardcoded `write` rescues below, and only those.
-   * It is NOT a general grant: it never enters scope resolution, so it gives
-   * no read, no download, and no write anywhere except `roles.yaml` and
-   * `access.md`. The deployment owner is the person who can already change
+   * This exists for the two hardcoded `write` rescues below and the root write
+   * floor, and only those. It is NOT a general grant: it never enters scope
+   * resolution, so it gives no read, no download, and no write beyond
+   * `roles.yaml`, `access.md`, and what the root floor reaches (see
+   * `hasPermissionResolved`). The deployment owner is the person who can already change
    * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
    * nothing they could not already take — while withholding it turns a
    * `roles.yaml` that has lost its last Admin into a knowledge base nobody
@@ -476,7 +477,8 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 /**
  * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
  * of principal KEYS with no person behind them — no direct-email tier, no
- * admin rescue, no machine-owned rule. Closest scope first; within a scope a
+ * admin rescue, no machine-owned rule — only the Admin write floor, when the
+ * keys include the Admin role. Closest scope first; within a scope a
  * grant to any key wins over a denial to another, exactly as for a person.
  */
 function hasPermissionForKeys(
@@ -486,7 +488,9 @@ function hasPermissionForKeys(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  const adminFloor = verb === 'write' && keys.has(ADMIN_ROLE_KEY);
   for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
     let grant = false;
     let deny = false;
     for (const key of keys) {
@@ -498,7 +502,22 @@ function hasPermissionForKeys(
     if (deny) return false;
     if (scope.everyone) return scope.everyone === 'grant';
   }
-  return false;
+  return adminFloor;
+}
+
+/** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
+const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * Whether a scope sits at the Admin write floor: the repository root's own
+ * `access.md`, or the own frontmatter of a file directly in the root (those
+ * files are part of the root, so their own rules cannot take Admin's write
+ * away either). A folder directly in the root is not covered — its own
+ * `access.md` is an ordinary subfolder scope that may exclude Admin.
+ */
+function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
+  if (scope.source.kind === 'own') return !relativePath.includes('/');
+  return scope.source.path === 'access.md';
 }
 
 function isAdminEmail(model: AccessModel, email: string): boolean {
@@ -541,6 +560,16 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
+ * One floor for `write`, applied during the walk: an admin (same definition)
+ * always holds `write` at the repository root. When the walk reaches the root
+ * `access.md` (or the own frontmatter of a file directly in the root) — or runs
+ * out of scopes without a verdict — an admin is granted,
+ * whatever the root file says, so no root rule can lock the deployment out of
+ * its own tree. A NEARER scope still decides first: a subfolder that denies
+ * Admin (or denies `everyone` without naming Admin) excludes admins there like
+ * anyone else. The root file's own entries are not rewritten — the floor is a
+ * verdict, not a grant line — so `grantSources` stays file-backed.
+ *
  * No special-cases for `read`/`download` — they fall through to scope resolution.
  */
 function hasPermissionResolved(
@@ -557,10 +586,19 @@ function hasPermissionResolved(
     if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) return true;
   }
 
-  const userRoles = principalKeysOf(model, email);
+  const adminFloor = verb === 'write' && isAdminEmail(model, email);
+  // For write, the deployment owner IS Admin — the floor admits them, so the
+  // Admin rules along the way bind them too: a subfolder denying Admin excludes
+  // the owner exactly as it excludes the role's members.
+  let userRoles = principalKeysOf(model, email);
+  if (adminFloor && !userRoles?.has(ADMIN_ROLE_KEY)) {
+    userRoles = new Set([...(userRoles ?? []), ...principalKeysOfToken(model, ADMIN_ROLE_KEY)]);
+  }
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
+
     // Tier 1 — direct email entry is the most specific verdict at this scope.
     const direct = scope.byEmail.get(email);
     if (direct) return direct === 'grant';
@@ -587,7 +625,8 @@ function hasPermissionResolved(
     // No verdict at this scope — fall through to the next (farther) one.
   }
 
-  return false;
+  // No verdict anywhere (and no root access.md to stop at): the floor still holds.
+  return adminFloor;
 }
 
 /**
@@ -785,6 +824,38 @@ function canReadResolved(
   return hasPermissionResolved(model, 'read', userEmail, relativePath, fileOwn);
 }
 
+/**
+ * The key set someone holding exactly the principal behind `token` carries —
+ * the question "would a member of this principal be allowed?" put to
+ * `hasPermissionForKeys`. A group gets its full member key set
+ * (`principalKeysOfGroup`); a role or plugin principal gets every key its
+ * record is registered under (the bare name and the `role/` alias share one
+ * record) plus the plugin principals expanded from those keys; a token with no
+ * record (`everyone`, a vanished principal) is just itself. Public keys are
+ * always included — every caller holds them.
+ */
+function principalKeysOfToken(model: AccessModel, token: string): Set<string> {
+  const record = model.roles.byCanonical.get(token);
+  if (record?.kind === 'group') return principalKeysOfGroup(model, token) ?? new Set([token]);
+  const keys = new Set<string>([token]);
+  if (record) {
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (principal === record) keys.add(key);
+    }
+    for (const [key, principal] of model.roles.byCanonical) {
+      if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+      for (const source of principal.sourceKeys) {
+        if (keys.has(source)) {
+          keys.add(key);
+          break;
+        }
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
 function eligibleHoldersResolved(
   model: AccessModel,
   verb: Verb,
@@ -809,16 +880,31 @@ function eligibleHoldersResolved(
     const key = `${kind}\0${name.toLowerCase()}`;
     if (!byIdentity.has(key)) byIdentity.set(key, { name, kind });
   };
+  // Every row is re-checked against the resolver. The collapsed view keeps a
+  // principal's closest OWN verdict, but a nearer scope can still decide for
+  // them without naming them — a `deny everyone` in a subfolder cuts off a
+  // root `write: Admin` — and a list that named them anyway would tell the
+  // dialog and the denial message that someone is eligible whom the gate then
+  // refuses.
+  const allowedFor = (keys: ReadonlySet<string>) =>
+    hasPermissionForKeys(model, verb, keys, relativePath, fileOwn);
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
+    if (!allowedFor(principalKeysOfToken(model, canonical))) continue;
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
+  }
+  // The Admin write floor (see `hasPermissionResolved`): Admin holds write here
+  // whenever no nearer scope excludes it, whether or not any file names it.
+  if (verb === 'write' && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY)!;
+    if (allowedFor(principalKeysOfToken(model, ADMIN_ROLE_KEY))) addPrincipal(adminRole.displayName, 'role');
   }
   // The derived everyone verdict: a public plugin principal granted here
   // means anyone signed in holds the verb, and a list that counts holders (an
   // approval gate, a "restricted to" banner) must say so — as `everyone`, the
   // same row a literal grant produces.
-  if (everyone === 'grant') addPrincipal(EVERYONE_CANONICAL, 'role');
+  if (everyone === 'grant' && allowedFor(NO_KEYS)) addPrincipal(EVERYONE_CANONICAL, 'role');
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
   // `roles.yaml` and on any `access.md` is granted to Admin even if the
@@ -847,6 +933,7 @@ function eligibleHoldersResolved(
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {
     if (state !== 'grant') continue;
+    if (!hasPermissionResolved(model, verb, email, relativePath, fileOwn)) continue;
     users.push({ name: '', email });
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
@@ -1533,6 +1620,27 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
+  }
+
+  async heldPrincipalNames(workspaceId: string, userEmail: string, ref?: string): Promise<string[]> {
+    let model: AccessModel;
+    if (ref === undefined) {
+      model = await this.loadModel(workspaceId);
+    } else {
+      const loaded = await this.loadModelAtRef(workspaceId, ref);
+      if (!loaded) return [];
+      model = loaded.model;
+    }
+    const email = canonicalEmail(userEmail);
+    const names = new Set<string>();
+    for (const key of model.roles.byEmail.get(email) ?? []) {
+      const record = model.roles.byCanonical.get(key);
+      if (record && record.kind !== 'plugin') names.add(record.displayName);
+    }
+    if (model.deploymentOwners.has(email)) {
+      names.add(model.roles.byCanonical.get(ADMIN_ROLE_KEY)?.displayName ?? ADMIN_CANONICAL);
+    }
+    return [...names].sort();
   }
 
   async eligibleWritersForPathsAtRef(
