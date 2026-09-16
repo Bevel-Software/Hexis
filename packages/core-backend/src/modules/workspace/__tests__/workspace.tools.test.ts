@@ -203,6 +203,50 @@ describe('workspace file primitives', () => {
     expect(res.matches).toContainEqual(expect.objectContaining({ path: 'a.md', line: 2 }));
   });
 
+  // Copy path gives the root-anchored `/<kbDirName>/…`, and people paste
+  // that same text into an agent: a leading slash names the same path.
+  it('every path input accepts a leading slash as the same workspace path', async () => {
+    const base = await start();
+    expect(await (await post(`${base}/api/agent/tools/read_file`, { path: '/a.md' })).json()).toEqual({ path: 'a.md', content: 'hello\nworld\n' });
+    expect(await (await post(`${base}/api/agent/tools/file_stat`, { path: '/a.md' })).json()).toMatchObject({ type: 'file' });
+    await post(`${base}/api/agent/tools/write_file`, { path: '/b.md', content: 'fresh' });
+    await post(`${base}/api/agent/tools/write_file`, { path: '/c.md', content: 'batch' });
+    await post(`${base}/api/agent/tools/edit_file`, { path: '/a.md', old_string: 'world', new_string: 'earth' });
+    await post(`${base}/api/agent/tools/mkdir`, { path: '/dir' });
+    await post(`${base}/api/agent/tools/copy_file`, { src: '/b.md', dest: '/dir/b-copy.md' });
+    await post(`${base}/api/agent/tools/move_file`, { src: '/c.md', dest: '/dir/c.md' });
+    expect(await readFile(join(tempDir, 'a.md'), 'utf8')).toBe('hello\nearth\n');
+    expect(await readFile(join(tempDir, 'b.md'), 'utf8')).toBe('fresh');
+    expect(await readFile(join(tempDir, 'dir', 'b-copy.md'), 'utf8')).toBe('fresh');
+    expect(await readFile(join(tempDir, 'dir', 'c.md'), 'utf8')).toBe('batch');
+    const list = (await (await post(`${base}/api/agent/tools/list_files`, { path: '/dir' })).json()) as { path: string; entries: { name: string }[] };
+    expect(list.path).toBe('dir');
+    expect(list.entries.map((e) => e.name).sort()).toEqual(['b-copy.md', 'c.md']);
+    const grep = (await (await post(`${base}/api/agent/tools/grep`, { pattern: 'earth', path: '/a.md' })).json()) as { matches: { path: string }[] };
+    expect(grep.matches).toContainEqual(expect.objectContaining({ path: 'a.md' }));
+    await post(`${base}/api/agent/tools/delete_file`, { path: '/b.md' });
+    await expect(readFile(join(tempDir, 'b.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('says so on the path inputs', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'edit_file', 'delete_file', 'mkdir', 'unzip']) {
+      const def = tools.find((t) => t.name === name)!;
+      const body = (def.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
+      expect(body.properties.path.description, name).toContain('with or without a leading slash');
+    }
+    for (const name of ['copy_file', 'move_file']) {
+      const def = tools.find((t) => t.name === name)!;
+      const body = (def.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
+      expect(body.properties.src.description, name).toContain('with or without a leading slash');
+      expect(body.properties.dest.description, name).toContain('with or without a leading slash');
+    }
+    const batch = tools.find((t) => t.name === 'write_files')!;
+    const batchBody = (batch.inputs as { properties: { body: { properties: { files: { items: { properties: Record<string, { description?: string }> } } } } } }).properties.body;
+    expect(batchBody.properties.files.items.properties.path.description).toContain('with or without a leading slash');
+  });
+
   it('execute_command runs in the workspace dir', async () => {
     const base = await start();
     const res = (await (await post(`${base}/api/agent/tools/execute_command`, { branch: 'main', command: 'echo hello-exec' })).json()) as { stdout: string; exitCode: number };

@@ -20,7 +20,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { assertInsideRepo } from '../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -135,7 +135,7 @@ const IMAGE_CONVENTION_NOTE =
  */
 const wsPath = (kbDirName: string, what: string, refused = true): JsonSchema =>
   str(
-    `${what}: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).` +
+    `${what}: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash (\`/${kbDirName}/…\` is the same path).` +
       (refused ? ' A path without that prefix is outside the repository and is refused.' : ''),
   );
 
@@ -430,7 +430,9 @@ export function registerWorkspaceTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      toolHandler(spec.handler, { write: spec.write }),
+      // A leading slash is the root-anchored form Copy path gives and names
+      // the same workspace path — normalised once here, for every path input.
+      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args), ctx), { write: spec.write }),
     );
   };
 
@@ -493,7 +495,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Path to read, starting with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
+        path: str(`Path to read, starting with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash, or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
         offset: int('Start character index (default 0).'),
         limit: int('Max characters to return from `offset`.'),
         sessionId: SESSION_ID_INPUT,
@@ -558,7 +560,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Directory to list, starting with \`${kbDirName}/\` (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
+        path: str(`Directory to list, starting with \`${kbDirName}/\`, with or without a leading slash (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch'],
@@ -631,7 +633,7 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         pattern: str('JavaScript regular expression.'),
-        path: str('Subtree to search, or a single file to search on its own (default: whole workspace).'),
+        path: str('Subtree to search, or a single file to search on its own, with or without a leading slash (default: whole workspace).'),
         ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
         max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
         sessionId: SESSION_ID_INPUT,
