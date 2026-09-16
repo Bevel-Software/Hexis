@@ -335,6 +335,83 @@ describe('OidcAuthProvider — live configuration', () => {
     ]);
   });
 
+  it('exchanges the code with a rotated client secret on the next sign-in', async () => {
+    const idp = makeIdpFetch();
+    const { base, settings } = await boot(idp.impl);
+    await settings.save(
+      { oidcIssuerUrl: ISSUER, oidcClientId: 'client-1', oidcClientSecret: 'secret-1' },
+      null,
+    );
+    const signIn = async () => {
+      const start = await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' });
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      const cookie = start.headers.get('set-cookie')!.split(';')[0];
+      const cb = await fetch(`${base}/api/auth/oidc/callback?code=code-1&state=${state}`, {
+        redirect: 'manual',
+        headers: { cookie },
+      });
+      expect(cb.headers.get('location')).toContain('#token=');
+      const exchange = idp.calls.filter((c) => c.url === DISCOVERY.token_endpoint).at(-1)!;
+      return (exchange.init!.headers as Record<string, string>).Authorization;
+    };
+    const basic = (secret: string) =>
+      `Basic ${Buffer.from(`client-1:${secret}`).toString('base64')}`;
+
+    expect(await signIn()).toBe(basic('secret-1'));
+    await settings.save({ oidcClientSecret: 'secret-2' }, null);
+    expect(await signIn()).toBe(basic('secret-2'));
+  });
+
+  it('shares one discovery fetch between concurrent sign-ins', async () => {
+    const idp = makeIdpFetch();
+    // A slow issuer, so every sign-in arrives while discovery is still in flight.
+    const slow = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return idp.impl(input, init);
+    }) as typeof fetch;
+    const { base, settings } = await boot(slow);
+    await settings.save(
+      { oidcIssuerUrl: ISSUER, oidcClientId: 'client-1', oidcClientSecret: 'secret-1' },
+      null,
+    );
+    const starts = await Promise.all(
+      Array.from({ length: 5 }, () => fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' })),
+    );
+    for (const res of starts) {
+      expect(new URL(res.headers.get('location')!).origin).toBe(ISSUER);
+    }
+    expect(idp.calls.filter((c) => c.url.endsWith('/openid-configuration'))).toHaveLength(1);
+  });
+
+  it('re-discovers the original issuer when switched back after a failed change', async () => {
+    const BROKEN = 'https://broken-idp.example.com';
+    const discovered: string[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      discovered.push(url);
+      if (url.startsWith(BROKEN)) return new Response('down', { status: 503 });
+      return new Response(JSON.stringify(DISCOVERY), { status: 200 });
+    }) as unknown as typeof fetch;
+    const { base, settings } = await boot(fetchImpl);
+    await settings.save(
+      { oidcIssuerUrl: ISSUER, oidcClientId: 'client-1', oidcClientSecret: 'secret-1' },
+      null,
+    );
+    const login = async () =>
+      (await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' })).headers.get('location')!;
+
+    expect(await login()).toContain(DISCOVERY.authorization_endpoint);
+    await settings.save({ oidcIssuerUrl: BROKEN }, null);
+    expect(await login()).toBe('http://localhost:5173/auth/oidc/callback#error=start');
+    await settings.save({ oidcIssuerUrl: ISSUER }, null);
+    expect(await login()).toContain(DISCOVERY.authorization_endpoint);
+    expect(discovered).toEqual([
+      `${ISSUER}/.well-known/openid-configuration`,
+      `${BROKEN}/.well-known/openid-configuration`,
+      `${ISSUER}/.well-known/openid-configuration`,
+    ]);
+  });
+
   it('keeps an environment-configured provider exactly as the environment says', async () => {
     process.env.OIDC_ISSUER_URL = ISSUER;
     process.env.OIDC_CLIENT_ID = 'env-client';

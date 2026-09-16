@@ -112,8 +112,12 @@ export class OidcAuthProvider implements AuthProviderPlugin {
   readonly startPath = '/api/auth/oidc/login';
 
   private readonly fetchImpl: typeof fetch;
-  /** Remembers the issuer it came from, so a changed issuer is never served a stale document. */
-  private discovery: { issuerUrl: string; doc: OidcDiscovery } | null = null;
+  /**
+   * The discovery for exactly one issuer — the one last asked for. Held as a
+   * promise so concurrent sign-ins share one fetch; replaced whenever the
+   * issuer differs, so no other issuer's document is ever served.
+   */
+  private discovery: { issuerUrl: string; doc: Promise<OidcDiscovery> } | null = null;
 
   constructor(private readonly opts: OidcAuthProviderOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -132,8 +136,17 @@ export class OidcAuthProvider implements AuthProviderPlugin {
    * boot) so a temporarily unreachable issuer delays the first login instead
    * of failing the whole deployment; a failed attempt is not cached.
    */
-  private async discover(issuerUrl: string): Promise<OidcDiscovery> {
+  private discover(issuerUrl: string): Promise<OidcDiscovery> {
     if (this.discovery?.issuerUrl === issuerUrl) return this.discovery.doc;
+    const entry = { issuerUrl, doc: this.fetchDiscovery(issuerUrl) };
+    this.discovery = entry;
+    entry.doc.catch(() => {
+      if (this.discovery === entry) this.discovery = null;
+    });
+    return entry.doc;
+  }
+
+  private async fetchDiscovery(issuerUrl: string): Promise<OidcDiscovery> {
     const url = `${issuerUrl}/.well-known/openid-configuration`;
     const res = await this.fetchImpl(url);
     if (!res.ok) throw new Error(`OIDC discovery failed: ${res.status} ${url}`);
@@ -141,13 +154,11 @@ export class OidcAuthProvider implements AuthProviderPlugin {
     if (!doc.authorization_endpoint || !doc.token_endpoint || !doc.userinfo_endpoint) {
       throw new Error('OIDC discovery document is missing required endpoints');
     }
-    const discovered = {
+    return {
       authorization_endpoint: doc.authorization_endpoint,
       token_endpoint: doc.token_endpoint,
       userinfo_endpoint: doc.userinfo_endpoint,
     };
-    this.discovery = { issuerUrl, doc: discovered };
-    return discovered;
   }
 
   private redirectUri(): string {
