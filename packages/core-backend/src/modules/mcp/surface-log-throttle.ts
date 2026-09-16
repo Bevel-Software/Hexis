@@ -14,10 +14,14 @@
  * comes first. In between, identical rebuilds are counted, and the next
  * logged line carries the count so nothing is hidden, only compressed.
  *
- * Bounded: an entry per user, pruned as they go quiet for longer than the
+ * Bounded: an entry per user, dropped once they have been quiet for the
  * interval, so a long-running process never accumulates departed users. The
  * pruning is one sweep per interval, not one per request — a request must
- * not pay for every other active user.
+ * not pay for every other active user — which puts the bound at TWO
+ * intervals, not one: a user who goes quiet just after a sweep is not yet
+ * quiet enough at the next one and goes at the one after. Departed users
+ * therefore cost at most the number who were active in the last two
+ * intervals, which is the price of the O(1) request.
  */
 
 export const DEFAULT_SURFACE_LOG_INTERVAL_MS = 60_000;
@@ -54,10 +58,17 @@ export class SurfaceLogThrottle {
     const now = this.now();
     // One sweep per interval, amortized over every request in it: a request
     // costs O(1), not a walk of every active user, and an entry that goes
-    // quiet is still gone within one interval of the next sweep. The sweep
+    // quiet is gone by the second sweep after (see the class doc). The sweep
     // skips THIS user: its entry is about to be read, and at exactly the
     // interval it still carries the suppressed count the next line owes.
-    if (now - this.lastPruneAt >= this.intervalMs) {
+    //
+    // `now` is the wall clock, which can step backwards (an NTP correction, a
+    // VM restored from suspend). Waiting for it to climb back past the last
+    // sweep would stall pruning for as long as the step was; a clock that
+    // went backwards instead resets the cadence, and pruning resumes in the
+    // clock's new domain on the next request.
+    const clockSteppedBack = now < this.lastPruneAt;
+    if (clockSteppedBack || now - this.lastPruneAt >= this.intervalMs) {
       this.prune(now, userId);
       this.lastPruneAt = now;
     }

@@ -87,3 +87,29 @@ describe('SurfaceLogThrottle — pruning cost', () => {
     expect(throttle.size()).toBe(2);
   });
 });
+
+describe('SurfaceLogThrottle — a wall clock that steps backwards', () => {
+  const shape = { tools: 5, manuals: 2 };
+
+  it('does not stall pruning until the clock climbs back past the last sweep', () => {
+    let now = 1_000_000;
+    const throttle = new SurfaceLogThrottle(60_000, () => now);
+
+    throttle.decide('a', shape); // t0 — first sweep
+    now += 60_000;
+    throttle.decide('b', shape); // t0+60s — sweep (a dropped); last sweep is now t0+60s
+
+    // The clock steps back 45s (NTP correction / VM restore). A cadence that
+    // waited for `now - lastSweep >= interval` would not sweep again until
+    // t0+120s in the OLD domain — 105s from here, not 60s.
+    now -= 45_000; // t0+15s
+    throttle.decide('c', shape);
+    now += 60_000; // t0+75s — c has been quiet a full interval in the new domain
+    throttle.decide('d', shape);
+
+    // c is gone: the backwards step reset the cadence instead of stalling it.
+    // (b's entry is stamped t0+60s, "in the future" for 45s, and is kept — it
+    // is dropped once the clock has passed it by an interval.)
+    expect(throttle.size()).toBe(2);
+  });
+});
