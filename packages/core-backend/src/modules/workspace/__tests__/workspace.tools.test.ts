@@ -1442,6 +1442,7 @@ describe('a write refused for permissions says whether and how to propose it', (
       body: JSON.stringify(body),
     });
     const text = await res.text();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a JSON body read field by field
     return { status: res.status, text, json: JSON.parse(text) as Record<string, any> };
   };
 
