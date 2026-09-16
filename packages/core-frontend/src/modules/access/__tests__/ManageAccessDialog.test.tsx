@@ -1002,7 +1002,7 @@ describe('ManageAccessDialog: the reworked layout', () => {
 
     // The open dropdown holds verbs only.
     await user.click(trigger);
-    const menu = screen.getByRole('button', { name: /^can download$/i }).closest('div.fixed') as HTMLElement;
+    const menu = screen.getByRole('button', { name: /^can download$/i }).parentElement as HTMLElement;
     expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
       'Owner',
       'Can edit',
