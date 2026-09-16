@@ -10,6 +10,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { isAbsence, type IFsProbe, type ITreeWalker } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IPluginIndexService } from '../plugins/plugins.contract.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
 import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
@@ -53,6 +54,13 @@ export function createToolManualsAgentRoutes(
     accessControl: IAccessControl;
     kbDirName: string;
     disk: ITreeWalker & IFsProbe;
+    /**
+     * Resolves a plugin IDENTITY (its manifest name) to its folder, so a
+     * plugin nested below the root — `Plugins/departments/eng/ado` — is
+     * archived by the one name every client knows it by. Without it only a
+     * folder directly under the root can be named.
+     */
+    pluginIndex?: Pick<IPluginIndexService, 'catalog'>;
   },
 ): express.Router {
   const router = express.Router();
@@ -100,11 +108,24 @@ export function createToolManualsAgentRoutes(
       if (!folder || folder === '.' || folder === '..' || /[/\\]/.test(folder)) {
         return void res.status(422).json({ error: 'Not a plugin folder name' });
       }
-      const { workspaceService, accessControl, kbDirName, disk } = archiveDeps;
+      const { workspaceService, accessControl, kbDirName, disk, pluginIndex } = archiveDeps;
       const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
       await workspaceService.getOrCreateForBranch(DEFAULT_BRANCH);
       const wsDir = await workspaceService.getWorkspacePath(wsId);
-      const pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      // The name is a folder directly under the root, as it always was — or,
+      // when no such folder exists, a plugin's IDENTITY, which the index maps
+      // to its folder at any depth (`Plugins/departments/eng/ado`). Identity
+      // second, so a folder that spells a nested plugin's name keeps meaning
+      // the folder.
+      let pluginRel = `${PLUGINS_DIR}/${folder}`;
+      let pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
+      if (pluginIndex && (await disk.lstatOrNull(pluginDir))?.isDirectory() !== true) {
+        const byIdentity = (await pluginIndex.catalog()).find((p) => p.name === folder)?.folders[0];
+        if (byIdentity) {
+          pluginRel = byIdentity;
+          pluginDir = path.join(wsDir, kbDirName, ...byIdentity.split('/'));
+        }
+      }
       // SYMLINKS ARE NOT SUPPORTED IN PLUGINS, anywhere. Access control
       // resolves rules by path, and a symlink is a second path to the same
       // content — a standing invitation for the spelling the ACL judged and
@@ -144,7 +165,7 @@ export function createToolManualsAgentRoutes(
       const verdicts = await accessControl.canReadBatch(
         wsId,
         email,
-        rels.map((r) => `${PLUGINS_DIR}/${folder}/${r}`),
+        rels.map((r) => `${pluginRel}/${r}`),
       );
       const zip = new AdmZip();
       let included = 0;
@@ -165,7 +186,7 @@ export function createToolManualsAgentRoutes(
       if (pluginRealBase === null) return void res.status(404).json({ error: 'Not found' });
       for (const rel of rels) {
         // Fail closed, per file — only an explicit `true` verdict is included.
-        if (verdicts.get(`${PLUGINS_DIR}/${folder}/${rel}`) !== true) continue;
+        if (verdicts.get(`${pluginRel}/${rel}`) !== true) continue;
         const abs = path.join(pluginDir, ...rel.split('/'));
         // The no-symlink rule, re-checked at read time over the WHOLE path.
         // The open below guards only the final component — a PARENT directory

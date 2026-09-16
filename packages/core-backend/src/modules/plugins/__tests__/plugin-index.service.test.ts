@@ -208,6 +208,23 @@ describe('PluginIndexService', () => {
     });
   });
 
+  test("carries what discovery left out of a plugin, in that plugin's entry, without the folder prefix", async () => {
+    await pluginDir('GTM');
+    await mkdir(join(kb(), 'Plugins', 'Ado'), { recursive: true });
+    await writeFile(
+      join(kb(), 'Plugins', 'Ado', 'plugin.bundle.json'),
+      JSON.stringify({ name: 'ado', mcpProfile: 'global', sourceSkillRoots: ['../escape'] }),
+    );
+    const catalog = await svc().catalog();
+    const ado = catalog.find((g) => g.name === 'ado')!;
+    expect(ado.warnings).toEqual([
+      'sourceSkillRoots entry "../escape" is not a folder path — ignored',
+      'mcpProfile "global" named but no registry could be read',
+    ]);
+    // Nothing of that is GTM's.
+    expect(catalog.find((g) => g.name === 'gtm')!.warnings).toEqual([]);
+  });
+
   test('resolves principals on the plugin folder', async () => {
     await pluginDir('GTM');
 

@@ -29,6 +29,7 @@ const principals = (over: Partial<PluginCatalogEntry>): PluginCatalogEntry => ({
   writers: { roles: [], users: [] },
   readers: { restricted: true, roles: [], users: [] },
   isPrivate: false,
+  warnings: [],
   ...over,
 });
 
