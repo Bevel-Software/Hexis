@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Banner, Button } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
-import { fetchSetupStatus, type SetupStatus } from '../../setup/services/setup.api';
+import { useSetupStatus } from '../../setup/hooks/useSetupStatus';
 import { SetupScreen } from '../../setup/components/SetupScreen';
 
 /**
@@ -28,25 +27,11 @@ import { SetupScreen } from '../../setup/components/SetupScreen';
  */
 export function DeploymentPage() {
   const { isAdmin } = useAdmin();
-  const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-
-  const refresh = useCallback(() => {
-    // Non-admins never fetch: the endpoint would answer them safely (status
-    // without settings), but this page has already told them it is not
-    // theirs — a request whose answer nothing renders is noise.
-    if (!isAdmin) return;
-    fetchSetupStatus()
-      .then((s) => {
-        setStatus(s);
-        setFailed(false);
-      })
-      .catch(() => setFailed(true))
-      .finally(() => setLoaded(true));
-  }, [isAdmin]);
-
-  useEffect(refresh, [refresh]);
+  // Read the shared way (`useSetupStatus`: latest read wins, a failed read
+  // keeps the last status). Non-admins never read: the endpoint would answer
+  // them safely (status without settings), but this page has already told them
+  // it is not theirs — a request whose answer nothing renders is noise.
+  const { status, failed, loaded, refresh } = useSetupStatus(isAdmin);
 
   if (!isAdmin) {
     return (
@@ -87,6 +72,7 @@ export function DeploymentPage() {
           <SetupScreen
             settings={status.settings}
             sync={status.sync}
+            kbInit={status.kbInit}
             onSaved={refresh}
             variant="settings"
           />
