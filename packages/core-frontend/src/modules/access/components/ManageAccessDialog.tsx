@@ -1105,10 +1105,21 @@ export function ManageAccessDialog({
   // Every managed row ends in the same two slots: the verb control, then
   // Remove. A row with nothing removable here (a role or policy grant) keeps
   // the slot empty, so the verb control still lines up with its neighbours'.
+  //
+  // The accessible names are the ones these actions had before they shared a
+  // slot: on a direct grant this is the old dropdown item "Remove access", on an
+  // inherited grant the old "Remove" button. The name still contains the visible
+  // word, so voice control ("click Remove") reaches both.
   const removeSlot = (p: PrincipalRow | null) => (
     <span className="flex w-16 shrink-0 justify-end">
       {p && (
-        <Button variant="danger" size="tiny" disabled={busy} onClick={() => doRevoke(p)}>
+        <Button
+          variant="danger"
+          size="tiny"
+          disabled={busy}
+          aria-label={p.manage === 'direct' ? 'Remove access' : undefined}
+          onClick={() => doRevoke(p)}
+        >
           Remove
         </Button>
       )}

@@ -104,7 +104,7 @@ describe('ManageAccessDialog: a proposed-only file', () => {
     const user = userEvent.setup();
     render(<ManageAccessDialog entry={ENTRY} proposal={PROPOSAL} onClose={() => {}} />);
     // Remove sits beside the row's verb control, not inside its menu.
-    await user.click(await screen.findByRole('button', { name: 'Remove' }));
+    await user.click(await screen.findByRole('button', { name: 'Remove access' }));
 
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(

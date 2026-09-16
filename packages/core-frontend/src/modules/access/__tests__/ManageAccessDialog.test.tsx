@@ -186,7 +186,7 @@ describe('ManageAccessDialog: a public node', () => {
     const readItem = screen.getAllByRole('button', { name: /^can read$/i }).at(-1)!;
     const menu = readItem.parentElement as HTMLElement;
     expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Can read']);
-    await user.click(screen.getByRole('button', { name: 'Remove' }));
+    await user.click(screen.getByRole('button', { name: 'Remove access' }));
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(
       'ws-1',
@@ -974,7 +974,7 @@ describe('ManageAccessDialog: the reworked layout', () => {
     api.fetchFileAccess.mockResolvedValue({ ...VIEW, canWrite: false });
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
     expect(await screen.findByText('Restricted: only the people below can open it')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^remove( access)?$/i })).toBeNull();
   });
 
   it('names plugins in the helper line under the field', async () => {
@@ -993,16 +993,25 @@ describe('ManageAccessDialog: the reworked layout', () => {
 
     const triggers = screen.getAllByRole('button', { name: /^can edit$/i });
     const trigger = triggers[triggers.length - 1];
-    const removes = screen.getAllByRole('button', { name: 'Remove' });
     // Only Alice's row is visible (Bo and Engineering sit in collapsed sections).
-    expect(removes).toHaveLength(1);
-    expect(trigger.compareDocumentPosition(removes[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Its Remove keeps the accessible name the dropdown item had: "Remove access".
+    const remove = screen.getByRole('button', { name: 'Remove access' });
+    expect(remove).toHaveTextContent('Remove');
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+    expect(trigger.compareDocumentPosition(remove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
+    // The open dropdown holds verbs only.
     await user.click(trigger);
-    expect(screen.queryByRole('button', { name: /remove access/i })).toBeNull();
+    const menu = screen.getByRole('button', { name: /^can download$/i }).closest('div.fixed') as HTMLElement;
+    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
+      'Owner',
+      'Can edit',
+      'Can read',
+      'Can download',
+    ]);
     await user.keyboard('{Escape}');
 
-    await user.click(removes[0]);
+    await user.click(remove);
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(
       'ws-1',
@@ -1017,9 +1026,9 @@ describe('ManageAccessDialog: the reworked layout', () => {
     await user.click(await screen.findByRole('button', { name: /People invited to Sales/ }));
 
     const verbText = screen.getByText('Can read', { selector: 'span' });
-    const removes = screen.getAllByRole('button', { name: 'Remove' });
-    expect(removes).toHaveLength(2);
-    const bosRemove = removes[1];
+    // An inherited row's Remove keeps its name, "Remove"; Alice's direct one is "Remove access".
+    const bosRemove = screen.getByRole('button', { name: 'Remove' });
+    expect(screen.getAllByRole('button', { name: 'Remove access' })).toHaveLength(1);
     expect(verbText.compareDocumentPosition(bosRemove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(bosRemove);
@@ -1034,7 +1043,8 @@ describe('ManageAccessDialog: the reworked layout', () => {
 
     expect(screen.getByText('Engineering')).toBeInTheDocument();
     expect(screen.getByTitle('Granted via a role or policy. Manage it there')).toHaveTextContent('Can read');
-    // Alice's Remove only.
-    expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
+    // Alice's Remove only: the role row has none.
+    expect(screen.getAllByRole('button', { name: 'Remove access' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 });
