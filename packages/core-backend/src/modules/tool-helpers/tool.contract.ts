@@ -75,6 +75,12 @@ export class ToolError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /**
+     * Structured fields sent NEXT TO `error` in the response body, for a
+     * refusal an agent should act on rather than only read (e.g. the
+     * `write-denied` answer saying whether and how to propose instead).
+     */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ToolError';

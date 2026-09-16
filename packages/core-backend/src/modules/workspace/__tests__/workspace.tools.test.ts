@@ -19,6 +19,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -1349,5 +1350,337 @@ describe('path inputs tell the agent about the repository folder', () => {
     expect(list).toBeDefined();
     expect(list!.description).toContain(`\`${KB_DIR}/\``);
     expect(inputDescription(list, 'path')).toContain(`\`${KB_DIR}/\``);
+  });
+});
+
+/**
+ * The safety contract an agent gets before a move or delete: `file_stat` says
+ * what an item is and what the caller may do with it, `move_file` and
+ * `delete_folder` answer a dry run with the impact and wait for `confirm`, and
+ * a permission refusal says whether and how to propose instead. The access
+ * double below stands in for the rules, per top-level KB folder:
+ *   Sales/  — everything (the default for anything unlisted)
+ *   HR/     — read + write, no download, no owner: a move here changes access
+ *   Locked/ — read only: writes are refused, proposing is possible
+ *   Secret/ — nothing: writes are refused, proposing is not
+ */
+describe('preflight for moves and deletes', () => {
+  const PROTECTED = 'target-company-state';
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+
+  const verbsFor = (rel: string) => {
+    if (rel.startsWith('HR/')) return { read: true, write: true, download: false, owner: false };
+    if (rel.startsWith('Locked/')) return { read: true, write: false, download: false, owner: false };
+    if (rel.startsWith('Secret/')) return { read: false, write: false, download: false, owner: false };
+    return { read: true, write: true, download: true, owner: true };
+  };
+  const rules = {
+    canRead: async (_w: string, _u: string, rel: string) => verbsFor(rel).read,
+    canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, verbsFor(p).read])),
+    canWrite: async (_w: string, _u: string, rel: string) => verbsFor(rel).write,
+    canDownload: async (_w: string, _u: string, rel: string) => verbsFor(rel).download,
+    canOwner: async (_w: string, _u: string, rel: string) => verbsFor(rel).owner,
+    canWriteBatchAtRef: async (_w: string, _r: string, _u: string, rels: string[]) =>
+      new Map(rels.map((p) => [p, verbsFor(p).write])),
+    eligibleWritersAtRef: async () => ({ roles: ['Admin'], users: [] }),
+  } as unknown as IAccessControl;
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${tool}`, { branch: PROTECTED, ...body });
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  };
+  const exists = async (p: string) => fs.exists(p);
+
+  async function seeded(): Promise<string> {
+    const base = await start('write', rules);
+    await fs.writeFile(KB('access.md'), '---\nread: everyone\n---\n');
+    await fs.writeFile(KB('KnowledgeBase/Team/a.md'), 'a');
+    await fs.writeFile(KB('Sales/deal.md'), 'deal');
+    await fs.writeFile(KB('Sales/archive/nested/old.md'), 'old');
+    await fs.writeFile(KB('Sales/archive/nested/older.md'), 'older');
+    await fs.writeFile(KB('Sales/archive/top.md'), 'top');
+    await fs.writeFile(KB('HR/policy.md'), 'policy');
+    await fs.writeFile(KB('Locked/rules.md'), 'rules');
+    return base;
+  }
+
+  describe('file_stat', () => {
+    it('a platform file is managed, not movable, not deletable', async () => {
+      const base = await seeded();
+      const { status, body } = await call(base, 'file_stat', { path: KB('access.md') });
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ type: 'file', managed: true, movable: false, deletable: false });
+      expect(body.access).toEqual({ read: true, write: true, download: true, owner: true });
+      expect(body.descendants).toBeUndefined();
+    });
+
+    it('a plain file is movable and deletable, with the caller\'s verdicts', async () => {
+      const base = await seeded();
+      expect((await call(base, 'file_stat', { path: KB('Sales/deal.md') })).body).toMatchObject({
+        type: 'file', managed: false, movable: true, deletable: true,
+        access: { read: true, write: true, download: true, owner: true },
+      });
+      expect((await call(base, 'file_stat', { path: KB('Locked/rules.md') })).body).toMatchObject({
+        managed: false, movable: false, deletable: false,
+        access: { read: true, write: false, download: false, owner: false },
+      });
+    });
+
+    it('a folder counts its files at any depth; a reserved root folder is managed', async () => {
+      const base = await seeded();
+      expect((await call(base, 'file_stat', { path: KB('Sales/archive') })).body).toMatchObject({
+        type: 'directory', managed: false, movable: true, deletable: true, descendants: 3,
+      });
+      expect((await call(base, 'file_stat', { path: KB('KnowledgeBase') })).body).toMatchObject({
+        type: 'directory', managed: true, movable: false, deletable: false, descendants: 1,
+      });
+    });
+  });
+
+  describe('move_file', () => {
+    it('a same-access move: the dry run changes nothing, the real call runs without confirm', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/2026/deal.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({
+        ...args, kind: 'file', descendants: 1, accessChanges: false, allowed: true, dryRun: true, moved: false,
+      });
+      expect(dry.body.access.before).toEqual(dry.body.access.after);
+      expect(dry.body.reason).toBeUndefined();
+      expect(await exists(args.src)).toBe(true);
+      expect(await exists(args.dest)).toBe(false);
+
+      const run = await call(base, 'move_file', args);
+      expect(run.body).toMatchObject({ moved: true });
+      expect(await exists(args.dest)).toBe(true);
+      expect(await exists(args.src)).toBe(false);
+    });
+
+    it('an access-changing move shows before/after and runs only with confirm: true', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('HR/deal.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({
+        accessChanges: true,
+        allowed: true,
+        access: {
+          before: { read: true, write: true, download: true, owner: true },
+          after: { read: true, write: true, download: false, owner: false },
+        },
+      });
+
+      const unconfirmed = await call(base, 'move_file', args);
+      expect(unconfirmed.status).toBe(200);
+      expect(unconfirmed.body).toMatchObject({ accessChanges: true, confirmationRequired: true, moved: false });
+      expect(unconfirmed.body.message).toContain('confirm: true');
+      expect(await exists(args.src)).toBe(true);
+      expect(await exists(args.dest)).toBe(false);
+
+      const confirmed = await call(base, 'move_file', { ...args, confirm: true });
+      expect(confirmed.body).toMatchObject({ moved: true });
+      expect(await exists(args.dest)).toBe(true);
+    });
+
+    it('a folder moves recursively', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/archive'), dest: KB('Sales/old-archive') };
+      expect((await call(base, 'move_file', { ...args, dryRun: true })).body).toMatchObject({ kind: 'folder', descendants: 3 });
+      expect((await call(base, 'move_file', args)).body).toMatchObject({ moved: true });
+      expect(await exists(KB('Sales/old-archive/nested/old.md'))).toBe(true);
+      expect(await exists(args.src)).toBe(false);
+    });
+
+    it('a move the caller may not write: the dry run says so, the real call is a write-denied with proposal steps', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Locked/deal.md') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false });
+      expect(dry.body.reason).toContain(KB('Locked/deal.md'));
+
+      const run = await call(base, 'move_file', args);
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Locked/deal.md'), canPropose: true });
+      expect(run.body.reason).toContain('Eligible: Admin');
+      expect(run.body.error).toBe(run.body.reason);
+      expect(run.body.proposal.targetBranch).toBe(PROTECTED);
+      expect(run.body.proposal.steps.join('\n')).toMatch(/create_branch[\s\S]*move_file[\s\S]*open_change_request/);
+      expect(await exists(args.src)).toBe(true);
+    });
+
+    it('a denied move into a path the caller cannot read cannot be proposed, and says why', async () => {
+      const base = await seeded();
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Secret/deal.md'), confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied', canPropose: false });
+      expect(run.body.proposal).toBeUndefined();
+      expect(run.body.whyNot).toContain("can't read");
+    });
+
+    it('a draft branch is not write-gated, so the same move is allowed there', async () => {
+      const base = await seeded();
+      const dry = await call(base, 'move_file', { branch: 'someone/draft', src: KB('Sales/deal.md'), dest: KB('Locked/deal.md'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: true, accessChanges: true });
+    });
+
+    it('a platform file is refused with the platform-file sentence, in the dry run and for real', async () => {
+      const base = await seeded();
+      const args = { src: KB('access.md'), dest: KB('Sales/access.md') };
+      const sentence = 'access.md is a platform file and stays in its folder.';
+      expect((await call(base, 'move_file', { ...args, dryRun: true })).body).toMatchObject({ allowed: false, reason: sentence });
+      const run = await call(base, 'move_file', { ...args, confirm: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(sentence);
+      expect(await exists(args.src)).toBe(true);
+    });
+
+    it('an existing destination is refused, never overwritten', async () => {
+      const base = await seeded();
+      const args = { src: KB('Sales/deal.md'), dest: KB('Sales/archive/top.md') };
+      expect((await call(base, 'move_file', { ...args, dryRun: true })).body).toMatchObject({ allowed: false });
+      expect((await call(base, 'move_file', args)).status).toBe(409);
+      expect(await fs.readFile(args.dest, { encoding: 'utf-8' })).toBe('top');
+    });
+  });
+
+  describe('delete_folder', () => {
+    it('the dry run lists the files and deletes nothing; without confirm nothing is deleted; with confirm the folder is gone', async () => {
+      const base = await seeded();
+      const path = KB('Sales/archive');
+      const dry = await call(base, 'delete_folder', { path, dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ path, kind: 'folder', descendants: 3, allowed: true, dryRun: true, filesTruncated: false });
+      expect([...dry.body.files].sort()).toEqual([
+        KB('Sales/archive/nested/old.md'), KB('Sales/archive/nested/older.md'), KB('Sales/archive/top.md'),
+      ]);
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+
+      const unconfirmed = await call(base, 'delete_folder', { path });
+      expect(unconfirmed.body).toMatchObject({ confirmationRequired: true, deleted: false });
+      expect(unconfirmed.body.message).toContain('confirm: true');
+      expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
+
+      const confirmed = await call(base, 'delete_folder', { path, confirm: true });
+      expect(confirmed.body).toMatchObject({ deleted: true, descendants: 3 });
+      expect(await exists(path)).toBe(false);
+      const listing = await call(base, 'list_files', { path: KB('Sales') });
+      expect(listing.body.entries.map((e: { name: string }) => e.name)).toEqual(['deal.md']);
+    });
+
+    it('a platform folder is refused with its reason', async () => {
+      const base = await seeded();
+      const dry = await call(base, 'delete_folder', { path: KB('KnowledgeBase'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false, reason: 'KnowledgeBase/ is a platform folder and cannot be moved or deleted.' });
+      const run = await call(base, 'delete_folder', { path: KB('KnowledgeBase'), confirm: true });
+      expect(run.status).toBe(400);
+      expect(await exists(KB('KnowledgeBase/Team/a.md'))).toBe(true);
+    });
+
+    it('a folder the caller cannot write is refused with the structured denial', async () => {
+      const base = await seeded();
+      expect((await call(base, 'delete_folder', { path: KB('Locked'), dryRun: true })).body).toMatchObject({ allowed: false });
+      const run = await call(base, 'delete_folder', { path: KB('Locked'), confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied', canPropose: true });
+      expect(await exists(KB('Locked/rules.md'))).toBe(true);
+    });
+
+    it('an empty folder is deleted without confirm; a file is pointed to delete_file', async () => {
+      const base = await seeded();
+      await fs.mkdir(KB('Sales/empty'), { recursive: true });
+      expect((await call(base, 'delete_folder', { path: KB('Sales/empty') })).body).toMatchObject({ deleted: true, descendants: 0 });
+      expect(await exists(KB('Sales/empty'))).toBe(false);
+      const file = await call(base, 'delete_folder', { path: KB('Sales/deal.md') });
+      expect(file.status).toBe(400);
+      expect(file.body.error).toContain('delete_file');
+    });
+  });
+
+  describe('delete_file', () => {
+    it('on a folder answers with delete_folder instead of the filesystem error', async () => {
+      const base = await seeded();
+      const run = await call(base, 'delete_file', { path: KB('Sales/archive') });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toContain('use delete_folder');
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+    });
+
+    it('a denied delete is the structured denial', async () => {
+      const base = await seeded();
+      const run = await call(base, 'delete_file', { path: KB('Locked/rules.md') });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Locked/rules.md'), canPropose: true });
+      expect(run.body.proposal.steps.join('\n')).toContain('delete_file');
+    });
+    it('a refusal from the lock gate itself (rules changed after the preflight) is the structured denial too', async () => {
+      const base = await seeded();
+      fs.deleteFile = async (p: string) => {
+        throw new AccessDeniedError({ path: p, eligibleRoles: ['Admin'], eligibleUsers: [] });
+      };
+      const run = await call(base, 'delete_file', { path: KB('Sales/deal.md') });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
+    });
+  });
+
+  describe('descriptions match behaviour', () => {
+    const def = async (name: string) => {
+      const d = (await toolRegistry.listInternal()).find((t) => t.name === name);
+      expect(d, name).toBeDefined();
+      return d as unknown as { description: string; inputs: any; outputs: any };
+    };
+    const declaredOutputs = (d: { outputs: any }) => Object.keys(d.outputs.properties ?? {});
+
+    it('move_file states folders, recursion, collisions, platform files and the confirm rule, and declares every field it returns', async () => {
+      const base = await seeded();
+      const d = await def('move_file');
+      expect(d.description).toMatch(/FILE or FOLDER/);
+      expect(d.description).toMatch(/folder moves recursively/);
+      expect(d.description).toMatch(/destination must not exist/);
+      expect(d.description).toContain('is a platform file and stays in its folder.');
+      expect(d.description).toContain('`dryRun: true`');
+      expect(d.description).toContain('`confirm: true`');
+      expect(Object.keys(d.inputs.properties.body.properties)).toEqual(expect.arrayContaining(['dryRun', 'confirm']));
+      // What the description promises a dry run returns is what it returns.
+      const dry = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('HR/deal.md'), dryRun: true });
+      for (const key of ['src', 'dest', 'kind', 'descendants', 'access', 'accessChanges', 'allowed']) {
+        expect(d.description, key).toContain(key);
+        expect(dry.body, key).toHaveProperty(key);
+      }
+      const unconfirmed = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('HR/deal.md') });
+      expect(d.description).toContain('confirmationRequired: true');
+      expect(unconfirmed.body.confirmationRequired).toBe(true);
+      for (const body of [dry.body, unconfirmed.body]) {
+        expect(declaredOutputs(d)).toEqual(expect.arrayContaining(Object.keys(body)));
+      }
+    });
+
+    it('delete_folder states the confirm rule and refusals, and declares every field it returns', async () => {
+      const base = await seeded();
+      const d = await def('delete_folder');
+      expect(d.description).toContain('`dryRun: true`');
+      expect(d.description).toContain('A non-empty folder is deleted only with `confirm: true`');
+      expect(d.description).toContain('platform folder');
+      const dry = await call(base, 'delete_folder', { path: KB('Sales/archive'), dryRun: true });
+      const unconfirmed = await call(base, 'delete_folder', { path: KB('Sales/archive') });
+      const confirmed = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
+      for (const body of [dry.body, unconfirmed.body, confirmed.body]) {
+        expect(declaredOutputs(d)).toEqual(expect.arrayContaining(Object.keys(body)));
+      }
+    });
+
+    it('delete_file names delete_folder, file_stat names its new fields, and every destructive tool names the proposal route', async () => {
+      const base = await seeded();
+      expect((await def('delete_file')).description).toContain('`delete_folder`');
+      const stat = await def('file_stat');
+      const body = (await call(base, 'file_stat', { path: KB('Sales/archive') })).body;
+      for (const key of ['managed', 'movable', 'deletable', 'access', 'descendants']) {
+        expect(stat.description, key).toContain(`\`${key}`);
+        expect(body, key).toHaveProperty(key);
+      }
+      for (const name of ['move_file', 'delete_file', 'delete_folder']) {
+        expect((await def(name)).description, name).toContain('`write-denied`');
+      }
+    });
   });
 });

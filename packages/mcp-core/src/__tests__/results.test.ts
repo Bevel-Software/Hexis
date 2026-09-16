@@ -14,6 +14,13 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
   });
 
+  it('keeps the fields of a structured refusal after its sentence', () => {
+    const data = { error: 'You may not move it.', code: 'write-denied', canPropose: true };
+    const text = describeToolFailure({ response: { data } });
+    expect(text.split('\n')[0]).toBe('You may not move it.');
+    expect(JSON.parse(text.split('\n')[1])).toEqual(data);
+  });
+
   it('never throws on a thrown value whose own toString throws', () => {
     // A null-prototype object has no toString; String() on it throws — and a
     // describe that throws inside a catch path turns a tool failure into a

@@ -32,6 +32,29 @@ import { displayPath, type FileReaderRegistry } from './file-readers/file-reader
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
+import {
+  isPlatformFile,
+  isPlatformFolder,
+  isProtectedBranch,
+  platformFileRefusal,
+  platformFolderRefusal,
+} from '@bevel-software/platform-shared';
+import { AccessDeniedError } from '../access-model/access-errors.js';
+import { removeEmptyDirs } from './empty-dirs.js';
+
+/** The caller's verdict per access verb on one path. */
+interface AccessVerbs {
+  read: boolean;
+  write: boolean;
+  download: boolean;
+  owner: boolean;
+}
+
+/** How many files `file_stat` counts under a folder before it stops and says so. */
+const DESCENDANTS_CAP = 10_000;
+
+/** How many of a folder's files a `delete_folder` answer names. */
+const LISTED_FILES_CAP = 100;
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */
 interface DirEntry {
@@ -122,6 +145,14 @@ const str = (description: string): JsonSchema => ({ type: 'string', description 
  */
 const IMAGE_CONVENTION_NOTE =
   ' Images: keep them in an `assets/` folder next to the page that uses them and link them with a relative path, e.g. `![Approval screen](./assets/approval-screen.png)`; the page renders them inline.';
+
+/**
+ * The proposal route, on every tool a permission can refuse. Without it an
+ * agent reads a denial as a dead end, when the UI would have routed the same
+ * action to a change request.
+ */
+const PROPOSAL_NOTE =
+  ' Refused for lack of write access, the answer is a `write-denied` error with `canPropose` and, when you may, the exact steps to propose the change instead (create a draft branch, repeat the call there, open a change request).';
 
 /**
  * A path input that names the clone folder. The tools are rooted at the
@@ -400,6 +431,155 @@ export function registerWorkspaceTools(
     userEmail: ctx.user.email,
   });
 
+  // ── preflight for moves and deletes ─────────────────────────────────────
+  // What an agent is told before (and instead of) a destructive operation:
+  // whether the item is the platform's own, what the caller may do with it,
+  // how much a folder takes with it, and — for a move — whether the caller's
+  // access changes on the way. The same verdicts gate the execution, so a
+  // dry run and the real call never disagree.
+
+  /** The caller's verdicts on a KB path. A path outside the repository carries no rules. */
+  const accessAt = async (branch: string, ctx: ToolContext, path: string): Promise<AccessVerbs> => {
+    const rel = toKbRelative(path, kbDirName);
+    if (rel === null) return { read: true, write: true, download: true, owner: false };
+    const wid = workspaceIdForBranch(branch);
+    const email = ctx.user.email;
+    const [read, write, download, owner] = await Promise.all([
+      accessControl.canRead(wid, email, rel),
+      accessControl.canWrite(wid, email, rel),
+      accessControl.canDownload(wid, email, rel),
+      accessControl.canOwner(wid, email, rel),
+    ]);
+    return { read, write, download, owner };
+  };
+
+  /**
+   * The paths among `paths` the caller may NOT write, judged exactly as the
+   * lock gate judges them (`WorkflowService.acquireLock`): on a protected
+   * branch only, against the access tree at HEAD, with no rules at HEAD
+   * meaning allow. Empty on a draft branch — changes there reach a protected
+   * branch only through a change request.
+   */
+  const writeBlocked = async (branch: string, ctx: ToolContext, paths: string[]): Promise<string[]> => {
+    if (!isProtectedBranch(branch)) return [];
+    const byRel = new Map<string, string>();
+    for (const p of paths) {
+      const rel = toKbRelative(p, kbDirName);
+      if (rel !== null) byRel.set(rel, p);
+    }
+    if (byRel.size === 0) return [];
+    const verdicts = await accessControl.canWriteBatchAtRef(
+      workspaceIdForBranch(branch),
+      'HEAD',
+      ctx.user.email,
+      [...byRel.keys()],
+    );
+    if (!verdicts) return [];
+    return [...byRel].filter(([rel]) => verdicts.get(rel) !== true).map(([, p]) => p);
+  };
+
+  /**
+   * The structured `write-denied` answer: what was refused and why, whether
+   * the caller may propose the change instead, and the exact steps. Proposing
+   * needs read access to the path; every denial happens on a protected branch,
+   * and a protected branch is what a change request targets. Nothing is
+   * created here.
+   */
+  const writeDenied = async (
+    branch: string,
+    ctx: ToolContext,
+    path: string,
+    tool: string,
+  ): Promise<ToolError> => {
+    const rel = toKbRelative(path, kbDirName);
+    const eligible = rel === null
+      ? null
+      : await accessControl.eligibleWritersAtRef(workspaceIdForBranch(branch), 'HEAD', rel);
+    const names = [
+      ...(eligible?.roles ?? []),
+      ...(eligible?.users ?? []).map((u) => (u.name ? `${u.name} <${u.email}>` : u.email)),
+    ];
+    const reason = `You don't have permission to write to "${path}". Eligible: ${names.length ? names.join(', ') : 'none'}.`;
+    const readable = (await accessAt(branch, ctx, path)).read;
+    const details: Record<string, unknown> = {
+      code: 'write-denied',
+      path,
+      reason,
+      canPropose: readable,
+    };
+    if (readable) {
+      details.proposal = {
+        targetBranch: branch,
+        steps: [
+          `create_branch with { name: "<your-email-localpart>/<short-slug>", branch: "${branch}" }`,
+          `call ${tool} again with the same arguments and branch set to the new draft`,
+          `open_change_request with { sourceBranch: <the new draft>, targetBranch: "${branch}", title: <what the change does> }`,
+        ],
+      };
+    } else {
+      details.whyNot = `You can't read "${path}", so you can't propose a change to it either.`;
+    }
+    return new ToolError(reason, 403, details);
+  };
+
+  /** Run a write; a lock-gate permission refusal becomes the structured denial. */
+  const asStructuredDenial = async <T>(
+    branch: string,
+    ctx: ToolContext,
+    tool: string,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof AccessDeniedError) throw await writeDenied(branch, ctx, err.access.path, tool);
+      throw err;
+    }
+  };
+
+  /** Whether the item at `path` is the platform's own: a platform file, or the root / a reserved root folder. */
+  const isManaged = (path: string, kind: 'file' | 'folder'): boolean => {
+    if (kind === 'file') return isPlatformFile(path);
+    const norm = path.replace(/^\.?\/+/, '').replace(/\/+$/, '');
+    if (norm === '' || norm === kbDirName) return true;
+    const rel = toKbRelative(norm, kbDirName);
+    return rel !== null && isPlatformFolder(rel);
+  };
+
+  const managedRefusal = (path: string, kind: 'file' | 'folder'): string => {
+    if (kind === 'file') return platformFileRefusal(path);
+    const rel = toKbRelative(path, kbDirName) ?? '';
+    return platformFolderRefusal(rel);
+  };
+
+  const kindOf = async (fs: LocalFilesystem, path: string): Promise<'file' | 'folder' | null> => {
+    try {
+      return (await fs.stat(path)).type === 'directory' ? 'folder' : 'file';
+    } catch (err) {
+      if (isAbsence(err) || (err as { name?: string }).name === 'FileNotFoundError') return null;
+      throw err;
+    }
+  };
+
+  /** Every file under `dir`, at any depth, as workspace-relative paths; stops at `cap`. */
+  const filesUnder = async (fs: LocalFilesystem, dir: string, cap = Infinity): Promise<{ files: string[]; truncated: boolean }> => {
+    const files: string[] = [];
+    const walk = async (d: string): Promise<boolean> => {
+      for (const e of (await fs.readdir(d)) as DirEntry[]) {
+        const child = `${d.replace(/\/+$/, '')}/${e.name}`;
+        if (e.type === 'directory') {
+          if (!(await walk(child))) return false;
+        } else {
+          if (files.length >= cap) return false;
+          files.push(child);
+        }
+      }
+      return true;
+    };
+    const complete = await walk(dir);
+    return { files, truncated: !complete };
+  };
+
   const mount = (spec: {
     name: string;
     description: string;
@@ -594,7 +774,11 @@ export function registerWorkspaceTools(
   mount({
     name: 'file_stat',
     description:
-      'Get a file/directory\'s metadata (name, type, size, …) without reading content.' +
+      'Get a file/directory\'s metadata without reading content: `name`, `type`, `size`, … plus what you may do with it. ' +
+      '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
+      '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you: not managed, and on a protected branch you hold write (on a draft branch writes are not gated). ' +
+      'For a folder, `descendants` is the number of files under it at any depth (counting stops at 10000 and `descendantsTruncated` says so). ' +
+      'Call this before a move or delete to see what it would touch.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -609,15 +793,55 @@ export function registerWorkspaceTools(
     outputs: {
       type: 'object',
       description: "The filesystem entry's metadata.",
-      properties: { name: str('Entry name.'), type: str('`file` or `directory`.'), size: int('Size in bytes.') },
+      properties: {
+        name: str('Entry name.'),
+        type: str('`file` or `directory`.'),
+        size: int('Size in bytes.'),
+        managed: { type: 'boolean', description: 'True for a platform file or platform folder.' },
+        movable: { type: 'boolean', description: 'Whether `move_file` would be allowed for you.' },
+        deletable: { type: 'boolean', description: 'Whether `delete_file` (a file) or `delete_folder` (a folder) would be allowed for you.' },
+        access: {
+          type: 'object',
+          description: 'Your verdict per access verb on this path.',
+          properties: {
+            read: { type: 'boolean', description: 'You may read it.' },
+            write: { type: 'boolean', description: 'You may write it.' },
+            download: { type: 'boolean', description: 'You may download it.' },
+            owner: { type: 'boolean', description: 'You own it.' },
+          },
+          required: ['read', 'write', 'download', 'owner'],
+        },
+        descendants: int('Folders only: files under it at any depth.'),
+        descendantsTruncated: { type: 'boolean', description: 'Folders only: true when counting stopped at the cap.' },
+      },
+      required: ['managed', 'movable', 'deletable', 'access'],
       additionalProperties: true,
     },
     write: false,
     handler: async (a, ctx: ToolContext) => {
       const p = a.path as string;
+      const branch = a.branch as string;
       await recordOntologyRead(sessionOntologyGate, ctx, p);
-      await assertCanRead(readGateFor(a.branch as string, ctx), p);
-      return (await ctx.getFilesystem(a.branch as string)).stat(p);
+      await assertCanRead(readGateFor(branch, ctx), p);
+      const fs = await ctx.getFilesystem(branch);
+      const stat = await fs.stat(p);
+      const kind = stat.type === 'directory' ? 'folder' : 'file';
+      const managed = isManaged(p, kind);
+      const access = await accessAt(branch, ctx, p);
+      const writable = (await writeBlocked(branch, ctx, [p])).length === 0;
+      const out: Record<string, unknown> = {
+        ...stat,
+        managed,
+        movable: !managed && writable,
+        deletable: !managed && writable,
+        access,
+      };
+      if (kind === 'folder') {
+        const { files, truncated } = await filesUnder(fs, p, DESCENDANTS_CAP);
+        out.descendants = files.length;
+        if (truncated) out.descendantsTruncated = true;
+      }
+      return out;
     },
   });
 
@@ -880,7 +1104,11 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'delete_file',
-    description: 'Delete a workspace file. Committed + pushed as you.' + ONTOLOGY_BOUNDARY_NOTE,
+    description:
+      'Delete ONE workspace file. Committed + pushed as you. Files only: a folder is refused with a pointer to `delete_folder`. ' +
+      'A platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) is refused.' +
+      PROPOSAL_NOTE +
+      ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -902,10 +1130,110 @@ export function registerWorkspaceTools(
       // doesn't carry bytes from elsewhere), so it is NOT ontology-write-gated — it
       // only records the ontology it touched, like a read. The extension policy
       // DOES apply though: a dashboard-only run must not delete graph `.md` nodes.
-      writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
-      await recordOntologyRead(sessionOntologyGate, ctx, a.path as string);
-      await (await ctx.getFilesystem(a.branch as string)).deleteFile(a.path as string);
-      return { path: a.path, deleted: true };
+      const path = a.path as string;
+      const branch = a.branch as string;
+      writePolicy.assertPathWritable(ctx.sessionId, path);
+      await recordOntologyRead(sessionOntologyGate, ctx, path);
+      const fs = await ctx.getFilesystem(branch);
+      if ((await kindOf(fs, path)) === 'folder') {
+        throw new ToolError(`"${path}" is a folder, not a file — use delete_folder to delete it and the files under it.`, 400);
+      }
+      if (isPlatformFile(path)) {
+        throw new ToolError(`${path.slice(path.lastIndexOf('/') + 1)} is a platform file and cannot be deleted through the agent tools.`, 400);
+      }
+      if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeDenied(branch, ctx, path, 'delete_file');
+      await asStructuredDenial(branch, ctx, 'delete_file', () => fs.deleteFile(path));
+      return { path, deleted: true };
+    },
+  });
+
+  mount({
+    name: 'delete_folder',
+    description:
+      'Delete a workspace FOLDER and every file under it, at any depth; each file lands as its own committed + pushed change as you, then the empty folder is removed. ' +
+      'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
+      'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
+      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), a path that is a file (use `delete_file`), and a folder holding any file you may not write.' +
+      PROPOSAL_NOTE +
+      ONTOLOGY_BOUNDARY_NOTE,
+    inputs: {
+      type: 'object',
+      properties: {
+        branch: BRANCH_INPUT,
+        path: wsPath(kbDirName, 'Folder to delete'),
+        dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
+        confirm: { type: 'boolean', description: 'Required to delete a non-empty folder. Set it only after a dry run.' },
+        sessionId: SESSION_ID_INPUT,
+      },
+      required: ['branch', 'path'],
+      additionalProperties: false,
+    },
+    outputs: {
+      type: 'object',
+      properties: {
+        path: str('The folder (echoes the input).'),
+        kind: str('Always `folder`.'),
+        descendants: int('Files under the folder at any depth.'),
+        files: { type: 'array', items: { type: 'string' }, description: 'Up to 100 of those files.' },
+        filesTruncated: { type: 'boolean', description: 'True when `files` does not name every file.' },
+        allowed: { type: 'boolean', description: 'Whether the delete may run.' },
+        reason: str('Why it may not, when `allowed` is false.'),
+        dryRun: { type: 'boolean', description: 'True on a dry run.' },
+        confirmationRequired: { type: 'boolean', description: 'True when the call stopped for want of `confirm: true`.' },
+        message: str('One sentence on what happened (or did not).'),
+        deleted: { type: 'boolean', description: 'True once the folder is gone.' },
+      },
+      required: ['path', 'kind', 'descendants', 'allowed'],
+    },
+    write: true,
+    handler: async (a, ctx: ToolContext) => {
+      const path = (a.path as string).replace(/\/+$/, '');
+      const branch = a.branch as string;
+      assertInsideRepo(path, kbDirName);
+      writePolicy.assertPathWritable(ctx.sessionId, path);
+      await recordOntologyRead(sessionOntologyGate, ctx, path);
+      const fs = await ctx.getFilesystem(branch);
+      const kind = await kindOf(fs, path);
+      if (kind === null) throw new ToolError(`"${path}" does not exist.`, 404);
+      if (kind === 'file') {
+        throw new ToolError(`"${path}" is a file, not a folder — use delete_file to delete it.`, 400);
+      }
+      const { files } = await filesUnder(fs, path);
+      const blocked = isManaged(path, 'folder') ? [] : await writeBlocked(branch, ctx, [path, ...files]);
+      const reason = isManaged(path, 'folder')
+        ? managedRefusal(path, 'folder')
+        : blocked.length > 0
+          ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the folder cannot be deleted.`
+          : undefined;
+      const impact = {
+        path,
+        kind: 'folder' as const,
+        descendants: files.length,
+        files: files.slice(0, LISTED_FILES_CAP),
+        filesTruncated: files.length > LISTED_FILES_CAP,
+        allowed: reason === undefined,
+        ...(reason !== undefined ? { reason } : {}),
+      };
+      if (a.dryRun === true) return { ...impact, dryRun: true };
+      if (isManaged(path, 'folder')) throw new ToolError(reason!, 400);
+      if (blocked.length > 0) throw await writeDenied(branch, ctx, blocked[0], 'delete_folder');
+      if (files.length > 0 && a.confirm !== true) {
+        return {
+          ...impact,
+          confirmationRequired: true,
+          deleted: false,
+          message: `Nothing was deleted: "${path}" holds ${files.length} ${files.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
+        };
+      }
+      for (const f of files) {
+        await asStructuredDenial(branch, ctx, 'delete_folder', () => fs.deleteFile(f));
+      }
+      // Git tracks no folders: once the files are gone, the shells left on
+      // disk are swept so the folder stops appearing in listings. Only empty
+      // folders go, so a file a concurrent writer just dropped in survives.
+      const root = await ctx.workspaceService.getWorkspacePath(workspaceIdForBranch(branch));
+      await removeEmptyDirs(join(root, path));
+      return { ...impact, deleted: true, message: `Deleted "${path}" and its ${files.length} ${files.length === 1 ? 'file' : 'files'}.` };
     },
   });
 
@@ -938,13 +1266,21 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'move_file',
-    description: 'Move/rename a workspace file. Lands as a delete + create. Committed + pushed as you.' + ONTOLOGY_BOUNDARY_NOTE,
+    description:
+      'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
+      'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) is refused with "<name> is a platform file and stays in its folder."; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) is refused; on a protected branch you must be able to write both ends. ' +
+      'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
+      'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.' +
+      PROPOSAL_NOTE +
+      ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        src: wsPath(kbDirName, 'Source path', false),
-        dest: wsPath(kbDirName, 'Destination path'),
+        src: wsPath(kbDirName, 'Source path (file or folder)', false),
+        dest: wsPath(kbDirName, 'Destination path — the full new path; must not exist yet'),
+        dryRun: { type: 'boolean', description: 'Answer with the impact and change nothing.' },
+        confirm: { type: 'boolean', description: 'Required when the move changes your access. Set it only after a dry run.' },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -952,21 +1288,77 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { src: str('Source path (echoes the input).'), dest: str('Destination path (echoes the input).'), moved: { type: 'boolean', description: 'Always true on success.' } },
+      properties: {
+        src: str('Source path (echoes the input).'),
+        dest: str('Destination path (echoes the input).'),
+        kind: str('`file` or `folder`.'),
+        descendants: int('Files that move: 1 for a file, the file count under a folder.'),
+        access: { type: 'object', description: 'Your `{ read, write, download, owner }` at the source (`before`) and destination (`after`).' },
+        accessChanges: { type: 'boolean', description: 'True when any of your verdicts differs between source and destination.' },
+        allowed: { type: 'boolean', description: 'Whether the move may run.' },
+        reason: str('Why it may not, when `allowed` is false.'),
+        dryRun: { type: 'boolean', description: 'True on a dry run.' },
+        confirmationRequired: { type: 'boolean', description: 'True when the call stopped for want of `confirm: true`.' },
+        message: str('One sentence on what happened (or did not).'),
+        moved: { type: 'boolean', description: 'True once the move landed.' },
+      },
       required: ['src', 'dest', 'moved'],
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
+      const src = a.src as string;
+      const dest = a.dest as string;
+      const branch = a.branch as string;
       // A move CARRIES the source content into the destination — a genuine
       // cross-ontology flow if the two differ — so BOTH endpoints are write-gated
       // (unlike a plain delete, which moves no content). Check both BEFORE
       // touching disk so a blocked endpoint can't leave the source already deleted.
-      writePolicy.assertPathWritable(ctx.sessionId, a.src as string);
-      writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
-      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
-      await (await ctx.getFilesystem(a.branch as string)).moveFile(a.src as string, a.dest as string);
-      return { src: a.src, dest: a.dest, moved: true };
+      writePolicy.assertPathWritable(ctx.sessionId, src);
+      writePolicy.assertPathWritable(ctx.sessionId, dest);
+      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, src);
+      await assertOntologyWriteAllowed(sessionOntologyGate, ctx, dest);
+      const fs = await ctx.getFilesystem(branch);
+      const kind = await kindOf(fs, src);
+      if (kind === null) throw new ToolError(`"${src}" does not exist.`, 404);
+
+      const [before, after] = await Promise.all([accessAt(branch, ctx, src), accessAt(branch, ctx, dest)]);
+      const accessChanges = (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
+      const descendants = kind === 'folder' ? (await filesUnder(fs, src)).files.length : 1;
+      const managed = isManaged(src, kind);
+      // A case-only rename finds its own source at `dest` on a case-insensitive disk.
+      const collision = src.toLowerCase() !== dest.toLowerCase() && (await kindOf(fs, dest)) !== null;
+      const blocked = managed ? [] : await writeBlocked(branch, ctx, [src, dest]);
+      const reason = managed
+        ? managedRefusal(src, kind)
+        : collision
+          ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
+          : blocked.length > 0
+            ? `You may not write "${blocked[0]}", so the move cannot run.`
+            : undefined;
+      const impact = {
+        src,
+        dest,
+        kind,
+        descendants,
+        access: { before, after },
+        accessChanges,
+        allowed: reason === undefined,
+        ...(reason !== undefined ? { reason } : {}),
+      };
+      if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
+      if (managed) throw new ToolError(reason!, 400);
+      if (collision) throw new ToolError(reason!, 409);
+      if (blocked.length > 0) throw await writeDenied(branch, ctx, blocked[0], 'move_file');
+      if (accessChanges && a.confirm !== true) {
+        return {
+          ...impact,
+          confirmationRequired: true,
+          moved: false,
+          message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
+        };
+      }
+      await asStructuredDenial(branch, ctx, 'move_file', () => fs.moveFile(src, dest));
+      return { ...impact, moved: true };
     },
   });
 
