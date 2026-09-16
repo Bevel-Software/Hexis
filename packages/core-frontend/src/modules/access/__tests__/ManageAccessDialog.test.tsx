@@ -130,11 +130,11 @@ describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () =
 });
 
 /**
- * A public node. The "Anyone can read" band is a STATEMENT — it says the node
- * is public and why — and never a control: every reason it names is a grant
- * with a row below (the Everyone row for a literal line, the plugin's row for
- * a public plugin principal), and the row is the one place any grant is
- * removed, through the same flow as every other principal.
+ * A public node. The reach line under the field is a STATEMENT — it says the
+ * node is public and why — and never a control: every reason it names is a
+ * grant with a row below (the Everyone row for a literal line, the plugin's
+ * row for a public plugin principal), and the row is the one place any grant
+ * is removed, through the same flow as every other principal.
  */
 describe('ManageAccessDialog: a public node', () => {
   const PUBLIC_VIEW = {
@@ -156,13 +156,15 @@ describe('ManageAccessDialog: a public node', () => {
     users: [],
     publicVia,
   });
+  /** The one reach line, found by its opening word. */
+  const reachLine = () => screen.findByText(/^Public: anyone signed in can read it/);
 
   beforeEach(() => {
     vi.clearAllMocks();
     api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
   });
 
-  it('a literal grant here: the band says so, and the Everyone row removes it like any other row', async () => {
+  it('a literal grant here: the reach line says so, and the Everyone row removes it like any other row', async () => {
     const user = userEvent.setup();
     api.fetchFileAccess.mockResolvedValue({
       ...PUBLIC_VIEW,
@@ -171,18 +173,20 @@ describe('ManageAccessDialog: a public node', () => {
     } as AccessResponse);
     api.revokeAccess.mockResolvedValue({ ...PUBLIC_VIEW, readers: { restricted: true, roles: [], users: [] }, sources: {} });
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
-    const band = (await screen.findByText('Anyone can read')).closest('div.flex.items-center') as HTMLElement;
-    expect(screen.getByText(/granted here/)).toBeInTheDocument();
-    // The band itself has nothing to click.
-    expect(within(band).queryByRole('button')).toBeNull();
+    const line = await reachLine();
+    expect(line.textContent).toBe('Public: anyone signed in can read it — granted here. Editing needs access.');
+    // The line itself has nothing to click, and the old separate row is gone.
+    expect(within(line.parentElement as HTMLElement).queryByRole('button')).toBeNull();
+    expect(screen.queryByText('Anyone can read')).toBeNull();
 
-    // The row: opens to exactly the verb Everyone can hold, and Remove access.
+    // The row's menu holds exactly the verb Everyone can hold — Remove is its
+    // own control beside it, never a menu item.
     expect(screen.getByText('Everyone')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /^can read$/i }));
-    const removeItem = screen.getByRole('button', { name: /remove access/i });
-    const menu = removeItem.parentElement as HTMLElement;
-    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Can read', 'Remove access']);
-    await user.click(removeItem);
+    const readItem = screen.getAllByRole('button', { name: /^can read$/i }).at(-1)!;
+    const menu = readItem.parentElement as HTMLElement;
+    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Can read']);
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(
       'ws-1',
@@ -190,24 +194,26 @@ describe('ManageAccessDialog: a public node', () => {
     );
   });
 
-  it('public through a plugin only: the band names the plugin, whose row is the grant — no Everyone row', async () => {
+  it('public through a plugin only: the reach line names the plugin, whose row is the grant — no Everyone row', async () => {
     api.fetchFileAccess.mockResolvedValue({
       ...PUBLIC_VIEW,
       readers: readers(['plugin/open/read'], true),
       sources: { 'r:everyone': {}, 'p:plugin/open/read': { read: [{ kind: 'direct' }] } },
     } as AccessResponse);
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
-    const band = (await screen.findByText('Anyone can read')).closest('div.flex.items-center') as HTMLElement;
-    expect(screen.getByText(/through open · readers/)).toBeInTheDocument();
+    const line = await reachLine();
+    expect(line.textContent).toBe(
+      'Public: anyone signed in can read it — through open · readers. Editing needs access.',
+    );
     expect(screen.getByText('open · readers')).toBeInTheDocument();
     // A derived everyone has no line of its own — no row to remove nothing by,
     // not even a collapsed "through a role" one.
     expect(screen.queryByText('Everyone')).toBeNull();
     expect(screen.queryByRole('button', { name: /People with access through a role/ })).toBeNull();
-    expect(within(band).queryByRole('button')).toBeNull();
+    expect(within(line.parentElement as HTMLElement).queryByRole('button')).toBeNull();
   });
 
-  it('both a literal line and a public plugin: the band lists both reasons, and both rows are there', async () => {
+  it('both a literal line and a public plugin: the reach line lists both reasons, and both rows are there', async () => {
     api.fetchFileAccess.mockResolvedValue({
       ...PUBLIC_VIEW,
       readers: readers(['plugin/open/read'], true),
@@ -217,21 +223,19 @@ describe('ManageAccessDialog: a public node', () => {
       },
     } as AccessResponse);
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
-    await screen.findByText('Anyone can read');
-    expect(screen.getByText(/granted here, through open · readers/)).toBeInTheDocument();
+    expect((await reachLine()).textContent).toMatch(/granted here, through open · readers\. Editing needs access\.$/);
     expect(screen.getByText('Everyone')).toBeInTheDocument();
     expect(screen.getByText('open · readers')).toBeInTheDocument();
   });
 
-  it('a literal line in a parent: the band says where, and the Everyone row is inherited from there', async () => {
+  it('a literal line in a parent: the reach line says where, and the Everyone row is inherited from there', async () => {
     api.fetchFileAccess.mockResolvedValue({
       ...PUBLIC_VIEW,
       readers: readers([], false),
       sources: { 'r:everyone': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }] } },
     } as AccessResponse);
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
-    await screen.findByText('Anyone can read');
-    expect(screen.getByText(/inherited from Sales/)).toBeInTheDocument();
+    expect((await reachLine()).textContent).toMatch(/— inherited from Sales\./);
     // The row files under the folder that grants it, like every inherited grant.
     fireEvent.click(screen.getByRole('button', { name: /People invited to Sales/ }));
     expect(screen.getByText('Everyone')).toBeInTheDocument();
@@ -435,7 +439,7 @@ describe('ManageAccessDialog: group principals', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
     await user.type(
-      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      await screen.findByPlaceholderText(/add people, groups, roles or plugins/i),
       'gtm',
     );
     // The suggestion row carries the "group" tag and chips on click.
@@ -465,7 +469,7 @@ describe('ManageAccessDialog: group principals', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
     await user.type(
-      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      await screen.findByPlaceholderText(/add people, groups, roles or plugins/i),
       'adm',
     );
     expect(await screen.findByRole('button', { name: /Admin/ })).toBeInTheDocument();
@@ -491,7 +495,7 @@ describe('ManageAccessDialog: group principals', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
     await user.type(
-      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      await screen.findByPlaceholderText(/add people, groups, roles or plugins/i),
       'bo',
     );
     expect(await screen.findByRole('button', { name: /Bo/ })).toBeInTheDocument();
@@ -506,7 +510,7 @@ describe('ManageAccessDialog: group principals', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
     await user.type(
-      await screen.findByPlaceholderText(/add people, groups, or roles/i),
+      await screen.findByPlaceholderText(/add people, groups, roles or plugins/i),
       'a',
     );
     expect(await screen.findByRole('button', { name: /GTM Team/ })).toBeInTheDocument();
@@ -648,7 +652,7 @@ describe('ManageAccessDialog: grantee rows badge roles vs groups', () => {
     });
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
-    const input = await screen.findByPlaceholderText(/add people, groups, or roles/i);
+    const input = await screen.findByPlaceholderText(/add people, groups, roles or plugins/i);
     await user.type(input, 'prod');
     // The group suggestion (tagged "group") chips first…
     await user.click(await screen.findByRole('button', { name: /Product group/i }));
@@ -721,12 +725,12 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
 
     await user.click(await aliceTrigger());
-    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
 
     // The dialog's own heading: inside the dialog, outside the menu.
     await user.click(screen.getByRole('dialog'));
 
-    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
     expect(api.grantAccess).not.toHaveBeenCalled();
     expect(api.revokeAccess).not.toHaveBeenCalled();
@@ -776,11 +780,11 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
 
     const trigger = await aliceTrigger();
     await user.click(trigger);
-    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
     // The outside-click listener must NOT fire on the trigger, or this click
     // would close-then-reopen and the menu would look stuck open.
     await user.click(trigger);
-    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
   });
 
   /**
@@ -796,11 +800,11 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
 
     await user.click(await aliceTrigger());
-    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
 
     const scrim = screen.getByRole('dialog').parentElement!;
     await user.click(scrim);
-    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
 
@@ -827,11 +831,11 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     await user.click(screen.getByRole('button', { name: /^owner$/i }));
     expect(api.grantAccess).toHaveBeenCalledTimes(1);
     // In flight: the checklist's items are frozen, the trigger is not.
-    expect(screen.getByRole('button', { name: /remove access/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeDisabled();
     expect(trigger).not.toBeDisabled();
 
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
     expect(document.activeElement).toBe(trigger);
 
     settle(VIEW);
@@ -845,11 +849,11 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
 
     const trigger = await aliceTrigger();
     await user.click(trigger);
-    expect(screen.getByRole('button', { name: /remove access/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^can download$/i })).toBeInTheDocument();
 
     await user.keyboard('{Escape}');
 
-    expect(screen.queryByRole('button', { name: /remove access/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^can download$/i })).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(document.activeElement).toBe(trigger);
@@ -857,5 +861,180 @@ describe('ManageAccessDialog: dismissing a verb menu', () => {
     // With the menu gone the dialog is the top layer again: Escape closes it.
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * ONE PRIMARY BUTTON, ONE STATUS LINE, ONE PLACE TO REMOVE.
+ *
+ * The sheet used to carry a Share button beside the field AND a Done in the
+ * footer, a "Restricted" block at the bottom AND an "Anyone can read" row at
+ * the top, and a Remove that was a button on inherited rows but a menu item
+ * ("Remove access") on direct ones. Each pair is now one thing.
+ */
+describe('ManageAccessDialog: the reworked layout', () => {
+  const B = { name: 'Bo', email: 'bo@x.com' };
+  /** Alice direct (write), Bo inherited from Sales (read), Engineering a role with no file source. */
+  const VIEW = {
+    canRead: true,
+    canWrite: true,
+    canDownload: false,
+    canOwner: false,
+    eligible: { roles: [], users: [A] },
+    readers: {
+      restricted: true,
+      principals: [{ name: 'Engineering', kind: 'role' }],
+      roles: ['Engineering'],
+      users: [A, B],
+    },
+    owners: { roles: [], users: [] },
+    downloaders: { roles: [], users: [] },
+    sources: {
+      'u:alice@x.com': { read: [{ kind: 'direct' }], write: [{ kind: 'direct' }] },
+      'u:bo@x.com': { read: [{ kind: 'ancestor', path: 'Sales/access.md' }] },
+    },
+  } as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.fetchFileAccess.mockResolvedValue(VIEW);
+    api.grantAccess.mockResolvedValue(VIEW);
+    api.revokeAccess.mockResolvedValue(VIEW);
+    api.suggestPrincipals.mockResolvedValue({
+      roles: [],
+      groups: ['GTM Team'],
+      people: [],
+      peopleWithheld: false,
+    });
+  });
+
+  async function pickGtm(user: ReturnType<typeof userEvent.setup>) {
+    await user.type(await screen.findByPlaceholderText('Add people, groups, roles or plugins…'), 'gtm');
+    await user.click(await screen.findByRole('button', { name: /GTM Team/ }));
+  }
+
+  it('reads "Done" with nothing picked, and only closes', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+    await screen.findByText('Alice');
+
+    // One Share-or-Done button in the whole sheet, and it is Done.
+    expect(screen.queryByRole('button', { name: /^Share$/ })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(api.grantAccess).not.toHaveBeenCalled();
+  });
+
+  it('reads "Share" while something is picked, grants it with the chosen verb and closes', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+    await pickGtm(user);
+
+    // Done became Share — there is still exactly one primary button.
+    expect(screen.queryByRole('button', { name: 'Done' })).toBeNull();
+    const share = screen.getByRole('button', { name: /^Share$/ });
+    // It lives in the footer, after everything in the body in reading order.
+    const body = screen.getByText('Restricted: only the people below can open it');
+    expect(body.compareDocumentPosition(share) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(share);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledTimes(1);
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ verb: 'write', principal: { kind: 'group', group: 'GTM Team' } }),
+    );
+  });
+
+  it('a failed grant keeps the dialog open, the failure shown and the picks intact', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    api.grantAccess.mockRejectedValue(new Error('No such group'));
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+    await pickGtm(user);
+
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/GTM Team \(write\): No such group/);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Remove GTM Team' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Share$/ })).toBeInTheDocument();
+  });
+
+  it('states a restricted reach in one line, with no footer block and no "Anyone can read" row', async () => {
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    expect(await screen.findByText('Restricted: only the people below can open it')).toBeInTheDocument();
+    expect(screen.queryByText('Restricted')).toBeNull();
+    expect(screen.queryByText(/Only people granted access can edit/)).toBeNull();
+    expect(screen.queryByText('Anyone can read')).toBeNull();
+  });
+
+  it('states the reach for someone who cannot manage too', async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...VIEW, canWrite: false });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    expect(await screen.findByText('Restricted: only the people below can open it')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+  });
+
+  it('names plugins in the helper line under the field', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await user.type(await screen.findByPlaceholderText('Add people, groups, roles or plugins…'), 'nobody');
+    expect(
+      await screen.findByText('Type a full email to add someone, or pick a group, role or plugin from the list.'),
+    ).toBeInTheDocument();
+  });
+
+  it('a direct row ends in its verb dropdown then Remove, which revokes in place; the dropdown has no Remove', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await screen.findByText('Alice');
+
+    const triggers = screen.getAllByRole('button', { name: /^can edit$/i });
+    const trigger = triggers[triggers.length - 1];
+    const removes = screen.getAllByRole('button', { name: 'Remove' });
+    // Only Alice's row is visible (Bo and Engineering sit in collapsed sections).
+    expect(removes).toHaveLength(1);
+    expect(trigger.compareDocumentPosition(removes[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(trigger);
+    expect(screen.queryByRole('button', { name: /remove access/i })).toBeNull();
+    await user.keyboard('{Escape}');
+
+    await user.click(removes[0]);
+    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
+    expect(api.revokeAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ principal: { kind: 'user', email: 'alice@x.com', displayName: 'Alice' } }),
+    );
+    expect(screen.queryByRole('heading', { name: /remove from parent folder\?/i })).toBeNull();
+  });
+
+  it('an inherited row ends in its verb text then Remove, which opens "Remove from parent?"', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await user.click(await screen.findByRole('button', { name: /People invited to Sales/ }));
+
+    const verbText = screen.getByText('Can read', { selector: 'span' });
+    const removes = screen.getAllByRole('button', { name: 'Remove' });
+    expect(removes).toHaveLength(2);
+    const bosRemove = removes[1];
+    expect(verbText.compareDocumentPosition(bosRemove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(bosRemove);
+    expect(await screen.findByRole('heading', { name: /remove from parent folder\?/i })).toBeInTheDocument();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it('a role-based grant shows its verb text and no Remove', async () => {
+    const user = userEvent.setup();
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+    await user.click(await screen.findByRole('button', { name: /People with access through a role/ }));
+
+    expect(screen.getByText('Engineering')).toBeInTheDocument();
+    expect(screen.getByTitle('Granted via a role or policy. Manage it there')).toHaveTextContent('Can read');
+    // Alice's Remove only.
+    expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
   });
 });

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Banner, Button } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import type { JoinProposal, JoinRequest } from '../services/plugins.api';
@@ -44,55 +45,92 @@ export function AccessRequestsBanner({
 }: AccessRequestsBannerProps) {
   if (requests.length === 0) return null;
 
+  const accept = (request: JoinRequest, proposal: JoinProposal) => (
+    <Button
+      variant="outline"
+      size="sm"
+      aria-label={`Grant ${proposal.verb} to ${proposal.label}`}
+      onClick={() => onAccept(request, proposal)}
+    >
+      Accept
+    </Button>
+  );
+
+  // One line per request, naming the requester and ending in its answers. A
+  // request proposing ONE grant says which on that line, so Accept and Decline
+  // sit together; a request proposing several gives each its own line and
+  // Accept, and keeps Decline — which answers the whole request — on the
+  // requester's line.
+  const lines: { key: string; text: ReactNode; actions: ReactNode; nested?: boolean }[] = [];
+  for (const request of requests) {
+    const single = request.proposals.length === 1 ? request.proposals[0] : null;
+    lines.push({
+      key: `request:${request.number}`,
+      text: single ? (
+        <>
+          {`${request.requesterName} asked for access to ${plugin}: `}
+          {single.label !== request.requesterName && `${single.label}, `}
+          <span className="font-semibold">{single.verb}</span>
+        </>
+      ) : (
+        `${request.requesterName} asked for access to ${plugin}.`
+      ),
+      actions: (
+        <>
+          {single && accept(request, single)}
+          <Button
+            variant="quiet"
+            size="sm"
+            aria-label={`Decline the request from ${request.requesterName}`}
+            onClick={() => onDecline(request)}
+          >
+            Decline
+          </Button>
+        </>
+      ),
+    });
+    if (single) continue;
+    for (const proposal of request.proposals) {
+      lines.push({
+        key: `proposal:${request.number}:${proposal.verb}:${proposal.id}`,
+        text: (
+          <>
+            {`${proposal.label}: `}
+            <span className="font-semibold">{proposal.verb}</span>
+          </>
+        ),
+        actions: accept(request, proposal),
+        nested: true,
+      });
+    }
+  }
+
   return (
     <Banner role="status" tone="wait" className={cn('mb-4', className)}>
-      <p>
-        {requests.length === 1
-          ? `${requests[0].requesterName} asked for access to ${plugin}.`
-          : `${requests.length} people asked for access to ${plugin}.`}
-      </p>
-
-      <div className="mt-2 flex flex-col gap-2">
-        {requests.map((request) => (
-          <div key={request.number} className="flex flex-col gap-1">
-            {requests.length > 1 && (
-              <span className="text-meta font-semibold text-ink">{request.requesterName}</span>
-            )}
-            {request.proposals.map((proposal) => (
-              <div
-                key={`${proposal.verb}:${proposal.id}`}
-                className="flex flex-wrap items-center gap-2"
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {proposal.label}: <span className="font-semibold">{proposal.verb}</span>
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  aria-label={`Grant ${proposal.verb} to ${proposal.label}`}
-                  onClick={() => onAccept(request, proposal)}
-                >
-                  Accept
-                </Button>
-              </div>
-            ))}
-            <div>
-              <Button
-                variant="quiet"
-                size="sm"
-                aria-label={`Decline the request from ${request.requesterName}`}
-                onClick={() => onDecline(request)}
-              >
-                Decline
-              </Button>
-            </div>
-          </div>
-        ))}
-        {folders.map((folder) => (
-          <div key={folder}>
-            <Button variant="quiet" size="sm" onClick={() => onManage(folder)}>
-              Manage access
-            </Button>
+      <div className="flex flex-col gap-1.5">
+        {lines.map((line, i) => (
+          <div
+            key={line.key}
+            className={cn('flex flex-wrap items-center gap-x-2 gap-y-1', line.nested && 'pl-4')}
+          >
+            <span className="min-w-0 flex-1">{line.text}</span>
+            <span className="flex shrink-0 items-center gap-1.5">
+              {line.actions}
+              {/* The third path, said as a link rather than a button of its
+                  own: the manager who wants something other than what was
+                  proposed. It closes the banner's last line. */}
+              {i === lines.length - 1 &&
+                folders.map((folder) => (
+                  <button
+                    key={folder}
+                    type="button"
+                    className="ml-1 rounded-xs text-detail text-ink-muted underline underline-offset-2 hover:text-ink"
+                    onClick={() => onManage(folder)}
+                  >
+                    Manage access
+                  </button>
+                ))}
+            </span>
           </div>
         ))}
       </div>
