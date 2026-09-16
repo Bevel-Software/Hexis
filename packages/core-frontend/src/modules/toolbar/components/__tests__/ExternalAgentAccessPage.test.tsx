@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ExternalAgentAccessPage } from '../ExternalAgentAccessPage';
@@ -802,5 +802,62 @@ describe('tabs', () => {
     mount(PUBLIC_URL);
     await user.click(screen.getByRole('tab', { name: 'Autonomous agents' }));
     expect(screen.queryByRole('link', { name: 'Add to Claude' })).toBeNull();
+  });
+});
+
+/**
+ * Adding a marketplace installs nothing in Codex, and the compiled plugin's
+ * server entry carries no credentials: the block has to carry the install and
+ * the sign-in, and the page has to say why the sign-in is there.
+ */
+describe('the Codex block', () => {
+  const REMOTE = 'https://key:<external-api-key>@kb.acme.com/git/marketplace.git';
+  const note = /Codex signs in through your browser once: the login line is needed because the plugin's server entry carries no credentials\./;
+
+  function codexLines(remote: string): string[] {
+    return [
+      `codex plugin marketplace add ${remote}`,
+      'codex plugin add skills-and-knowledge@hexis',
+      'codex mcp login hexis',
+      'codex exec --skip-git-repo-check "Call the hexis MCP server\'s list_tools tool and print the tool names it returns."',
+    ];
+  }
+
+  it('adds, installs, signs in and checks, in that order, and says why it signs in', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    const drawer = screen.getByTestId('marketplace-section');
+    const codex = within(drawer)
+      .getAllByRole('textbox')
+      .map((el) => (el as HTMLTextAreaElement).value)
+      .find((v) => v.startsWith('codex '));
+    expect(codex?.split('\n')).toEqual(codexLines(REMOTE));
+    expect(within(drawer).getByText(note)).toBeTruthy();
+    // The other two commands are exactly what they were.
+    const values = within(drawer).getAllByRole('textbox').map((el) => (el as HTMLTextAreaElement).value);
+    expect(values).toContain(`claude plugin marketplace add ${REMOTE} && claude plugin install hexis-all@hexis`);
+    expect(values).toContain(`npx skills add ${REMOTE} --all -y`);
+  });
+
+  it('copies the whole block, not its first line', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await user.click(screen.getByRole('tab', { name: 'Marketplaces' }));
+    // Stubbed after userEvent.setup(), which installs a clipboard of its own.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy: Codex' }));
+    expect(writeText).toHaveBeenCalledWith(codexLines(REMOTE).join('\n'));
+  });
+
+  it('is the same block in the connection-keys dialog, with the key filled in', async () => {
+    const user = userEvent.setup();
+    mount(PUBLIC_URL);
+    await revealAKey(user);
+    const dialog = screen.getByRole('alertdialog');
+    const block = within(dialog).getByRole('textbox', { name: 'Codex marketplace command' }) as HTMLTextAreaElement;
+    expect(block.value.split('\n')).toEqual(codexLines(`https://key:${KEY}@kb.acme.com/git/marketplace.git`));
+    expect(within(dialog).getByText(note)).toBeTruthy();
   });
 });
