@@ -953,7 +953,28 @@ describe('ManageAccessDialog: explaining the access words', () => {
 
     await user.click(trigger);
     expect(screen.queryByRole('list', { name: 'What can I share with?' })).not.toBeInTheDocument();
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  // A press puts focus on the control, so a second press needs no hand-back of
+  // its own; what matters is that closing from the keyboard leaves it there,
+  // ready to open again, rather than dropping it to the page.
+  it('opens and closes from the keyboard with focus kept on the control', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await screen.findByRole('button', { name: 'What can I share with?' });
+    trigger.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('list', { name: 'What can I share with?' })).toBeInTheDocument();
+
+    await user.keyboard('{Enter}');
+    expect(screen.queryByRole('list', { name: 'What can I share with?' })).not.toBeInTheDocument();
     expect(document.activeElement).toBe(trigger);
+
+    await user.keyboard(' ');
+    expect(screen.getByRole('list', { name: 'What can I share with?' })).toBeInTheDocument();
   });
 
   it('closes on Escape without closing the dialog, and hands focus back', async () => {
