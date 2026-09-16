@@ -4,7 +4,7 @@ import type { Database } from '../database/connection.js';
 import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { hashEmail } from '../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   hashPassword,
   verifyPassword,
@@ -88,7 +88,7 @@ export class AuthService {
     email: string,
     password: string,
   ): Promise<{ token: string; user: AuthUser }> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
 
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid credentials');
@@ -135,7 +135,7 @@ export class AuthService {
     email: string,
     name: string,
   ): Promise<{ token: string; user: AuthUser }> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Sign-in returned an invalid email');
     }
@@ -156,7 +156,7 @@ export class AuthService {
     name: string | undefined,
     password: string,
   ): Promise<AuthUser> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
@@ -261,7 +261,7 @@ export class AuthService {
     email: string,
     name?: string,
   ): Promise<{ id: string; email: string; name: string } | null> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
@@ -347,7 +347,7 @@ export class AuthService {
   isEmailDomainAllowed(email: string): boolean {
     const allowed = this.config.allowedEmailDomains;
     if (allowed.length === 0) return true;
-    const domain = (email ?? '').trim().toLowerCase().split('@')[1] ?? '';
+    const domain = canonicalEmail(email ?? '').split('@')[1] ?? '';
     if (!domain) return false;
     return allowed.some((d) => domain === d || domain.endsWith(`.${d}`));
   }
