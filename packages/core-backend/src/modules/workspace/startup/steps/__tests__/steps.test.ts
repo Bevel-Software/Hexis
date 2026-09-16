@@ -193,6 +193,33 @@ describe('TemplateFilesStep', () => {
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + scaffolding
   });
 
+  /**
+   * The step is built at boot, while the process still runs the defaults; the
+   * save that completes first-run setup applies the admin's names afterwards.
+   * A root list snapshotted at construction scaffolded `Skills/` beside the
+   * `skills/` they had just chosen — the very bug the names exist to avoid.
+   */
+  it('scaffolds the layout in effect when it RUNS, not the one it was built under', async () => {
+    const builtAtBoot = new TemplateFilesStep(new NodeFs());
+    await seedUpstream({ 'skills/deploy/SKILL.md': '# deploy\n' });
+    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+    await makeRunner([builtAtBoot]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    // Listed rather than probed: a probe for `Skills` answers yes on a
+    // case-insensitive filesystem that holds `skills`.
+    const roots = (await fs.readdir(dir, { withFileTypes: true }))
+      .filter((e) => e.isDirectory() && e.name !== '.git')
+      .map((e) => e.name)
+      .sort();
+    expect(roots).toEqual(['Docs', 'Plugins', 'skills']);
+    expect(await exists(dir, 'Docs/.gitkeep')).toBe(true);
+    const subject = (await git(dir, ['log', '--format=%s', '-1'])).trim();
+    expect(subject).toContain('Docs/.gitkeep');
+    expect(subject).not.toContain('KnowledgeBase/');
+    expect(subject).not.toContain('Skills/');
+  });
+
   it('replaces a drifted AGENTS.md, and says so when that is the only change', async () => {
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': 'stale conventions\n' });
     await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
@@ -687,6 +714,20 @@ describe('buildSeedTree', () => {
     // The generated paths — what the runner force-adds past a template .gitignore.
     expect(generated.sort()).toEqual(['KnowledgeBase/.gitkeep', 'Plugins/.gitkeep', 'Skills/.gitkeep', 'roles.yaml']);
     expect(await exists(dest, 'roles.yaml')).toBe(true);
+  });
+
+  it('seeds the layout in effect when it seeds, not the one it was composed under', async () => {
+    const templateDir = path.join(root, 'seed-template-layout');
+    await fs.mkdir(templateDir, { recursive: true });
+    await fs.writeFile(path.join(templateDir, 'access.md'), 'policy', 'utf8');
+    // Composed at boot, under the defaults…
+    const seed = buildSeedTree(new NodeFs(), templateDir, [], ['admin@example.com']);
+    // …and run after the completing save applied the admin's names.
+    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+    const dest = path.join(root, 'seed-dest-layout');
+    await fs.mkdir(dest, { recursive: true });
+    const generated = await seed(dest);
+    expect(generated.sort()).toEqual(['Docs/.gitkeep', 'Plugins/.gitkeep', 'roles.yaml', 'skills/.gitkeep']);
   });
 
   it('names a template that is not there — a missing directory is a broken build, not an empty seed', async () => {

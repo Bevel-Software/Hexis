@@ -514,20 +514,30 @@ describe('WorkspaceService.withPathTurn', () => {
   it('updates the diff baseline inside the turn, in the order the mutations landed', async () => {
     const rel = 'knowledge-base/notes.md';
     await fs.writeFile(path.join(workspaceDir, rel), 'Old.', 'utf-8');
-    const calls: string[] = [];
+    const absolute = path.join(workspaceDir, rel);
+    const onDisk = async () => fs.readFile(absolute, 'utf-8').catch(() => null);
+    // Each baseline update records what the file held when it ran. The
+    // property under test is that an update runs INSIDE its mutation's turn —
+    // after that mutation's disk effect and before the next mutation's — so
+    // the sequence of updates is the sequence of disk states.
+    const calls: Array<{ call: string; disk: string | null }> = [];
     svc.setDiffService({
       markUserDeleted: async () => {
-        calls.push('deleted');
+        calls.push({ call: 'deleted', disk: await onDisk() });
       },
       syncFromDisk: async () => {
-        calls.push('synced');
+        calls.push({ call: 'synced', disk: await onDisk() });
       },
     } as never);
-    // A delete and a write queued back to back: the delete's baseline update
-    // must not run after the write's, or the new baseline is lost.
+    // A delete and a write launched together. Which takes the turn first is
+    // not promised (each resolves the workspace before acquiring), so the
+    // assertions hold for either order: every update saw its own mutation's
+    // effect, and the last update matches what is left on disk.
     await Promise.all([svc.deleteFile(workspaceId, rel), svc.writeFile(workspaceId, rel, 'New.')]);
-    expect(calls).toEqual(['deleted', 'synced']);
-    expect(await fs.readFile(path.join(workspaceDir, rel), 'utf-8')).toBe('New.');
+    expect(calls.map((c) => c.call).sort()).toEqual(['deleted', 'synced']);
+    expect(calls.find((c) => c.call === 'deleted')?.disk).toBeNull();
+    expect(calls.find((c) => c.call === 'synced')?.disk).toBe('New.');
+    expect(await onDisk()).toBe(calls[1].disk);
   });
 
   it('a throwing turn does not wedge the ones queued behind it', async () => {
@@ -552,7 +562,21 @@ describe('WorkspaceService.withPathTurn', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const holder = svc.withPathTurn(workspaceId, rel, () => held);
+    // The turn is taken only after `withPathTurn` has resolved the workspace
+    // directory, and so are the contenders' — so calling first does not mean
+    // acquiring first. What the service promises is that whoever holds the
+    // turn holds it alone; the test must therefore wait until the holder
+    // actually HOLDS it before launching the delete and the upload, or one of
+    // them can win the acquisition and land first (a real 1-in-5 flake).
+    let holding: () => void = () => {};
+    const acquired = new Promise<void>((resolve) => {
+      holding = resolve;
+    });
+    const holder = svc.withPathTurn(workspaceId, rel, () => {
+      holding();
+      return held;
+    });
+    await acquired;
 
     let deleted = false;
     let uploaded = false;

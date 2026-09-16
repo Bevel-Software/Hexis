@@ -6,7 +6,7 @@ import type { Database } from './connection.js';
  * agree that only one of them may do a thing at a time.
  *
  * WHY THIS EXISTS. Hexis is single-replica by design (see the notes in
- * `mcp-session-store.ts`, `event-bus.ts` and `pending-commits.worker.ts`), but
+ * `event-bus.ts` and `pending-commits.worker.ts`), but
  * nothing enforces it, and the deployment topology guarantees an overlap on
  * every redeploy: the reverse-proxy deployments this project targets start the
  * replacement container while the outgoing one is still running — which is

@@ -4,7 +4,7 @@ import type { Database } from '../database/connection.js';
 import type { CoreConfig } from '../../core-config.js';
 import { users } from '../database/schema.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { hashEmail } from '../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   hashPassword,
   verifyPassword,
@@ -88,7 +88,7 @@ export class AuthService {
     email: string,
     password: string,
   ): Promise<{ token: string; user: AuthUser }> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
 
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid credentials');
@@ -135,7 +135,7 @@ export class AuthService {
     email: string,
     name: string,
   ): Promise<{ token: string; user: AuthUser }> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Sign-in returned an invalid email');
     }
@@ -156,7 +156,7 @@ export class AuthService {
     name: string | undefined,
     password: string,
   ): Promise<AuthUser> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
     }
@@ -207,16 +207,34 @@ export class AuthService {
       .where(eq(users.id, userId));
   }
 
-  /** Accounts overview for the admin management screen (never exposes hashes). */
+  /**
+   * Accounts overview for the admin management screen (never exposes hashes).
+   * The two password facts are independent: `hasPassword` is a stored hash;
+   * `isEnvAdmin` is the env bootstrap credential (`ADMIN_EMAIL` while
+   * `ADMIN_PASSWORD` is set), which signs in whether or not a hash exists —
+   * the same condition {@link loginWithPassword} checks first.
+   */
   async listAccounts(): Promise<
-    Array<{ id: string; email: string; name: string; hasPassword: boolean; createdAt: Date }>
+    Array<{
+      id: string;
+      email: string;
+      name: string;
+      hasPassword: boolean;
+      isEnvAdmin: boolean;
+      createdAt: Date;
+    }>
   > {
     const rows = await this.db.select().from(users).orderBy(users.email);
+    const envAdminEmail =
+      this.config.adminEmail.length > 0 && this.config.adminPassword.length > 0
+        ? this.config.adminEmail
+        : null;
     return rows.map((row) => ({
       id: row.id,
       email: row.email,
       name: row.name,
       hasPassword: row.passwordHash != null,
+      isEnvAdmin: envAdminEmail !== null && row.email === envAdminEmail,
       createdAt: row.createdAt,
     }));
   }
@@ -243,7 +261,7 @@ export class AuthService {
     email: string,
     name?: string,
   ): Promise<{ id: string; email: string; name: string } | null> {
-    const normalizedEmail = (email ?? '').trim().toLowerCase();
+    const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) return null;
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
@@ -329,7 +347,7 @@ export class AuthService {
   isEmailDomainAllowed(email: string): boolean {
     const allowed = this.config.allowedEmailDomains;
     if (allowed.length === 0) return true;
-    const domain = (email ?? '').trim().toLowerCase().split('@')[1] ?? '';
+    const domain = canonicalEmail(email ?? '').split('@')[1] ?? '';
     if (!domain) return false;
     return allowed.some((d) => domain === d || domain.endsWith(`.${d}`));
   }

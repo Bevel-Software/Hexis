@@ -5,6 +5,7 @@ const log = logger('auth');
 import type { AuthService } from './auth.service.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
 import { FixedWindowRateLimiter } from './rate-limit.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 
 /**
  * Max age of the JWT cookie (seconds). Matches the JWT's own `expiresIn:
@@ -79,7 +80,7 @@ export function createAuthRoutes(
       res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;
     }
-    const pairKey = `${ip}|${email.trim().toLowerCase()}`;
+    const pairKey = `${ip}|${canonicalEmail(email)}`;
     if (!loginPairLimiter.consume(pairKey)) {
       res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;

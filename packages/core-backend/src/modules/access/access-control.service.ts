@@ -1,12 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
 import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { hashEmail } from '../../shared/email-identity.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
@@ -95,11 +95,6 @@ async function catFileBatch(
     off += size + 1; // payload + trailing LF
   }
   return results;
-}
-
-/** Mirrors `shared/hash-email.ts`. Duplicated to avoid a cross-cutting import. */
-function sha256Email(email: string): string {
-  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
 }
 
 
@@ -1440,7 +1435,7 @@ export class AccessControlService implements IAccessControl {
       ...namesByEmail.keys(),
     ]);
     for (const email of candidates) {
-      if (sha256Email(email) === hash) {
+      if (hashEmail(email) === hash) {
         const displayName = namesByEmail.get(email) ?? email.split('@')[0];
         return { email, displayName };
       }
@@ -1459,7 +1454,7 @@ export class AccessControlService implements IAccessControl {
    */
   private machineOwnedWriteRule(userEmail: string, relativePath: string): boolean | null {
     if (relativePath !== SYNCED_GROUPS_YAML) return null;
-    return userEmail.trim().toLowerCase() === DIRECTORY_SYNC_BOT_EMAIL;
+    return canonicalEmail(userEmail) === DIRECTORY_SYNC_BOT_EMAIL;
   }
 
   async canWriteAtRef(

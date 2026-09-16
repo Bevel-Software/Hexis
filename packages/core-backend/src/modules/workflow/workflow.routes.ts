@@ -36,16 +36,14 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 function toHttpError(
   err: unknown,
 ): { status: number; body: Record<string, unknown> } {
   if (err instanceof WorkflowDomainError) {
-    return {
-      status: err.status,
-      body: { error: err.message, ...(err.payload ?? {}) },
-    };
+    return { status: err.status, body: domainErrorBody(err) };
   }
   log.error('unhandled error:', { err });
   return { status: 500, body: { error: 'Internal server error' } };

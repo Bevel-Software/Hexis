@@ -22,8 +22,34 @@ const ALICE = {
   email: 'alice@example.com',
   name: 'Alice',
   hasPassword: false,
+  isEnvAdmin: false,
   createdAt: '2026-01-01T00:00:00Z',
 };
+const BOB = {
+  id: 'u-bob',
+  email: 'bob@example.com',
+  name: 'Bob',
+  hasPassword: true,
+  isEnvAdmin: false,
+  createdAt: '2026-01-01T00:00:00Z',
+};
+// The deployment admin (ADMIN_EMAIL) — a different account from the signed-in
+// admin, so its row offers the actions. No hash stored yet.
+const ROOT = {
+  id: 'u-root',
+  email: 'root@example.com',
+  name: 'Root',
+  hasPassword: false,
+  isEnvAdmin: true,
+  createdAt: '2026-01-01T00:00:00Z',
+};
+
+/** The "email · Joined … · sign-in method" line of the named account's row. */
+function row(name: string): HTMLElement {
+  const li = screen.getByText(name).closest('li');
+  if (!li) throw new Error(`no row for ${name}`);
+  return within(li).getByText(/· Joined /);
+}
 
 function renderPage(opts: { isAdmin?: boolean } = {}) {
   const auth: AuthContextValue = {
@@ -57,7 +83,7 @@ beforeEach(() => {
   vi.mocked(listAccounts)
     .mockReset()
     .mockResolvedValue([
-      { ...ME, hasPassword: true, createdAt: '2026-01-01T00:00:00Z' },
+      { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z' },
       ALICE,
     ]);
   vi.mocked(deleteAccount).mockReset().mockResolvedValue(undefined);
@@ -74,7 +100,7 @@ describe('UserAccountsPage', () => {
   it('lists accounts with sign-in method; own row offers no actions', async () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument());
-    expect(screen.getByText(/Single sign-on only/)).toBeInTheDocument();
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
     expect(
       screen.getByRole('button', { name: 'Set password for alice@example.com' }),
     ).toBeInTheDocument();
@@ -87,6 +113,75 @@ describe('UserAccountsPage', () => {
     expect(
       screen.queryByRole('button', { name: 'Delete account admin@example.com' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('labels each account with the sign-in methods it actually has', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      ALICE,
+      BOB,
+      ROOT,
+      { ...ROOT, id: 'u-root-hashed', name: 'Root Hashed', hasPassword: true },
+    ]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
+    expect(row('Bob')).toHaveTextContent(/· Password$/);
+    // The deployment admin reads the same with or without a stored hash.
+    expect(row('Root')).toHaveTextContent(/· Password \(deployment admin\)$/);
+    expect(row('Root Hashed')).toHaveTextContent(/· Password \(deployment admin\)$/);
+    expect(screen.queryByText(/Single sign-on only/)).not.toBeInTheDocument();
+  });
+
+  it('the delete confirmation describes the password state in the same words', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB, ROOT]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    const cases: Array<[string, RegExp]> = [
+      ['alice@example.com', /No password — signs in with single sign-on: they can sign in again later with single sign-on/],
+      ['bob@example.com', /Password: to sign in again they will need an admin/],
+      ['root@example.com', /Password \(deployment admin\): they can still sign in with the deployment admin password/],
+    ];
+    for (const [email, wording] of cases) {
+      await userEvent.click(screen.getByRole('button', { name: `Delete account ${email}` }));
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(wording);
+      expect(dialog).not.toHaveTextContent(/Single sign-on only/);
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+    expect(deleteAccount).not.toHaveBeenCalled();
+  });
+
+  it('after Set password the label follows the refreshed facts, no manual reload', async () => {
+    // Initial load, then one reload per Set password: each reload reports the
+    // hash now stored for the account that was just set.
+    vi.mocked(listAccounts)
+      .mockResolvedValueOnce([ALICE, ROOT])
+      .mockResolvedValueOnce([ALICE, { ...ROOT, hasPassword: true }])
+      .mockResolvedValueOnce([{ ...ALICE, hasPassword: true }, { ...ROOT, hasPassword: true }]);
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+
+    async function setPassword(email: string) {
+      await userEvent.click(screen.getByRole('button', { name: `Set password for ${email}` }));
+      const dialog = within(screen.getByRole('dialog'));
+      await userEvent.type(dialog.getByLabelText('New password'), 'fresh-password-1');
+      await userEvent.click(dialog.getByRole('button', { name: 'Set password' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+
+    // Deployment admin: both facts now true — still the deployment-admin label.
+    await setPassword('root@example.com');
+    await waitFor(() => expect(listAccounts).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(row('Root')).toHaveTextContent(/· Password \(deployment admin\)$/),
+    );
+
+    // Any other account: flips to Password on the refresh alone.
+    expect(row('Alice')).toHaveTextContent(/· No password — signs in with single sign-on$/);
+    await setPassword('alice@example.com');
+    await waitFor(() => expect(row('Alice')).toHaveTextContent(/· Password$/));
+    expect(listAccounts).toHaveBeenCalledTimes(3);
   });
 
   it('sets a password for a user WITHOUT touching their name', async () => {

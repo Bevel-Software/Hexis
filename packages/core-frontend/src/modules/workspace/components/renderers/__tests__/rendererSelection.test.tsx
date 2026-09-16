@@ -8,7 +8,7 @@ import {
 const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock('../../../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
 
-import { getFileRenderer } from '../index';
+import { getFileRenderer, hasFileViewer } from '../index';
 import { LegacyOfficeRenderer } from '../LegacyOfficeRenderer';
 import { TextRenderer } from '../TextRenderer';
 import { ImageRenderer } from '../ImageRenderer';
@@ -67,6 +67,42 @@ describe('getFileRenderer: document routing', () => {
     expect(getFileRenderer('Plugins/GTM/ACCESS.MD')).toBe(TextRenderer);
     // Only the rules file: any other markdown stays a document.
     expect(rendererName(getFileRenderer('Plugins/GTM/README.md'))).toBe('MarkdownRenderer');
+  });
+});
+
+/**
+ * The question the change-request dialog asks before offering to show a
+ * proposed document: is there a viewer for this, or only a sentence about it?
+ * Derived from the routing above, so the two can't drift.
+ */
+describe('hasFileViewer', () => {
+  it.each([
+    'Inbox/brief.pdf',
+    'Inbox/report.docx',
+    'Data/book.xlsx',
+    'Inbox/all-hands.pptx',
+    'Inbox/offer.eml',
+    'Inbox/thread.msg',
+    'pics/logo.png',
+    'pics/diagram.svg',
+    'Data/rows.csv',
+  ])('%s has a viewer', (path) => {
+    expect(hasFileViewer(path)).toBe(true);
+  });
+
+  it.each([
+    // The no-preview note is not a viewer — it renders nothing of the file.
+    'old/memo.doc',
+    'old/deck.ppt',
+    'old/sheet.xls',
+    'docs/spec.odt',
+    'decks/pitch.odp',
+    'data/numbers.ods',
+    // The text fallback over bytes nobody can read as text.
+    'archive/bundle.zip',
+    'notes/scratch.unknown',
+  ])('%s has none', (path) => {
+    expect(hasFileViewer(path)).toBe(false);
   });
 });
 

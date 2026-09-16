@@ -128,19 +128,19 @@ importers:
         version: 1.1.3
       '@utcp/code-mode':
         specifier: ^1.2.13
-        version: 1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
+        version: 1.2.13(@utcp/sdk@1.2.0)(isolated-vm@6.1.2)
       '@utcp/direct-call':
         specifier: ^1.1.1
-        version: 1.1.1(@utcp/sdk@1.1.2)
+        version: 1.1.1(@utcp/sdk@1.2.0)
       '@utcp/http':
         specifier: ^1.1.12
         version: 1.1.12
       '@utcp/mcp':
-        specifier: ^1.1.7
-        version: 1.1.7(@types/json-schema@7.0.15)(zod@3.25.76)
+        specifier: ^1.2.0
+        version: 1.2.0(@types/json-schema@7.0.15)(zod@3.25.76)
       '@utcp/sdk':
-        specifier: ^1.1.1
-        version: 1.1.2
+        specifier: ^1.2.0
+        version: 1.2.0
       adm-zip:
         specifier: ^0.6.0
         version: 0.6.0
@@ -233,8 +233,8 @@ importers:
         specifier: ^0.5.19
         version: 0.5.20(tailwindcss@4.3.3)
       '@utcp/sdk':
-        specifier: ^1.1.1
-        version: 1.1.2
+        specifier: ^1.2.0
+        version: 1.2.0
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -340,16 +340,16 @@ importers:
         version: 1.1.3
       '@utcp/code-mode':
         specifier: ^1.2.13
-        version: 1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
+        version: 1.2.13(@utcp/sdk@1.2.0)(isolated-vm@6.1.2)
       '@utcp/http':
         specifier: ^1.1.12
         version: 1.1.12
       '@utcp/mcp':
-        specifier: ^1.1.7
-        version: 1.1.7(@types/json-schema@7.0.15)(zod@4.4.3)
+        specifier: ^1.2.0
+        version: 1.2.0(@types/json-schema@7.0.15)(zod@4.4.3)
       '@utcp/sdk':
-        specifier: ^1.1.1
-        version: 1.1.2
+        specifier: ^1.2.0
+        version: 1.2.0
       adm-zip:
         specifier: ^0.6.0
         version: 0.6.0
@@ -374,16 +374,16 @@ importers:
         version: 1.30.0(zod@4.4.3)
       '@utcp/code-mode':
         specifier: ^1.2.13
-        version: 1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)
+        version: 1.2.13(@utcp/sdk@1.2.0)(isolated-vm@6.1.2)
       '@utcp/http':
         specifier: ^1.1.12
         version: 1.1.12
       '@utcp/mcp':
-        specifier: ^1.1.7
-        version: 1.1.7(@types/json-schema@7.0.15)(zod@4.4.3)
+        specifier: ^1.2.0
+        version: 1.2.0(@types/json-schema@7.0.15)(zod@4.4.3)
       '@utcp/sdk':
-        specifier: ^1.1.1
-        version: 1.1.2
+        specifier: ^1.2.0
+        version: 1.2.0
     devDependencies:
       typescript:
         specifier: ^5.8.0
@@ -1904,11 +1904,11 @@ packages:
   '@utcp/http@1.1.12':
     resolution: {integrity: sha512-A1rV/iDU5bCyxoJxFhPDEzEKT29y/mTDSYEGsFvjhP32kIjAXpde/l6+Kjwzy1WokDmyHWZqvhuJTnrnGionvg==}
 
-  '@utcp/mcp@1.1.7':
-    resolution: {integrity: sha512-JpfeH0jiXqLS06SPUixOlHlBBPZmO+ugUugi+hxhmDTdkSWmrvLeAusv6uFpkMINopOpX++DqQfZiWTOxRQsGw==}
+  '@utcp/mcp@1.2.0':
+    resolution: {integrity: sha512-Adt6MS8pW9Q5LyXw6VI8JeOqBqCazQCnV2ueb2OqBVOfeHzFSQj0RBZ/AaXkUgcd5eh4gy4P/gehW6dAoRNrng==}
 
-  '@utcp/sdk@1.1.2':
-    resolution: {integrity: sha512-YOBhcOK5kbD27d3emuXNAb8gBb8nH2kr7BuqjrvmSGyUi9379jzusYeTuZDsAxyy5da9VZPnfC/cNCpTVkEtUw==}
+  '@utcp/sdk@1.2.0':
+    resolution: {integrity: sha512-BGV0jefOjMuahbSk++TV1qlQ0Ht9pnhPvDJgpXG9khfT6YHZIv54kMxYn5fgt70EXQohsRHAFaSIOZdlJOGwxw==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -6141,31 +6141,31 @@ snapshots:
 
   '@utcp/cli@1.1.3':
     dependencies:
-      '@utcp/sdk': 1.1.2
+      '@utcp/sdk': 1.2.0
 
-  '@utcp/code-mode@1.2.13(@utcp/sdk@1.1.2)(isolated-vm@6.1.2)':
+  '@utcp/code-mode@1.2.13(@utcp/sdk@1.2.0)(isolated-vm@6.1.2)':
     dependencies:
-      '@utcp/sdk': 1.1.2
+      '@utcp/sdk': 1.2.0
       isolated-vm: 6.1.2
 
-  '@utcp/direct-call@1.1.1(@utcp/sdk@1.1.2)':
+  '@utcp/direct-call@1.1.1(@utcp/sdk@1.2.0)':
     dependencies:
-      '@utcp/sdk': 1.1.2
+      '@utcp/sdk': 1.2.0
 
   '@utcp/http@1.1.12':
     dependencies:
-      '@utcp/sdk': 1.1.2
+      '@utcp/sdk': 1.2.0
       axios: 1.19.0
       js-yaml: 4.3.1
     transitivePeerDependencies:
       - debug
       - supports-color
 
-  '@utcp/mcp@1.1.7(@types/json-schema@7.0.15)(zod@3.25.76)':
+  '@utcp/mcp@1.2.0(@types/json-schema@7.0.15)(zod@3.25.76)':
     dependencies:
       '@apidevtools/json-schema-ref-parser': 15.5.1(@types/json-schema@7.0.15)
       '@modelcontextprotocol/sdk': 1.30.0(zod@3.25.76)
-      '@utcp/sdk': 1.1.2
+      '@utcp/sdk': 1.2.0
       axios: 1.19.0
     transitivePeerDependencies:
       - '@cfworker/json-schema'
@@ -6174,11 +6174,11 @@ snapshots:
       - supports-color
       - zod
 
-  '@utcp/mcp@1.1.7(@types/json-schema@7.0.15)(zod@4.4.3)':
+  '@utcp/mcp@1.2.0(@types/json-schema@7.0.15)(zod@4.4.3)':
     dependencies:
       '@apidevtools/json-schema-ref-parser': 15.5.1(@types/json-schema@7.0.15)
       '@modelcontextprotocol/sdk': 1.30.0(zod@4.4.3)
-      '@utcp/sdk': 1.1.2
+      '@utcp/sdk': 1.2.0
       axios: 1.19.0
     transitivePeerDependencies:
       - '@cfworker/json-schema'
@@ -6187,7 +6187,7 @@ snapshots:
       - supports-color
       - zod
 
-  '@utcp/sdk@1.1.2':
+  '@utcp/sdk@1.2.0':
     dependencies:
       dotenv: 17.4.2
       zod: 3.25.76

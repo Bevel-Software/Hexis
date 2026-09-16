@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error — mammoth ships no .d.ts
 import mammoth from 'mammoth/mammoth.browser.js';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { sanitizeDocxHtml } from './sanitizeDocxHtml';
@@ -31,7 +31,7 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function DocxRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 

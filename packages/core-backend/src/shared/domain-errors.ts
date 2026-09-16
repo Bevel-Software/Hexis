@@ -231,6 +231,22 @@ export class WorkflowValidationError extends WorkflowDomainError {
 }
 
 /**
+ * An archive the caller uploaded that the zip reader cannot open. 422, not
+ * 400: the request is well-formed and the path is fine — the BYTES are not a
+ * readable zip, which is the caller's to fix but not their spelling's.
+ *
+ * A type, because the route used to recognise this by the `Could not read zip
+ * file` prefix its message happens to start with, and a reworded message
+ * would silently have turned it into a 500.
+ */
+export class UnreadableArchiveError extends WorkflowDomainError {
+  constructor(reason: string) {
+    super(`Could not read zip file: ${reason}`, 422, { kind: 'unreadable-archive' });
+    this.name = 'UnreadableArchiveError';
+  }
+}
+
+/**
  * The draft branch doesn't share history with the target branch, so GitHub
  * would reject the change request with `no history in common`. Surfaced as
  * a structured payload so the frontend's typed-error parser can route into

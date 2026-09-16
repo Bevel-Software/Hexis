@@ -5,7 +5,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
-import { hashEmail } from '../../../../shared/hash-email.js';
+import { hashEmail } from '../../../../shared/email-identity.js';
 import { WorkflowValidationError } from '../../../../shared/domain-errors.js';
 
 // Cancel is now a DB state flip (no `gh`): `update(change_requests) … WHERE

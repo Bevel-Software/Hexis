@@ -39,6 +39,7 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('pending-commits');
 import type { Database } from '../database/connection.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import { pendingCommits } from '../database/schema.js';
 
 /**
@@ -175,7 +176,7 @@ export class PendingCommitsService {
    * in-flight or terminal work the caller shouldn't disturb.
    */
   async enqueue(input: EnqueueInput): Promise<void> {
-    const email = input.authorEmail.trim().toLowerCase();
+    const email = canonicalEmail(input.authorEmail);
     // Store the canonical (encoded) workspace id so the worker's per-workspace
     // claim — which keys on `knownWorkspaces()`'s encoded ids — can find this row
     // even when the enqueuing route delivered a URL-decoded id.
@@ -252,7 +253,7 @@ export class PendingCommitsService {
       workspaceId,
       branch: input.branch,
       path: input.path,
-      authorEmail: input.authorEmail.trim().toLowerCase(),
+      authorEmail: canonicalEmail(input.authorEmail),
       authorName: input.authorName,
     });
     return true;

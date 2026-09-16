@@ -13,6 +13,7 @@ import {
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { spliceGrant } from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { pluginsWorkspaceId } from './plugins.service.js';
 import { PluginProvisionError, type PluginProvisionService } from './plugin-provision.service.js';
@@ -183,7 +184,7 @@ export function createPluginsRoutes(
           return;
         }
         if (err instanceof WorkflowDomainError) {
-          res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+          res.status(err.status).json(domainErrorBody(err));
           return;
         }
         log.error('rename failed:', { err });
@@ -231,7 +232,7 @@ export function createPluginsRoutes(
           return;
         }
         if (err instanceof WorkflowDomainError) {
-          res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+          res.status(err.status).json(domainErrorBody(err));
           return;
         }
         log.error('link operation failed:', { err });
@@ -491,7 +492,7 @@ export function createPluginsRoutes(
       res.json({ ok: true, number: detail.number });
     } catch (err) {
       if (err instanceof WorkflowDomainError) {
-        res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+        res.status(err.status).json(domainErrorBody(err));
         return;
       }
       log.error('failed to open a join request:', { err });

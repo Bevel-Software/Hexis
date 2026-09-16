@@ -15,8 +15,9 @@ import type { AgentPreambleReader } from './read-preamble.js';
  *                             bridge reads it at startup; the External agent
  *                             access card reads it to show what agents get.
  *
- * The hosted proxy does NOT call this: it composes in-process at session
- * creation (see `McpService.createSession`). `Cache-Control: no-store`
+ * The hosted proxy does NOT call this: it composes in-process while building
+ * each request's server (see `McpService.createRequestServer`).
+ * `Cache-Control: no-store`
  * because the text is privileged: it is read with platform rights and may
  * name folders the caller cannot open. A reader throw is a 500, never an
  * empty preamble, so the caller's own fallback decides what to send.

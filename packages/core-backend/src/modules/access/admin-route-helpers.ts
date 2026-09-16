@@ -15,6 +15,7 @@
 import type express from 'express';
 import { logger } from '../../shared/logging.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 
 /** One error shape for every access-family route. */
 export function toHttpError(
@@ -22,9 +23,7 @@ export function toHttpError(
   logTag: string,
 ): { status: number; body: Record<string, unknown> } {
   if (err instanceof WorkflowDomainError && err.status < 500) {
-    // Spread the payload FIRST and assign `error` LAST — a payload key named
-    // `error` must never overwrite the message the client renders.
-    return { status: err.status, body: { ...(err.payload ?? {}), error: err.message } };
+    return { status: err.status, body: domainErrorBody(err) };
   }
   logger(logTag).error('route failure:', { err });
   const status = err instanceof WorkflowDomainError ? err.status : 500;

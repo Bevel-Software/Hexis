@@ -4,6 +4,7 @@ import { logger } from '../../shared/logging.js';
 const log = logger('admin');
 import { type WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import type { IAdminAccessService } from './admin.interface.js';
 
 /**
@@ -34,7 +35,7 @@ export class AdminAccessService implements IAdminAccessService {
 
   async isAdmin(email: string | undefined): Promise<boolean> {
     if (!email) return false;
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalEmail(email);
     if (this.alwaysAdminEmails.includes(normalized)) return true;
     try {
       // Ensure the authoritative clone is on disk, then resolve Admin-role

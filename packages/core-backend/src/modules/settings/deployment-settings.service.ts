@@ -379,21 +379,28 @@ export class DeploymentSettingsService {
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
    * leave the screen implying otherwise.
+   *
+   * `restartRequired` is this service's view: some restart-to-apply setting
+   * changed. It cannot know what the caller then applies to the running
+   * process, so `restartKeys` names the settings behind it — the setup route
+   * leaves out the folder names and the branch model when the save that
+   * completes setup has just applied them, and reports only what remains.
    */
   async save(
     entries: Record<string, string>,
     updatedBy: string | null,
-  ): Promise<{ restartRequired: boolean }> {
+  ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
     const toWrite = this.plan(entries);
 
-    let restartRequired = false;
+    /** The settings this save changed that a running server cannot pick up. */
+    const restartKeys: string[] = [];
     for (const { key, value, def } of toWrite) {
       // Compared against the EFFECTIVE value: a layout root that was unset
       // was already running on its default, so saving that default changes
       // nothing a restart would pick up.
       const effective =
         this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
-      if (def.restartToApply && effective !== value) restartRequired = true;
+      if (def.restartToApply && effective !== value) restartKeys.push(key);
       const encrypted = def.secret === true;
       const stored = encrypted ? this.crypto!.encrypt(value) : value;
       await this.db
@@ -410,7 +417,7 @@ export class DeploymentSettingsService {
     // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
     // it there is what makes a token saved here work without a restart.
     this.syncGitTokenEnv();
-    return { restartRequired };
+    return { restartRequired: restartKeys.length > 0, restartKeys };
   }
 
   /**

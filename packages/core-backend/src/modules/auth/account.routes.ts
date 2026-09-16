@@ -31,7 +31,8 @@ export function createAccountRoutes(
     next();
   };
 
-  // GET /api/admin/accounts — id, email, name, whether a password is set.
+  // GET /api/admin/accounts — id, email, name, whether a password hash is
+  // stored, and whether the account is the env bootstrap admin.
   router.get('/admin/accounts', requireAdmin, async (_req, res) => {
     res.json({ accounts: await authService.listAccounts() });
   });

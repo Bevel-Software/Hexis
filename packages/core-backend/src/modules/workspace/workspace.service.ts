@@ -6,12 +6,16 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
-import { PathTraversalError } from '../../shared/domain-errors.js';
+import {
+  PathTraversalError,
+  UnreadableArchiveError,
+  WorkflowValidationError,
+} from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   RemoteBranchGoneError,
@@ -154,6 +158,20 @@ async function readForConditionalWrite(absolutePath: string, relativePath: strin
     }
     throw err;
   }
+}
+
+/**
+ * The published library's path rule, refused as a TYPED 400.
+ *
+ * The library throws a bare `Error('Invalid path: …')` — it is shared with
+ * the frontend and cannot carry a backend domain type — and the routes used
+ * to recognise that by its message prefix. Converting it here, at the one
+ * layer that calls it, is what lets the route layer read a status off a
+ * class like it does for every other refusal.
+ */
+function assertValidPath(relativePath: string): void {
+  const reason = validateRelativePath(relativePath);
+  if (reason) throw new WorkflowValidationError(`Invalid path: ${reason}`);
 }
 
 /** Throw the conditional write's 409 unless the file still holds `expectedContent`. */
@@ -1231,7 +1249,7 @@ export class WorkspaceService implements IWorkspaceService {
    * serializes it against the app's own editors.
    */
   async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
-    assertValidRelativePath(newRelativePath);
+    assertValidPath(newRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const oldAbsolute = path.resolve(workspaceDir, oldRelativePath);
     const newAbsolute = path.resolve(workspaceDir, newRelativePath);
@@ -1264,7 +1282,7 @@ export class WorkspaceService implements IWorkspaceService {
     relativePath: string,
     expectedContent: string,
   ): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1297,7 +1315,7 @@ export class WorkspaceService implements IWorkspaceService {
    * them as one would be a worse bug than the race it would close.
    */
   async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1371,7 +1389,7 @@ export class WorkspaceService implements IWorkspaceService {
     content: string,
     options?: { failIfExists?: boolean; expectedContent?: string },
   ): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1411,7 +1429,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async createDirectory(workspaceId: string, relativePath: string): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1424,7 +1442,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1462,7 +1480,7 @@ export class WorkspaceService implements IWorkspaceService {
     const zipAbsolute = path.resolve(workspaceDir, zipRelativePath);
     this.assertWithinWorkspace(zipAbsolute, workspaceDir);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
-      throw new Error('Only .zip files can be extracted');
+      throw new WorkflowValidationError('Only .zip files can be extracted');
     }
 
     const inferredDest = (() => {
@@ -1470,7 +1488,7 @@ export class WorkspaceService implements IWorkspaceService {
       return d === '.' ? '' : d;
     })();
     const destRel = destDirRelativePath ?? inferredDest;
-    if (destRel) assertValidRelativePath(destRel);
+    if (destRel) assertValidPath(destRel);
     const destAbsolute = destRel ? path.resolve(workspaceDir, destRel) : workspaceDir;
     this.assertWithinWorkspace(destAbsolute, workspaceDir);
     // Neither the archive nor the destination may sit behind a link; each
@@ -1482,8 +1500,7 @@ export class WorkspaceService implements IWorkspaceService {
     try {
       zip = new AdmZip(zipAbsolute);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Could not read zip file: ${msg}`);
+      throw new UnreadableArchiveError(err instanceof Error ? err.message : String(err));
     }
 
     // The destination directory is created on demand by the first allowed entry
