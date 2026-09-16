@@ -108,8 +108,31 @@ describe('SurfaceLogThrottle — a wall clock that steps backwards', () => {
     throttle.decide('d', shape);
 
     // c is gone: the backwards step reset the cadence instead of stalling it.
-    // (b's entry is stamped t0+60s, "in the future" for 45s, and is kept — it
-    // is dropped once the clock has passed it by an interval.)
-    expect(throttle.size()).toBe(2);
+    // So is b: its stamp (t0+60s) was in the future at the reset, so it was
+    // restamped as seen then, and has now been quiet an interval too.
+    expect(throttle.size()).toBe(1);
+  });
+});
+
+describe('SurfaceLogThrottle — a large clock rollback', () => {
+  const shape = { tools: 5, manuals: 2 };
+
+  it('does not keep pre-rollback users for the length of the step — they age from the reset', () => {
+    let now = 1_000_000;
+    const throttle = new SurfaceLogThrottle(60_000, () => now);
+
+    throttle.decide('a', shape); // t0
+    now += 60_000;
+    throttle.decide('b', shape); // t0+60s — sweep; b stamped t0+60s
+
+    // The clock rolls back ten intervals. b's stamp is now 10 minutes in the
+    // future; waiting for the clock to pass it by an interval would keep b
+    // for eleven intervals — far past the two-interval bound.
+    now -= 600_000; // t0-540s
+    throttle.decide('c', shape); // sweep (cadence reset): b restamped as seen now
+    now += 60_000; // one interval in the new domain
+    throttle.decide('d', shape); // sweep: b and c have been quiet an interval — gone
+
+    expect(throttle.size()).toBe(1);
   });
 });

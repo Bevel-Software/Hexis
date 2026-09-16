@@ -88,10 +88,17 @@ export class SurfaceLogThrottle {
     return this.last.size;
   }
 
-  /** Entries for users quiet for the interval or longer carry no information; drop them. */
+  /**
+   * Entries for users quiet for the interval or longer carry no information;
+   * drop them. An entry stamped LATER than now was written before the clock
+   * stepped backwards: its age is unknowable across the step, so it is
+   * restamped as seen now and ages from here — otherwise a large step would
+   * keep every pre-step user for as long as the step, past the stated bound.
+   */
   private prune(now: number, except: string): void {
     for (const [userId, entry] of this.last) {
-      if (userId !== except && now - entry.at >= this.intervalMs) this.last.delete(userId);
+      if (entry.at > now) entry.at = now;
+      else if (userId !== except && now - entry.at >= this.intervalMs) this.last.delete(userId);
     }
   }
 }
