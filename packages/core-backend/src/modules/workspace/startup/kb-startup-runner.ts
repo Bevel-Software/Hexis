@@ -207,8 +207,26 @@ export class KbStartupRunner {
         }));
     let stopped = false;
 
+    // A rejected token is not worth asking again with: the host answers the
+    // same until the token changes, and the setup save that changes it runs
+    // the phase itself — while re-dialing with a dead token is what gets it
+    // rate-limited or locked. Such a boot still survives (the deployment
+    // comes up gated, showing that failure); it just is not re-dialed on a
+    // timer. Everything else the boot survived IS asked again: a host that
+    // could not be reached comes back, and a repository that was "not found"
+    // appears when it is created or when the token is granted access to it —
+    // neither needs a settings change on this side.
+    const worthRetrying = () => this.failureKind?.kind !== 'credentials-rejected';
+    const stopOnStanding = () => {
+      log(
+        `the retry stopped on a failure that asking again cannot change — ` +
+          `saving the setup form retries once it is fixed: ${this.failure ?? 'unknown failure'}`,
+      );
+    };
+
     void (async () => {
       let delay = initial;
+      if (this.failure !== null && !worthRetrying()) return stopOnStanding();
       while (!stopped) {
         await sleep(delay);
         // Another caller — the setup save — may have finished the phase while
@@ -220,13 +238,10 @@ export class KbStartupRunner {
           log('the remote is reachable again and the knowledge base is maintained — the deployment is open.');
           return;
         } catch (err) {
-          if (!(err instanceof KbRemoteUnreachableError)) {
-            log(
-              `the retry stopped on a failure that is not the remote being unreachable — ` +
-                `saving the setup form retries once it is fixed: ${this.failure ?? String(err)}`,
-            );
-            return;
-          }
+          // Stopped by either: a failure that is no longer the remote at all
+          // (the knowledge base itself is wrong — asking again will not change
+          // it), or a remote answer that a retry cannot change (see above).
+          if (!(err instanceof KbRemoteUnreachableError) || !worthRetrying()) return stopOnStanding();
           delay = Math.min(delay * 2, max);
           log(`remote still unreachable; trying again in ${Math.round(delay / 1000)}s`);
         }

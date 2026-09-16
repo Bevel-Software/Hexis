@@ -137,8 +137,8 @@ describe('canonicalFileIdentity', () => {
     '.',
     './',
     '/etc/passwd',
-    // Absolute, but spelled to look contained under the stand-in root the
-    // implementation resolves against.
+    // Absolute spellings, including a pair that would read as contained if
+    // any root were named `/workspace` — refused as absolute, never resolved.
     '/workspace/a.md',
     '/workspace',
     '/workspace/',

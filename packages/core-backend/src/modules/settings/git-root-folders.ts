@@ -33,7 +33,9 @@ export function listingRunnerFor(runner: IGitRunner): GitRunner {
 /** The listing bound to one runner: what the composition root hands the setup routes. */
 export function rootFolderListerFor(runner: IGitRunner): typeof listRootFolders {
   const run = listingRunnerFor(runner);
-  return (listing, deps = {}) => listRootFolders(listing, { run, ...deps });
+  // The bound runner is not a default a caller may override: a `run` in
+  // `deps` would take git back out of the port, deadline and cleanup included.
+  return (listing, deps = {}) => listRootFolders(listing, { ...deps, run });
 }
 
 let defaultRun: GitRunner | undefined;

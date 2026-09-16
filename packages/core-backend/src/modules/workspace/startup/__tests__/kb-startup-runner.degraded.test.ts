@@ -269,3 +269,43 @@ describe('KbStartupRunner with a remote that rejects the credentials', () => {
     expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
   });
 });
+
+describe('KbStartupRunner retry after a boot that survived a rejected token', () => {
+  it('does not re-dial on a timer: only an unreachable remote is worth asking again unchanged', async () => {
+    let dials = 0;
+    const rejecting: IGitRunner = {
+      defaultTimeoutMs: 1000,
+      run: (async () => {
+        dials += 1;
+        const said = "fatal: Authentication failed for 'https://example.com/acme/kb.git/'";
+        throw new GitRunError(`git ls-remote failed: Command failed: git ls-remote\n${said}`, {
+          exitCode: 128,
+          stderr: said,
+        });
+      }) as IGitRunner['run'],
+    };
+    const runner = makeRunner([], () => 'https://example.com/acme/kb.git', rejecting);
+    await runner.runAll().catch(() => undefined);
+    expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
+    expect(dials).toBe(1);
+
+    const waits: number[] = [];
+    const logged: string[] = [];
+    const retry = runner.retryUntilMaintained({
+      initialDelayMs: 5,
+      log: (m) => logged.push(m),
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    retry.stop();
+
+    // No timer, no second dial: the standing failure is still there for the
+    // setup screen, and the save that fixes the token runs the phase itself.
+    expect(waits).toEqual([]);
+    expect(dials).toBe(1);
+    expect(runner.lastFailureKind()?.kind).toBe('credentials-rejected');
+    expect(logged.join('\n')).toMatch(/saving the setup form retries/);
+  });
+});
