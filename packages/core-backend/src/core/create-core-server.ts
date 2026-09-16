@@ -462,7 +462,13 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName, disk: core.disk },
+    {
+      workspaceService: core.workspaceService,
+      accessControl: core.accessControl,
+      kbDirName: core.kbDirName,
+      disk: core.disk,
+      pluginIndex: core.pluginIndexService,
+    },
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the

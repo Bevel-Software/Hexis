@@ -353,16 +353,18 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  * concern, not a setup one, and belong to a different surface.
  */
 export interface PluginAttention {
-  /** Everything that needs a person: integrations to set up plus broken links. */
+  /** Everything that needs a person: integrations to set up, broken links, and what the definition left out. */
   total: number;
   /** The broken-link part alone — what turns the count orange. */
   brokenLinks: number;
+  /** What the platform could not keep of the plugin's definition — a server, a skill root — as the server reports it. */
+  warnings: number;
 }
 
 export function attentionOf(
   items: readonly LibraryItem[],
   plugin: string,
-  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks' | 'warnings'>[] = [],
 ): PluginAttention {
   // One pass for the links, returned beside the total: every caller wants
   // both, and computing the part again for the tone would filter the whole
@@ -371,7 +373,10 @@ export function attentionOf(
   const integrations = items.filter(
     (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
   ).length;
-  return { total: integrations + brokenLinks, brokenLinks };
+  // Amber, like an integration to set up: it needs a person who can edit
+  // the plugin's files, and blocks nobody but the users of what is missing.
+  const warnings = summaries.find((s) => s.name === plugin)?.warnings?.length ?? 0;
+  return { total: integrations + brokenLinks + warnings, brokenLinks, warnings };
 }
 
 /**

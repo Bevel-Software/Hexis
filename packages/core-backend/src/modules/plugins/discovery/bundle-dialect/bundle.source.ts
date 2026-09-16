@@ -37,6 +37,10 @@ import { expandProfile, parseRegistry, type McpRegistry } from './registry.js';
 export const BUNDLE_FILE = 'plugin.bundle.json';
 export const DEFAULT_REGISTRY_PATH = 'configs/mcp/registry.json';
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 /** The registry, when the repository has one; a missing file is null, a broken one warns. */
 export async function loadRegistry(kbRoot: string, warnings: string[]): Promise<McpRegistry | null> {
   let text: string;
@@ -118,6 +122,14 @@ export async function readBundlePlugin(
   if (typeof bundle.version === 'string') manifest.version = bundle.version;
   if (typeof bundle.description === 'string') manifest.description = bundle.description;
   if (typeof ui.displayName === 'string') manifest.displayName = ui.displayName;
+  // What the bundle says about itself beyond the four fields above — who
+  // wrote it, what it is for, how a catalogue should present it — is carried
+  // as written, so the compiled plugin can say the same. Shapes are the
+  // vendor manifests' own (`author` an object or a string, `keywords` a list,
+  // `interface` the Codex presentation block); anything else is left where it is.
+  if (isRecord(bundle.author) || typeof bundle.author === 'string') manifest.author = bundle.author;
+  if (Array.isArray(bundle.keywords) && bundle.keywords.every((k) => typeof k === 'string')) manifest.keywords = bundle.keywords;
+  if (Object.keys(ui).length > 0) manifest.interface = ui;
 
   return {
     name,

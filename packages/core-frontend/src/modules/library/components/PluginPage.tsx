@@ -144,8 +144,9 @@ export function PluginPage() {
   // Two kinds of attention, two banners: a link without its grant locks the
   // plugin's members out of a skill NOW, so it outranks an integration the
   // reader has not connected for themselves.
-  const { total: attention, brokenLinks } = attentionOf(data.items, plugin, data.pluginSummaries);
-  const integrationsNeedingSetup = attention - brokenLinks;
+  const { total: attention, brokenLinks, warnings: warningCount } = attentionOf(data.items, plugin, data.pluginSummaries);
+  const integrationsNeedingSetup = attention - brokenLinks - warningCount;
+  const definitionWarnings = summary?.warnings ?? [];
   // What the Skills band actually renders. The filter is a VIEW over the band,
   // not a different query — flipping it back must show exactly what was there.
   const shownSkills = filterOn ? skillItems.filter((i) => i.status.state !== 'ok') : skillItems;
@@ -313,6 +314,25 @@ export function PluginPage() {
               ? `linked skill can't be read by ${label}'s members: its access rules no longer name them. Repair the link`
               : `linked skills can't be read by ${label}'s members: their access rules no longer name them. Repair the links`
           } from the skill page${brokenLinks === 1 ? '' : 's'}.`}
+        </Banner>
+      )}
+      {/* What the platform could not keep of the plugin's definition — a
+          server its profile selects that the registry rejected, a skill root
+          that is not a folder. Said HERE, in words, because the people who
+          can fix those files open this page; the server log is where it
+          used to go, and nobody who owned a plugin ever read it. */}
+      {definitionWarnings.length > 0 && (
+        <Banner role="status" tone="wait" className="mt-4">
+          <span className="font-semibold">
+            {definitionWarnings.length === 1
+              ? "Something in this plugin's definition was left out:"
+              : `${definitionWarnings.length} things in this plugin's definition were left out:`}
+          </span>
+          <ul className="mt-1 list-disc pl-5">
+            {definitionWarnings.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
         </Banner>
       )}
       {integrationsNeedingSetup > 0 && (
