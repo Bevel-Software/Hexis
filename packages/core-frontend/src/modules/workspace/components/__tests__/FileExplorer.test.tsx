@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
 import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
@@ -95,6 +95,9 @@ interface RenderOptions {
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
   deleteEntry?: ReturnType<typeof vi.fn>;
+  moveEntry?: ReturnType<typeof vi.fn>;
+  /** The workspace id — the encoded branch name, so it decides "protected". */
+  workspaceId?: string;
   openFilePath?: string | null;
   /** Workspace-relative paths with an open change request. */
   openChangeRequestPaths?: string[];
@@ -107,6 +110,7 @@ function renderExplorer(opts: RenderOptions = {}) {
   const clearUploadError = opts.clearUploadError ?? vi.fn();
   const createFile = opts.createFile ?? vi.fn().mockResolvedValue(undefined);
   const deleteEntry = opts.deleteEntry ?? vi.fn().mockResolvedValue(undefined);
+  const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
@@ -119,8 +123,11 @@ function renderExplorer(opts: RenderOptions = {}) {
     clearUploadError,
     createFile,
     deleteEntry,
+    moveEntry,
+    ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
   });
   return {
+    moveEntry,
     dispatchUpload,
     clearUploadError,
     createFile,
@@ -861,12 +868,16 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
-  it('still deletes from the context menu', async () => {
+  it('still deletes from the context menu, once confirmed', async () => {
     const deleteEntry = vi.fn(async () => {});
     renderExplorer({ fileTree: TREE, deleteEntry });
     fireEvent.contextMenu(screen.getByText('brief.md'));
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    expect(deleteEntry).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     });
     expect(deleteEntry).toHaveBeenCalledWith('brief.md');
   });
@@ -1213,5 +1224,235 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
   it('leaves window.innerWidth and innerHeight as it found them', () => {
     expect(window.innerWidth).toBe(REAL_VIEWPORT.width);
     expect(window.innerHeight).toBe(REAL_VIEWPORT.height);
+  });
+});
+
+// Delete asked nothing and a drop moved a file into another folder without a
+// word about what that means. Both now ask first — and a move says that access
+// follows the destination, plus whatever else about it is worth knowing.
+describe('FileExplorer: delete and move ask first', () => {
+  const DRAG_MIME = 'application/x-workspace-path';
+  const KB = 'knowledge-base';
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          {
+            name: 'KnowledgeBase',
+            relativePath: `${KB}/KnowledgeBase`,
+            type: 'directory',
+            children: [
+              {
+                name: 'Legal',
+                relativePath: `${KB}/KnowledgeBase/Legal`,
+                type: 'directory',
+                children: [
+                  { name: 'contract.pdf', relativePath: `${KB}/KnowledgeBase/Legal/contract.pdf`, type: 'file' },
+                  { name: 'access.md', relativePath: `${KB}/KnowledgeBase/Legal/access.md`, type: 'file' },
+                  {
+                    name: 'Old',
+                    relativePath: `${KB}/KnowledgeBase/Legal/Old`,
+                    type: 'directory',
+                    children: [
+                      { name: 'nda.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/nda.md`, type: 'file' },
+                    ],
+                  },
+                ],
+              },
+              { name: 'Sales', relativePath: `${KB}/KnowledgeBase/Sales`, type: 'directory', children: [] },
+            ],
+          },
+          { name: 'Data', relativePath: `${KB}/Data`, type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+  const CONTRACT = `${KB}/KnowledgeBase/Legal/contract.pdf`;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  /** Open Legal so its rows render (Knowledge's children start collapsed). */
+  function openLegal() {
+    fireEvent.click(screen.getByText('Legal'));
+  }
+
+  async function dropOn(rowName: string, sourcePath: string) {
+    await act(async () => {
+      fireEvent.drop(screen.getByText(rowName), {
+        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''), files: [] },
+      });
+    });
+  }
+
+  async function chooseDelete(rowName: string) {
+    fireEvent.contextMenu(screen.getByText(rowName));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+  }
+
+  describe('delete', () => {
+    it('names the file and deletes it on Confirm', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      await chooseDelete('contract.pdf');
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent('Delete contract.pdf?');
+      expect(deleteEntry).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+      });
+      expect(deleteEntry).toHaveBeenCalledWith(CONTRACT);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('counts every file under a folder, nested ones included', async () => {
+      renderExplorer({ fileTree: TREE });
+      await chooseDelete('Legal');
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 3 files?');
+    });
+
+    it('deletes nothing on Cancel', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      await chooseDelete('Sales');
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Sales and its 0 files?');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(deleteEntry).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('move', () => {
+    it('states that access follows the destination, and moves on Confirm', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      await dropOn('Sales', CONTRACT);
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(
+        "Move contract.pdf to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      // A move between two folders of the same root, on a draft: nothing else to say.
+      expect(screen.queryAllByRole('note')).toHaveLength(0);
+      expect(moveEntry).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+    });
+
+    it("uses 's for a destination that does not end in s", async () => {
+      renderExplorer({ fileTree: TREE });
+      openLegal();
+      await dropOn('Old', CONTRACT);
+      expect(screen.getByRole('dialog')).toHaveTextContent("Access to it will follow Old's rules from now on.");
+    });
+
+    it('sends nothing on Cancel', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      await dropOn('Sales', CONTRACT);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(moveEntry).not.toHaveBeenCalled();
+      expect(mockAuthFetch).not.toHaveBeenCalled();
+    });
+
+    it('does nothing on a drop onto the folder the entry is already in', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      await dropOn('Legal', CONTRACT);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
+    it('warns that a platform-managed file is read differently once moved', async () => {
+      renderExplorer({ fileTree: TREE });
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
+      expect(screen.getByRole('note')).toHaveTextContent(
+        'access.md is a platform-managed file; moving it changes how the platform reads it.',
+      );
+    });
+
+    it('warns when the move crosses from one root into another', async () => {
+      renderExplorer({ fileTree: TREE });
+      await dropOn('Data', CONTRACT);
+      expect(screen.getByRole('note')).toHaveTextContent(
+        'This moves it out of KnowledgeBase/ into Data/ — the two roots are handled differently.',
+      );
+    });
+
+    it('warns that a move into a folder the caller cannot write will be refused', async () => {
+      configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
+      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: false }) });
+      renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      await dropOn('Sales', CONTRACT);
+      expect(await screen.findByRole('note')).toHaveTextContent(
+        "You can't write to Sales — the move will be refused.",
+      );
+      // The lookup is the folder's, repo-relative — what the access route resolves.
+      expect(String(mockAuthFetch.mock.calls[0][0])).toContain(
+        `/api/workspace/main/access?path=${encodeURIComponent('KnowledgeBase/Sales')}&kind=folder`,
+      );
+    });
+
+    it('adds no refusal warning when the caller can write the destination', async () => {
+      configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
+      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: true }) });
+      renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      await dropOn('Sales', CONTRACT);
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      expect(screen.queryAllByRole('note')).toHaveLength(0);
+    });
+  });
+
+  describe('keyboard', () => {
+    it('confirms on Enter and returns focus to the row', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      const row = screen.getByText('contract.pdf').closest('button')!;
+      await dropOn('Sales', CONTRACT);
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move' }));
+      await act(async () => {
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+      });
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it('cancels on Escape and returns focus to the row', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      const row = screen.getByText('contract.pdf').closest('button')!;
+      await chooseDelete('contract.pdf');
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(deleteEntry).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it('lets Enter press Cancel when Cancel has focus', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      await chooseDelete('Sales');
+      const cancel = screen.getByRole('button', { name: 'Cancel' });
+      cancel.focus();
+      await act(async () => {
+        fireEvent.keyDown(cancel, { key: 'Enter' });
+      });
+      expect(deleteEntry).not.toHaveBeenCalled();
+    });
   });
 });

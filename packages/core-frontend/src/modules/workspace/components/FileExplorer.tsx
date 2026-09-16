@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import {
+  isProtectedBranch,
   validateFilename,
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
@@ -51,6 +52,9 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
+import { fetchFileAccess } from '../../access/api';
+import { TreeActionConfirmDialog, type TreeConfirmRequest } from './TreeActionConfirm';
+import { moveWarnings } from '../utils/treeConfirm';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -187,6 +191,28 @@ export interface TreeMenuItem {
   onSelect(): void;
 }
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
+
+/**
+ * Ask before a delete or a move — see `TreeActionConfirm`. `TreeChrome` holds
+ * the one open request and renders its dialog; a row outside any chrome has
+ * no one to ask, so the default runs the operation as it always did.
+ */
+const TreeConfirmContext = createContext<(request: TreeConfirmRequest) => void>((request) => {
+  void request.run();
+});
+const useTreeConfirm = () => useContext(TreeConfirmContext);
+
+/**
+ * The row button for a path, found in the DOM. A move is dropped on ANOTHER
+ * row, so the dragged row's ref is not in hand where the drop lands; the path
+ * is. (A pinned folder renders twice — the first match is the one to return to.)
+ */
+function rowForPath(path: string): HTMLElement | null {
+  for (const el of document.querySelectorAll<HTMLElement>('[data-tree-path]')) {
+    if (el.dataset.treePath === path) return el;
+  }
+  return null;
+}
 const useTreeNav = () => useContext(TreeNavContext);
 
 /** Depth-first lookup of a tree entry by its exact relativePath. */
@@ -242,6 +268,7 @@ function ContextMenu({
   const { deleteEntry, unzipHere } = useWorkspace();
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
+  const confirm = useTreeConfirm();
   const pinned = isPinned(entry.relativePath);
   const [unzipping, setUnzipping] = useState(false);
   // Outside-click, Escape, and focus return — none of which `MenuPanel`
@@ -276,15 +303,23 @@ function ContextMenu({
     }
   };
 
-  const handleDelete = async () => {
+  // Delete asks first; Confirm runs the delete exactly as the menu used to.
+  const handleDelete = () => {
     onClose();
-    try {
-      await deleteEntry(entry.relativePath);
-    } catch (err) {
-      console.error('Failed to delete entry:', err);
-      const msg = err instanceof Error ? err.message : String(err);
-      alert(`Failed to delete ${entry.relativePath}:\n${msg}`);
-    }
+    confirm({
+      kind: 'delete',
+      entry,
+      returnFocusTo: () => returnFocusTo?.current ?? null,
+      run: async () => {
+        try {
+          await deleteEntry(entry.relativePath);
+        } catch (err) {
+          console.error('Failed to delete entry:', err);
+          const msg = err instanceof Error ? err.message : String(err);
+          alert(`Failed to delete ${entry.relativePath}:\n${msg}`);
+        }
+      },
+    });
   };
 
   const handleUnzip = async () => {
@@ -533,6 +568,7 @@ export function FileTreeNode({
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
+  const confirm = useTreeConfirm();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
@@ -686,7 +722,25 @@ export function FileTreeNode({
         ) {
           return;
         }
-        moveEntry(sourcePath, newPath);
+        // Every cross-folder move is an access change, so it asks first;
+        // nothing is sent until Confirm.
+        confirm({
+          kind: 'move',
+          sourcePath,
+          targetDir,
+          destinationLabel: targetDir ? entry.name : 'the top level',
+          returnFocusTo: () => rowForPath(sourcePath),
+          run: async () => {
+            try {
+              await moveEntry(sourcePath, newPath);
+            } catch (err) {
+              // Same surfacing as rename — a refused move (a folder the caller
+              // may not write) must not read as one that silently reverted.
+              const msg = err instanceof Error ? err.message : String(err);
+              alert(`Failed to move ${name}:\n${msg}`);
+            }
+          },
+        });
         return;
       }
 
@@ -705,7 +759,7 @@ export function FileTreeNode({
       if (files.length === 0) return;
       dispatchUpload({ kind: 'files', files }, targetDir);
     },
-    [entry, isRoot, dispatchUpload, moveEntry],
+    [entry, isRoot, dispatchUpload, moveEntry, confirm],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -815,6 +869,7 @@ export function FileTreeNode({
           <button
             ref={rowRef}
             type="button"
+            data-tree-path={entry.relativePath}
             // A folder with nothing in it has no caret and nothing to expand,
             // so it claims neither state: `aria-expanded` is for a control
             // that can open, and an empty folder cannot.
@@ -937,6 +992,7 @@ export function FileTreeNode({
         <button
           ref={rowRef}
           type="button"
+          data-tree-path={entry.relativePath}
           className={cn(
             ROW_CLASS,
             'text-accent hover:bg-hover hover:text-accent-hover',
@@ -977,6 +1033,7 @@ export function FileTreeNode({
       <button
         ref={rowRef}
         type="button"
+        data-tree-path={entry.relativePath}
         aria-current={isActive}
         className={cn(
           ROW_CLASS,
@@ -1121,8 +1178,49 @@ export function TreeChrome({
     return { number: crNumber, branch: cr?.branch ?? null };
   }, [accessTarget, inheritedProposal, suggestionOnlyPaths, openChangeRequests]);
 
+  // The one open delete/move confirmation for this tree.
+  const { workspaceId, kbDirName } = useWorkspace();
+  const [confirmRequest, setConfirmRequest] = useState<TreeConfirmRequest | null>(null);
+  // Whether the caller may write the move's destination: null until known.
+  // The same three short-circuits as `useFileAccess` (and the upload's
+  // suggestion routing): drafts and paths outside the KB are writable
+  // without asking, and a failed lookup warns about nothing — the server
+  // is the gate either way, and the dialog never waits on this.
+  // Keyed by the request it answers, so a stale answer never reaches the next one.
+  const [writableAnswer, setWritableAnswer] = useState<
+    { request: TreeConfirmRequest; canWrite: boolean } | null
+  >(null);
+  const destinationWritable =
+    writableAnswer && writableAnswer.request === confirmRequest ? writableAnswer.canWrite : null;
+  const focusAfterConfirm = useRef<(() => HTMLElement | null) | null>(null);
+  useEffect(() => {
+    if (confirmRequest?.kind !== 'move' || !workspaceId || !kbDirName) return;
+    if (!isProtectedBranch(decodeURIComponent(workspaceId))) return;
+    const prefix = `${kbDirName}/`;
+    if (!confirmRequest.targetDir.startsWith(prefix)) return;
+    let cancelled = false;
+    fetchFileAccess(workspaceId, confirmRequest.targetDir.slice(prefix.length), 'folder')
+      .then((res) => { if (!cancelled) setWritableAnswer({ request: confirmRequest, canWrite: res.canWrite }); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [confirmRequest, workspaceId, kbDirName]);
+  const closeConfirm = (andRun: boolean) => {
+    if (!confirmRequest) return;
+    focusAfterConfirm.current = confirmRequest.returnFocusTo;
+    setConfirmRequest(null);
+    if (andRun) void confirmRequest.run();
+  };
+  // Focus goes back to the row once the dialog has unmounted — after the
+  // Dialog's own restore, which would otherwise hand it to the (gone) menu.
+  useEffect(() => {
+    if (confirmRequest || !focusAfterConfirm.current) return;
+    focusAfterConfirm.current()?.focus();
+    focusAfterConfirm.current = null;
+  }, [confirmRequest]);
+
   return (
     <>
+      <TreeConfirmContext.Provider value={setConfirmRequest}>
       <TreeNavContext.Provider value={nav}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
       <ManageAccessContext.Provider value={openAccess}>
@@ -1132,6 +1230,19 @@ export function TreeChrome({
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
       </TreeNavContext.Provider>
+      </TreeConfirmContext.Provider>
+      {confirmRequest && (
+        <TreeActionConfirmDialog
+          request={confirmRequest}
+          warnings={
+            confirmRequest.kind === 'move'
+              ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
+              : []
+          }
+          onCancel={() => closeConfirm(false)}
+          onConfirm={() => closeConfirm(true)}
+        />
+      )}
       {openSuggestionCr && (
         <ChangeRequestDialog
           cr={openSuggestionCr}
