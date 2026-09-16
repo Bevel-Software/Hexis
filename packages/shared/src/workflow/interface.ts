@@ -234,6 +234,15 @@ export interface IWorkflowService {
     sha: string,
     path: string,
   ): Promise<string | null>;
+  /**
+   * A change request's current fork point: the merge base of the freshly
+   * fetched target and source branches, or `null` when they share no history.
+   */
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 

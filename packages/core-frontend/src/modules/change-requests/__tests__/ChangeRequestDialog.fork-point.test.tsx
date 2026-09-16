@@ -100,7 +100,9 @@ const NOTICE = /has changed since this was proposed/;
 beforeEach(() => {
   detailMock.fetchPrDetail.mockReset();
   mergeApi.refreshChangeRequestFromTarget.mockReset();
-  filesApi.readFileAtForkPoint.mockReset().mockResolvedValue(ORIGINAL);
+  filesApi.readFileAtForkPoint
+    .mockReset()
+    .mockImplementation(async (_n: number, sha: string) => ({ content: ORIGINAL, forkSha: sha }));
   filesApi.readFileOnBranch
     .mockReset()
     .mockImplementation(async (branch: string) => (branch === 'main' ? TARGET_TIP : PROPOSED));
@@ -150,21 +152,39 @@ describe('ChangeRequestDialog: the needs-updating notice', () => {
     expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
   });
 
-  it('Update merges on the server, refreshes the dialog, and the notice disappears', async () => {
+  it('Update merges on the server, re-reads the open file, and the notice disappears', async () => {
+    const MERGED_FORK = 'e'.repeat(40);
     detailMock.fetchPrDetail
       .mockResolvedValueOnce(detail())
-      .mockResolvedValue(detail({ behind: false, mergeBaseSha: 'e'.repeat(40) }));
+      .mockResolvedValue(detail({ behind: false, mergeBaseSha: MERGED_FORK }));
     mergeApi.refreshChangeRequestFromTarget.mockResolvedValue({});
-    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    const { container } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 120'));
+    expect(filesApi.readFileOnBranch).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+    // After the merge the branch carries Bob's line too, and the fork point is
+    // the target tip it was merged from.
+    filesApi.readFileOnBranch.mockImplementation(async () => 'price: 120\nstatus: signed\n');
+    filesApi.readFileAtForkPoint.mockImplementation(async (_n: number, sha: string) => ({
+      content: TARGET_TIP,
+      forkSha: sha,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
     await waitFor(() => expect(mergeApi.refreshChangeRequestFromTarget).toHaveBeenCalledWith(21));
     await waitFor(() => expect(screen.queryByText(NOTICE)).not.toBeInTheDocument());
     expect(detailMock.fetchPrDetail).toHaveBeenLastCalledWith(21, { fresh: true });
-    // The fresh fork point is what the diff reads from now.
+
+    // The open file is READ AGAIN — not left on "Loading…" — and the diff is
+    // still only the author's line, now against the fresh fork point.
+    await waitFor(() => expect(filesApi.readFileOnBranch).toHaveBeenCalledTimes(2));
+    expect(filesApi.readFileAtForkPoint).toHaveBeenCalledWith(21, MERGED_FORK, 'Sales/deal.yaml');
+    await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument());
     await waitFor(() =>
-      expect(filesApi.readFileAtForkPoint).toHaveBeenCalledWith(21, 'e'.repeat(40), 'Sales/deal.yaml'),
+      expect([...container.querySelectorAll('del')].map((n) => n.textContent)).toEqual(['price: 100']),
     );
+    expect([...container.querySelectorAll('ins')].map((n) => n.textContent)).toEqual(['price: 120']);
   });
 
   it('a conflicting Update shows the conflict help with the prompt for the agent', async () => {

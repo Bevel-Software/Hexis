@@ -26,6 +26,7 @@ async function makeHarness() {
   const workflow = {
     getChangeRequest: vi.fn(async (n: number) => (n === 7 ? CR : null)),
     fileAtForkPoint: vi.fn(async () => 'price: 100\n'),
+    changeRequestForkPoint: vi.fn(async (): Promise<string | null> => SHA),
   };
   const workspaceService = {
     getOrCreateForUser: vi.fn(async () => ({ id: 'ws-alice' })),
@@ -67,7 +68,7 @@ describe('GET /workflow/change-requests/:number/fork-point-file', () => {
     h = await makeHarness();
     const res = await get(7, 'Sales/Deal.md');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ content: 'price: 100\n' });
+    expect(await res.json()).toEqual({ content: 'price: 100\n', forkSha: SHA });
     expect(h.canReadAtRef).toHaveBeenCalledWith(
       'ws-alice',
       'origin/current-company-state',
@@ -89,11 +90,37 @@ describe('GET /workflow/change-requests/:number/fork-point-file', () => {
     expect(h.workflow.fileAtForkPoint).not.toHaveBeenCalled();
   });
 
-  it('refuses a workspace-prefixed path, a missing sha, and an unknown request', async () => {
+  it('refuses a workspace-prefixed path and an unknown request', async () => {
     h = await makeHarness();
     expect((await get(7, 'knowledge-base/Secret/x.md')).status).toBe(400);
-    expect((await get(7, 'Sales/Deal.md', '')).status).toBe(400);
     expect((await get(8, 'Sales/Deal.md')).status).toBe(404);
     expect(h.workflow.fileAtForkPoint).not.toHaveBeenCalled();
+  });
+
+  it("without a sha, resolves the request's current fork point (the file page's boxes)", async () => {
+    h = await makeHarness();
+    const res = await get(7, 'Sales/Deal.md', '');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ content: 'price: 100\n', forkSha: SHA });
+    expect(h.workflow.changeRequestForkPoint).toHaveBeenCalledWith(
+      'ws-alice',
+      'current-company-state',
+      'alice/deal',
+    );
+    expect(h.workflow.fileAtForkPoint).toHaveBeenCalledWith('ws-alice', 'current-company-state', SHA, 'Sales/Deal.md');
+  });
+
+  it('branches with no shared history answer forkSha: null, and read nothing', async () => {
+    h = await makeHarness();
+    h.workflow.changeRequestForkPoint.mockResolvedValueOnce(null);
+    const res = await get(7, 'Sales/Deal.md', '');
+    expect(await res.json()).toEqual({ content: null, forkSha: null });
+    expect(h.workflow.fileAtForkPoint).not.toHaveBeenCalled();
+  });
+
+  it('a denied read never resolves the fork point either', async () => {
+    h = await makeHarness();
+    expect((await get(7, 'Secret/x.md', '')).status).toBe(403);
+    expect(h.workflow.changeRequestForkPoint).not.toHaveBeenCalled();
   });
 });

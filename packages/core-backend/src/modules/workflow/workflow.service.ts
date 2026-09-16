@@ -810,6 +810,14 @@ export class WorkflowService implements IWorkflowService {
     return this.git.readFileAtForkPoint(workspaceId, baseBranch, sha, path);
   }
 
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    return this.git.mergeBaseForPr(workspaceId, baseBranch, headBranch);
+  }
+
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string> {
     return this.git.diffFileAtCommit(workspaceId, path, sha);
   }

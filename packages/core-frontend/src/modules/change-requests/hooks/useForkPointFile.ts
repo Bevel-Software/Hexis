@@ -36,7 +36,7 @@ export function useForkPointFileRead(
     asked.current.add(key);
     const land = (read: BranchFileRead) => setSettled((m) => new Map(m).set(key, read));
     readFileAtForkPoint(crNumber, sha, repoRelativePath)
-      .then((content) => land(content === null ? FAILED : { content, failed: false }))
+      .then(({ content }) => land(content === null ? FAILED : { content, failed: false }))
       .catch(() => land(FAILED));
   }, [crNumber, sha, repoRelativePath, key]);
 

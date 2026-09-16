@@ -1,16 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
-import { readFileOnBranch } from '../services/change-requests.api';
+import { readFileAtForkPoint, readFileOnBranch, type ForkPointFile } from '../services/change-requests.api';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
 
 /**
- * For each open change request touching `repoRelativePath`, that branch's copy
- * of the file diffed against the file as it stands on the default branch.
+ * For each open change request touching `repoRelativePath`, what THAT REQUEST
+ * changes in the file: its branch's copy diffed against the file as it stood
+ * at the request's fork point — the text its author started from.
  *
- * Against CURRENT main, not against what the author forked from: the person
- * deciding is being asked "should this text become that text?", and the only
- * honest answer to that compares the proposal with what is there right now.
+ * Not against current main. Diffing against the tip showed every edit made on
+ * main after the proposal as something the proposal DELETES: a reader saw
+ * another person's direct edit struck through inside somebody else's request,
+ * and feared approving it would undo that edit. (Applying is a merge, and keeps
+ * the newer edit.) The request dialog reads the same fork point, so the box and
+ * the whole-change view never disagree about what a request does.
+ *
+ * `mainRaw` is still the "before" in exactly one case: branches with no shared
+ * history have no fork point to read, and the tip is the only text left.
  *
  * Keyed by CR number + path + revision so a tab switch or a reload can never
  * show the previous file's diff under this file's heading.
@@ -22,6 +29,7 @@ export function useCrFileDiffs(
   revision = 0,
 ): Map<number, DiffLine[] | null> {
   const [contents, setContents] = useState<Map<string, string>>(new Map());
+  const [forkReads, setForkReads] = useState<Map<string, ForkPointFile>>(new Map());
   /** Requests already made, so a failed read is not retried on every render. */
   const asked = useRef<Set<string>>(new Set());
 
@@ -54,6 +62,13 @@ export function useCrFileDiffs(
           // would diff as "every line deleted" and present a proposal to erase
           // the file. No content means no claim: the box keeps waiting.
         });
+      readFileAtForkPoint(cr.number, null, repoRelativePath)
+        .then((read) => setForkReads((m) => new Map(m).set(k, read)))
+        .catch(() => {
+          // Same rule for the before side: an unreadable fork point is no
+          // claim, and falling back to main would bring back the very
+          // "deletions" this reads the fork point to avoid.
+        });
     }
     // `contents` is intentionally out: it changes on every arrival, and the
     // `asked` guard already makes each (cr, file, revision) fetch once.
@@ -64,16 +79,21 @@ export function useCrFileDiffs(
     const out = new Map<number, DiffLine[] | null>();
     for (const cr of relevant) {
       const branchRaw = contents.get(key(cr.number));
-      if (mainRaw === null || branchRaw === undefined) {
+      const fork = forkReads.get(key(cr.number));
+      // The before side: the fork point's text; '' when the request ADDS the
+      // file (absent at the fork point); main only when there is no fork point.
+      const before =
+        fork === undefined ? null : fork.forkSha === null ? mainRaw : (fork.content ?? '');
+      if (before === null || branchRaw === undefined) {
         out.set(cr.number, null);
         continue;
       }
-      const d = diffLines(mainRaw, branchRaw);
-      // A proposal whose text now matches main has been overtaken — showing an
-      // empty diff would ask for a decision about nothing.
+      const d = diffLines(before, branchRaw);
+      // A proposal that no longer changes anything has been overtaken — showing
+      // an empty diff would ask for a decision about nothing.
       out.set(cr.number, hasChanges(d) ? d : []);
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [relevant, contents, mainRaw, repoRelativePath, revision]);
+  }, [relevant, contents, forkReads, mainRaw, repoRelativePath, revision]);
 }

@@ -78,6 +78,14 @@ export function ChangeRequestDialog({
   /** Files whose branch copy could not be read — shown as such, never guessed at. */
   const [unreadable, setUnreadable] = useState<Set<string>>(new Set());
   const [blocked, setBlocked] = useState(false);
+  /**
+   * Bumped when the request's branch has moved under the dialog (an Update
+   * merged into it), so the open file's branch copy is read again. Clearing
+   * the cached copy alone is not a read: the effect below only runs when its
+   * dependencies change, and the selection has not — the pane sat on
+   * "Loading…" forever.
+   */
+  const [branchRevision, setBranchRevision] = useState(0);
 
   const isTop = useModalLayer(true);
   useEffect(() => {
@@ -180,7 +188,7 @@ export function ChangeRequestDialog({
         // "every line deleted" — a change request that erases the file.
         .catch(() => setUnreadable((s) => new Set(s).add(selected)));
     }
-  }, [selected, selectedIsBinary, cr.branch]);
+  }, [selected, selectedIsBinary, cr.branch, branchRevision]);
 
   const isAdded = addedFiles.includes(selected);
 
@@ -459,6 +467,9 @@ export function ChangeRequestDialog({
       });
       setPicked(null);
       setDetail(await fetchPrDetail(cr.number));
+      // The selection can land back on this same path (a scope base file), and
+      // a cleared cache is only re-read when the read effect runs again.
+      setBranchRevision((r) => r + 1);
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
     } finally {
@@ -537,10 +548,15 @@ export function ChangeRequestDialog({
     setError(null);
     try {
       await refreshChangeRequestFromTarget(cr.number);
+      const fresh = await fetchPrDetail(cr.number, { fresh: true });
+      // Every branch copy read so far predates the merge — forget them and
+      // read again, in the same render the fresh detail (and so the fresh
+      // fork point) lands in.
       asked.current.clear();
       setBranchContents({});
       setUnreadable(new Set());
-      setDetail(await fetchPrDetail(cr.number, { fresh: true }));
+      setDetail(fresh);
+      setBranchRevision((r) => r + 1);
     } catch (err) {
       const conflicts =
         err instanceof GitApiError &&

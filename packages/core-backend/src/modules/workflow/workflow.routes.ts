@@ -762,9 +762,13 @@ export function createWorkflowRoutes(
 
   /**
    * One file as it stood at the request's fork point — the "before" side of
-   * every diff in the request dialog. `sha` is the detail's `mergeBaseSha`;
-   * the git layer refuses any commit that is not on the target's history.
-   * `path` is repo-relative. Read authority comes from the target branch's
+   * every diff of the request. `sha` is the detail's `mergeBaseSha` when the
+   * caller holds one (the dialog: its diff and its file list then describe
+   * the same fork point); the git layer refuses any commit that is not on the
+   * target's history. Without `sha` the request's CURRENT fork point is
+   * resolved here (the file page's change boxes, which see only summaries).
+   * Answers `{ content, forkSha }`; `forkSha: null` means the branches share
+   * no history, so there is no fork point to read. `path` is repo-relative. Read authority comes from the target branch's
    * access tree (`origin/<base>`), the tree the fork point belongs to; an
    * unresolvable verdict is a denial.
    */
@@ -776,8 +780,8 @@ export function createWorkflowRoutes(
     }
     const repoPath = typeof req.query.path === 'string' ? req.query.path : '';
     const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
-    if (!repoPath || !sha) {
-      res.status(400).json({ error: 'path and sha are required' });
+    if (!repoPath) {
+      res.status(400).json({ error: 'path is required' });
       return;
     }
     // Repo-relative ONLY. The git layer strips a leading `<kbDirName>/`, so a
@@ -806,8 +810,14 @@ export function createWorkflowRoutes(
         res.status(403).json({ error: `You don't have permission to read "${repoPath}".` });
         return;
       }
-      const content = await workflow.fileAtForkPoint(workspace.id, cr.base, sha, repoPath);
-      res.json({ content });
+      const forkSha =
+        sha || (await workflow.changeRequestForkPoint(workspace.id, cr.base, cr.branch));
+      if (!forkSha) {
+        res.json({ content: null, forkSha: null });
+        return;
+      }
+      const content = await workflow.fileAtForkPoint(workspace.id, cr.base, forkSha, repoPath);
+      res.json({ content, forkSha });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

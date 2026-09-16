@@ -33,8 +33,8 @@ export interface FileChangeBoxesProps {
  * text become that text?") is unanswerable without the text, which is why
  * this is not a banner pointing at a review queue somewhere else.
  *
- * Owns the whole decision loop: per-request diffs against the default
- * branch, Approve (approvals → merge → wait for the outcome event),
+ * Owns the whole decision loop: per-request diffs from each request's fork
+ * point (see `useCrFileDiffs`), Approve (approvals → merge → wait for the outcome event),
  * Decline, the author's Withdraw, and "Read the whole change" opening the
  * shared {@link ChangeRequestDialog}. Resolutions dispatch
  * {@link PR_STALE_EVENT} so the tree dots, the tabs and this very list

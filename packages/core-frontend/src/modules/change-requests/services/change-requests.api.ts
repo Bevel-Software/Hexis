@@ -44,19 +44,26 @@ export async function readFileOnBranch(branch: string, repoRelativePath: string)
   return readFile(workspace.id, `${workspace.kbDirName}/${repoRelativePath}`);
 }
 
+/** A file read at a change request's fork point. */
+export interface ForkPointFile {
+  /** The file's text there; `null` when the path did not exist at the fork point. */
+  content: string | null;
+  /** The fork point read; `null` when the branches share no history (nothing was read). */
+  forkSha: string | null;
+}
+
 /**
- * A file as it stood at a change request's fork point (`sha` = the detail's
- * `mergeBaseSha`) — the "before" side of every diff in the request dialog.
- * `null` when the path did not exist there.
+ * A file as it stood at a change request's fork point — the "before" side of
+ * every diff of the request. Pass `sha` (the detail's `mergeBaseSha`) when you
+ * hold one; `null` asks the server for the request's current fork point.
  */
 export async function readFileAtForkPoint(
   crNumber: number,
-  sha: string,
+  sha: string | null,
   repoRelativePath: string,
-): Promise<string | null> {
-  const qs = new URLSearchParams({ path: repoRelativePath, sha });
-  const { content } = await handleApiResponse<{ content: string | null }>(
+): Promise<ForkPointFile> {
+  const qs = new URLSearchParams({ path: repoRelativePath, ...(sha ? { sha } : {}) });
+  return handleApiResponse<ForkPointFile>(
     await authFetch(`/api/workflow/change-requests/${crNumber}/fork-point-file?${qs}`),
   );
-  return content;
 }
