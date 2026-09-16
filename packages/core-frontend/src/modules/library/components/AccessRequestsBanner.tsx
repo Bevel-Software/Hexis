@@ -124,7 +124,7 @@ export function AccessRequestsBanner({
                   <button
                     key={folder}
                     type="button"
-                    className="ml-1 rounded-xs text-detail text-ink-muted underline underline-offset-2 hover:text-ink"
+                    className="ml-1 rounded-xs text-detail text-ink-muted underline underline-offset-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink-muted"
                     onClick={() => onManage(folder)}
                   >
                     Manage access
