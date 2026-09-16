@@ -434,9 +434,12 @@ function ContextMenu({
           </span>
         </MenuItem>
       )}
-      <MenuItem role="menuitem" onClick={handleCopyPath}>
-        <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
-      </MenuItem>
+      {/* The workspace root has no path worth linking: it would copy `/.`. */}
+      {!isRoot && (
+        <MenuItem role="menuitem" onClick={handleCopyPath}>
+          <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
+        </MenuItem>
+      )}
       {offersManageAccess(entry) && (
         <>
           <div className="my-1 border-t border-line" />

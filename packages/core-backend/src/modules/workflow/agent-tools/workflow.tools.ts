@@ -8,6 +8,11 @@ import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 
+/** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
+function stripKbDir(path: string, kbDirName: string): string {
+  return path.startsWith(`${kbDirName}/`) ? path.slice(kbDirName.length + 1) : path;
+}
+
 // A function, not a constant: the branch model is applied during boot, and a
 // module-scope capture would freeze this at the empty set that exists before it.
 const protectedInline = () => [...PROTECTED_BRANCHES].map((b) => `\`${b}\``).join(' / ');
@@ -378,7 +383,7 @@ export function registerWorkflowTools(
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
         body: { type: 'string', minLength: 1, description: 'Comment body (Markdown).' },
-        path: { type: 'string', description: 'Workspace-relative path for a file-level/inline comment, with or without a leading slash.' },
+        path: { type: 'string', description: `Repository-relative path of the changed file for a file-level/inline comment (e.g. \`KnowledgeBase/Foo.md\`); the workspace form \`${kbDirName}/KnowledgeBase/Foo.md\`, with or without a leading slash, names the same file.` },
         line: { type: 'integer', minimum: 1, description: 'Line number for an inline comment. Requires `path`.' },
         parentId: { type: 'string', description: 'Comment id to reply to.' },
       },
@@ -398,7 +403,10 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const number = args.number as number;
       const line = typeof args.line === 'number' ? args.line : undefined;
-      const path = typeof args.path === 'string' ? args.path : undefined;
+      // A change request's files are repository-relative; the workspace form
+      // Copy path gives (`/<kbDirName>/…`, its slash already dropped by the
+      // mount) carries the clone folder, which no changed file would match.
+      const path = typeof args.path === 'string' ? stripKbDir(args.path, kbDirName) : undefined;
       if (line !== undefined && !path) {        throw new ToolError('`path` is required when `line` is provided (inline comments anchor to a file).', 400);
       }
       const detail = await ctx.workflowService.getChangeRequestDetail(number, {

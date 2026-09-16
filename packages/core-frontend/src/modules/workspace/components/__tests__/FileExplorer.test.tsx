@@ -934,6 +934,15 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(writeText).toHaveBeenCalledWith('/docs/a.md');
   });
 
+  it('does not offer Copy path on the workspace root, which would copy "/."', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(screen.getAllByText('.')[0]);
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
+  });
+
   it('offers Copy path on a folder row too', () => {
     renderExplorer({ fileTree: TREE });
     fireEvent.contextMenu(screen.getByText('reports'));

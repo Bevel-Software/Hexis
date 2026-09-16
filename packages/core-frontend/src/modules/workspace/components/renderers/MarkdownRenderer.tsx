@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useContext, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { KbMarkdownView } from './KbMarkdownView';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
@@ -8,7 +8,7 @@ import {
   useCanonicalFileUrl,
 } from '../../routing/kb-routes';
 import { useRendererWorkspaceId } from './rendererWorkspace';
-import { useWorkspace } from '../../state/workspace.context';
+import { WorkspaceContext } from '../../state/workspace.context';
 import { markdownLinkForPaste } from '../../utils/pasteLink';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
@@ -194,8 +194,9 @@ export function MarkdownRenderer({
 
   // Pasting a bare workspace path (what Copy path gives) or a URL makes a
   // link, so nobody has to know `[]()` to link a page. Anything else pastes
-  // as it always did.
-  const { kbDirName } = useWorkspace();
+  // as it always did. Read optionally, so paste adds no workspace-provider
+  // requirement of its own; without a `kbDirName` a path pastes as text.
+  const kbDirName = useContext(WorkspaceContext)?.kbDirName ?? null;
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
     const { selectionStart: start, selectionEnd: end } = el;

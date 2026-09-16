@@ -49,6 +49,11 @@ const workflowService = {
   releaseLock: async (ws: string, branch: string, path: string) => {
     calls.push(['releaseLock', ws, branch, path]);
   },
+  getChangeRequestDetail: async () => ({ headSha: 'head-1' }),
+  postComment: async (number: number, _user: unknown, input: { path?: string }) => {
+    calls.push(['postComment', number, input.path]);
+    return { id: 'c-1' };
+  },
 } as never;
 const events = {
   emit: (p: unknown) => {
@@ -102,6 +107,21 @@ describe('registerWorkflowTools', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ change: { id: 'change-1', summary: 'fix typo' } });
     expect(calls).toContainEqual(['commitChange', WS, 'user-A', { summary: 'fix typo', description: undefined }]);
+  });
+
+  // A change request's files are repository-relative; the Copy path form
+  // carries the clone folder, which is dropped so the comment lands on the file.
+  it('post_change_request_comment anchors a copied workspace path to the repository-relative file', async () => {
+    const base = await start();
+    for (const path of ['/knowledge-base/KnowledgeBase/Foo.md', 'knowledge-base/KnowledgeBase/Foo.md', 'KnowledgeBase/Foo.md']) {
+      const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi', path });
+      expect(res.status, path).toBe(200);
+    }
+    expect(calls.filter((c) => c[0] === 'postComment')).toEqual([
+      ['postComment', 3, 'KnowledgeBase/Foo.md'],
+      ['postComment', 3, 'KnowledgeBase/Foo.md'],
+      ['postComment', 3, 'KnowledgeBase/Foo.md'],
+    ]);
   });
 
   it('list_branches takes no branch and lists from any existing clone (repo-global)', async () => {

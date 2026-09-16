@@ -51,7 +51,10 @@ export function markdownLinkForPaste(
   if (kbDirName && text.startsWith(`/${kbDirName}/`)) {
     const name = text.replace(/\/+$/, '').split('/').pop() ?? '';
     if (!name || name === kbDirName) return null;
-    return `[${escapeLabel(selection || stem(name))}](${destination(text)})`;
+    // The link resolver splits at the first `#` and percent-decodes the rest,
+    // so a literal `#` or `%` in a file name is encoded to survive both.
+    const target = text.replace(/%/g, '%25').replace(/#/g, '%23');
+    return `[${escapeLabel(selection || stem(name))}](${destination(target)})`;
   }
 
   if (/^https?:\/\/\S+$/i.test(text)) {

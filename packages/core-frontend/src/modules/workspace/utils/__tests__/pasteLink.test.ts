@@ -16,6 +16,13 @@ describe('markdownLinkForPaste', () => {
     expect(markdownLinkForPaste('  /knowledge-base/KnowledgeBase/Reports/\n', KB)).toBe('[Reports](/knowledge-base/KnowledgeBase/Reports/)');
   });
 
+  // The link resolver cuts at the first `#` and percent-decodes the path, so
+  // both are encoded or the link opens a different file.
+  it('percent-encodes # and % in a workspace path destination', () => {
+    expect(markdownLinkForPaste('/knowledge-base/KnowledgeBase/C#.md', KB)).toBe('[C#](/knowledge-base/KnowledgeBase/C%23.md)');
+    expect(markdownLinkForPaste('/knowledge-base/KnowledgeBase/100%20off.md', KB)).toBe('[100%20off](/knowledge-base/KnowledgeBase/100%2520off.md)');
+  });
+
   it('angle-brackets a destination with spaces', () => {
     expect(markdownLinkForPaste('/knowledge-base/File Type examples/sub file.md', KB)).toBe(
       '[sub file](</knowledge-base/File Type examples/sub file.md>)',

@@ -236,6 +236,15 @@ describe('workspace file primitives', () => {
       const body = (def.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
       expect(body.properties.path.description, name).toContain('with or without a leading slash');
     }
+    for (const name of ['copy_file', 'move_file']) {
+      const def = tools.find((t) => t.name === name)!;
+      const body = (def.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
+      expect(body.properties.src.description, name).toContain('with or without a leading slash');
+      expect(body.properties.dest.description, name).toContain('with or without a leading slash');
+    }
+    const batch = tools.find((t) => t.name === 'write_files')!;
+    const batchBody = (batch.inputs as { properties: { body: { properties: { files: { items: { properties: Record<string, { description?: string }> } } } } } }).properties.body;
+    expect(batchBody.properties.files.items.properties.path.description).toContain('with or without a leading slash');
   });
 
   it('execute_command runs in the workspace dir', async () => {
