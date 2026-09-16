@@ -97,12 +97,12 @@ describe('canonicalFileIdentity', () => {
     expect(() => canonicalFileIdentity('/etc/passwd')).toThrow(PathTraversalError);
   });
 
-  it('refuses an absolute path that the containment stand-in would call contained', () => {
-    // The trap the stand-in root sets for itself: `validateRelativePath`
-    // accepts `/workspace/a.md`, and resolving it against `/workspace`
-    // lands it inside `/workspace` — so containment alone reads it as fine
-    // and it becomes a lock identity. No real workspace directory is ever
-    // literally `/workspace` (it is `<workspacesRoot>/<id>`), so the file
+  it('refuses an absolute path however contained it looks', () => {
+    // `validateRelativePath` accepts `/workspace/a.md` (its leading empty
+    // segment is filtered out), and resolved against a root named
+    // `/workspace` it would even read as contained — which is why absolute is
+    // refused as absolute and never by resolving. No real workspace directory
+    // is literally `/workspace` (it is `<workspacesRoot>/<id>`), so the file
     // verbs resolve that same path outside their workspace and answer 403.
     expect(() => canonicalFileIdentity('/workspace/a.md')).toThrow(PathTraversalError);
     expect(() => canonicalFileIdentity('/workspace')).toThrow(PathTraversalError);
