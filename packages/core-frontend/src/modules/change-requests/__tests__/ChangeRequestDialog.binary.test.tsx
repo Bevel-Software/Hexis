@@ -366,6 +366,45 @@ describe('ChangeRequestDialog: a proposed document', () => {
     expect(screen.queryByRole('button', { name: /Download/ })).toBeNull();
   });
 
+  /**
+   * The no-viewer path asks the SAME access question as the viewer pane. It
+   * used to ask nothing at all, so a restricted `.zip` offered a live Download
+   * that answered a click with a bare "Download failed (HTTP 403)" — the raw
+   * endpoint's gate holding, but nothing the file page would ever say.
+   */
+  it('refuses the no-viewer download when the reader may not read the file', async () => {
+    accessMock.fetchFileAccess.mockResolvedValue({ canRead: false, canDownload: false });
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([{ path: 'Docs/minutes.odt', status: 'added' }]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    expect(await screen.findByText("You don't have access to this file")).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Download/ })).toBeNull();
+    // …and the bytes were never asked for.
+    expect(rawUrls()).toHaveLength(0);
+  });
+
+  /**
+   * Readable but not downloadable: the button stays, disabled, with its
+   * reason — `DownloadFileButton`'s own rule, the same one the file page
+   * feeds it.
+   */
+  it('disables the no-viewer download when the reader may not download it', async () => {
+    accessMock.fetchFileAccess.mockResolvedValue({ canRead: true, canDownload: false });
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([{ path: 'Docs/minutes.odt', status: 'added' }]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    const download = await screen.findByRole('button', { name: 'Download the proposed file' });
+    expect(download).toBeDisabled();
+    expect(download).toHaveAttribute(
+      'title',
+      'You do not have download permission for this file.',
+    );
+  });
+
   it('refuses the same way the file page does when the reader may not read it', async () => {
     accessMock.fetchFileAccess.mockResolvedValue({ canRead: false, canDownload: false });
     detailMock.fetchPrDetail.mockResolvedValue(

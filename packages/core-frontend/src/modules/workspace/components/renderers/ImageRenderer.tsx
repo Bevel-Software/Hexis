@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Button } from '../../../../shared/components';
 import { useRendererWorkspaceId } from './rendererWorkspace';
 import { useImageRevision } from '../../hooks/useImageRevision';
 import { authFetch } from '../../../../lib/api';
@@ -34,6 +35,15 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
   // drops the old failure with it — a second `useState` would need a reset in
   // the effect body, which costs a cascading render on every path change.
   const [read, setRead] = useState<ImageRead>(NOT_READ);
+  /**
+   * Bumped by Try again, and a dependency of the read below — which is the
+   * whole mechanism. A failure whose `workspaceId`, path and revision are all
+   * unchanged has nothing to re-trigger the effect, so a dropped connection or
+   * a 502 was terminal until the pane remounted; a reviewer with a dialog open
+   * had no way back to the picture. Automatic recovery on a path or revision
+   * change is untouched: those change the deps by themselves.
+   */
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -64,14 +74,17 @@ export function ImageRenderer({ filePath }: FileRendererProps) {
         return prev === NOT_READ ? prev : NOT_READ;
       });
     };
-  }, [workspaceId, filePath, revision]);
+  }, [workspaceId, filePath, revision, attempt]);
 
   if (read.error) {
     return (
-      <div className="flex h-full items-center justify-center p-4">
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-4">
         <p role="alert" className="text-detail text-danger">
           {read.error}
         </p>
+        <Button variant="outline" size="tiny" onClick={() => setAttempt((n) => n + 1)}>
+          Try again
+        </Button>
       </div>
     );
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { WorkflowEvent } from '@bevel-software/platform-shared';
 import {
   WorkspaceContext,
@@ -116,6 +116,35 @@ describe('ImageRenderer', () => {
     await waitFor(() => expect(apiMock.authFetch).toHaveBeenCalledTimes(2));
     expect(apiMock.authFetch.mock.calls[1][0]).toBe(
       '/api/workspace/ws-1/file/raw?path=Knowledge%2Fassets%2Fshot.png&v=1',
+    );
+  });
+
+  /**
+   * A failure whose workspace, path and revision are all unchanged has nothing
+   * to re-trigger the read, so a dropped connection was TERMINAL until the
+   * pane remounted — a reviewer with the dialog open had no way back to the
+   * picture. Try again is that way back.
+   */
+  it('recovers from a transient failure when asked to try again', async () => {
+    apiMock.authFetch.mockRejectedValueOnce(new Error('network down'));
+    apiMock.authFetch.mockResolvedValue({ ok: true, blob: async () => new Blob(['png']) });
+    render(
+      <WorkspaceContext.Provider
+        value={{ workspaceId: 'ws-1' } as unknown as WorkspaceContextValue}
+      >
+        <ImageRenderer filePath="Knowledge/assets/shot.png" content="" onSave={async () => {}} />
+      </WorkspaceContext.Provider>,
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load this image.");
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    // The SAME request, re-run: the picture arrives and the failure is gone.
+    expect(await screen.findByRole('img')).toHaveAttribute('src', 'blob:fake-url');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(apiMock.authFetch).toHaveBeenCalledTimes(2);
+    expect(apiMock.authFetch.mock.calls[1][0]).toBe(
+      '/api/workspace/ws-1/file/raw?path=Knowledge%2Fassets%2Fshot.png',
     );
   });
 

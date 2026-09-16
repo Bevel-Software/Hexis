@@ -314,9 +314,18 @@ export interface BranchFileDownloadProps {
  * OpenDocument file, a `.zip`, an unknown binary. The dialog keeps its note
  * ("there is no text to compare") and this hands over the bytes it is talking
  * about, from the request's branch rather than the checked-out tree.
+ *
+ * Through the SAME access question as the viewer pane, and for the same
+ * reason: a file the reader may not have is a file the reader may not have in
+ * either shape. Without the lookup this offered a live button that answered a
+ * click with a bare "Download failed (HTTP 403)" — the raw endpoint's gate
+ * holding, but nothing the file page would ever say. A refused read gets
+ * `FileRoute`'s wording instead, and a read-but-not-download verdict leaves
+ * the button disabled with its reason, exactly as the file page does.
  */
 export function BranchFileDownload({ branch, repoRelativePath, label }: BranchFileDownloadProps) {
   const { workspace, failed } = useBranchWorkspace(branch);
+  const access = useBranchFileAccess(workspace?.id ?? null, repoRelativePath);
   // A failed bootstrap has to be SAID. Folding it into the loading case
   // rendered nothing at all, which under a note that promises the bytes reads
   // as a missing button rather than as the branch problem it is.
@@ -327,14 +336,22 @@ export function BranchFileDownload({ branch, repoRelativePath, label }: BranchFi
       </p>
     );
   }
-  if (!workspace) return null;
+  // Nothing yet — and no button either. An enabled Download that turns out to
+  // be a refusal is worse than one that arrives a moment later.
+  if (!workspace || access.canRead === null) return null;
+  if (access.canRead === false) return <AccessRefused repoRelativePath={repoRelativePath} />;
   return (
     <RendererWorkspaceContext.Provider value={{ workspaceId: workspace.id }}>
-      <DownloadFileButton
-        filePath={`${workspace.kbDirName}/${repoRelativePath}`}
-        size="sm"
-        label={label}
-      />
+      {/* `canDownload` false disables the button and says why; null keeps it
+          optimistic, with the backend as the gate — `DownloadFileButton`'s own
+          rule, unchanged, and the same one `FileViewer` feeds it. */}
+      <CanDownloadContext.Provider value={access.canDownload}>
+        <DownloadFileButton
+          filePath={`${workspace.kbDirName}/${repoRelativePath}`}
+          size="sm"
+          label={label}
+        />
+      </CanDownloadContext.Provider>
     </RendererWorkspaceContext.Provider>
   );
 }
