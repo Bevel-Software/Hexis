@@ -1496,7 +1496,7 @@ describe('SkillPage: Share', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
     const dialog = await screen.findByRole('dialog', { name: 'Manage access' });
 
-    fireEvent.change(await screen.findByPlaceholderText(/add people, groups, or roles/i), {
+    fireEvent.change(await screen.findByPlaceholderText(/add people, groups, roles or plugins/i), {
       target: { value: 'gtm' },
     });
     fireEvent.click(await screen.findByRole('button', { name: /GTM Team/ }));

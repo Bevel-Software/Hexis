@@ -103,9 +103,8 @@ describe('ManageAccessDialog: a proposed-only file', () => {
   it('revokes on the proposal branch — symmetric with grant', async () => {
     const user = userEvent.setup();
     render(<ManageAccessDialog entry={ENTRY} proposal={PROPOSAL} onClose={() => {}} />);
-    const triggers = await screen.findAllByRole('button', { name: /^can edit$/i });
-    await user.click(triggers[triggers.length - 1]);
-    await user.click(await screen.findByRole('button', { name: /remove access/i }));
+    // Remove sits beside the row's verb control, not inside its menu.
+    await user.click(await screen.findByRole('button', { name: 'Remove' }));
 
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(
