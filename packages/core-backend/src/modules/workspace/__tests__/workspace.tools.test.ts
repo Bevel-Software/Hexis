@@ -1623,6 +1623,88 @@ describe('preflight for moves and deletes', () => {
     });
   });
 
+  describe('what counts as the platform\'s own, and what a move or delete may reach', () => {
+    const caseSensitiveDisk = process.platform === 'linux';
+
+    it('roles.yaml and AGENTS.md are platform files only at the root; access.md and .bevelignore at any depth', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      await fs.writeFile(KB('Sales/roles.yaml'), 'content');
+      await fs.writeFile(KB('Sales/AGENTS.md'), 'content');
+      await fs.writeFile(KB('Sales/.bevelignore'), '*.tmp\n');
+      const managed = async (p: string) => (await call(base, 'file_stat', { path: KB(p) })).body.managed;
+      expect(await managed('roles.yaml')).toBe(true);
+      expect(await managed('Sales/roles.yaml')).toBe(false);
+      expect(await managed('Sales/AGENTS.md')).toBe(false);
+      expect(await managed('Sales/.bevelignore')).toBe(true);
+      expect((await call(base, 'move_file', { src: KB('Sales/roles.yaml'), dest: KB('Sales/old-roles.yaml') })).body).toMatchObject({ moved: true });
+    });
+
+    it.skipIf(!caseSensitiveDisk)('a differently cased access.md is content on a case-sensitive disk', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/Access.md'), 'notes');
+      expect((await call(base, 'file_stat', { path: KB('Sales/Access.md') })).body).toMatchObject({ managed: false, movable: true });
+    });
+
+    it('git metadata is refused, and a folder walk never enters it', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('.git/HEAD'), 'ref: refs/heads/main\n');
+      await fs.writeFile(KB('Sales/sub/.git/HEAD'), 'ref: refs/heads/main\n');
+      const dry = await call(base, 'delete_folder', { path: KB('.git'), dryRun: true });
+      expect(dry.body).toMatchObject({ allowed: false });
+      expect(dry.body.reason).toContain('git metadata');
+      expect((await call(base, 'delete_folder', { path: KB('.git'), confirm: true })).status).toBe(400);
+      expect((await call(base, 'delete_file', { path: KB('.git/HEAD') })).status).toBe(400);
+      expect((await call(base, 'move_file', { src: KB('.git'), dest: KB('Sales/git') })).status).toBe(400);
+      expect(await exists(KB('.git/HEAD'))).toBe(true);
+      expect((await call(base, 'file_stat', { path: KB('Sales/sub') })).body).toMatchObject({ descendants: 0 });
+    });
+
+    it('a folder\'s own access.md goes with it, deleted after every other file', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/archive/access.md'), '---\nread: everyone\n---\n');
+      const order: string[] = [];
+      const deleteFile = fs.deleteFile.bind(fs);
+      fs.deleteFile = async (p: string, o?: never) => {
+        order.push(p);
+        return deleteFile(p, o);
+      };
+      const run = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
+      expect(run.body).toMatchObject({ deleted: true, descendants: 4 });
+      expect(order).toHaveLength(4);
+      expect(order.at(-1)).toBe(KB('Sales/archive/access.md'));
+    });
+
+    it('a restricted run is judged on the files a folder delete or move would write, not the folder path', async () => {
+      const base = await seeded();
+      writePolicy.restrictToExtensions('restricted-run', ['.html']);
+      await fs.writeFile(KB('Sales/views/a.html'), '<p>a</p>');
+      await fs.writeFile(KB('Sales/views/b.html'), '<p>b</p>');
+      const moved = await call(base, 'move_file', { src: KB('Sales/views'), dest: KB('Sales/dashboards'), sessionId: 'restricted-run' });
+      expect(moved.body).toMatchObject({ moved: true, descendants: 2 });
+      const deleted = await call(base, 'delete_folder', { path: KB('Sales/dashboards'), confirm: true, sessionId: 'restricted-run' });
+      expect(deleted.body).toMatchObject({ deleted: true });
+      const refused = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true, sessionId: 'restricted-run' });
+      expect(refused.status).toBe(403);
+      expect(await exists(KB('Sales/archive/top.md'))).toBe(true);
+    });
+
+    it.skipIf(process.platform === 'win32')('a move or folder delete through a symbolic link that leaves the repository is refused, a dangling one included', async () => {
+      const base = await seeded();
+      await mkdir(join(tempDir, 'beside-the-clone'), { recursive: true });
+      await symlink(join(tempDir, 'beside-the-clone'), join(tempDir, KB('Sales/out')));
+      const escaped = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/out/deal.md'), dryRun: true });
+      expect(escaped.status).toBe(400);
+      expect(escaped.body.error).toContain('symbolic link');
+      expect((await call(base, 'delete_folder', { path: KB('Sales/out'), dryRun: true })).status).toBe(400);
+      await symlink(join(tempDir, 'nowhere'), join(tempDir, KB('Sales/dangling.md')));
+      const collided = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/dangling.md') });
+      expect(collided.status).toBe(400);
+      expect(collided.body.error).toContain('symbolic link');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+  });
+
   describe('descriptions match behaviour', () => {
     const def = async (name: string) => {
       const d = (await toolRegistry.listInternal()).find((t) => t.name === name);
