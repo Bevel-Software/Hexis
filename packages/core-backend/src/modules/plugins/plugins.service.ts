@@ -175,7 +175,7 @@ export class PluginIndexService implements IPluginIndexService {
         // stays in the log alone.
         warnings: discovered.warnings
           .filter((w) => w.startsWith(`${plugin.folder}: `) || w.startsWith(`${plugin.folder}/`))
-          .map((w) => (w.startsWith(`${plugin.folder}: `) ? w.slice(plugin.folder.length + 2) : w)),
+          .map((w) => w.slice(plugin.folder.length).replace(/^[:/]\s*/, '')),
       });
     }
     return byName;

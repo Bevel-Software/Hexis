@@ -94,6 +94,9 @@ describe('GET /agent/plugins/:folder/archive', () => {
     expect(res.headers.get('content-type')).toContain('application/zip');
     // A name the index does not know either is still an absence.
     expect((await fetch(`${base}/api/agent/plugins/nope/archive`)).status).toBe(404);
+    // A stray FILE at the root name is not a plugin folder: the identity still resolves.
+    await fs.writeFile(path.join(wsDir, KB, 'Plugins', 'ado'), 'not a folder', 'utf-8');
+    expect((await fetch(`${base}/api/agent/plugins/ado/archive`)).status).toBe(200);
   });
 
   it('404s an absent plugin folder — ENOENT is an absence', async () => {

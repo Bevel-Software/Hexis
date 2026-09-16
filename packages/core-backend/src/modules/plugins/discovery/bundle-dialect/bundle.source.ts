@@ -114,10 +114,8 @@ export async function readBundlePlugin(
     }
   }
 
-  const ui =
-    typeof bundle.interface === 'object' && bundle.interface !== null
-      ? (bundle.interface as Record<string, unknown>)
-      : {};
+  // A record, or nothing: a list where the block should be is not a block.
+  const ui = isRecord(bundle.interface) ? bundle.interface : {};
   const manifest: Record<string, unknown> = { name: pluginManifestName(name) };
   if (typeof bundle.version === 'string') manifest.version = bundle.version;
   if (typeof bundle.description === 'string') manifest.description = bundle.description;

@@ -329,8 +329,9 @@ export function PluginPage() {
               : `${definitionWarnings.length} things in this plugin's definition were left out:`}
           </span>
           <ul className="mt-1 list-disc pl-5">
-            {definitionWarnings.map((w) => (
-              <li key={w}>{w}</li>
+            {definitionWarnings.map((w, i) => (
+              // Two warnings may read the same; the position tells them apart.
+              <li key={`${i}:${w}`}>{w}</li>
             ))}
           </ul>
         </Banner>

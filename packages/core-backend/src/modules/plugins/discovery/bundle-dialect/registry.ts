@@ -91,13 +91,21 @@ export function parseRegistry(text: string): McpRegistry {
     // lose the server: it runs under its id, and the registry's author is
     // told which skills will not find it.
     let name = raw.id;
-    if (typeof raw.name === 'string' && raw.name.trim() && raw.name.trim() !== raw.id) {
-      const declared = raw.name.trim();
-      if (judgeMcpServerEntry(declared, { ...config, ...converted.entry }).ok) name = declared;
-      else
+    if (raw.name !== undefined) {
+      const declared = typeof raw.name === 'string' ? raw.name.trim() : '';
+      if (declared === raw.id) {
+        // Named as it is keyed: nothing to say.
+      } else if (declared && judgeMcpServerEntry(declared, { ...config, ...converted.entry }).ok) {
+        name = declared;
+      } else {
+        // Every name that is present and unusable is said, blank or not a
+        // string included: a skill written against it will not find the server.
         warnings.push(
-          `registry.json: server "${raw.id}" is named "${declared}", which cannot be a server name (lowercase alphanumeric with \`_\`/\`-\`) — it runs as "${raw.id}"`,
+          declared
+            ? `registry.json: server "${raw.id}" is named "${declared}", which cannot be a server name (lowercase alphanumeric with \`_\`/\`-\`) — it runs as "${raw.id}"`
+            : `registry.json: server "${raw.id}" has a name that is blank or not a string — it runs as "${raw.id}"`,
         );
+      }
     }
     servers.set(raw.id, { id: raw.id, name, entry: converted.entry });
   }
@@ -217,7 +225,11 @@ function mcpEntryOf(
   // flat entry's) are the record's, not the server's.
   const entry: Record<string, unknown> = { ...verdict.entry };
   for (const [key, value] of Object.entries(config)) {
-    if (!JUDGED_OR_RECORD_KEYS.has(key)) entry[key] = value;
+    // Defined, not assigned: a field spelled `__proto__` is a field to
+    // carry, and assignment would set the object's prototype instead.
+    if (!JUDGED_OR_RECORD_KEYS.has(key)) {
+      Object.defineProperty(entry, key, { value, enumerable: true, configurable: true, writable: true });
+    }
   }
   return { entry: entry as RegistryServer['entry'] };
 }

@@ -372,4 +372,13 @@ describe('compileMarketplace', () => {
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
     expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ displayName: 'GTM' });
   });
+
+  it('a partial presentation block keeps what it says and gains the name it does not', async () => {
+    await write(
+      'Plugins/GTM/plugin.json',
+      JSON.stringify({ name: 'gtm', version: '2.1.0', description: 'Go to market', interface: { category: 'Sales' } }),
+    );
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ category: 'Sales', displayName: 'GTM' });
+  });
 });

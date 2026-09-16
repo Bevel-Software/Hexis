@@ -94,6 +94,32 @@ describe('registry: servers are called by name, selected by id', () => {
     expect(Object.keys(expandProfile(registry, 'p').mcpServers)).toEqual(['ok-id']);
   });
 
+  it('a name that is present but blank, or not a string, is said too — the server runs under its id', () => {
+    const registry = parseRegistry(
+      JSON.stringify({
+        servers: [
+          { id: 'a', name: '   ', config: { command: 'x' } },
+          { id: 'b', name: 42, config: { command: 'x' } },
+          { id: 'c', name: 'c', config: { command: 'x' } },
+        ],
+      }),
+    );
+    expect(registry.warnings).toEqual([
+      'registry.json: server "a" has a name that is blank or not a string — it runs as "a"',
+      'registry.json: server "b" has a name that is blank or not a string — it runs as "b"',
+    ]);
+    expect([...registry.servers.values()].map((s) => s.name)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('carries a field spelled __proto__ as a field, not as a prototype', () => {
+    // Raw text on purpose: in a JavaScript literal `__proto__` sets the
+    // prototype and never reaches JSON; from a file it is an ordinary key.
+    const registry = parseRegistry('{"servers":[{"id":"odd","config":{"command":"x","__proto__":{"polluted":true}}}]}');
+    const entry = registry.servers.get('odd')!.entry as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(entry, '__proto__')).toBe(true);
+    expect((entry as { polluted?: unknown }).polluted).toBeUndefined();
+  });
+
   it('a rejected server carries the reason the entry failed, not its name', () => {
     const registry = parseRegistry(
       JSON.stringify({ servers: [{ id: 'docs', name: 'acme-docs', config: { command: 'node', args: [{ x: 1 }] } }] }),

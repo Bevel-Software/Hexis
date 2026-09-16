@@ -270,9 +270,13 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     if (p.author !== undefined) vendor.author = p.author;
     if (p.keywords) vendor.keywords = p.keywords;
     put(`${base}/.claude-plugin/plugin.json`, `${JSON.stringify(vendor, null, 2)}\n`);
-    // Codex's manifest carries the presentation block: the source's own when
-    // it has one, else the one thing every plugin can say about itself.
-    const codex: Record<string, unknown> = { ...vendor, interface: p.ui ?? { displayName: p.displayName } };
+    // Codex's manifest carries the presentation block: the source's own,
+    // completed with the one thing every plugin can say about itself when
+    // the block does not say it — a partial block is a block, not a reason
+    // to lose the name.
+    const ui: Record<string, unknown> = { ...(p.ui ?? {}) };
+    if (typeof ui.displayName !== 'string' || !ui.displayName.trim()) ui.displayName = p.displayName;
+    const codex: Record<string, unknown> = { ...vendor, interface: ui };
     put(`${base}/.codex-plugin/plugin.json`, `${JSON.stringify(codex, null, 2)}\n`);
     if (p.mcp) {
       put(`${base}/${PLUGIN_MCP_FILE}`, `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: p.mcp }, null, 2)}\n`);
@@ -464,7 +468,9 @@ function portableMcp(
     // along as declared — a client that knows one uses it, one that does
     // not ignores it — unless they hold a vault reference, which no client
     // can expand.
-    const extras: Record<string, unknown> = {};
+    // Built without a prototype, so a field spelled `__proto__` is a field
+    // that survives to the serialised entry, not a prototype assignment.
+    const extras: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     if (isRecord(raw)) {
       for (const [key, value] of Object.entries(raw)) {
         if (JUDGED_KEYS.has(key) || containsVariableReference(JSON.stringify(value))) continue;

@@ -119,7 +119,7 @@ export function createToolManualsAgentRoutes(
       // the folder.
       let pluginRel = `${PLUGINS_DIR}/${folder}`;
       let pluginDir = path.join(wsDir, kbDirName, PLUGINS_DIR, folder);
-      if (pluginIndex && (await disk.lstatOrNull(pluginDir)) === null) {
+      if (pluginIndex && (await disk.lstatOrNull(pluginDir))?.isDirectory() !== true) {
         const byIdentity = (await pluginIndex.catalog()).find((p) => p.name === folder)?.folders[0];
         if (byIdentity) {
           pluginRel = byIdentity;
