@@ -310,6 +310,8 @@ function ContextMenu({
       kind: 'delete',
       entry,
       returnFocusTo: () => returnFocusTo?.current ?? null,
+      // The folder it was in — the row itself is gone once the delete lands.
+      focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
       run: async () => {
         try {
           await deleteEntry(entry.relativePath);
@@ -730,6 +732,8 @@ export function FileTreeNode({
           targetDir,
           destinationLabel: targetDir ? entry.name : 'the top level',
           returnFocusTo: () => rowForPath(sourcePath),
+          // The row it was dropped on stays put; the source row moves away.
+          focusAfterRun: () => rowForPath(entry.relativePath),
           run: async () => {
             try {
               await moveEntry(sourcePath, newPath);
@@ -1178,9 +1182,24 @@ export function TreeChrome({
     return { number: crNumber, branch: cr?.branch ?? null };
   }, [accessTarget, inheritedProposal, suggestionOnlyPaths, openChangeRequests]);
 
-  // The one open delete/move confirmation for this tree.
+  // The one open delete/move confirmation for this tree, stamped with the
+  // workspace it was asked in: its `run` closes over that workspace's
+  // operations, so a switch while it is open drops it rather than letting
+  // Confirm act on a branch the dialog never described.
   const { workspaceId, kbDirName } = useWorkspace();
-  const [confirmRequest, setConfirmRequest] = useState<TreeConfirmRequest | null>(null);
+  const [openConfirm, setOpenConfirm] = useState<
+    { request: TreeConfirmRequest; workspaceId: string | null } | null
+  >(null);
+  const confirmRequest =
+    openConfirm && openConfirm.workspaceId === workspaceId ? openConfirm.request : null;
+  const askConfirm = useCallback(
+    (request: TreeConfirmRequest) => setOpenConfirm({ request, workspaceId }),
+    [workspaceId],
+  );
+  // Dropped outright, so switching back does not bring it back either.
+  useEffect(() => {
+    setOpenConfirm((open) => (open && open.workspaceId !== workspaceId ? null : open));
+  }, [workspaceId]);
   // Whether the caller may write the move's destination: null until known.
   // The same three short-circuits as `useFileAccess` (and the upload's
   // suggestion routing): drafts and paths outside the KB are writable
@@ -1206,8 +1225,8 @@ export function TreeChrome({
   }, [confirmRequest, workspaceId, kbDirName]);
   const closeConfirm = (andRun: boolean) => {
     if (!confirmRequest) return;
-    focusAfterConfirm.current = confirmRequest.returnFocusTo;
-    setConfirmRequest(null);
+    focusAfterConfirm.current = andRun ? confirmRequest.focusAfterRun : confirmRequest.returnFocusTo;
+    setOpenConfirm(null);
     if (andRun) void confirmRequest.run();
   };
   // Focus goes back to the row once the dialog has unmounted — after the
@@ -1220,7 +1239,7 @@ export function TreeChrome({
 
   return (
     <>
-      <TreeConfirmContext.Provider value={setConfirmRequest}>
+      <TreeConfirmContext.Provider value={askConfirm}>
       <TreeNavContext.Provider value={nav}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
       <ManageAccessContext.Provider value={openAccess}>

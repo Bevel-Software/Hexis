@@ -126,16 +126,10 @@ function renderExplorer(opts: RenderOptions = {}) {
     moveEntry,
     ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
   });
-  return {
-    moveEntry,
-    dispatchUpload,
-    clearUploadError,
-    createFile,
-    deleteEntry,
-    ...render(
+  const ui = (ws: WorkspaceContextValue) => (
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
-          <WorkspaceContext.Provider value={workspace}>
+          <WorkspaceContext.Provider value={ws}>
             <GitContext.Provider value={makeGit()}>
                 <OpenChangeRequestsContext.Provider
                   value={{
@@ -171,8 +165,18 @@ function renderExplorer(opts: RenderOptions = {}) {
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
-      </MemoryRouter>,
-    ),
+      </MemoryRouter>
+  );
+  const result = render(ui(workspace));
+  return {
+    moveEntry,
+    dispatchUpload,
+    clearUploadError,
+    createFile,
+    deleteEntry,
+    ...result,
+    /** Re-render the same explorer as though the user switched workspace. */
+    switchWorkspace: (workspaceId: string) => result.rerender(ui({ ...workspace, workspaceId })),
   };
 }
 
@@ -1279,6 +1283,14 @@ describe('FileExplorer: delete and move ask first', () => {
     cleanup();
     mockAuthFetch.mockReset();
   });
+  // The branch model is module-global; put back what the shared test setup
+  // applied, so a case that protects `main` does not leak into the next suite.
+  afterEach(() => {
+    configureBranchModel({
+      defaultBranch: 'target-company-state',
+      protectedBranches: ['current-company-state', 'target-company-state'],
+    });
+  });
 
   /** Open Legal so its rows render (Knowledge's children start collapsed). */
   function openLegal() {
@@ -1368,6 +1380,22 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(mockAuthFetch).not.toHaveBeenCalled();
     });
 
+    it('drops an open confirmation when the workspace changes under it', async () => {
+      const { moveEntry, switchWorkspace } = renderExplorer({ fileTree: TREE, workspaceId: 'draft-a' });
+      await dropOn('Sales', CONTRACT);
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        switchWorkspace('draft-b');
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      // Nor does switching back resurrect it.
+      await act(async () => {
+        switchWorkspace('draft-a');
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
     it('does nothing on a drop onto the folder the entry is already in', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });
       await dropOn('Legal', CONTRACT);
@@ -1416,10 +1444,11 @@ describe('FileExplorer: delete and move ask first', () => {
   });
 
   describe('keyboard', () => {
-    it('confirms on Enter and returns focus to the row', async () => {
+    it('confirms on Enter and moves focus to the row it was dropped on', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });
       openLegal();
-      const row = screen.getByText('contract.pdf').closest('button')!;
+      // The dragged row leaves the tree once the move lands; the target stays.
+      const row = screen.getByText('Sales').closest('button')!;
       await dropOn('Sales', CONTRACT);
       expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move' }));
       await act(async () => {
@@ -1442,6 +1471,18 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(deleteEntry).not.toHaveBeenCalled();
       expect(document.activeElement).toBe(row);
+    });
+
+    it('returns focus to the containing folder after a confirmed delete', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      const folder = screen.getByText('Legal').closest('button')!;
+      await chooseDelete('contract.pdf');
+      await act(async () => {
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+      });
+      expect(deleteEntry).toHaveBeenCalledWith(CONTRACT);
+      expect(document.activeElement).toBe(folder);
     });
 
     it('lets Enter press Cancel when Cancel has focus', async () => {

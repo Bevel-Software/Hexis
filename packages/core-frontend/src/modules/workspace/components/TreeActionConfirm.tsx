@@ -19,8 +19,13 @@ export type TreeConfirmRequest =
       entry: FileTreeEntry;
       /** Today's delete, unchanged. */
       run(): void | Promise<void>;
-      /** The row to hand focus back to once the dialog closes. */
+      /** The row to hand focus back to once the dialog is cancelled. */
       returnFocusTo(): HTMLElement | null;
+      /**
+       * Where focus goes once the operation runs instead: the entry's own row
+       * is about to leave the tree, and focus would fall to the page with it.
+       */
+      focusAfterRun(): HTMLElement | null;
     }
   | {
       kind: 'move';
@@ -33,6 +38,7 @@ export type TreeConfirmRequest =
       /** Today's move, unchanged. */
       run(): void | Promise<void>;
       returnFocusTo(): HTMLElement | null;
+      focusAfterRun(): HTMLElement | null;
     };
 
 /**
