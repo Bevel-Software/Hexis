@@ -221,6 +221,25 @@ export interface PullRequestDetail extends PullRequestSummary {
    * tree can't be resolved.
    */
   viewerCanCancel: boolean;
+  /**
+   * The commit this request forked from its target (merge base of `headSha`
+   * and `baseSha`). Every file diff in the request reads its "before" side
+   * here, never at the target tip — an edit made on the target after the
+   * proposal must not look like something the proposal deletes. `null` when
+   * the branches share no history (or no workspace could resolve them).
+   */
+  mergeBaseSha: string | null;
+  /**
+   * True iff the target holds commits the proposal does not contain — the
+   * request needs updating. False for anything not open.
+   */
+  behind: boolean;
+  /**
+   * True iff the viewer may Update the request (merge its target into it):
+   * the request is open AND the viewer is its author or may apply it. A UX
+   * hint — the update route re-checks the same predicate server-side.
+   */
+  viewerCanUpdate: boolean;
 }
 
 /**

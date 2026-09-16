@@ -43,3 +43,20 @@ export async function readFileOnBranch(branch: string, repoRelativePath: string)
   const { workspace } = await getOrCreateWorkspace(branch);
   return readFile(workspace.id, `${workspace.kbDirName}/${repoRelativePath}`);
 }
+
+/**
+ * A file as it stood at a change request's fork point (`sha` = the detail's
+ * `mergeBaseSha`) — the "before" side of every diff in the request dialog.
+ * `null` when the path did not exist there.
+ */
+export async function readFileAtForkPoint(
+  crNumber: number,
+  sha: string,
+  repoRelativePath: string,
+): Promise<string | null> {
+  const qs = new URLSearchParams({ path: repoRelativePath, sha });
+  const { content } = await handleApiResponse<{ content: string | null }>(
+    await authFetch(`/api/workflow/change-requests/${crNumber}/fork-point-file?${qs}`),
+  );
+  return content;
+}

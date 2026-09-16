@@ -760,6 +760,60 @@ export function createWorkflowRoutes(
     }
   });
 
+  /**
+   * One file as it stood at the request's fork point — the "before" side of
+   * every diff in the request dialog. `sha` is the detail's `mergeBaseSha`;
+   * the git layer refuses any commit that is not on the target's history.
+   * `path` is repo-relative. Read authority comes from the target branch's
+   * access tree (`origin/<base>`), the tree the fork point belongs to; an
+   * unresolvable verdict is a denial.
+   */
+  router.get('/workflow/change-requests/:number/fork-point-file', async (req, res) => {
+    const num = parsePrNumber(req.params.number);
+    if (num === null) {
+      res.status(400).json({ error: 'invalid change request number' });
+      return;
+    }
+    const repoPath = typeof req.query.path === 'string' ? req.query.path : '';
+    const sha = typeof req.query.sha === 'string' ? req.query.sha : '';
+    if (!repoPath || !sha) {
+      res.status(400).json({ error: 'path and sha are required' });
+      return;
+    }
+    // Repo-relative ONLY. The git layer strips a leading `<kbDirName>/`, so a
+    // prefixed spelling would be authorized under one path and read as
+    // another — refused rather than normalised.
+    if (repoPath.startsWith(`${kbDirName}/`)) {
+      res.status(400).json({ error: 'path must be repository-relative' });
+      return;
+    }
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      const cr = await workflow.getChangeRequest(num);
+      if (!cr) {
+        res.status(404).json({ error: 'change request not found' });
+        return;
+      }
+      const workspace = await workspaceService.getOrCreateForUser(user);
+      const allowed = await accessControl.canReadAtRef(
+        workspace.id,
+        `origin/${cr.base}`,
+        user.email,
+        repoPath,
+      );
+      if (allowed !== true) {
+        res.status(403).json({ error: `You don't have permission to read "${repoPath}".` });
+        return;
+      }
+      const content = await workflow.fileAtForkPoint(workspace.id, cr.base, sha, repoPath);
+      res.json({ content });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   router.get('/workflow/change-requests/:number/comments', async (req, res) => {
     const num = parsePrNumber(req.params.number);
     if (num === null) {

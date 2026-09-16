@@ -801,6 +801,15 @@ export class WorkflowService implements IWorkflowService {
     return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
   }
 
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null> {
+    return this.git.readFileAtForkPoint(workspaceId, baseBranch, sha, path);
+  }
+
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string> {
     return this.git.diffFileAtCommit(workspaceId, path, sha);
   }
@@ -1801,6 +1810,12 @@ export class WorkflowService implements IWorkflowService {
    * automatically — they're pinned to the head SHA, and any new commit on
    * source drops the per-file approval gate (handled by the existing
    * approval staleness check). No special bookkeeping needed here.
+   *
+   * Authority: the request's author, or anyone who may apply it — the
+   * detail's `viewerCanUpdate`, computed for THIS caller, so the button and
+   * the enforcement read one predicate. A conflicting merge is aborted
+   * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
+   * is exactly what it was.
    */
   async updateFromTarget(
     workspaceId: string,
@@ -1820,6 +1835,16 @@ export class WorkflowService implements IWorkflowService {
         { kind: 'change-request-not-open', state: detail.state },
       );
     }
+    if (!detail.viewerCanUpdate) {
+      throw new WorkflowDomainError(
+        'Only the author of this change request, or someone who may apply it, can update it.',
+        403,
+      );
+    }
+    // Best-effort freshen of the source checkout, as the per-file revert
+    // does: a clone behind its own origin branch would merge onto a stale
+    // head and push non-fast-forward. A real failure still surfaces at push.
+    await this.pullWorkspace(workspaceId).catch(() => undefined);
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,

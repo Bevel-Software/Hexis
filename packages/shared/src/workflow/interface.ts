@@ -222,6 +222,18 @@ export interface IWorkflowService {
     path: string,
     sha: string,
   ): Promise<{ baseline: string | null; current: string | null }>;
+  /**
+   * One file as it stood at a change request's fork point (`sha`, which must
+   * lie on the target branch's history) — the "before" side of the request
+   * dialog's diff. `null` when the path did not exist there. Access is the
+   * caller's to check.
+   */
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
 
@@ -402,9 +414,12 @@ export interface IWorkflowService {
   ): Promise<ChangeRequestDetail>;
 
   /**
-   * Re-run `targetBranch → sourceBranch` merge on an existing change request.
-   * Used when the target has advanced since the change request was opened.
-   * Throws `NotImplementedWorkflowError` until the backing merge path lands.
+   * Re-run `targetBranch → sourceBranch` merge on an existing change request
+   * and push it — the request dialog's Update, offered when the target has
+   * advanced since the request was opened. Only the request's author or
+   * someone who may apply it (`viewerCanUpdate`) may run it (403 otherwise).
+   * A conflicting merge is aborted, leaving the branch exactly as it was, and
+   * surfaces as `ChangeRequestConflictsError` (409).
    */
   updateFromTarget(workspaceId: string, user: AuthUser, number: number): Promise<ChangeRequestDetail>;
 

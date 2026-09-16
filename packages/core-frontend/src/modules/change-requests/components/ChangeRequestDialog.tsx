@@ -13,12 +13,15 @@ import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
+import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
+import { GitApiError } from '../../git/services/git.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
 import { changeAuthorName } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
+import { useForkPointFileRead } from '../hooks/useForkPointFile';
 import { diffLines, type DiffLine } from '../utils/diff';
 import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
@@ -218,14 +221,36 @@ export function ChangeRequestDialog({
   /** A rename described without a `previousPath` — no before-side to read. */
   const renameWithoutOldPath = move !== null && move.from === null;
 
+  const touchesSelected = changedFiles.has(selected);
+
   // Raw-vs-raw: the skills API hands back SKILL.md's PARSED body (frontmatter
   // stripped), and diffing that against a raw branch read renders the
   // frontmatter as a deletion and the whole file as changed.
-  const mainRead = useDefaultBranchFileRead(
+  const beforePath =
     isAdded || renameWithoutOldPath || !selected || selectedIsBinary
       ? null
-      : (movedFrom ?? selected),
+      : (movedFrom ?? selected);
+  /**
+   * WHICH "before". A file the request touches is read at the request's FORK
+   * POINT — what its author started from — so the diff shows exactly what the
+   * author changed. Read against the target's tip, an edit somebody made on
+   * the target after the proposal appeared inside this request as a deletion,
+   * and the reader feared applying it would undo that edit. The target having
+   * moved on is said by the notice above the files instead.
+   *
+   * A file the request does NOT touch has no fork-point question: it reads as
+   * it stands. So does a request whose branches share no history (no fork
+   * point to read) — the old reading, which is the only one left.
+   */
+  const forkSha = detail?.mergeBaseSha ?? null;
+  const readAtFork = touchesSelected && forkSha !== null;
+  const forkRead = useForkPointFileRead(
+    cr.number,
+    readAtFork ? forkSha : null,
+    readAtFork ? beforePath : null,
   );
+  const tipRead = useDefaultBranchFileRead(detail !== null && !readAtFork ? beforePath : null);
+  const mainRead = readAtFork ? forkRead : tipRead;
   const mainRaw = mainRead.content;
   const branchRaw = branchContents[selected] ?? null;
 
@@ -284,7 +309,6 @@ export function ChangeRequestDialog({
         : null,
     [selectedIsMarkdown, bothSidesIn, selected, isAdded, mainRaw, branchRaw],
   );
-  const touchesSelected = changedFiles.has(selected);
 
   /**
    * The branch this request is against — where the CURRENT version of
@@ -497,6 +521,37 @@ export function ChangeRequestDialog({
     },
   });
   const applyBusy = applying.activeCr === cr.number;
+
+  /**
+   * Update: merge the target into this request's branch on the server, so the
+   * proposal sits on the text as it stands now. Success re-reads everything —
+   * the head, the fork point, and every file cached from before — and the
+   * "has changed" notice clears with the fresh detail. A conflict is the same
+   * answer an apply conflict is (git refused; nothing was merged), and gets
+   * the same help: the prompt for the author's agent.
+   */
+  const [updating, setUpdating] = useState(false);
+  async function updateFromTarget() {
+    if (updating) return;
+    setUpdating(true);
+    setError(null);
+    try {
+      await refreshChangeRequestFromTarget(cr.number);
+      asked.current.clear();
+      setBranchContents({});
+      setUnreadable(new Set());
+      setDetail(await fetchPrDetail(cr.number, { fresh: true }));
+    } catch (err) {
+      const conflicts =
+        err instanceof GitApiError &&
+        err.status === 409 &&
+        (err.body as { kind?: unknown } | undefined)?.kind === 'change-request-conflicts';
+      if (conflicts) setBlocked(true);
+      else setError(err instanceof Error ? err.message : "Couldn't update this change request.");
+    } finally {
+      setUpdating(false);
+    }
+  }
   // Name the step: recording approvals and merging are separately slow, and one
   // label over both makes the longer half look stalled.
   const applyLabel = applying.phase === 'approving' ? 'Approving…' : 'Applying…';
@@ -618,6 +673,33 @@ export function ChangeRequestDialog({
             <div className="mt-2.5">
               <ConflictHelp prompt={conflictResolutionPrompt(cr)} />
             </div>
+          </Banner>
+        )}
+
+        {/* The target moved on after this was proposed. The diff below does not
+            show that (it is read from the fork point), so it is said here —
+            with Update for the author and anyone who may apply it. Nothing at
+            all when the request is up to date. The button goes once an Update
+            has conflicted: the conflict help above is the way forward, and a
+            second click would only fail the same way. */}
+        {detail !== null && detail.behind && (
+          <Banner tone="neutral" role="status" className="mx-8 mt-4">
+            <span className="flex flex-wrap items-center gap-3">
+              <span className="min-w-0 flex-1">
+                <span className="font-mono">{detail.base || targetBranch}</span> has changed since
+                this was proposed
+              </span>
+              {detail.viewerCanUpdate && !blocked && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={updating || applyBusy}
+                  onClick={() => void updateFromTarget()}
+                >
+                  {updating ? 'Updating…' : 'Update'}
+                </Button>
+              )}
+            </span>
           </Banner>
         )}
 
