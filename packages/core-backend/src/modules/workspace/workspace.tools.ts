@@ -1502,8 +1502,10 @@ export function registerWorkspaceTools(
     },
     write: true,
     handler: async (a, ctx: ToolContext) => {
-      const src = a.src as string;
-      const dest = a.dest as string;
+      // Without trailing slashes: every path under a folder is derived from
+      // these by prefix, and `filesUnder` names children without the slash.
+      const src = (a.src as string).replace(/\/+$/, '');
+      const dest = (a.dest as string).replace(/\/+$/, '');
       const branch = a.branch as string;
       // A move CARRIES the source content into the destination — a genuine
       // cross-ontology flow if the two differ — so BOTH endpoints are write-gated

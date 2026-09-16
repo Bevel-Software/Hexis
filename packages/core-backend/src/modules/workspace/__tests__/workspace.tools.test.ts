@@ -1364,12 +1364,16 @@ describe('path inputs tell the agent about the repository folder', () => {
  *   Locked/ — read only: writes are refused, proposing is possible
  *   Secret/ — nothing: writes are refused, proposing is not
  *   …/sealed.md — read only, wherever it sits: a denied file inside a writable folder
+ *   Sales/outbox/nested/, Sales/moved/nested/ — read only: a denial at only the old, or only the new, path of a moved folder
  */
 describe('preflight for moves and deletes', () => {
   const PROTECTED = 'target-company-state';
   const KB = (p: string) => `${KB_DIR}/${p}`;
 
   const verbsFor = (rel: string) => {
+    if (rel.startsWith('Sales/outbox/nested/') || rel.startsWith('Sales/moved/nested/')) {
+      return { read: true, write: false, download: false, owner: false };
+    }
     if (rel.endsWith('/sealed.md')) return { read: true, write: false, download: false, owner: false };
     if (rel.startsWith('HR/')) return { read: true, write: true, download: false, owner: false };
     if (rel.startsWith('Locked/')) return { read: true, write: false, download: false, owner: false };
@@ -1543,6 +1547,34 @@ describe('preflight for moves and deletes', () => {
       expect(v.stat.movable).toBe(v.move.allowed);
       expect(v.stat.deletable).toBe(v.del.allowed);
       expect([v.stat.movable, v.stat.deletable]).toEqual([false, false]);
+    });
+
+    it('a folder move judges each file at its old path and at its new path, separately', async () => {
+      const base = await seeded();
+      // Denied only at the old path: the file under Sales/outbox/nested/ may not be removed.
+      await fs.writeFile(KB('Sales/outbox/nested/letter.md'), 'letter');
+      const oldSide = await call(base, 'move_file', { src: KB('Sales/outbox'), dest: KB('Sales/sent'), dryRun: true });
+      expect(oldSide.body).toMatchObject({ allowed: false });
+      expect(oldSide.body.reason).toContain(KB('Sales/outbox/nested/letter.md'));
+      // Denied only at the new path: Sales/archive is writable, Sales/moved/nested/ is not.
+      const newSide = await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Sales/moved'), dryRun: true });
+      expect(newSide.body).toMatchObject({ allowed: false });
+      expect(newSide.body.reason).toContain(KB('Sales/moved/nested/'));
+      const run = await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Sales/moved'), confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied' });
+      expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
+    });
+
+    it('trailing slashes do not change which paths a folder move is judged on', async () => {
+      const base = await seeded();
+      const args = { src: `${KB('Sales/archive')}/`, dest: `${KB('Sales/moved')}/` };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ src: KB('Sales/archive'), dest: KB('Sales/moved'), descendants: 3, allowed: false });
+      expect(dry.body.reason).toContain(KB('Sales/moved/nested/'));
+      expect((await call(base, 'move_file', { ...args, confirm: true })).status).toBe(403);
+      expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
+      expect(await exists(KB('Sales/moved'))).toBe(false);
     });
 
     it('a denied move into a path the caller cannot read cannot be proposed, and says why', async () => {
