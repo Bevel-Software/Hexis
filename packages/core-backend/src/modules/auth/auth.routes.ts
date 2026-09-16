@@ -18,9 +18,11 @@ export const AUTH_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
  * (e.g. the enterprise "Sign in with Microsoft", owned by its sharepoint
  * module). A plugin mounts its own routes under `/auth/<key>/…` and is
  * advertised to the login screen by the capability probe, which renders one
- * button per provider from `label` + `startPath`. A plugin is only present
- * when its machinery is configured AND the instance hasn't switched it off —
- * presence means enabled.
+ * button per provider from `label` + `startPath`. A plugin is advertised while
+ * it is present and — if it implements {@link AuthProviderPlugin.isEnabled} —
+ * says it is enabled. That second half lets a provider configured at runtime
+ * (the generic OIDC one, from the setup screen) mount once at boot and appear
+ * the moment its configuration is complete.
  */
 export interface AuthProviderPlugin {
   /** Probe key + route namespace (e.g. 'oidc' → /auth/oidc/…). */
@@ -29,6 +31,11 @@ export interface AuthProviderPlugin {
   readonly label: string;
   /** Browser navigation target that starts the flow (e.g. '/api/auth/oidc/login'). */
   readonly startPath: string;
+  /**
+   * Whether the login screen should offer it right now; asked on every probe.
+   * Absent means always — a plugin whose presence is its enablement.
+   */
+  isEnabled?(): boolean;
   /** Mount the provider's routes (login redirect, callback) on the auth router. */
   mountRoutes(router: express.Router, authService: AuthService): void;
 }
@@ -115,7 +122,9 @@ export function createAuthRoutes(
   router.get('/auth/providers', (_req, res) => {
     res.json({
       password: passwordLoginEnabled,
-      sso: providers.map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
+      sso: providers
+        .filter((p) => p.isEnabled?.() ?? true)
+        .map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
     });
   });
 

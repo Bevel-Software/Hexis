@@ -56,7 +56,9 @@ undecryptable, so treat it as permanent for the life of the deployment.
 
 Set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` for any
 spec-compliant provider, or configure it on the setup screen, which shows you
-the redirect URI to register with your identity provider.
+the redirect URI to register with your identity provider. A configuration
+saved there, or a later change to it, applies to the next sign-in without a
+restart.
 
 - **SSO-only deployments**: set `LOGIN_PASSWORD=false` and drop
   `ADMIN_PASSWORD`. The password endpoint is then rejected, not merely hidden.
