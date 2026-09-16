@@ -201,8 +201,8 @@ describe('account routes — removing the erased address from access files', () 
         blockedReason: null,
       })),
       assertRemovable: vi.fn(async () => {}),
-      remove: vi.fn(async () => ({ removedFrom: ['roles.yaml'], stillNamedIn: [] as string[] })),
-      filesNaming: vi.fn(async () => ['Sales/access.md', 'roles.yaml']),
+      remove: vi.fn(async () => ({ removedFrom: ['roles.yaml'], stillNamedIn: [] as string[] | null })),
+      filesNaming: vi.fn(async (): Promise<string[]> => ['Sales/access.md', 'roles.yaml']),
     };
     const app = express();
     app.use((req, _res, next) => {
@@ -278,6 +278,19 @@ describe('account routes — removing the erased address from access files', () 
     expect(body.accessRemoval.stillNamedIn).toEqual(['Sales/access.md', 'roles.yaml']);
     expect(text).not.toContain('/srv/kb');
     expect(text).not.toContain('lee@example.com');
+  });
+
+  it('commit failure with an unreadable re-scan reports the files as unknown, not as none', async () => {
+    const { app, accessRemoval } = makeRemovalApp();
+    accessRemoval.remove.mockRejectedValueOnce(new Error('push rejected'));
+    accessRemoval.filesNaming.mockRejectedValueOnce(new Error('EACCES'));
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/u2?removeFromAccess=1`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { erased: boolean; accessRemoval: { ok: boolean; stillNamedIn: string[] | null } };
+    expect(body.erased).toBe(true);
+    expect(body.accessRemoval.ok).toBe(false);
+    expect(body.accessRemoval.stillNamedIn).toBeNull();
   });
 
   it('the guards refuse up front: nothing is erased', async () => {

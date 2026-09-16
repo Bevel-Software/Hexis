@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
 
 const log = logger('accounts');
 import type { AuthUser } from '@bevel-software/platform-shared';
@@ -162,12 +163,14 @@ export function createAccountRoutes(
       log.info('erasure audit:', { action: 'remove-from-access', actorUserId: req.userId, account: accountId, files: result.removedFrom.length });
       res.json({ erased: true, accessRemoval: { ok: true, ...result } });
     } catch (err) {
-      log.error('removing the erased account from access files failed:', { err, account: accountId });
-      let stillNamedIn: string[] = [];
+      // `remove` throws only before its commit lands, so nothing was removed.
+      log.error(`removing erased account ${accountId} from access files failed: ${errorText(err)}`);
+      // null, not []: an unreadable scan is no proof that no file names them.
+      let stillNamedIn: string[] | null = null;
       try {
         stillNamedIn = await accessRemoval!.filesNaming(email);
       } catch (scanErr) {
-        log.warn('could not list the files still naming the erased account:', { err: scanErr });
+        log.warn(`could not list the files still naming erased account ${accountId}: ${errorText(scanErr)}`);
       }
       const message =
         err instanceof WorkflowDomainError && err.status < 500
@@ -178,4 +181,9 @@ export function createAccountRoutes(
   });
 
   return router;
+}
+
+/** An error's message as one escaped log token — never a raw stack. */
+function errorText(err: unknown): string {
+  return printable(err instanceof Error ? err.message : String(err));
 }

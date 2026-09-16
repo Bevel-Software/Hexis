@@ -24,7 +24,7 @@
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
-import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { IAccessControl } from './access-control.interface.js';
 import {
   ADMIN_CANONICAL,
@@ -34,6 +34,7 @@ import {
   canonicalRoleName,
   hasAccessFrontmatterExtension,
   isAccessMdPath,
+  parseAccessEntry,
   parseAccessFile,
   parseOwnAccessEntries,
   stripComment,
@@ -41,12 +42,14 @@ import {
   type Verb,
 } from '../access-model/access-grammar.js';
 import { spliceRevoke } from '../access-model/access-splice.js';
+import { scanFrontmatter } from '../access-model/frontmatter-lines.js';
 import { GROUPS_YAML, SYNCED_GROUPS_YAML, validateGroupsFile } from '../access-model/group-files.js';
 import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
 import { emitRolesModel, isGroupRefMember, parseRolesModel } from './roles-edit.js';
 import { emitGroupsModel, parseGroupsModel } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
 import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
 
 const log = logger('user-access-removal');
@@ -87,8 +90,13 @@ export interface UserReferenceReport extends UserReferenceCounts {
 export interface UserAccessRemovalResult {
   /** Files the commit changed. */
   removedFrom: string[];
-  /** Files that still name the address afterwards (e.g. synced-groups.yaml). */
-  stillNamedIn: string[];
+  /**
+   * Files that still name the address afterwards (e.g. synced-groups.yaml);
+   * null when they could not be checked — never read as "none".
+   */
+  stillNamedIn: string[] | null;
+  /** The commit landed but its push did not; publishing is retried. */
+  publishPending?: boolean;
 }
 
 function matchingUserEntries(entries: Record<Verb, ParsedEntry[]> | null, email: string): number {
@@ -132,7 +140,99 @@ export function removeUserFromAccessText(text: string, repoRel: string, email: s
   } catch {
     return text;
   }
+  // The splice reads plain entries only; the frontmatter parser also accepts
+  // quoted scalars and flow lists, so a grant in those forms is still there.
+  if (matchingUserEntries(parseOwnAccessEntries(out), canonicalEmail(email)) > 0) {
+    out = removeQuotedOrFlowFrontmatterEntries(out, canonicalEmail(email));
+  }
   return out;
+}
+
+/** A YAML scalar without its surrounding quotes (`''` and `\"` unescaped). */
+function unquoteYaml(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) return t.slice(1, -1).replace(/\\(["\\])/g, '$1');
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+  return t;
+}
+
+function namesUser(raw: string, email: string): boolean {
+  const r = parseAccessEntry(unquoteYaml(raw));
+  return r.ok && r.entry.kind === 'user' && r.entry.email === email;
+}
+
+/** The items of a one-line flow list's inner text, split on commas outside quotes. */
+function splitFlowItems(inner: string): string[] {
+  const items: string[] = [];
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === ',') {
+      items.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  items.push(inner.slice(start));
+  return items.map((item) => item.trim()).filter((item) => item !== '');
+}
+
+/**
+ * Remove `email` from the top-level verb keys of a file's own frontmatter in
+ * the forms the splice does not edit: a quoted scalar (`read: "A <a@x>"`), a
+ * one-line flow list (`read: [A <a@x>, "B <b@x>"]`) and quoted list items.
+ * Other lines stay byte-for-byte; a verb left empty becomes `verb: []`.
+ */
+export function removeQuotedOrFlowFrontmatterEntries(text: string, email: string): string {
+  const scan = scanFrontmatter(text);
+  if (scan.kind !== 'frontmatter') return text;
+  const fm = [...scan.fm];
+  const out: string[] = [];
+  let verbKey: { index: number; verb: string; items: number; removed: number } | null = null;
+  const closeVerb = () => {
+    if (verbKey && verbKey.removed > 0 && verbKey.items === verbKey.removed) out[verbKey.index] = `${verbKey.verb}: []`;
+    verbKey = null;
+  };
+  for (const line of fm) {
+    const content = stripComment(line).replace(/\s+$/, '');
+    const key = /^([A-Za-z]+):\s*(.*)$/.exec(content);
+    if (key) {
+      closeVerb();
+      const [, name, value] = key;
+      if (!(KNOWN_VERBS as readonly string[]).includes(name)) {
+        out.push(line);
+        continue;
+      }
+      if (value === '') {
+        verbKey = { index: out.length, verb: name, items: 0, removed: 0 };
+        out.push(line);
+        continue;
+      }
+      if (value.startsWith('[') && value.endsWith(']')) {
+        const items = splitFlowItems(value.slice(1, -1));
+        const kept = items.filter((item) => !namesUser(item, email));
+        out.push(kept.length === items.length ? line : `${name}: [${kept.join(', ')}]`);
+        continue;
+      }
+      out.push(namesUser(value, email) ? `${name}: []` : line);
+      continue;
+    }
+    const item = /^\s+-\s+(.*)$/.exec(content);
+    if (item && verbKey) {
+      verbKey.items++;
+      if (namesUser(item[1], email)) {
+        verbKey.removed++;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  closeVerb();
+  return [...scan.open, ...out, ...scan.post].join(scan.eol);
 }
 
 /**
@@ -239,9 +339,9 @@ export class UserAccessRemovalService {
   /**
    * Every `access.md` and access-frontmatter file (`.md`, `.tool`) in the
    * checkout, repo-relative — the walk the access resolver itself does, with
-   * `.bevelignore` NOT honoured. A folder that cannot be listed is logged.
+   * `.bevelignore` NOT honoured, plus the folders that could not be listed.
    */
-  private async accessFiles(workspaceId: string): Promise<string[]> {
+  private async accessFiles(workspaceId: string): Promise<{ files: string[]; holes: string[] }> {
     const wsDir = await this.workspaceService.getWorkspacePath(workspaceId);
     const repoDir = `${wsDir}/${this.kbDirName}`;
     const out: string[] = [];
@@ -252,13 +352,15 @@ export class UserAccessRemovalService {
         },
       },
     ]);
-    if (holes.length > 0) log.warn(`folders that could not be listed are not scanned: ${holes.join(', ')}`);
-    return out;
+    if (holes.length > 0) {
+      log.warn(`folders that could not be listed are not scanned: ${holes.map((h) => printable(h)).join(', ')}`);
+    }
+    return { files: out, holes };
   }
 
   /** Read every file that could name an address: roles, both group files, access files. */
-  private async readAll(workspaceId: string): Promise<Map<string, string>> {
-    const candidates = await this.accessFiles(workspaceId);
+  private async readAll(workspaceId: string): Promise<{ texts: Map<string, string>; holes: string[] }> {
+    const { files: candidates, holes } = await this.accessFiles(workspaceId);
     const paths = [ROLES_YAML, GROUPS_YAML, SYNCED_GROUPS_YAML, ...candidates];
     const texts = await Promise.all(paths.map((p) => this.locked.readKbFile(workspaceId, p)));
     const out = new Map<string, string>();
@@ -266,7 +368,7 @@ export class UserAccessRemovalService {
       const text = texts[i];
       if (text !== null) out.set(p, text);
     });
-    return out;
+    return { texts: out, holes };
   }
 
   private countIn(texts: Map<string, string>, email: string): UserReferenceCounts {
@@ -316,7 +418,7 @@ export class UserAccessRemovalService {
   async report(rawEmail: string): Promise<UserReferenceReport> {
     const email = canonicalEmail(rawEmail);
     const workspaceId = await this.ensureWorkspace();
-    const texts = await this.readAll(workspaceId);
+    const { texts } = await this.readAll(workspaceId);
     const blockedReason = this.blockedReason(texts.get(ROLES_YAML), email);
     return { ...this.countIn(texts, email), removable: blockedReason === null, blockedReason };
   }
@@ -334,14 +436,16 @@ export class UserAccessRemovalService {
   async filesNaming(rawEmail: string): Promise<string[]> {
     const email = canonicalEmail(rawEmail);
     const workspaceId = await this.ensureWorkspace();
-    return this.countIn(await this.readAll(workspaceId), email).files;
+    return this.countIn((await this.readAll(workspaceId)).texts, email).files;
   }
 
   /**
    * Remove `email` from roles.yaml, groups.yaml and every access file in ONE
    * commit. `erasedId` names the account in the commit message. Throws on any
-   * failure (guard, lock contention, invalid candidate, commit) with nothing
-   * committed.
+   * failure BEFORE the commit (guard, a folder that cannot be listed, lock
+   * contention, invalid candidate, commit) with nothing committed. Once the
+   * commit has landed it never throws: a push that needs resolution is
+   * reported as `publishPending`, and a failed re-scan as `stillNamedIn: null`.
    */
   async remove(actor: AuthUser, rawEmail: string, erasedId: string): Promise<UserAccessRemovalResult> {
     const email = canonicalEmail(rawEmail);
@@ -349,12 +453,22 @@ export class UserAccessRemovalService {
     const workspaceId = await this.ensureWorkspace();
     // Plan once to learn which files to lock, then re-read and re-plan UNDER
     // those locks so a concurrent edit can't be overwritten.
-    const planned = this.countIn(await this.readAll(workspaceId), email).files.filter(
-      (f) => f !== SYNCED_GROUPS_YAML,
-    );
+    const { texts, holes } = await this.readAll(workspaceId);
+    if (holes.length > 0) {
+      // A partial scan would commit a partial cleanup that looks complete.
+      throw new UserAccessRemovalError(
+        `Some folders could not be read (${holes.join(', ')}), so not every access rule can be found. Nothing was changed.`,
+        422,
+        { kind: 'access-removal-incomplete-scan' },
+      );
+    }
+    const planned = this.countIn(texts, email).files.filter((f) => f !== SYNCED_GROUPS_YAML);
     let removedFrom: string[] = [];
+    let publishPending = false;
     if (planned.length > 0) {
-      await this.locked.withFileLocks(workspaceId, actor, planned, async () => {
+      let attempted: string[] = [];
+      try {
+        await this.locked.withFileLocks(workspaceId, actor, planned, async () => {
         const writes: LockedWrite[] = [];
         for (const repoRel of planned) {
           const original = await this.locked.readKbFile(workspaceId, repoRel);
@@ -362,21 +476,35 @@ export class UserAccessRemovalService {
           const content = this.removeFrom(repoRel, original, email);
           if (content !== original) writes.push({ repoRel, content, original });
         }
-        if (writes.length === 0) return;
-        await this.locked.writeAndCommitLocked(
-          workspaceId,
-          actor,
-          writes,
-          `Remove erased account ${erasedId} from roles, groups and access rules`,
-        );
-        removedFrom = writes.map((w) => w.repoRel);
-      });
+          if (writes.length === 0) return;
+          attempted = writes.map((w) => w.repoRel);
+          await this.locked.writeAndCommitLocked(
+            workspaceId,
+            actor,
+            writes,
+            `Remove erased account ${erasedId} from roles, groups and access rules`,
+          );
+          removedFrom = attempted;
+        });
+      } catch (err) {
+        // The commit landed; only its push needs help, which the pending-commit
+        // ladder retries. The removal IS done — never report it as undone.
+        if (!(err instanceof PushNeedsAgentResolutionError) || attempted.length === 0) throw err;
+        removedFrom = attempted;
+        publishPending = true;
+      }
     }
     if (removedFrom.length > 0) {
       this.accessControl.invalidate(workspaceId);
       this.emitWrites(workspaceId, actor, removedFrom);
     }
-    return { removedFrom, stillNamedIn: await this.filesNaming(email) };
+    let stillNamedIn: string[] | null = null;
+    try {
+      stillNamedIn = await this.filesNaming(email);
+    } catch (err) {
+      log.warn(`could not re-scan the files naming erased account ${erasedId}: ${printable(err instanceof Error ? err.message : String(err))}`);
+    }
+    return { removedFrom, stillNamedIn, ...(publishPending ? { publishPending } : {}) };
   }
 
   /** The candidate text for one file with `email` removed (validated). */

@@ -3,11 +3,14 @@ import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { PushNeedsAgentResolutionError } from '../../../shared/domain-errors.js';
+import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { AccessControlService } from '../access-control.service.js';
 import {
   UserAccessRemovalService,
@@ -17,6 +20,7 @@ import {
 } from '../user-access-removal.service.js';
 
 const KB = 'knowledge-base';
+const TEMPLATE_BEVELIGNORE = fileURLToPath(new URL('../../../../kb-template/.bevelignore', import.meta.url));
 const ADMIN: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
 const LEE = 'lee@x.io';
 
@@ -58,7 +62,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
   } as unknown as WorkspaceService;
 }
 
-function stubWorkflow(opts: { failCommit?: boolean } = {}) {
+function stubWorkflow(opts: { failCommit?: boolean; pushNeedsResolution?: boolean } = {}) {
   const commits: { summary: string; paths: string[]; author: string }[] = [];
   const locks = new Map<string, AuthUser>();
   const lockRow = (h: AuthUser) => ({ holderUserId: h.id, holderName: h.name });
@@ -82,6 +86,7 @@ function stubWorkflow(opts: { failCommit?: boolean } = {}) {
     commitChanges: async (_ws: string, user: AuthUser, summary: string, paths: string[]) => {
       if (opts.failCommit) throw new Error('push rejected: remote unreachable');
       commits.push({ summary, paths, author: user.email });
+      if (opts.pushNeedsResolution) throw new PushNeedsAgentResolutionError(DEFAULT_BRANCH, paths[0], 'diverged', 'rebase failed');
       return {} as unknown;
     },
   } as unknown as WorkflowService;
@@ -106,6 +111,23 @@ describe('access-file text helpers', () => {
 
     const node = removeUserFromAccessText(NODE, 'Plan.md', LEE);
     expect(node).toBe('---\nnodeType: note\nowner: []\nread:\n  - Product\n---\n# Plan\n\nowner: Lee <lee@x.io>\n');
+  });
+
+  it('removes grants written as quoted scalars, flow lists and quoted list items', () => {
+    const cases: [string, string][] = [
+      ['---\nowner: "Lee <lee@x.io>"\n---\n', '---\nowner: []\n---\n'],
+      ["---\nowner: 'Lee <lee@x.io>'\n---\n", '---\nowner: []\n---\n'],
+      ['---\nread: [Lee <lee@x.io>, "Sara <sara@x.io>"]  # team\n---\n', '---\nread: ["Sara <sara@x.io>"]\n---\n'],
+      ['---\nread: ["deny Lee <LEE@x.io>"]\n---\n', '---\nread: []\n---\n'],
+      ['---\nread:\n  - "Lee <lee@x.io>"  # lead\n  - Sara <sara@x.io>\n---\n', '---\nread:\n  - Sara <sara@x.io>\n---\n'],
+      ["---\nwrite:\n  - 'Lee <lee@x.io>'\n  - Lee <lee@x.io>\nread:\n  - Product\n---\n", '---\nwrite: []\nread:\n  - Product\n---\n'],
+    ];
+    for (const [text, expected] of cases) {
+      expect(countUserEntriesInAccessText(text, 'Plan.md', LEE)).toBeGreaterThan(0);
+      const out = removeUserFromAccessText(text, 'Plan.md', LEE);
+      expect(out).toBe(expected);
+      expect(countUserEntriesInAccessText(out, 'Plan.md', LEE)).toBe(0);
+    }
   });
 });
 
@@ -134,7 +156,7 @@ describe('UserAccessRemovalService', () => {
     await write(
       repo,
       '.bevelignore',
-      await fs.readFile(path.join(__dirname, '../../../../kb-template/.bevelignore'), 'utf-8'),
+      await fs.readFile(TEMPLATE_BEVELIGNORE, 'utf-8'),
     );
     workspace = stubWorkspace(root);
   });
@@ -145,11 +167,11 @@ describe('UserAccessRemovalService', () => {
 
   const read = (rel: string) => fs.readFile(path.join(repo, rel), 'utf-8');
 
-  function build(workflow = stubWorkflow(), owners: string[] = ['owner@x.io']) {
+  function build(workflow = stubWorkflow(), owners: string[] = ['owner@x.io'], disk: ITreeWalker = new NodeFs()) {
     const access = new AccessControlService(workspace as never, KB, new NodeFs());
     return {
       workflow,
-      service: new UserAccessRemovalService(workspace, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, undefined, owners),
+      service: new UserAccessRemovalService(workspace, workflow.svc, access, disk, KB, () => DEFAULT_BRANCH, undefined, owners),
     };
   }
 
@@ -227,5 +249,32 @@ describe('UserAccessRemovalService', () => {
     expect(await read('roles.yaml')).toBe(ROLES);
     expect(await read('Sales/access.md')).toBe(SALES_ACCESS);
     expect(await service.filesNaming(LEE)).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
+  });
+
+  it('refuses to commit a partial cleanup when a folder cannot be listed', async () => {
+    const real = new NodeFs();
+    const holey = {
+      walkKb: async (...args: Parameters<ITreeWalker['walkKb']>) => {
+        const result = await real.walkKb(...args);
+        return { ...result, holes: [...result.holes, 'Secret'] };
+      },
+    } as unknown as ITreeWalker;
+    const { service, workflow } = build(stubWorkflow(), ['owner@x.io'], holey);
+    await expect(service.remove(ADMIN, LEE, 'deleted-1')).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringMatching(/could not be read \(Secret\)/),
+    });
+    expect(workflow.commits).toHaveLength(0);
+    expect(await read('roles.yaml')).toBe(ROLES);
+  });
+
+  it('a commit whose push needs resolution is reported as removed, publishing pending', async () => {
+    const { service, workflow } = build(stubWorkflow({ pushNeedsResolution: true }));
+    const result = await service.remove(ADMIN, LEE, 'deleted-1');
+    expect(workflow.commits).toHaveLength(1);
+    expect(result.publishPending).toBe(true);
+    expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
+    expect(result.stillNamedIn).toEqual([]);
+    expect(await read('roles.yaml')).not.toContain('lee@x.io');
   });
 });

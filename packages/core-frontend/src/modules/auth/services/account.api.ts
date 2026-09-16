@@ -82,8 +82,13 @@ export interface AccessRemovalOutcome {
   /** Present when `ok` is false. */
   error?: string;
   removedFrom: string[];
-  /** Files that still name the deleted user — for the admin to fix. */
-  stillNamedIn: string[];
+  /**
+   * Files that still name the deleted user — for the admin to fix. null when
+   * they could not be checked (not the same as none).
+   */
+  stillNamedIn: string[] | null;
+  /** The removal was committed but is not published yet; it is retried. */
+  publishPending?: boolean;
 }
 
 /**

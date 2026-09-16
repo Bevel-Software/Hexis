@@ -9,6 +9,7 @@ import {
   deleteAccount,
   getAccountReferences,
   listAccounts,
+  type AccountReferences,
 } from '../../auth/services/account.api';
 
 vi.mock('../../auth/services/account.api', () => ({
@@ -301,6 +302,41 @@ describe('UserAccountsPage', () => {
     expect(within(alert).getByText('Sales/access.md')).toBeInTheDocument();
     expect(within(alert).getByText('roles.yaml')).toBeInTheDocument();
     expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('a slower references answer for an account opened earlier does not land in a later dialog', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    let answerAlice: (refs: AccountReferences) => void = () => {};
+    vi.mocked(getAccountReferences).mockImplementation((id: string) =>
+      id === 'u-alice'
+        ? new Promise((resolve) => {
+            answerAlice = resolve;
+          })
+        : Promise.resolve({ ...REFS, total: 1, roles: 1, groups: 0, accessRules: 0, fileGrants: 0 }),
+    );
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account bob@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('named in 1 place: 1 role'));
+    answerAlice({ ...REFS, removable: false, blockedReason: 'This is the last Admin.' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('named in 1 place: 1 role');
+    expect(dialog).not.toHaveTextContent(/last Admin/);
+    expect(
+      within(dialog).getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+  });
+
+  it('a removal whose re-scan failed says the remaining files could not be checked', async () => {
+    vi.mocked(deleteAccount).mockResolvedValueOnce({ ok: true, removedFrom: ['roles.yaml'], stillNamedIn: null });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/could not be checked/));
   });
 
   it('a failed delete closes the dialog, surfaces the error, and does not reload', async () => {

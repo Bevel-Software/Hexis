@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
 import { useAdmin } from '../state/admin.context';
@@ -81,6 +81,9 @@ export function UserAccountsPage() {
   const [references, setReferences] = useState<AccountReferences | null>(null);
   const [referencesError, setReferencesError] = useState<string | null>(null);
   const [removeFromAccess, setRemoveFromAccess] = useState(true);
+  // Which references request the dialog is waiting for — a slower answer
+  // for an account opened earlier must not land in a later dialog.
+  const referencesRequest = useRef(0);
   // After a delete whose access-file cleanup did not fully land: what went
   // wrong and which files still name the deleted user.
   const [accessNotice, setAccessNotice] = useState<{ message: string; files: string[] } | null>(null);
@@ -122,12 +125,15 @@ export function UserAccountsPage() {
     setReferences(null);
     setReferencesError(null);
     setRemoveFromAccess(true);
+    const requestId = ++referencesRequest.current;
     getAccountReferences(account.id)
       .then((refs) => {
+        if (referencesRequest.current !== requestId) return;
         setReferences(refs);
         if (!refs.removable) setRemoveFromAccess(false);
       })
       .catch((err) => {
+        if (referencesRequest.current !== requestId) return;
         setReferencesError(err instanceof Error ? err.message : "Couldn't count where they are named.");
       });
   }
@@ -143,18 +149,28 @@ export function UserAccountsPage() {
       const outcome = await deleteAccount(pendingDelete.id, {
         removeFromAccess: removeFromAccess && !removalBlocked,
       });
+      const unchecked = ' Which files still name them could not be checked — look through roles, groups and access rules.';
       if (outcome && !outcome.ok) {
         setAccessNotice({
           message: `The account was deleted, but removing them from roles, groups and access rules failed${
             outcome.error ? `: ${outcome.error}` : '.'
-          }`,
-          files: outcome.stillNamedIn,
+          }${outcome.stillNamedIn === null ? unchecked : ''}`,
+          files: outcome.stillNamedIn ?? [],
         });
-      } else if (outcome && outcome.stillNamedIn.length > 0) {
-        setAccessNotice({
-          message: 'The account was deleted. Some files still name them and need a manual edit:',
-          files: outcome.stillNamedIn,
-        });
+      } else if (outcome) {
+        const pending = outcome.publishPending
+          ? ' The removal is saved; publishing it is being retried.'
+          : '';
+        if (outcome.stillNamedIn === null) {
+          setAccessNotice({ message: `The account was deleted.${pending}${unchecked}`, files: [] });
+        } else if (outcome.stillNamedIn.length > 0) {
+          setAccessNotice({
+            message: `The account was deleted.${pending} Some files still name them and need a manual edit:`,
+            files: outcome.stillNamedIn,
+          });
+        } else if (pending) {
+          setAccessNotice({ message: `The account was deleted.${pending}`, files: [] });
+        }
       }
       setPendingDelete(null);
       refresh();
