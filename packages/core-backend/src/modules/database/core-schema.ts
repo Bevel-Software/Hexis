@@ -147,6 +147,13 @@ export const changeRequests = pgTable('change_requests', {
   authorName: text('author_name').notNull(),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
+  // The last apply attempt that did not land (null when none, or once a new
+  // attempt starts). Persisted rather than only pushed to the clicker so every
+  // viewer of the still-open request — its author first — sees the refusal.
+  applyFailureReason: text('apply_failure_reason'),
+  applyFailureConflicts: boolean('apply_failure_conflicts'),
+  applyFailedAt: timestamp('apply_failed_at'),
+  applyFailedByName: text('apply_failed_by_name'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
   closedAt: timestamp('closed_at'),

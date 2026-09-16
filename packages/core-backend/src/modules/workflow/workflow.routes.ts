@@ -1002,10 +1002,30 @@ export function createWorkflowRoutes(
     // the result over the event bus: `change-request-merged` on success (emitted
     // by the workflow service; the PR viewer refreshes off it), and a
     // user-scoped `change-request-merge-failed` on a gate block / conflict /
-    // merge error so the UI that kicked it off can react.
+    // merge error so the UI that kicked it off can react. A failure on a
+    // request that exists is ALSO persisted and broadcast (`recordApplyFailure`)
+    // — the request stays open, and its author and other viewers must see why.
     res.status(202).json({ status: 'merging', number: num });
+    const reportFailure = async (reason: string, conflicts: boolean) => {
+      events.emit({
+        kind: 'change-request-merge-failed',
+        forUserId: user.id,
+        number: num,
+        reason,
+        conflicts,
+      });
+      try {
+        await workflow.recordApplyFailure(num, { reason, conflicts }, user);
+      } catch (err) {
+        // The clicker already has the reason; only the other viewers lose it.
+        log.warn(`could not record the failed apply of change request #${num}:`, { err });
+      }
+    };
     void (async () => {
       try {
+        await workflow.clearApplyFailure(num).catch((err: unknown) => {
+          log.warn(`could not clear the previous apply failure of change request #${num}:`, { err });
+        });
         const workspace = await workspaceService.getOrCreateForUser(user);
         const detail = await workflow.getChangeRequestDetail(num, {
           fresh: true,
@@ -1034,25 +1054,13 @@ export function createWorkflowRoutes(
           { bypass },
         );
         if (outcome.kind === 'conflicts-need-resolution') {
-          events.emit({
-            kind: 'change-request-merge-failed',
-            forUserId: user.id,
-            number: num,
-            reason: 'This draft conflicts with the target and needs resolving first.',
-            conflicts: true,
-          });
+          await reportFailure('This draft conflicts with the target and needs resolving first.', true);
         }
         // Success path: `workflow.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {
         const { body: errBody } = toHttpError(err);
         log.error(`async merge of change request #${num} failed:`, { err });
-        events.emit({
-          kind: 'change-request-merge-failed',
-          forUserId: user.id,
-          number: num,
-          reason: typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
-          conflicts: false,
-        });
+        await reportFailure(typeof errBody.error === 'string' ? errBody.error : 'Merge failed', false);
       }
     })();
   });

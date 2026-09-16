@@ -57,6 +57,13 @@
       "when": 1789406950616,
       "tag": "0007_github_facade_registered",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789563611048,
+      "tag": "0008_change_request_apply_failure",
+      "breakpoints": true
     }
   ]
 }

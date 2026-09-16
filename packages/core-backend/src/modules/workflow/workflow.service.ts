@@ -89,6 +89,9 @@ const execFileAsync = promisify(execFile);
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
 
+/** Cap on a persisted apply refusal — long enough to name the files a gate waits on. */
+const APPLY_FAILURE_MAX_LEN = 1000;
+
 /**
  * True only for a Postgres unique violation (23505) on the open-CR-per-pair
  * index. `change_requests` also carries `change_requests_number_unq` on its
@@ -2501,6 +2504,51 @@ export class WorkflowService implements IWorkflowService {
     // and branch retirement is git IO it must never wait behind.
     await this.retireMergedSourceBranch(number, baseBranch, user);
     return { kind: 'merged', result };
+  }
+
+  /**
+   * Persist why an apply did not land and tell every session. The apply route
+   * already answers the clicker directly (user-scoped `merge-failed`); this is
+   * for everyone else who can see the still-open request — above all its
+   * author, who otherwise sees it pending forever with no word of the refusal.
+   * The event carries only the number: the reason is read back through the
+   * list and detail endpoints, so a session that misses the event gets the
+   * same answer on its next fetch.
+   */
+  async recordApplyFailure(
+    number: number,
+    failure: { reason: string; conflicts: boolean },
+    user: AuthUser,
+  ): Promise<void> {
+    await this.db
+      .update(changeRequests)
+      .set({
+        applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
+        applyFailureConflicts: failure.conflicts,
+        applyFailedAt: new Date(),
+        applyFailedByName: user.name,
+      })
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')));
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-apply-failed', number });
+  }
+
+  /**
+   * Forget the previous refusal as a new attempt starts, so no viewer reads an
+   * old reason as the verdict on an apply still running. No event: the attempt
+   * ends in `merged` or a fresh `apply-failed`, and both refresh every viewer.
+   */
+  async clearApplyFailure(number: number): Promise<void> {
+    await this.db
+      .update(changeRequests)
+      .set({
+        applyFailureReason: null,
+        applyFailureConflicts: null,
+        applyFailedAt: null,
+        applyFailedByName: null,
+      })
+      .where(eq(changeRequests.number, number));
+    this.prs.invalidateDetailCache(number);
   }
 
   /**

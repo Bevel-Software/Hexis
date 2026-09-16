@@ -24,6 +24,23 @@ export interface ApplyRefusal {
   conflicts: boolean;
 }
 
+/**
+ * The refusal line a change box shows for `cr`. This tab's own attempt speaks
+ * first, and a conflict there says nothing here because the box's blocked state
+ * already does. Otherwise the refusal PERSISTED on the request, which is how
+ * the author and every other viewer learn that somebody's apply failed. That
+ * one never withdraws the button: the author may already have fixed the cause,
+ * and only a new attempt can say so.
+ */
+export function refusalLine(
+  cr: PullRequestSummary,
+  refusals: ReadonlyMap<number, ApplyRefusal>,
+): string | null {
+  const own = refusals.get(cr.number);
+  if (own) return own.conflicts ? null : own.reason;
+  return cr.lastApplyFailure?.reason ?? null;
+}
+
 export interface ApplyChangeRequest {
   /** The change request an apply is currently running for, if any. */
   activeCr: number | null;

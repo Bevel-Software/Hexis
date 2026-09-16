@@ -518,4 +518,18 @@ export interface IWorkflowService {
     workspaceId: string,
     opts?: { bypass?: boolean },
   ): Promise<MergeChangeRequestOutcome>;
+
+  /**
+   * Persist why an apply did not land on the (still open) request, and
+   * announce `change-request-apply-failed` to every session so the author and
+   * other viewers re-read it — not only the user who clicked.
+   */
+  recordApplyFailure(
+    number: number,
+    failure: { reason: string; conflicts: boolean },
+    user: AuthUser,
+  ): Promise<void>;
+
+  /** Forget a previous apply failure — a new attempt is starting. */
+  clearApplyFailure(number: number): Promise<void>;
 }

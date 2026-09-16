@@ -11,6 +11,7 @@ import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { useEventBus } from '../../workflow/state/event-bus.context';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
@@ -103,6 +104,32 @@ export function ChangeRequestDialog({
       cancelled = true;
     };
   }, [cr.number]);
+
+  // Somebody else's apply of THIS request just failed or landed. Re-read the
+  // detail so a reader with the dialog open sees the refusal the clicker saw
+  // (or that there is nothing left to decide), not the state from when it
+  // opened. Fresh: the event exists because the cached answer just went stale.
+  const bus = useEventBus();
+  useEffect(() => {
+    if (!bus) return;
+    let cancelled = false;
+    const reread = (e: { number: number }) => {
+      if (e.number !== cr.number) return;
+      fetchPrDetail(cr.number, { fresh: true })
+        .then((d) => {
+          if (!cancelled) setDetail(d);
+        })
+        .catch(() => undefined);
+    };
+    const offs = [
+      bus.subscribe('change-request-apply-failed', reread),
+      bus.subscribe('change-request-merged', reread),
+    ];
+    return () => {
+      cancelled = true;
+      for (const off of offs) off();
+    };
+  }, [bus, cr.number]);
 
   // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
   // lifted to full paths, and every touched file lists whatever folder it is
@@ -607,6 +634,20 @@ export function ChangeRequestDialog({
         {error && (
           <Banner tone="danger" role="alert" className="mx-8 mt-4">
             {error}
+          </Banner>
+        )}
+
+        {/* A refusal from an attempt this dialog did not make — another
+            owner's, an admin's, or this reader's own in another tab. Its own
+            attempt speaks through `error` / `blocked` above instead. */}
+        {!error && !blocked && !applyBusy && detail?.lastApplyFailure && (
+          <Banner tone="danger" role="alert" className="mx-8 mt-4">
+            <b className="font-semibold">
+              {detail.lastApplyFailure.byName
+                ? `${detail.lastApplyFailure.byName} could not apply this`
+                : 'The last apply did not land'}
+            </b>
+            : {detail.lastApplyFailure.reason}
           </Banner>
         )}
 

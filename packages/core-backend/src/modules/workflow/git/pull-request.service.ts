@@ -142,6 +142,16 @@ export class PullRequestService implements IPullRequestService {
       review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
       // In-app change-request route; there's no external PR URL to link to.
       url: `/change-requests/${row.number}`,
+      // Only an OPEN request can still be retried, so only it reports a refusal.
+      lastApplyFailure:
+        row.state === 'open' && row.applyFailureReason && row.applyFailedAt
+          ? {
+              reason: row.applyFailureReason,
+              conflicts: row.applyFailureConflicts === true,
+              at: row.applyFailedAt.toISOString(),
+              byName: row.applyFailedByName ?? '',
+            }
+          : null,
     };
   }
 

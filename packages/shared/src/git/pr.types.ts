@@ -45,6 +45,25 @@ export interface PullRequestSummary {
   touchedNodePaths: string[];
   review: PullRequestReviewStatus;
   url: string;
+  /**
+   * The most recent apply attempt that did not land, while the request is
+   * still open — so its author and every other viewer see the refusal the
+   * person who clicked Apply saw. Cleared when a new attempt starts; null or
+   * absent when there is nothing to report.
+   */
+  lastApplyFailure?: ChangeRequestApplyFailure | null;
+}
+
+/** Why the last apply of a change request failed, as persisted on the request. */
+export interface ChangeRequestApplyFailure {
+  /** Human-readable reason, credentials already redacted. */
+  reason: string;
+  /** True when git refused the merge on conflicts with the target. */
+  conflicts: boolean;
+  /** ISO timestamp of the failed attempt. */
+  at: string;
+  /** Display name of whoever attempted the apply. */
+  byName: string;
 }
 
 export type PrFileStatus =

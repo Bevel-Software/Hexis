@@ -5,7 +5,11 @@ import {
   listOpenChangeRequests,
 } from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
-import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
+import {
+  PR_STALE_EVENT,
+  PR_STALE_FALLBACK_MS,
+  SUGGESTIONS_OPTIMISTIC_EVENT,
+} from '../../../core/events';
 import {
   NO_CHANGE_REQUESTS,
   OpenChangeRequestsContext,
@@ -116,6 +120,19 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // rows for a just-uploaded file would sit invisible until the TTL).
     const onStale = () => load({ fresh: true });
     window.addEventListener(PR_STALE_EVENT, onStale);
+    // The fallback for a stale event that never came. Stale events now follow
+    // the bus's merge / reject / apply-failed broadcasts, so a dropped bus
+    // event would otherwise leave an applied request's markers in this tree
+    // until a reload. Cached reads (a merge evicts the server's list cache, so
+    // the first read after one is already true), and only while visible — a
+    // hidden tab catches up the moment it is shown instead.
+    const reconcile = setInterval(() => {
+      if (!document.hidden) load();
+    }, PR_STALE_FALLBACK_MS);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     const onAnnounce = (e: Event) => {
       const cr = (e as CustomEvent<PullRequestSummary>).detail;
       if (!cr || typeof cr.number !== 'number') return;
@@ -127,6 +144,8 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     return () => {
       cancelled = true;
+      clearInterval(reconcile);
+      document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener(PR_STALE_EVENT, onStale);
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     };
