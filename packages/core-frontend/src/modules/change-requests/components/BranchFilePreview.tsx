@@ -100,7 +100,11 @@ interface BranchFileAccess {
  *
  * Default-ALLOW when the lookup itself fails, matching `useFileAccess`: a
  * transient API failure must not manufacture a refusal, and the bytes are
- * still gated where it counts.
+ * still gated where it counts. What that costs is a viewer's own error rather
+ * than this pane's refusal — so every viewer mounted here has to HAVE one.
+ * `ImageRenderer` did not (it sat on "Loading image…" for a rejected read)
+ * and now names the status, which is the only path that could end in a
+ * permanent spinner.
  */
 function useBranchFileAccess(
   workspaceId: string | null,
@@ -168,10 +172,18 @@ export interface BranchFilePreviewProps {
   label: 'Proposed version' | 'Current version';
   /**
    * The branch to open the CURRENT version on, for a file the request
-   * CHANGES. Null for an added file (there is no current version) and for one
-   * the request doesn't touch (this pane already IS the current version).
+   * CHANGES. Null for an added file (there is no current version), for one the
+   * request doesn't touch (this pane already IS the current version), and for
+   * a rename whose old path the request never named (nothing to point at).
    */
   currentVersionBranch?: string | null;
+  /**
+   * WHERE the current version is, on `currentVersionBranch` — which for a
+   * RENAMED file is not `repoRelativePath`. The proposed path is the new
+   * name; the target branch has the file under the old one, and linking the
+   * new name there opens a 404. Defaults to the path being previewed.
+   */
+  currentVersionPath?: string;
 }
 
 /**
@@ -183,6 +195,7 @@ export function BranchFilePreview({
   repoRelativePath,
   label,
   currentVersionBranch = null,
+  currentVersionPath,
 }: BranchFilePreviewProps) {
   const { workspace, failed } = useBranchWorkspace(branch);
   const access = useBranchFileAccess(workspace?.id ?? null, repoRelativePath);
@@ -199,7 +212,10 @@ export function BranchFilePreview({
         // lose the review context, and the two versions are meant to be read
         // side by side.
         <a
-          href={kbFileUrl(currentVersionBranch, `${workspace.kbDirName}/${repoRelativePath}`)}
+          href={kbFileUrl(
+            currentVersionBranch,
+            `${workspace.kbDirName}/${currentVersionPath ?? repoRelativePath}`,
+          )}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 text-meta text-ink-faint transition-colors hover:text-ink"
@@ -215,7 +231,7 @@ export function BranchFilePreview({
   if (failed) {
     body = (
       <p className="py-6 text-center text-detail text-ink-faint">
-        The change request's branch couldn't be opened, so this file can't be shown here.
+        That branch couldn't be opened, so this file can't be shown here.
       </p>
     );
   } else if (!workspace || access.canRead === null) {
@@ -282,7 +298,17 @@ export interface BranchFileDownloadProps {
  * about, from the request's branch rather than the checked-out tree.
  */
 export function BranchFileDownload({ branch, repoRelativePath, label }: BranchFileDownloadProps) {
-  const { workspace } = useBranchWorkspace(branch);
+  const { workspace, failed } = useBranchWorkspace(branch);
+  // A failed bootstrap has to be SAID. Folding it into the loading case
+  // rendered nothing at all, which under a note that promises the bytes reads
+  // as a missing button rather than as the branch problem it is.
+  if (failed) {
+    return (
+      <p className="text-center text-detail text-ink-faint">
+        That branch couldn't be opened, so the file can't be downloaded here.
+      </p>
+    );
+  }
   if (!workspace) return null;
   return (
     <RendererWorkspaceContext.Provider value={{ workspaceId: workspace.id }}>

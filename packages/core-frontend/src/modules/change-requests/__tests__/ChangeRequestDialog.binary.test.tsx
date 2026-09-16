@@ -103,7 +103,7 @@ const CR: PullRequestSummary = {
   url: '/change-requests/12',
 } as unknown as PullRequestSummary;
 
-function detailWith(files: { path: string; status: PrFileStatus }[]) {
+function detailWith(files: { path: string; status: PrFileStatus; previousPath?: string }[]) {
   return {
     ...CR,
     body: '',
@@ -266,6 +266,104 @@ describe('ChangeRequestDialog: a proposed document', () => {
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
     expect(await screen.findByTestId('file-pane-card')).toBeInTheDocument();
     expect(screen.queryByTestId('cr-preview-viewport')).toBeNull();
+  });
+
+  /**
+   * A DELETION. The request's branch does not have the path at all, so reading
+   * it there would 404 into "Failed to load PDF (HTTP 404)"; the document
+   * under decision is the one still on the target branch, and the pane has to
+   * say that it is the one that would go.
+   */
+  it('shows a removed binary from the TARGET branch, named as a deletion', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([{ path: 'Inbox/brief.pdf', status: 'removed' }]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    expect(await screen.findByText('Page 1 of 2')).toBeInTheDocument();
+    expect(await screen.findByText(/This request DELETES this file/)).toBeInTheDocument();
+    expect(screen.getByText('Current version')).toBeInTheDocument();
+
+    // The TARGET branch's bytes, and never the request branch's — the path is
+    // gone there.
+    await waitFor(() =>
+      expect(rawUrls()).toContain(
+        `/api/workspace/${wsId(TARGET)}/file/raw?path=${encodeURIComponent(`${KB}/Inbox/brief.pdf`)}`,
+      ),
+    );
+    expect(rawUrls().some((u) => u.includes(wsId(CR_BRANCH)))).toBe(false);
+    // This pane already IS the current version.
+    expect(screen.queryByRole('link', { name: /Open the current version/ })).toBeNull();
+  });
+
+  /** A removed format with no viewer hands over the bytes that would go. */
+  it('offers the target branch bytes for a removed file no viewer renders', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([{ path: 'Docs/minutes.odt', status: 'removed' }]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    expect(await screen.findByText(/this request DELETES/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Download the file' }));
+    await waitFor(() =>
+      expect(rawUrls()).toContain(
+        `/api/workspace/${wsId(TARGET)}/file/raw?path=${encodeURIComponent(`${KB}/Docs/minutes.odt`)}&download=1`,
+      ),
+    );
+  });
+
+  /**
+   * A RENAMED file's current version is under its OLD name. Pointing the link
+   * at the proposed path on the target branch opens a 404 — the target branch
+   * has never had the file under that name.
+   */
+  it('opens a renamed binary current version under its OLD path', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        { path: 'Docs/logo-2026.png', status: 'renamed', previousPath: 'Docs/logo.png' },
+      ]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    // The proposed bytes still come from the request's branch, under the NEW name.
+    await screen.findByRole('img', { name: `${KB}/Docs/logo-2026.png` });
+    expect(rawUrls()).toContain(
+      `/api/workspace/${wsId(CR_BRANCH)}/file/raw?path=${encodeURIComponent(`${KB}/Docs/logo-2026.png`)}`,
+    );
+
+    expect(screen.getByText('Proposed version')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Open the current version/ })).toHaveAttribute(
+      'href',
+      `/workspace/${TARGET}/${KB}/Docs/logo.png`,
+    );
+  });
+
+  /** A rename with no `previousPath` has no current version to point at. */
+  it('offers no current-version link for a rename without an old path', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([{ path: 'Docs/logo-2026.png', status: 'renamed' }]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    await screen.findByRole('img', { name: `${KB}/Docs/logo-2026.png` });
+    expect(screen.getByText('Proposed version')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Open the current version/ })).toBeNull();
+  });
+
+  /**
+   * A branch that cannot be opened has to be SAID on the download path too.
+   * Rendering nothing under a note that promises the bytes reads as a missing
+   * button rather than as the branch problem it is.
+   */
+  it('says so when the branch cannot be opened for a no-viewer download', async () => {
+    workspaceMock.getOrCreateWorkspace.mockRejectedValue(new Error('no such branch'));
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([{ path: 'Docs/minutes.odt', status: 'added' }]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    expect(await screen.findByText(/branch couldn't be opened/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Download/ })).toBeNull();
   });
 
   it('refuses the same way the file page does when the reader may not read it', async () => {
