@@ -83,7 +83,10 @@ export function setFrontmatterField(text: string, key: string, value: string): s
     // No frontmatter — prepend a fresh block, keeping the original body intact.
     return `---${eol}${line}${eol}---${eol}${text}`;
   }
-  const fmLines = fm.frontmatter.split(/\r?\n/);
+  // An empty block has no lines, not one empty line: splitting '' would give
+  // [''], and the inserted key would be followed by a blank line before the
+  // closing fence.
+  const fmLines = fm.frontmatter === '' ? [] : fm.frontmatter.split(/\r?\n/);
   const idx = fmLines.findIndex((l) => keyRe.test(l));
   if (idx >= 0) fmLines[idx] = line;
   else fmLines.unshift(line);
