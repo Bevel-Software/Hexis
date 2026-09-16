@@ -75,6 +75,13 @@ export class ToolError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /**
+     * Structured fields sent beside `error` in the response body, for a
+     * refusal the caller should act on rather than only read (e.g. a
+     * `write-denied` that says how to propose the change instead). Never put
+     * request arguments or credentials here: the body goes back verbatim.
+     */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ToolError';

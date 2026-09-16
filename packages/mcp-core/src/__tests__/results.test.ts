@@ -14,6 +14,16 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
   });
 
+  it('returns a structured refusal (a body with a `code`) whole, so its fields reach the caller', () => {
+    const data = {
+      error: 'You don\'t have permission to write to "kb/a.md".',
+      code: 'write-denied',
+      canPropose: true,
+      proposal: { steps: [{ tool: 'create_branch' }] },
+    };
+    expect(JSON.parse(describeToolFailure({ response: { data } }))).toEqual(data);
+  });
+
   it('never throws on a thrown value whose own toString throws', () => {
     // A null-prototype object has no toString; String() on it throws — and a
     // describe that throws inside a catch path turns a tool failure into a

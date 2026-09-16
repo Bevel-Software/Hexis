@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
-import { hasHttpStatus, type ToolHandler } from './tool.contract.js';
+import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
 import type { ResolveToolContext } from './tool-context.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -77,6 +77,11 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
           if (hasHttpStatus(err)) log.error('handler failed post-stream:', { detail: err.message });
           else log.error('handler failed post-stream:', { err });
           res.end();
+          return;
+        }
+        if (err instanceof ToolError && err.details) {
+          // `error` goes last so no detail field can overwrite the message.
+          res.status(err.status).json({ ...err.details, error: err.message });
           return;
         }
         if (hasHttpStatus(err)) {

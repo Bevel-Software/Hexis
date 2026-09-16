@@ -19,6 +19,8 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
+import { AccessDeniedError } from '../../access-model/access-errors.js';
+import { PROPOSAL_ROUTE_NOTE } from '../write-denial.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -1393,5 +1395,164 @@ describe('path inputs tell the agent about the repository folder', () => {
     expect(list).toBeDefined();
     expect(list!.description).toContain(`\`${KB_DIR}/\``);
     expect(inputDescription(list, 'path')).toContain(`\`${KB_DIR}/\``);
+  });
+});
+
+describe('a write refused for permissions says whether and how to propose it', () => {
+  const TARGET = 'target-company-state';
+  const DENIED = `${KB_DIR}/Sales/deal.md`;
+  const KEY = 'hx_live_Zm9vYmFyU2VjcmV0S2V5';
+  const SECRET_CONTENT = 'password=hunter2-do-not-echo';
+
+  /** Access control whose read verdict is `readable` and which records every call. */
+  const readVerdict = (readable: boolean | 'throws') => {
+    const calls: string[] = [];
+    const ac = {
+      canRead: async (_w: string, _u: string, rel: string) => {
+        calls.push(rel);
+        if (readable === 'throws') throw new Error('git failed');
+        return readable;
+      },
+      canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+    } as unknown as IAccessControl;
+    return { ac, calls };
+  };
+
+  /** Make every mutating filesystem method refuse like the lock gate on a protected branch. */
+  const denyWrites = (message?: string) => {
+    const refuse = async (p?: unknown) => {
+      const err = new AccessDeniedError({
+        path: typeof p === 'string' ? p : DENIED,
+        eligibleRoles: ['Sales Lead'],
+        eligibleUsers: [{ name: 'Owner', email: 'owner@x' }],
+      });
+      if (message) Object.defineProperty(err, 'message', { value: message });
+      throw err;
+    };
+    const target = fs as unknown as Record<string, unknown>;
+    for (const m of ['writeFile', 'deleteFile', 'moveFile', 'mkdir']) target[m] = refuse;
+    target.copyFile = async (_src: string, dest: string) => refuse(dest);
+    target.writeFiles = async (writes: { path: string }[]) => refuse(writes[0]?.path);
+  };
+
+  const call = async (base: string, tool: string, body: Record<string, unknown>) => {
+    const res = await fetch(`${base}/api/agent/tools/${tool}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${KEY}` },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, text, json: JSON.parse(text) as Record<string, any> };
+  };
+
+  const CALLS: Array<[string, Record<string, unknown>]> = [
+    ['write_file', { branch: TARGET, path: DENIED, content: SECRET_CONTENT }],
+    ['write_files', { branch: TARGET, files: [{ path: DENIED, content: SECRET_CONTENT }] }],
+    ['edit_file', { branch: TARGET, path: DENIED, old_string: 'old', new_string: SECRET_CONTENT }],
+    ['move_file', { branch: TARGET, src: DENIED, dest: `${KB_DIR}/Sales/moved.md` }],
+    ['delete_file', { branch: TARGET, path: DENIED }],
+    ['copy_file', { branch: TARGET, src: `${KB_DIR}/a.md`, dest: DENIED }],
+    ['mkdir', { branch: TARGET, path: DENIED }],
+  ];
+
+  it.each(CALLS)('%s: a reader gets canPropose and the three steps, and nothing is created', async (tool, body) => {
+    const { ac, calls } = readVerdict(true);
+    const base = await start('write', ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text\n');
+    denyWrites();
+    const workflowCalls = workspacePathCalls.length;
+
+    const { status, json } = await call(base, tool, body);
+
+    expect(status).toBe(403);
+    expect(json).toMatchObject({
+      code: 'write-denied',
+      path: DENIED,
+      reason: 'Eligible: Sales Lead; Owner <owner@x>.',
+      canPropose: true,
+    });
+    expect(json.cannotProposeReason).toBeUndefined();
+    expect(json.error).toContain('You may propose this change instead');
+    const draft = json.proposal.draftBranch as string;
+    expect(json.proposal.targetBranch).toBe(TARGET);
+    expect(json.proposal.steps.map((s: { tool: string }) => s.tool)).toEqual(['create_branch', tool, 'open_change_request']);
+    expect(json.proposal.steps[0].args).toEqual({ name: draft, branch: TARGET });
+    expect(json.proposal.steps[1].args).toEqual({ branch: draft });
+    expect(json.proposal.steps[2].args).toEqual({ sourceBranch: draft, targetBranch: TARGET });
+    // The read verdict was asked of the repo-relative path.
+    expect(calls).toContain('Sales/deal.md');
+    // Nothing was created: no workspace was resolved for a draft, and the context's
+    // workflow service is an empty stub, so a create_branch or change request would have 500d.
+    expect(workspacePathCalls.length).toBe(workflowCalls);
+  });
+
+  it('without read access the denial says so in one sentence and offers no proposal', async () => {
+    const { ac } = readVerdict(false);
+    const base = await start('write', ac);
+    denyWrites();
+    const { status, json } = await call(base, 'write_file', CALLS[0][1]);
+    expect(status).toBe(403);
+    expect(json).toMatchObject({ code: 'write-denied', path: DENIED, canPropose: false });
+    expect(json.proposal).toBeUndefined();
+    expect(json.cannotProposeReason).toBe('Proposing is not available: you cannot read this path.');
+    expect(json.error).toContain('you cannot read this path');
+  });
+
+  it('on a branch that takes no change requests the denial says the branch is not proposable', async () => {
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac);
+    denyWrites();
+    const { json } = await call(base, 'write_file', { ...CALLS[0][1], branch: 'someone/draft' });
+    expect(json).toMatchObject({ code: 'write-denied', canPropose: false });
+    expect(json.cannotProposeReason).toContain('not a branch that accepts change requests');
+  });
+
+  it('fails closed when the read verdict cannot be reached', async () => {
+    const { ac } = readVerdict('throws');
+    const base = await start('write', ac);
+    denyWrites();
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+    expect(json).toMatchObject({ code: 'write-denied', canPropose: false });
+    expect(json.proposal).toBeUndefined();
+  });
+
+  it('carries the excluded-principal sentence as the reason when the refusal gives one', async () => {
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac);
+    denyWrites(`You don't have permission to write to "${DENIED}". The Sales role is excluded at this folder.`);
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+    expect(json.reason).toBe('The Sales role is excluded at this folder.');
+  });
+
+  it('never echoes the key, the content or the session id', async () => {
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac);
+    await fs.mkdir(`${KB_DIR}/Sales`, { recursive: true });
+    await fs.writeFile(DENIED, 'old text\n');
+    denyWrites();
+    for (const [tool, body] of CALLS) {
+      const { text } = await call(base, tool, { ...body, sessionId: 'sess-secret-123' });
+      expect(text, tool).toContain('write-denied');
+      for (const secret of [KEY, SECRET_CONTENT, 'sess-secret-123', 'Bearer']) expect(text, tool).not.toContain(secret);
+    }
+  });
+
+  it('other failures pass through unchanged', async () => {
+    const base = await start('write', readVerdict(true).ac);
+    const res = await call(base, 'edit_file', { branch: TARGET, path: 'a.md', old_string: 'nope', new_string: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.json).toEqual({ error: 'old_string not found in the file.' });
+  });
+
+  it('each write tool mentions the proposal route in its description; read tools do not', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'edit_file', 'write_files', 'move_file', 'delete_file', 'copy_file', 'mkdir']) {
+      expect(tools.find((t) => t.name === name)?.description, name).toContain(PROPOSAL_ROUTE_NOTE.trim());
+    }
+    for (const name of ['read_file', 'grep', 'list_files']) {
+      expect(tools.find((t) => t.name === name)?.description, name).not.toContain(PROPOSAL_ROUTE_NOTE.trim());
+    }
   });
 });
