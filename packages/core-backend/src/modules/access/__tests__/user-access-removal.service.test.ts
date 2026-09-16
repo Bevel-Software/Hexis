@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -266,6 +266,21 @@ describe('UserAccessRemovalService', () => {
     });
     expect(workflow.commits).toHaveLength(0);
     expect(await read('roles.yaml')).toBe(ROLES);
+  });
+
+  it('a failure refreshing access after the commit still reports the removal as done', async () => {
+    const invalidate = vi.spyOn(AccessControlService.prototype, 'invalidate').mockImplementation(() => {
+      throw new Error('cache gone');
+    });
+    try {
+      const { service, workflow } = build();
+      const result = await service.remove(ADMIN, LEE, 'deleted-1');
+      expect(workflow.commits).toHaveLength(1);
+      expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
+      expect(result.stillNamedIn).toEqual([]);
+    } finally {
+      invalidate.mockRestore();
+    }
   });
 
   it('a commit whose push needs resolution is reported as removed, publishing pending', async () => {

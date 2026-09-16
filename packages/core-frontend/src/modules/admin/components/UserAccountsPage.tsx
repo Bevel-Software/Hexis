@@ -149,7 +149,7 @@ export function UserAccountsPage() {
       const outcome = await deleteAccount(pendingDelete.id, {
         removeFromAccess: removeFromAccess && !removalBlocked,
       });
-      const unchecked = ' Which files still name them could not be checked — look through roles, groups and access rules.';
+      const unchecked = ' Which files still name them could not be checked — look through roles, groups, access rules and file grants.';
       if (outcome && !outcome.ok) {
         setAccessNotice({
           message: `The account was deleted, but removing them from roles, groups and access rules failed${

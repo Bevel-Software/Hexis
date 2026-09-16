@@ -337,6 +337,7 @@ describe('UserAccountsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete account' }));
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/could not be checked/));
+    expect(screen.getByRole('alert')).toHaveTextContent(/roles, groups, access rules and file grants/);
   });
 
   it('a failed delete closes the dialog, surfaces the error, and does not reload', async () => {

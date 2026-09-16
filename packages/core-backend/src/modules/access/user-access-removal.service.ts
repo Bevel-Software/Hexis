@@ -495,8 +495,14 @@ export class UserAccessRemovalService {
       }
     }
     if (removedFrom.length > 0) {
-      this.accessControl.invalidate(workspaceId);
-      this.emitWrites(workspaceId, actor, removedFrom);
+      // The commit has landed: a failed cache flush or client nudge must not
+      // turn a done removal into a reported failure.
+      try {
+        this.accessControl.invalidate(workspaceId);
+        this.emitWrites(workspaceId, actor, removedFrom);
+      } catch (err) {
+        log.warn(`erased account ${erasedId} was removed, but refreshing access and clients failed: ${printable(err instanceof Error ? err.message : String(err))}`);
+      }
     }
     let stillNamedIn: string[] | null = null;
     try {
