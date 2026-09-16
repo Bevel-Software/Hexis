@@ -8,13 +8,14 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { X, Lock, Loader2, ChevronDown, Check, Globe } from 'lucide-react';
+import { X, Lock, Loader2, ChevronDown, Check, Globe, CircleHelp } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
   Badge,
   Banner,
   Button,
   Dialog,
+  IconButton,
   MenuItem,
   MenuPanel,
   useDismissableMenu,
@@ -157,7 +158,7 @@ function classifyManage(sources: GrantSources | undefined): {
  */
 function folderLabel(accessMdPath: string): string {
   const dir = accessMdPath.replace(/\/?access\.md$/, '');
-  if (dir === '') return 'the root folder';
+  if (dir === '') return WHOLE_WORKSPACE;
   const segs = dir.split('/');
   return segs[segs.length - 1];
 }
@@ -165,8 +166,34 @@ function folderLabel(accessMdPath: string): string {
 /** The full folder path (for a hover title), repo-relative. */
 function folderPath(accessMdPath: string): string {
   const dir = accessMdPath.replace(/\/?access\.md$/, '');
-  return dir === '' ? 'the root folder' : dir;
+  return dir === '' ? WHOLE_WORKSPACE : dir;
 }
+
+/**
+ * What the repository root is called to a business user. "The root folder" is
+ * a repository word; a grant at the root reaches everything in the workspace,
+ * and that is what the reader needs to know.
+ */
+const WHOLE_WORKSPACE = 'the whole workspace';
+
+/** True when an ancestor `access.md` path is the repository root's. */
+function isRootAccessMd(accessMdPath: string): boolean {
+  return accessMdPath.replace(/\/?access\.md$/, '') === '';
+}
+
+/**
+ * One line per kind of grantee, in business words. Shown together behind the
+ * "What can I share with?" control, and one at a time as the tooltip and
+ * accessible description of the group / role / plugin tags, so each word is
+ * explained where it is met.
+ */
+const PRINCIPAL_KIND_HELP = {
+  user: 'People: one person, by email.',
+  group:
+    'Groups: a way to group people together and give them access in the app. A group can be a team or department, like Engineering, or a functional group, like skill reviewers.',
+  role: 'Roles: special app roles that give people extra abilities in the app. They are pre-defined; you can only add or remove people. Example: Admin, which opens the platform and user management screens.',
+  plugin: 'Plugins: the readers, writers or owners of a plugin, whoever they are at the time.',
+} as const satisfies Record<Principal['kind'], string>;
 
 /**
  * A principal's row/chip identity. Kind is PART of it: a group and a role
@@ -496,6 +523,9 @@ export function ManageAccessDialog({
   // time), so it always names the button whose menu is on screen.
   const openRowTriggerRef = useRef<HTMLButtonElement>(null);
   const verbTriggerRef = useRef<HTMLButtonElement>(null);
+  // The "What can I share with?" explainer beside the add field.
+  const [kindHelpOpen, setKindHelpOpen] = useState(false);
+  const kindHelpTriggerRef = useRef<HTMLButtonElement>(null);
   // When set, the "Remove from parent?" confirmation is open for this principal.
   // `ancestors` are the granting access.md path(s) (repo-relative, opaque) to
   // echo back on remove-from-parent. `verb` scopes the action to a single verb
@@ -1103,7 +1133,13 @@ export function ManageAccessDialog({
             {p.kind !== 'user' && (
               // The same chip vocabulary as the suggest menu's trailing tags:
               // a role is a capability, a group is an audience — badge which.
-              <Badge tone="outline" size="xs" className="shrink-0 uppercase">
+              <Badge
+                tone="outline"
+                size="xs"
+                className="shrink-0 uppercase"
+                title={PRINCIPAL_KIND_HELP[p.kind]}
+                aria-description={PRINCIPAL_KIND_HELP[p.kind]}
+              >
                 {p.kind === 'group' ? 'Group' : p.kind === 'plugin' ? 'Plugin' : 'Role'}
               </Badge>
             )}
@@ -1291,7 +1327,13 @@ export function ManageAccessDialog({
                         key={`grp:${g}`}
                         onClick={() => addChip({ kind: 'group', group: g })}
                         trailing={
-                          <span className="text-label uppercase text-ink-faint">group</span>
+                          <span
+                              className="text-label uppercase text-ink-faint"
+                              title={PRINCIPAL_KIND_HELP.group}
+                              aria-description={PRINCIPAL_KIND_HELP.group}
+                            >
+                              group
+                            </span>
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
@@ -1305,7 +1347,13 @@ export function ManageAccessDialog({
                         key={`g:${g}`}
                         onClick={() => addChip({ kind: 'role', role: g })}
                         trailing={
-                          <span className="text-label uppercase text-ink-faint">role</span>
+                          <span
+                              className="text-label uppercase text-ink-faint"
+                              title={PRINCIPAL_KIND_HELP.role}
+                              aria-description={PRINCIPAL_KIND_HELP.role}
+                            >
+                              role
+                            </span>
                         }
                       >
                         <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
@@ -1322,7 +1370,13 @@ export function ManageAccessDialog({
                           key={`pl:${name}/${verb}`}
                           onClick={() => addChip({ kind: 'plugin', plugin: name, verb })}
                           trailing={
-                            <span className="text-label uppercase text-ink-faint">plugin</span>
+                            <span
+                              className="text-label uppercase text-ink-faint"
+                              title={PRINCIPAL_KIND_HELP.plugin}
+                              aria-description={PRINCIPAL_KIND_HELP.plugin}
+                            >
+                              plugin
+                            </span>
                           }
                         >
                           <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-sunken text-label font-bold text-ink-muted">
@@ -1354,6 +1408,35 @@ export function ManageAccessDialog({
                         </MenuItem>
                       );
                     })}
+                  </AnchoredMenu>
+                )}
+              </div>
+
+              {/* People, groups, roles and plugins are the words the field and
+                  its suggestions use; this says what each one is. */}
+              <div className="flex h-8 shrink-0 items-center">
+                <IconButton
+                  ref={kindHelpTriggerRef}
+                  aria-label="What can I share with?"
+                  aria-expanded={kindHelpOpen}
+                  active={kindHelpOpen}
+                  onClick={() => setKindHelpOpen((o) => !o)}
+                >
+                  <CircleHelp size={16} />
+                </IconButton>
+                {kindHelpOpen && (
+                  <AnchoredMenu
+                    onDismiss={() => setKindHelpOpen(false)}
+                    triggerRef={kindHelpTriggerRef}
+                    width={320}
+                  >
+                    <ul aria-label="What can I share with?" className="flex flex-col gap-2 px-3 py-2">
+                      {(['user', 'group', 'role', 'plugin'] as const).map((k) => (
+                        <li key={k} className="text-detail leading-snug text-ink">
+                          {PRINCIPAL_KIND_HELP[k]}
+                        </li>
+                      ))}
+                    </ul>
                   </AnchoredMenu>
                 )}
               </div>
@@ -1609,7 +1692,11 @@ export function ManageAccessDialog({
           onClose={() => setConfirmRemove(null)}
           size="md"
           title={
-            confirmRemove.ancestors.length ? 'Remove from parent folder?' : 'Restrict access here?'
+            confirmRemove.ancestors.length === 1 && isRootAccessMd(confirmRemove.ancestors[0])
+              ? `Remove from ${WHOLE_WORKSPACE}?`
+              : confirmRemove.ancestors.length
+                ? 'Remove from parent folder?'
+                : 'Restrict access here?'
           }
         >
           {(() => {

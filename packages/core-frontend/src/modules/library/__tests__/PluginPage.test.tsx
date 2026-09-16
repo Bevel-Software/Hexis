@@ -650,7 +650,7 @@ describe('PluginPage', () => {
     ]);
     renderPlugin('Finance');
     expect(
-      await screen.findByRole('button', { name: 'Subscribe to its skills and tools' }),
+      await screen.findByRole('button', { name: 'Subscribe to this plugin' }),
     ).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Skills' })).not.toBeInTheDocument();
     // A locked plugin offers no way in at all — not an add door, not a propose one.
