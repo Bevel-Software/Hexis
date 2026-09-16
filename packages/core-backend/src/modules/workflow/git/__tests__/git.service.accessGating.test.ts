@@ -93,8 +93,12 @@ interface AccessRecord {
 function recordingAccessControl(opts: {
   canWriteAtRef?: (ref: string, email: string, path: string) => boolean | null;
   canWriteBatchAtRef?: (ref: string, email: string, paths: string[]) => Map<string, boolean> | null;
-  eligible?: () => { roles: string[]; users: { name: string; email: string }[] };
-  heldPrincipalNames?: string[];
+  eligible?: () => {
+    principals?: { name: string; kind: 'role' | 'group' | 'plugin' }[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  };
+  heldPrincipals?: { name: string; kind: 'role' | 'group' | 'plugin' }[];
 } = {}): { ac: IAccessControl; calls: AccessRecord[] } {
   const calls: AccessRecord[] = [];
   const ac: IAccessControl = {
@@ -122,7 +126,7 @@ function recordingAccessControl(opts: {
       return opts.canWriteBatchAtRef?.(ref, userEmail, paths) ?? new Map(paths.map((p) => [p, true]));
     },
     eligibleWritersAtRef: async () => opts.eligible?.() ?? { roles: ['Admin'], users: [] },
-    heldPrincipalNames: async () => opts.heldPrincipalNames ?? [],
+    heldPrincipals: async () => opts.heldPrincipals ?? [],
     eligibleWritersForPathsAtRef: async (_w, _ref, paths) =>
       new Map(paths.map((p) => [p, { roles: [], users: [], emails: new Set<string>() }])),
     findEmailByHash: async () => null,
@@ -192,8 +196,8 @@ describe('GitService — commit gate uses HEAD (not working tree)', () => {
   it('never names a role the caller holds as eligible — it says that role is excluded here', async () => {
     const { ac } = recordingAccessControl({
       canWriteBatchAtRef: (_ref, _email, paths) => new Map(paths.map((p) => [p, false])),
-      eligible: () => ({ roles: ['Admin'], users: [] }),
-      heldPrincipalNames: ['Admin'],
+      eligible: () => ({ principals: [{ name: 'Admin', kind: 'role' }], roles: ['Admin'], users: [] }),
+      heldPrincipals: [{ name: 'Admin', kind: 'role' }],
     });
     const { svc, repo } = await makeSvc(root, workspaceId, ac);
     await commitFile(repo, 'Knowledge/Foo.md', 'seed\n', 'seed');

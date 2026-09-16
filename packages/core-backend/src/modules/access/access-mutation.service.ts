@@ -95,7 +95,11 @@ export function removesAdminRootWrite(
 ): boolean {
   if (principal.kind !== 'role') return false;
   if (verb !== undefined && verb !== 'write') return false;
-  const atRoot = kind === 'folder' ? repoRelTarget === '' : !repoRelTarget.includes('/');
+  // Spelling must not dodge the check: `.`, `./`, `./README.md` and a trailing
+  // slash all name the same root target the edit path resolves to.
+  const normalized = path.posix.normalize(repoRelTarget || '.').replace(/\/+$/, '');
+  const target = normalized === '.' ? '' : normalized;
+  const atRoot = kind === 'folder' ? target === '' : !target.includes('/');
   if (!atRoot) return false;
   const canonical = canonicalRoleName(principal.role);
   const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);

@@ -438,16 +438,20 @@ export interface IAccessControl {
     workspaceId: string,
     ref: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null>;
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  } | null>;
 
   /**
-   * Display names of the roles and groups `userEmail` holds — with Admin for
-   * the deployment owner — read from the working-tree model, or from the
+   * The roles and groups `userEmail` holds, with their kind — the Admin role
+   * for the deployment owner — read from the working-tree model, or from the
    * model at `ref` when given (empty when no rules resolve there). Feeds
-   * `AccessDeniedError.callerRoles`, so a denial never names a principal the
-   * caller already holds as the way in.
+   * `AccessDeniedError.callerPrincipals`, so a denial never names a principal
+   * the caller already holds as the way in.
    */
-  heldPrincipalNames(workspaceId: string, userEmail: string, ref?: string): Promise<string[]>;
+  heldPrincipals(workspaceId: string, userEmail: string, ref?: string): Promise<ResolvedPrincipal[]>;
 
   /**
    * Batched: resolve eligible writers + expanded emails for a list of paths

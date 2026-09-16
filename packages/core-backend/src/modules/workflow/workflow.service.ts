@@ -855,15 +855,16 @@ export class WorkflowService implements IWorkflowService {
     );
     if (!result) return; // no config at ref → default-allow (bootstrap)
     if (result.get(repoRelative)) return;
-    const [eligible, callerRoles] = await Promise.all([
+    const [eligible, callerPrincipals] = await Promise.all([
       this.accessControl.eligibleWritersAtRef(workspaceId, `HEAD`, repoRelative),
-      this.accessControl.heldPrincipalNames(workspaceId, userEmail, `HEAD`),
+      this.accessControl.heldPrincipals(workspaceId, userEmail, `HEAD`),
     ]);
     throw new AccessDeniedError({
       path: targetPath,
       eligibleRoles: eligible?.roles ?? [],
       eligibleUsers: eligible?.users ?? [],
-      callerRoles,
+      eligiblePrincipals: eligible?.principals,
+      callerPrincipals,
     });
   }
 

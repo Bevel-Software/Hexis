@@ -86,7 +86,7 @@ async function makeHarness(opts: {
     canDownload: vi.fn(async (_w: string, email: string) => effEmail(email, false)),
     canOwner: vi.fn(async (_w: string, email: string) => effEmail(email, false)),
     eligibleWriters: vi.fn(async () => opts.eligibleWriters ?? { roles: [], users: [] }),
-    heldPrincipalNames: vi.fn(async () => [] as string[]),
+    heldPrincipals: vi.fn(async () => []),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleDownloaders: vi.fn(async () => ({ roles: [], users: [] })),

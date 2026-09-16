@@ -108,6 +108,15 @@ describe('Admin write floor at the repository root', () => {
       });
     }
 
+    it('lists the deployment owner among eligible writer emails wherever the floor admits them', async () => {
+      await write(repo, 'access.md', '---\n---\nwrite:\n  - deny Admin\n');
+      const svc = service();
+      // The owner is not in roles.yaml; the floor still makes them a writer, so
+      // approval routing must count them.
+      const emails = [...(await svc.eligibleWriterEmails(WS, 'README.md')).keys()].sort();
+      expect(emails).toEqual([OWNER, ADMIN].sort());
+    });
+
     it('keeps the floor with no root access.md at all', async () => {
       const svc = service();
       expect(await svc.canWrite(WS, ADMIN, 'README.md')).toBe(true);
@@ -155,12 +164,12 @@ describe('Admin write floor at the repository root', () => {
       });
     });
 
-    it('heldPrincipalNames names the Admin role for a member and for the deployment owner', async () => {
+    it('heldPrincipals names the Admin role for a member and for the deployment owner', async () => {
       await write(repo, 'access.md', '---\n---\nwrite:\n  - Admin\n');
       const svc = service();
-      expect(await svc.heldPrincipalNames(WS, ADMIN)).toEqual(['Admin']);
-      expect(await svc.heldPrincipalNames(WS, OWNER)).toEqual(['Admin']);
-      expect(await svc.heldPrincipalNames(WS, ENGINEER)).toEqual(['Engineer']);
+      expect(await svc.heldPrincipals(WS, ADMIN)).toEqual([{ name: 'Admin', kind: 'role' }]);
+      expect(await svc.heldPrincipals(WS, OWNER)).toEqual([{ name: 'Admin', kind: 'role' }]);
+      expect(await svc.heldPrincipals(WS, ENGINEER)).toEqual([{ name: 'Engineer', kind: 'role' }]);
     });
   });
 
@@ -170,7 +179,8 @@ describe('Admin write floor at the repository root', () => {
         path: 'HR/Salaries.md',
         eligibleRoles: ['Engineer'],
         eligibleUsers: [],
-        callerRoles: ['Admin'],
+        eligiblePrincipals: [{ name: 'Engineer', kind: 'role' }],
+        callerPrincipals: [{ name: 'Admin', kind: 'role' }],
       });
       expect(err.message).toBe('You don\'t have permission to write to "HR/Salaries.md". Eligible: Engineer.');
     });
@@ -180,10 +190,36 @@ describe('Admin write floor at the repository root', () => {
         path: 'HR/Salaries.md',
         eligibleRoles: ['Admin', 'Engineer'],
         eligibleUsers: [],
-        callerRoles: ['admin'],
+        eligiblePrincipals: [
+          { name: 'Admin', kind: 'role' },
+          { name: 'Engineer', kind: 'role' },
+        ],
+        callerPrincipals: [{ name: 'admin', kind: 'role' }],
       });
       expect(err.message).not.toContain('Eligible');
       expect(err.message).toContain('The Admin role is excluded at this folder.');
+    });
+
+    it('does not mistake a held group for a same-named eligible role', () => {
+      const err = new AccessDeniedError({
+        path: 'Ops/Runbook.md',
+        eligibleRoles: ['Ops'],
+        eligibleUsers: [],
+        eligiblePrincipals: [{ name: 'Ops', kind: 'role' }],
+        callerPrincipals: [{ name: 'Ops', kind: 'group' }],
+      });
+      expect(err.message).toBe('You don\'t have permission to write to "Ops/Runbook.md". Eligible: Ops.');
+    });
+
+    it('names a held group as excluded by its kind', () => {
+      const err = new AccessDeniedError({
+        path: 'Ops/Runbook.md',
+        eligibleRoles: ['Ops'],
+        eligibleUsers: [],
+        eligiblePrincipals: [{ name: 'Ops', kind: 'group' }],
+        callerPrincipals: [{ name: 'Ops', kind: 'group' }],
+      });
+      expect(err.message).toContain('The Ops group is excluded at this folder.');
     });
   });
 
@@ -208,6 +244,12 @@ describe('Admin write floor at the repository root', () => {
       await refusal(mutation.denyHere(WS, 'folder', '', admin, 'write'));
       await refusal(mutation.denyHere(WS, 'folder', '', { kind: 'role', role: 'role/Admin' }));
       await refusal(mutation.denyHere(WS, 'file', 'README.md', admin, 'write'));
+      // Other spellings of the same root target.
+      for (const root of ['.', './', './/']) {
+        await refusal(mutation.revoke(WS, 'folder', root, admin, ADMIN, 'write'));
+        await refusal(mutation.denyHere(WS, 'folder', root, admin, 'write'));
+      }
+      await refusal(mutation.denyHere(WS, 'file', './README.md', admin, 'write'));
       expect(await fs.readFile(path.join(repo, 'access.md'), 'utf-8')).toContain('write:\n  - Admin');
     });
 

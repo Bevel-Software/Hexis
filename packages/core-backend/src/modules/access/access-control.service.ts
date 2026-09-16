@@ -942,6 +942,18 @@ function eligibleHoldersResolved(
 }
 
 /**
+ * Every individual the model names: `roles.yaml` members, emails named inline
+ * at this path's scope, and the deployment owner (Admin for the write floor
+ * even when `roles.yaml` does not list them).
+ */
+function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
+  const candidates = new Set<string>(model.deploymentOwners);
+  for (const email of model.roles.byEmail.keys()) candidates.add(email);
+  for (const email of byEmail.keys()) candidates.add(email);
+  return candidates;
+}
+
+/**
  * Expand the eligible-writer set to the underlying emails.
  *
  * Algorithm: for every email in roles.yaml, ask `canWriteResolved` whether
@@ -966,10 +978,10 @@ function eligibleHolderEmailsResolved(
   // in an access.md entry at this path's scope (whether granted or denied —
   // `hasPermissionResolved` filters denials out below). The built-in
   // `everyone` role can grant arbitrary signed-in users, but this finite
-  // expansion can only return emails the access tree explicitly names.
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  // expansion can only return emails the access tree explicitly names. The
+  // deployment owner is a candidate too: the Admin write floor admits them
+  // whether or not `roles.yaml` lists them.
+  const candidates = namedCandidateEmails(model, byEmail);
 
   for (const email of candidates) {
     if (hasPermissionResolved(model, verb, email, relativePath, fileOwn)) {
@@ -996,9 +1008,7 @@ function ineligibleNamedEmailsResolved(
   fileOwn?: OwnEntries | null,
 ): Set<string> {
   const { byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  const candidates = namedCandidateEmails(model, byEmail);
 
   const out = new Set<string>();
   for (const email of candidates) {
@@ -1607,7 +1617,11 @@ export class AccessControlService implements IAccessControl {
     workspaceId: string,
     ref: string,
     relativePath: string,
-  ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null> {
+  ): Promise<{
+    principals?: ResolvedPrincipal[];
+    roles: string[];
+    users: { name: string; email: string }[];
+  } | null> {
     if (relativePath === SYNCED_GROUPS_YAML) {
       // Machine-owned — see machineOwnedWriteRule.
       return {
@@ -1622,7 +1636,7 @@ export class AccessControlService implements IAccessControl {
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
   }
 
-  async heldPrincipalNames(workspaceId: string, userEmail: string, ref?: string): Promise<string[]> {
+  async heldPrincipals(workspaceId: string, userEmail: string, ref?: string): Promise<ResolvedPrincipal[]> {
     let model: AccessModel;
     if (ref === undefined) {
       model = await this.loadModel(workspaceId);
@@ -1632,15 +1646,21 @@ export class AccessControlService implements IAccessControl {
       model = loaded.model;
     }
     const email = canonicalEmail(userEmail);
-    const names = new Set<string>();
+    // Keyed by kind + name: a role and a group may share a display name, and
+    // holding one is not holding the other.
+    const byIdentity = new Map<string, ResolvedPrincipal>();
+    const add = (name: string, kind: ResolvedPrincipal['kind']) =>
+      byIdentity.set(`${kind}\0${name.toLowerCase()}`, { name, kind });
     for (const key of model.roles.byEmail.get(email) ?? []) {
       const record = model.roles.byCanonical.get(key);
-      if (record && record.kind !== 'plugin') names.add(record.displayName);
+      if (record && record.kind !== 'plugin') add(record.displayName, record.kind ?? 'role');
     }
     if (model.deploymentOwners.has(email)) {
-      names.add(model.roles.byCanonical.get(ADMIN_ROLE_KEY)?.displayName ?? ADMIN_CANONICAL);
+      add(model.roles.byCanonical.get(ADMIN_ROLE_KEY)?.displayName ?? ADMIN_CANONICAL, 'role');
     }
-    return [...names].sort();
+    return [...byIdentity.values()].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
+    );
   }
 
   async eligibleWritersForPathsAtRef(

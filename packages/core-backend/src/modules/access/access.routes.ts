@@ -554,15 +554,16 @@ export function createAccessRoutes(
   ): Promise<void> {
     const writable = await accessControl.canWrite(workspaceId, userEmail, gatePath);
     if (!writable) {
-      const [eligible, callerRoles] = await Promise.all([
+      const [eligible, callerPrincipals] = await Promise.all([
         accessControl.eligibleWriters(workspaceId, gatePath),
-        accessControl.heldPrincipalNames(workspaceId, userEmail),
+        accessControl.heldPrincipals(workspaceId, userEmail),
       ]);
       throw new AccessDeniedError({
         path: gatePath,
         eligibleRoles: eligible.roles,
         eligibleUsers: eligible.users,
-        callerRoles,
+        eligiblePrincipals: eligible.principals,
+        callerPrincipals,
       });
     }
     // On a protected branch, write is admin-only for access.md/roles.yaml. The

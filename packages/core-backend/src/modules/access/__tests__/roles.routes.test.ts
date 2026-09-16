@@ -65,7 +65,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     // Admin gate: the route's assertCanMutate calls canWrite('roles.yaml').
     canWrite: vi.fn(async () => isAdmin),
     eligibleWriters: vi.fn(async () => ({ roles: ['Admin'], users: [] })),
-    heldPrincipalNames: vi.fn(async () => [] as string[]),
+    heldPrincipals: vi.fn(async () => []),
     invalidate: vi.fn(),
     validateRolesYaml: (t: string) => realAccess.validateRolesYaml(t),
   } as unknown as IAccessControl;
