@@ -922,7 +922,7 @@ export function registerWorkspaceTools(
     description:
       'Get a file/directory\'s metadata without reading content: `name`, `type`, `size`, … plus what you may do with it. ' +
       '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
-      '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you: not managed, and on a protected branch you hold write (on a draft branch writes are not gated). ' +
+      '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
       'For a folder, `descendants` is the number of files under it at any depth (counting stops at 10000 and `descendantsTruncated` says so). ' +
       'Call this before a move or delete to see what it would touch.' +
       ONTOLOGY_BOUNDARY_NOTE,
@@ -989,21 +989,36 @@ export function registerWorkspaceTools(
       const kind = stat.type === 'directory' ? 'folder' : 'file';
       const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
       const access = await accessAt(branch, ctx, p);
-      const writable = (await writeBlocked(branch, ctx, [p])).length === 0;
       const link = !plain || viaLink !== undefined;
+      // Judged on the same paths move_file and delete_folder judge: a folder
+      // move or delete touches every file under it, so a file its own rules
+      // deny you makes the folder neither movable nor deletable, however
+      // writable the folder is. The walk is the one those tools run (uncapped);
+      // only the reported count stops at the cap.
+      const { files, links } = kind === 'folder' ? await filesUnder(fs, p) : { files: [p], links: [] as string[] };
+      const judged = kind === 'folder' ? [p, ...files] : [p];
+      const writable = (await writeBlocked(branch, ctx, judged)).length === 0;
+      // A restricted run (see IRoutineWritePolicy) is refused per file by both tools.
+      const policyAllows = files.every((file) => {
+        try {
+          writePolicy.assertPathWritable(ctx.sessionId, file);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      const open = !managed && !link && writable && policyAllows;
       const out: Record<string, unknown> = {
         ...stat,
         managed,
-        movable: !managed && !link && writable,
-        deletable: !managed && !link && writable,
+        movable: open,
+        // delete_folder also refuses a folder holding a link.
+        deletable: open && links.length === 0,
         access,
       };
       if (kind === 'folder') {
-        const { files, links, truncated } = await filesUnder(fs, p, DESCENDANTS_CAP);
-        out.descendants = files.length;
-        if (truncated) out.descendantsTruncated = true;
-        // delete_folder refuses a folder holding a link; say so here too.
-        if (links.length > 0) out.deletable = false;
+        out.descendants = Math.min(files.length, DESCENDANTS_CAP);
+        if (files.length > DESCENDANTS_CAP) out.descendantsTruncated = true;
       }
       return out;
     },

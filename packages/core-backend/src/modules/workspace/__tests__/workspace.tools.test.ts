@@ -1525,6 +1525,26 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.dest)).toBe(false);
     });
 
+    it('file_stat on a folder answers exactly what the move and delete dry runs answer, a denied file inside included', async () => {
+      const base = await seeded();
+      const path = KB('Sales/archive');
+      const verdicts = async () => ({
+        stat: (await call(base, 'file_stat', { path })).body,
+        move: (await call(base, 'move_file', { src: path, dest: KB('Sales/archive-2026'), dryRun: true })).body,
+        del: (await call(base, 'delete_folder', { path, dryRun: true })).body,
+      });
+      // All writable: every answer says yes.
+      let v = await verdicts();
+      expect([v.stat.movable, v.move.allowed, v.stat.deletable, v.del.allowed]).toEqual([true, true, true, true]);
+      // One file its own rules deny, deep inside the writable folder: every answer says no.
+      await fs.writeFile(KB('Sales/archive/nested/sealed.md'), 'sealed');
+      v = await verdicts();
+      expect(v.stat).toMatchObject({ access: { write: true }, descendants: 4 });
+      expect(v.stat.movable).toBe(v.move.allowed);
+      expect(v.stat.deletable).toBe(v.del.allowed);
+      expect([v.stat.movable, v.stat.deletable]).toEqual([false, false]);
+    });
+
     it('a denied move into a path the caller cannot read cannot be proposed, and says why', async () => {
       const base = await seeded();
       const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Secret/deal.md'), confirm: true });
