@@ -1,9 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isBranchModelConfigured } from '@bevel-software/platform-shared';
+import { printable } from '../../../shared/printable.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
-import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './kb-git.js';
+import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
+import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -31,6 +34,12 @@ import { git, lsRemoteHeads, redactSecret, stampIdentity, withTempDir } from './
 export interface KbStartupRunnerOptions {
   kbRepoUrl: () => string;
   gitUsername: () => string;
+  /**
+   * The git token in effect (settings-stored or environment), scrubbed from
+   * every message the phase throws or logs. Optional: `GITHUB_TOKEN` and its
+   * aliases are scrubbed regardless.
+   */
+  gitToken?: () => string;
   workspacesRoot: string;
   kbDirName: string;
   templateDir: string;
@@ -52,6 +61,17 @@ export interface KbStartupRunnerOptions {
 
 export class KbStartupRunner {
   constructor(private readonly opts: KbStartupRunnerOptions) {}
+
+  /**
+   * {@link redactSecret} plus the token in effect, which may never have reached
+   * the environment. Tokens, URL userinfo and URL query strings go — and the
+   * configured remote's own query values (a presigned remote's credential) are
+   * named as secrets too, so they are scrubbed even where git's text carries
+   * them without the URL around them.
+   */
+  private redact(text: string): string {
+    return redactSecret(text, [this.opts.gitToken?.(), ...urlQuerySecrets(this.opts.kbRepoUrl())]);
+  }
 
   /**
    * Run the whole phase. Throws to stop the boot; returns normally when the
@@ -108,15 +128,17 @@ export class KbStartupRunner {
         const started = Date.now();
         const result = await step.run(ctx).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(redactSecret(`KB startup step "${step.name}" failed: ${msg}`));
+          const raw = `KB startup step "${step.name}" failed: ${msg}`;
+          // A git failure inside the step was classified where git's words were
+          // still whole; anything else is read here, before the scrub.
+          const failure = err instanceof ClassifiedFailure ? err.failure : classifyGitFailure(raw);
+          throw new ClassifiedFailure(this.redact(raw), failure);
         });
         const took = `${((Date.now() - started) / 1000).toFixed(1)}s`;
         if (result.outcome === 'stopBoot') {
-          // Redacted like every other exit: the message travels beyond logs
-          // (the setup status endpoint surfaces it to admins).
-          throw new Error(
-            redactSecret(`KB startup step "${step.name}" stopped the boot: ${result.message}`),
-          );
+          // Redacted like every other exit: the message reaches the log.
+          const raw = `KB startup step "${step.name}" stopped the boot: ${result.message}`;
+          throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
         }
         if (result.outcome === 'skipped') {
           console.warn(`[kb-startup] ${step.name}: skipped — ${result.reason} (${took})`);
@@ -151,10 +173,17 @@ export class KbStartupRunner {
         await this.finalize(h);
       }
     } catch (err) {
-      if (!safeBoot) throw err;
+      // Every exit carries a scrubbed message: `git()` scrubs only what the
+      // environment holds, and a token saved on the setup screen is the one
+      // this runner alone knows about.
+      const msg = this.redact(err instanceof Error ? err.message : String(err));
+      // The classification rides along, read from text no scrub had touched.
+      if (!safeBoot) throw new ClassifiedFailure(msg, failureOf(err));
+      // Git's stderr and a step's own message are text this process does not
+      // control; one quoted token, so neither can forge or colour a log line.
       console.error(
         '[kb-startup] SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.',
-        redactSecret(err instanceof Error ? err.message : String(err)),
+        printable(msg),
       );
       // Reset only DIRTY handles — ones an apply at least began on (the mark
       // is set before the first op, so a mid-apply failure is covered). A
@@ -380,7 +409,7 @@ export class KbStartupRunner {
       }
       console.warn(
         `[kb-startup] ${h.name}: push rejected (concurrent replica?) — rolling back local commit.`,
-        redactSecret(msg),
+        printable(this.redact(msg)),
       );
       await git(repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
     }

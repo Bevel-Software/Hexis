@@ -10,9 +10,11 @@ import {
   syncNow,
   syncOutcomeError,
   testConnection,
+  KbInitFailed,
   testOidc,
   SettingsProblems,
   type ConnectionTest,
+  type KbInitFailure,
   type LastSync,
   type OidcTest,
   type OidcVerification,
@@ -229,7 +231,16 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
 
 interface Props {
   settings: SettingStatus[];
-  /** Re-read the status after a save, so the gate can let the app through. */
+  /**
+   * Re-read the status after a save, so the gate can let the app through.
+   *
+   * The host must let only its LATEST read land (`SetupGate` and
+   * `DeploymentPage` both read through `useSetupStatus`, which does): each
+   * fresh `kbInit` replaces the failure on
+   * screen, so an earlier read answering late — the refresh after a failed
+   * save, landing after a retry that succeeded — would otherwise put the
+   * cleared failure back.
+   */
   onSaved(): void;
   /**
    * Where the screen is standing. `setup` (the default) is the first-run
@@ -245,6 +256,12 @@ interface Props {
    * calls, and what the last call did. Absent on a build without the module.
    */
   sync?: SyncStatus;
+  /**
+   * A standing knowledge-base initialization failure, from the status
+   * endpoint — so the banner is there when the screen is opened, not only
+   * right after the save that failed.
+   */
+  kbInit?: KbInitFailure;
   /** Whether the single sign-on configuration in effect is proven. Absent from an older server. */
   oidcVerification?: OidcVerification;
 }
@@ -265,8 +282,43 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVerification }: Props) {
+/** Two reports of the same initialization failure (a status read builds a new object each time). */
+function sameFailure(a: KbInitFailure, b: KbInitFailure): boolean {
+  return a.kind === b.kind && a.cause === b.cause;
+}
+
+export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit, oidcVerification }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
+  /**
+   * The initialization failure on screen: the status endpoint's, until a save
+   * or a retry from this screen answers more recently. A fresh status read
+   * (a new `kbInit` from the host) takes over again — adjusted during render
+   * rather than in an effect, so the stale banner never paints. That a fresh
+   * prop really is the latest read is the host's promise (see `onSaved`), and
+   * each retry or save that clears the failure here also asks for that read.
+   */
+  const [initFailure, setInitFailure] = useState<KbInitFailure | null>(kbInit ?? null);
+  const [seenKbInit, setSeenKbInit] = useState(kbInit);
+  /**
+   * The failure a save or retry from THIS screen has just seen cleared, until a
+   * status read agrees. A read that went out before the retry — the refresh
+   * after the failed save — can still answer after it, reporting that same
+   * failure as standing; this screen knows better, so the stale copy is not
+   * shown. The guard lifts on the first read without a failure, and never
+   * hides a DIFFERENT failure: that is news, whenever it arrives.
+   */
+  const [clearedFailure, setClearedFailure] = useState<KbInitFailure | null>(null);
+  if (kbInit !== seenKbInit) {
+    setSeenKbInit(kbInit);
+    if (!kbInit) {
+      setClearedFailure(null);
+      setInitFailure(null);
+    } else if (!(clearedFailure && sameFailure(kbInit, clearedFailure))) {
+      setClearedFailure(null);
+      setInitFailure(kbInit);
+    }
+  }
+  const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
   const [syncResult, setSyncResult] = useState<SyncNowResult | null>(null);
@@ -335,6 +387,25 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
     if (!typed) return false;
     return typed !== (settings.find((s) => s.key === key)?.value ?? '').trim();
   };
+
+  /**
+   * Something typed that a save would actually store. The retry sends an EMPTY
+   * save — pressed now, it would re-run against the stored values while a
+   * corrected token sits unsaved in the form — so it waits, and Save (which
+   * retries too) is the way to try with the new values. Judged like the
+   * connection gate above — an edit put back changes nothing — and a token
+   * username that is just what an address answers (the one typed, or the one
+   * stored) is not an edit of its own: typing the address fills it in, and once
+   * the address is put back or cleared, nothing the admin did is left unsaved.
+   */
+  const answeredUsernames = [draft.kbRepoUrl, settings.find((s) => s.key === 'kbRepoUrl')?.value].map(
+    (address) => (address ? tokenUsernameForHost(address)?.username : undefined),
+  );
+  const draftChanged = Object.keys(draft).some(
+    (key) =>
+      !(key === 'gitUsername' && answeredUsernames.includes(draft.gitUsername)) &&
+      connectionKeyChanged(key),
+  );
 
   /**
    * Whether THIS save has to stand behind the repository connection.
@@ -664,10 +735,48 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
     );
   }
 
+  /**
+   * Re-run the knowledge-base initialization. No endpoint of its own: any save
+   * while the failure stands re-runs the phase, and an EMPTY one changes no
+   * setting — so nothing has to be typed again, and the server's one-save-at-a-
+   * time chain covers this exactly as it covers the form.
+   */
+  async function retryInitialization() {
+    if (retrying || saving || draftChanged) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      const result = await saveSettings({});
+      setClearedFailure(initFailure);
+      setInitFailure(null);
+      if (result.awaitingRestart) {
+        setNeedsRestart(true);
+        // As after a save: the settings page still wants fresh status, or its
+        // host keeps the failure this retry just cleared.
+        if (variant === 'settings') onSaved();
+        return;
+      }
+      if (result.complete && variant === 'setup') {
+        // The same full reload the completing save does, for the same reason:
+        // the browser's branch model predates the app it is about to open.
+        window.location.reload();
+        return;
+      }
+      onSaved();
+    } catch (err) {
+      if (err instanceof KbInitFailed) {
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+      } else setError(err instanceof Error ? err.message : 'Could not retry the initialization.');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     // A save during a sign-in check would clear the draft the check is about.
-    if (saving || oidcTesting) return;
+    if (saving || retrying || oidcTesting) return;
     setSaving(true);
     setError(null);
     setProblems({});
@@ -732,6 +841,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
         await probe();
       }
       const result = await saveSettings(payload);
+      // A save while a failure stands re-ran the initialization, and it held.
+      setClearedFailure(initFailure);
+      setInitFailure(null);
       setRestartRequired(result.restartRequired);
       setDraft({});
       if (result.oidcVerification) setLatest(result.oidcVerification);
@@ -777,6 +889,14 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
           ([key]) => !editable.some((s) => s.key === key),
         );
         if (unshown.length > 0) setError(unshown.map(([, message]) => message).join(' '));
+      } else if (err instanceof KbInitFailed) {
+        // The values ARE stored — only the initialization failed. The form
+        // shows what was saved, and the banner says what to fix and retries
+        // without asking for any of it again.
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+        setDraft({});
+        onSaved();
       } else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
       setSaving(false);
@@ -916,6 +1036,31 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
         )}
 
         <div ref={noticeRef}>
+          {/* Saved, but the knowledge base behind the gate was never set up.
+              The cause is the server's classified sentence — what to fix, not
+              what git said — and the retry needs nothing re-entered. */}
+          {initFailure && (
+            <Banner tone="danger" role="alert" className="mt-6" data-testid="kb-init-failure">
+              <p className="font-semibold">Saved, but the knowledge base could not be initialized</p>
+              <p className="mt-1">{initFailure.cause}</p>
+              {draftChanged && (
+                <p className="mt-1">
+                  The form has unsaved changes — saving them retries the initialization with them.
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => void retryInitialization()}
+                disabled={retrying || saving || testing || draftChanged}
+              >
+                {retrying ? 'Initializing…' : 'Retry initialization'}
+              </Button>
+            </Banner>
+          )}
+
           {error && (
             <Banner tone="danger" role="alert" className="mt-6">
               {error}
@@ -1020,7 +1165,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
                         // Also while SAVING: a save may be asking the remote
                         // itself, and a second test racing it would overwrite
                         // both the result and the versions derived from it.
-                        disabled={testing || saving}
+                        disabled={testing || saving || retrying}
                       >
                         {testing ? 'Checking…' : 'Test connection'}
                       </Button>
@@ -1134,7 +1279,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
             <Button
               type="submit"
               variant="primary"
-              disabled={saving || testing || oidcTesting || connectionRejected}
+              disabled={saving || testing || retrying || oidcTesting || connectionRejected}
               // Described by the refusal, so a reader who lands on a button
               // that will not move is told why rather than left guessing.
               aria-describedby={connectionRejected ? 'connection-refusal' : undefined}

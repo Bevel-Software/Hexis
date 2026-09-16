@@ -4,6 +4,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
+import { ClassifiedFailure, classifyGitFailure } from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,18 +19,6 @@ const execFileAsync = promisify(execFile);
 /** Fallback committer identity; workflow commits override with `--author`. */
 export const BOT_NAME = 'Bevel Workflow';
 export const BOT_EMAIL = 'bevel-workflow@bevel.software';
-
-/**
- * Scrub credentials from anything that reaches a log or an error message:
- * the configured token wherever it appears, and URL userinfo — a remote
- * spelled `https://user:pass@host` would otherwise leak `pass` verbatim
- * through every git failure that quotes the URL back.
- */
-export function redactSecret(text: string): string {
-  const token = process.env.GITHUB_TOKEN;
-  const scrubbed = token ? text.replaceAll(token, '***') : text;
-  return scrubbed.replace(/:\/\/[^/@\s]+@/g, '://***@');
-}
 
 /**
  * Per-invocation `-c` config. Long paths always (Windows checkouts of deep
@@ -76,7 +66,12 @@ export async function git(cwd: string, gitUsername: string, args: string[]): Pro
     return stdout.toString();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(redactSecret(`git ${args[0]} failed: ${msg}`));
+    // Classified here, from what git actually said, before the scrub can
+    // rewrite it — the message that leaves is the scrubbed one. A remote in
+    // the argv has its query values scrubbed as secrets of their own.
+    const raw = `git ${args[0]} failed: ${msg}`;
+    const querySecrets = args.flatMap((arg) => urlQuerySecrets(arg));
+    throw new ClassifiedFailure(redactSecret(raw, querySecrets), classifyGitFailure(raw));
   }
 }
 

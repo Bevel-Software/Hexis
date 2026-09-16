@@ -47,9 +47,33 @@ export interface SyncStatus {
  */
 export type OidcVerification = 'verified' | 'unverified' | 'not-configured';
 
+/** Why the setup-time knowledge-base initialization failed — mirrors the backend's `GitFailureKind`. */
+export type KbInitFailureKind =
+  | 'credentials-rejected'
+  | 'not-found'
+  | 'unreachable'
+  | 'write-refused'
+  | 'push-refused-by-policy'
+  | 'step-failed'
+  | 'unknown';
+
+/**
+ * A failed initialization, as the server classifies it. `cause` is a sentence
+ * telling the admin what to do; the raw error never leaves the server log.
+ */
+export interface KbInitFailure {
+  kind: KbInitFailureKind;
+  cause: string;
+}
+
 export interface SetupStatus {
   /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
+  /**
+   * Admins only: the setup-completing save stored the settings, but the
+   * knowledge base could not be initialized. Present while that failure stands.
+   */
+  kbInit?: KbInitFailure;
   /**
    * Answered, but the running process still holds the old branch model. Should
    * be rare — saving applies it — and means a restart, not another answer.
@@ -85,6 +109,21 @@ export class SettingsProblems extends Error {
   }
 }
 
+/**
+ * The save went through, but the knowledge-base initialization it triggered
+ * did not. Distinct from a failed save: the values are stored, and retrying
+ * needs none of them re-entered.
+ */
+export class KbInitFailed extends Error {
+  readonly kbInit: KbInitFailure;
+
+  constructor(kbInit: KbInitFailure) {
+    super('Saved, but the knowledge base could not be initialized.');
+    this.name = 'KbInitFailed';
+    this.kbInit = kbInit;
+  }
+}
+
 async function readError(res: Response): Promise<never> {
   let body: unknown;
   try {
@@ -92,8 +131,9 @@ async function readError(res: Response): Promise<never> {
   } catch {
     throw new Error(`Request failed (${res.status})`);
   }
-  const data = body as { error?: string; problems?: Record<string, string> };
+  const data = body as { error?: string; problems?: Record<string, string>; kbInit?: KbInitFailure };
   if (data.problems) throw new SettingsProblems(data.problems);
+  if (data.kbInit) throw new KbInitFailed(data.kbInit);
   throw new Error(data.error || `Request failed (${res.status})`);
 }
 

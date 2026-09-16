@@ -84,6 +84,17 @@ describe('classifyWriteFailure — a receive-pack refusal vs "remote ref does no
     expect(classifyWriteFailure(text)).toBe('credentials');
   });
 
+  /**
+   * The probe reads failures with the shared classifier, not a table of its
+   * own: a wording only that table names (GitHub's protected-branch refusal)
+   * is understood here without this module ever having learned it.
+   */
+  it('reads the write probe with the shared classifier — a policy refusal is read-only too', () => {
+    expect(
+      classifyWriteFailure('remote: error: GH006: Protected branch update failed for refs/heads/hexis-write-check-1a2b.'),
+    ).toBe('read-only');
+  });
+
   it('keeps an unreachable host unreachable, not read-only', () => {
     expect(
       classifyWriteFailure("fatal: unable to access 'https://x/': Could not resolve host: x"),

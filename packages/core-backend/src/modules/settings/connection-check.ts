@@ -5,6 +5,8 @@ import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { validateHttpsRemote } from './deployment-settings.service.js';
+import { classifyGitFailure } from '../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -115,15 +117,19 @@ export async function checkRepositoryConnection(
     GIT_TERMINAL_PROMPT: '0',
     GIT_ASKPASS: 'echo',
   };
-  const scrub = (err: unknown) => {
+  /** What git said, as git said it — the classifier's input. */
+  const gitSaid = (err: unknown) => {
     let raw = err instanceof Error ? err.message : String(err);
     // execFile's timeout kills git with SIGTERM and says so only in `killed` /
     // `signal` — the message is a bare "Command failed". Without the marker a
     // host that never answers classifies as `unknown`, not unreachable.
     const exit = err as { killed?: boolean; signal?: string | null } | null;
     if (exit?.killed && exit.signal === 'SIGTERM') raw += '\ntimed out';
-    return token ? raw.replaceAll(token, '***') : raw;
+    return raw;
   };
+  // Classification reads the raw text; only a scrubbed copy is ever echoed —
+  // git failures have been known to quote the credential back.
+  const scrub = (text: string) => redactSecret(text, [token, ...urlQuerySecrets(url)]);
 
   let listing: Listing;
   try {
@@ -136,7 +142,8 @@ export async function checkRepositoryConnection(
     );
     listing = parseListing(stdout);
   } catch (err) {
-    return rejection(classifyReadFailure(scrub(err)), scrub(err));
+    const raw = gitSaid(err);
+    return rejection(classifyReadFailure(raw), scrub(raw));
   }
 
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'hexis-write-check-'));
@@ -149,33 +156,35 @@ export async function checkRepositoryConnection(
     );
     return { outcome: 'connected', ...listing };
   } catch (err) {
-    const text = scrub(err);
-    const verdict = classifyWriteFailure(text);
+    const raw = gitSaid(err);
+    const verdict = classifyWriteFailure(raw);
     if (verdict === 'writable') return { outcome: 'connected', ...listing };
     if (verdict === 'read-only') {
       return { outcome: 'read-only', field: 'gitToken', error: readOnlyMessage(url), ...listing };
     }
-    return rejection(verdict, text);
+    return rejection(verdict, scrub(raw));
   } finally {
     await fs.rm(scratch, { recursive: true, force: true }).catch(() => {});
   }
 }
 
 /**
- * Why a READ failed. Order matters: an HTTP 403 arrives as
- * "unable to access '…': The requested URL returned error: 403", so the
- * credential patterns are tried before the generic "unable to access".
+ * Why a READ failed — the shared classifier's reading (`shared/git-failure.ts`,
+ * the ONE table of git's wordings), in the three reasons the connection check
+ * reports. This module keeps no patterns of its own: a host that changes its
+ * phrasing is learned once, for this check and the KB startup phase alike.
  */
 export function classifyReadFailure(text: string): FailureReason {
-  if (/timed out|ETIMEDOUT/i.test(text)) return 'unreachable';
-  if (/Authentication failed|could not read Username|could not read Password|invalid credentials|error: 40[13]\b/i.test(text)) {
-    return 'credentials';
+  switch (classifyGitFailure(text, { operation: 'read' }).kind) {
+    case 'credentials-rejected':
+      return 'credentials';
+    case 'not-found':
+      return 'not-found';
+    case 'unreachable':
+      return 'unreachable';
+    default:
+      return 'unknown';
   }
-  if (/not found|repository .* does not exist|error: 404\b/i.test(text)) return 'not-found';
-  if (/could not resolve host|unable to access|Failed to connect|Connection refused|SSL|certificate|TLS/i.test(text)) {
-    return 'unreachable';
-  }
-  return 'unknown';
 }
 
 /**
@@ -184,44 +193,33 @@ export function classifyReadFailure(text: string): FailureReason {
  *
  * "remote ref does not exist" is git's answer AFTER the host has let it into
  * `receive-pack` and advertised its refs — the probe ref is absent by design,
- * so that answer is proof of write access, not a failure. A host refusing the
- * push side says so at that same door: GitHub "Permission to … denied" or
- * "Write access to repository not granted", GitLab "not allowed to push",
- * Bitbucket "lack one or more required privilege scopes", Azure DevOps
- * "GenericContribute", or plainly a 403. A 404 here is the same refusal —
- * the credentials just listed the repository, so it exists; the host is hiding
- * the write side from this token.
+ * so that answer is proof of write access, not a failure. It is this probe's
+ * own success signal, which is why it is read here rather than in the shared
+ * table of failures.
  *
- * AN AUTHENTICATION failure is NOT that refusal. On a PUBLIC repository the
- * read succeeds anonymously — git only offers credentials when challenged,
- * and nobody challenges a public `ls-remote` — so the push is the FIRST time
- * the token is presented at all. A made-up token then fails there with a 401
- * ("Authentication failed", GitHub's "Invalid username or token"), and calling
- * that "can read but cannot write" would send the admin off to grant a
- * permission to a token that does not exist. Checked before the refusal
- * patterns for that reason.
+ * Everything else is the shared classifier's reading of a WRITE: a refusal in
+ * a host's own words, or a bare 403/404 (the credentials just listed the
+ * repository, so it exists and the host is hiding the write side), is
+ * read-only; an authentication failure stays credentials — on a PUBLIC
+ * repository the read succeeds anonymously, so the push is the first time the
+ * token is presented, and a made-up one must not send the admin off to grant a
+ * permission to a token that does not exist.
  */
 export function classifyWriteFailure(text: string): 'writable' | 'read-only' | FailureReason {
   if (/remote ref does not exist/i.test(text)) return 'writable';
-  if (/timed out|ETIMEDOUT/i.test(text)) return 'unreachable';
-  if (
-    /Authentication failed|could not read Username|could not read Password|Invalid username or (token|password)|invalid credentials|error: 401\b/i.test(
-      text,
-    )
-  ) {
-    return 'credentials';
+  switch (classifyGitFailure(text, { operation: 'write' }).kind) {
+    case 'write-refused':
+    case 'push-refused-by-policy':
+      return 'read-only';
+    case 'credentials-rejected':
+      return 'credentials';
+    case 'not-found':
+      return 'not-found';
+    case 'unreachable':
+      return 'unreachable';
+    default:
+      return 'unknown';
   }
-  if (
-    /Permission to .* denied|Write access to repository not granted|not allowed to push|lack one or more required privilege scopes|GenericContribute|denied|forbidden|error: 40[34]\b|not found/i.test(
-      text,
-    )
-  ) {
-    return 'read-only';
-  }
-  if (/could not resolve host|unable to access|Failed to connect|Connection refused|SSL|certificate|TLS/i.test(text)) {
-    return 'unreachable';
-  }
-  return 'unknown';
 }
 
 /** The permission a token needs to write, in the host's own words where it is recognised. */

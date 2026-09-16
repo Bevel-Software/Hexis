@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
+import { KbInitFailed } from '../../../setup/services/setup.api';
 
 /**
  * The deployment settings page — first-run setup with a permanent address.
@@ -137,6 +138,31 @@ describe('DeploymentPage', () => {
     // Still the form, not a blank page: the last good settings render on.
     expect(screen.getByText('Provider address')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('an out-of-date status answer cannot bring back a failure a retry cleared', async () => {
+    const WRITE_REFUSED = { kind: 'write-refused' as const, cause: 'Grant the token push access, then retry.' };
+    const FAILED = { ...COMPLETE_STATUS, complete: false, kbInit: WRITE_REFUSED };
+    apiMock.fetchSetupStatus.mockResolvedValueOnce(FAILED);
+    renderPage(admin(true));
+    await screen.findByTestId('kb-init-failure');
+
+    // The refresh after a failed save is slow to answer…
+    let answerStale!: (s: unknown) => void;
+    apiMock.fetchSetupStatus.mockReturnValueOnce(new Promise((r) => (answerStale = r)));
+    apiMock.saveSettings.mockRejectedValueOnce(new KbInitFailed(WRITE_REFUSED));
+    fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(apiMock.fetchSetupStatus).toHaveBeenCalledTimes(2));
+
+    // …a retry succeeds meanwhile, and its refresh answers first.
+    apiMock.fetchSetupStatus.mockResolvedValueOnce(COMPLETE_STATUS);
+    apiMock.saveSettings.mockResolvedValueOnce({ ...COMPLETE_STATUS, restartRequired: false });
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(apiMock.fetchSetupStatus).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    await act(async () => answerStale(FAILED));
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
   });
 
   it('offers a retry when the status cannot be loaded, and the retry fetches again', async () => {
