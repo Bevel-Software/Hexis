@@ -54,10 +54,18 @@ function draftNameFor(email: string, path: string): string {
   return `${local}/propose-${slug}`;
 }
 
-/** A suggested change-request title, within `open_change_request`'s 256-character limit. */
-function titleFor(path: string): string {
+/**
+ * A suggested change-request title, within `open_change_request`'s 256-character
+ * limit. Cut on a code-point boundary, so an emoji at the cut is dropped whole
+ * rather than leaving half a surrogate pair; the result is at most 256 UTF-16
+ * units, so it fits however the limit is counted.
+ */
+export function proposalTitleFor(path: string): string {
   const title = `Propose a change to ${path}`;
-  return title.length <= 256 ? title : `${title.slice(0, 255)}…`;
+  if (title.length <= 256) return title;
+  let cut = title.slice(0, 255);
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  return `${cut}…`;
 }
 
 /**
@@ -116,7 +124,7 @@ export async function writeDenial(
         },
         {
           tool: 'open_change_request',
-          args: { sourceBranch: draft, targetBranch: input.branch, title: titleFor(rel) },
+          args: { sourceBranch: draft, targetBranch: input.branch, title: proposalTitleFor(rel) },
           note: 'Open a change request from the draft into the target; a sharper title saying what changes is better than the suggested one.',
         },
       ],

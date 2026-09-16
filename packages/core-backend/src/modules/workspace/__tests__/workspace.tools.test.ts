@@ -20,7 +20,7 @@ import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
-import { PROPOSAL_ROUTE_NOTE } from '../write-denial.js';
+import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -1403,6 +1403,17 @@ describe('a write refused for permissions says whether and how to propose it', (
   const DENIED = `${KB_DIR}/Sales/deal.md`;
   const KEY = 'hx_live_Zm9vYmFyU2VjcmV0S2V5';
   const SECRET_CONTENT = 'password=hunter2-do-not-echo';
+
+  it('the suggested change-request title fits the limit and never splits an emoji', () => {
+    const lead = 'Propose a change to ';
+    expect(proposalTitleFor('Sales/deal.md')).toBe(`${lead}Sales/deal.md`);
+    // The emoji's high surrogate lands on the 255th unit, the last one kept before the ellipsis.
+    const path = `${'a'.repeat(254 - lead.length)}😀${'b'.repeat(40)}`;
+    const title = proposalTitleFor(path);
+    expect(title).toBe(`${lead}${'a'.repeat(254 - lead.length)}…`);
+    expect(title.length).toBeLessThanOrEqual(256);
+    expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
 
   /** Access control whose read verdict is `readable` and which records every call. */
   const readVerdict = (readable: boolean | 'throws') => {
