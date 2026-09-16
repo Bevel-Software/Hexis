@@ -13,8 +13,14 @@ const EMAIL = 'juan@bevel.software';
 const AUTHOR = hashEmail(EMAIL);
 const SOMEONE_ELSE = hashEmail('someone-else@bevel.software');
 
-const file = (isApproved: boolean, viewerCanApprove: boolean) =>
-  ({ path: 'Sales/Deal.md', isApproved, viewerCanApprove }) as FileApprovalState;
+const file = (isApproved: boolean, viewerCanApprove: boolean, path = 'Sales/Deal.md', owned = true) =>
+  ({
+    path,
+    isApproved,
+    viewerCanApprove,
+    eligibleApprovers: { roles: owned ? ['Sales'] : [], users: [] },
+    approvedBy: [],
+  }) as FileApprovalState;
 
 const base = {
   state: 'open' as const,
@@ -33,6 +39,23 @@ describe('computeViewerCanUpdate', () => {
     expect(
       computeViewerCanUpdate({ ...base, approvals: [file(true, false), file(false, true)] }),
     ).toBe(true);
+  });
+
+  it('files outside the approval gate withhold nothing — they need no approval to apply', () => {
+    // A non-Markdown file and an ownerless note: the merge gate lets anyone
+    // apply these, so anyone may update them too.
+    expect(
+      computeViewerCanUpdate({
+        ...base,
+        approvals: [file(false, false, 'Sales/deal.yaml'), file(false, false, 'Notes/Loose.md', false)],
+      }),
+    ).toBe(true);
+    // One gate-bound file the viewer cannot approve still refuses.
+    expect(
+      computeViewerCanUpdate({ ...base, approvals: [file(false, false, 'Sales/deal.yaml'), file(false, false)] }),
+    ).toBe(false);
+    // roles.yaml is bound by the gate even though it is not Markdown.
+    expect(computeViewerCanUpdate({ ...base, approvals: [file(false, false, 'roles.yaml')] })).toBe(false);
   });
 
   it('an admin, who may apply over missing approvals, may update', () => {

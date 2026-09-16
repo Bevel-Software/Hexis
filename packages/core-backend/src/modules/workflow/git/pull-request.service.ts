@@ -18,6 +18,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { isGateRelevant } from '../review-workflow/review-workflow.service.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
@@ -511,10 +512,12 @@ export function computeViewerCanCancel(input: {
 /**
  * Pure predicate for `viewerCanUpdate` — who may merge a request's target
  * into it. The request's author (it is their proposal to bring up to date)
- * and anyone who may apply it: every file already approved or approvable by
- * this viewer (the dialog's Apply rule), or an admin, who may apply over
- * missing approvals. Fail-closed on no viewer, and nothing but an open
- * request can be updated. The update route enforces exactly this.
+ * and anyone who may apply it, by the merge gate's own reading: every file
+ * the gate binds (`isGateRelevant`) already approved or approvable by this
+ * viewer — files outside the gate need nobody's approval to apply, so they
+ * cannot withhold Update either — or an admin, who may apply over missing
+ * approvals. Fail-closed on no viewer, and nothing but an open request can be
+ * updated. The update route enforces exactly this.
  */
 export function computeViewerCanUpdate(input: {
   state: PullRequestState;
@@ -528,7 +531,7 @@ export function computeViewerCanUpdate(input: {
   const viewerIsAuthor = !!(input.authorId && input.authorId === hashEmail(input.viewerEmail));
   const viewerMayApply =
     input.approvals.length > 0 &&
-    input.approvals.every((a) => a.isApproved || a.viewerCanApprove);
+    input.approvals.every((a) => !isGateRelevant(a) || a.isApproved || a.viewerCanApprove);
   return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
 }
 

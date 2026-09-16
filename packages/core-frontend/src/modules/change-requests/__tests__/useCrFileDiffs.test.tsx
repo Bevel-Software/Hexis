@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({ readFileOnBranch: vi.fn(), readFileAtForkPoint: 
 vi.mock('../services/change-requests.api', () => api);
 
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 
 const PATH = 'Sales/deal.yaml';
 const ORIGINAL = 'price: 100\nstatus: draft\n';
@@ -57,6 +58,14 @@ describe('useCrFileDiffs', () => {
     api.readFileAtForkPoint.mockRejectedValue(new Error('503'));
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
     await waitFor(() => expect(result.current.get(21)).toBe('unreadable'));
+  });
+
+  it('a file the request deletes (absent on its branch) shows every line removed', async () => {
+    api.readFileOnBranch.mockRejectedValue(new WorkspaceApiError(404));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    await waitFor(() => expect(Array.isArray(result.current.get(21))).toBe(true));
+    expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100', 'status: draft']);
+    expect(lines(result.current.get(21), 'added')).toEqual([]);
   });
 
   it('an unreadable branch copy says so too', async () => {

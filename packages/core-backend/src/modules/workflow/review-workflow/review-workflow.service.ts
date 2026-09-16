@@ -172,7 +172,7 @@ function isAccessConfigPath(p: string): boolean {
  * and any call-site that needs the "does this participate in approvals"
  * question answered consistently.
  */
-function isGateRelevant(a: FileApprovalState): boolean {
+export function isGateRelevant(a: FileApprovalState): boolean {
   const hasEligible =
     a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
   const lower = a.path.toLowerCase();

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { readFileAtForkPoint, readFileOnBranch, type ForkPointFile } from '../services/change-requests.api';
 import { isBinaryFile } from '../../workspace/components/renderers';
+import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
 
 /**
@@ -67,10 +68,17 @@ export function useCrFileDiffs(
       asked.current.add(k);
       readFileOnBranch(cr.branch, repoRelativePath)
         .then((content) => setContents((m) => new Map(m).set(k, content)))
-        .catch(() => {
-          // Deliberately NOT `''`. Storing empty for an unreadable branch copy
-          // would diff as "every line deleted" and present a proposal to erase
-          // the file. No content means no claim: the box says it couldn't read.
+        .catch((err: unknown) => {
+          // A 404 is the branch's own answer that the file is not there: the
+          // request DELETES it, and every line removed is exactly its diff.
+          if (err instanceof WorkspaceApiError && err.status === 404) {
+            setContents((m) => new Map(m).set(k, ''));
+            return;
+          }
+          // Anything else is deliberately NOT `''`. Storing empty for an
+          // unreadable branch copy would diff as "every line deleted" and
+          // present a proposal to erase the file. No content means no claim:
+          // the box says it couldn't read.
           setFailed((s) => new Set(s).add(k));
         });
       readFileAtForkPoint(cr.number, null, repoRelativePath)

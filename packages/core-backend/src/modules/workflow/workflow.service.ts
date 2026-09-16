@@ -1851,8 +1851,17 @@ export class WorkflowService implements IWorkflowService {
     }
     // Freshen the source checkout first, and let a failure stop the Update:
     // merging onto a head behind its own origin branch would leave a local
-    // merge commit that then cannot push, stranding it in the workspace.
-    await this.pullWorkspace(workspaceId);
+    // merge commit that then cannot push, stranding it in the workspace. A
+    // rebase conflict hands the stranded saves to recovery, as every other
+    // pull does, before the refusal reaches the caller.
+    try {
+      await this.pullWorkspace(workspaceId);
+    } catch (err) {
+      if (err instanceof PullRebaseConflictError) {
+        await this.queuePullConflictRecovery(workspaceId, err, user);
+      }
+      throw err;
+    }
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,

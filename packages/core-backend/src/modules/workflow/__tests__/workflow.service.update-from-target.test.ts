@@ -9,7 +9,11 @@ import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import type { Database } from '../../database/connection.js';
 import { WorkflowService } from '../workflow.service.js';
-import { ChangeRequestConflictsError, WorkflowDomainError } from '../../../shared/domain-errors.js';
+import {
+  ChangeRequestConflictsError,
+  PullRebaseConflictError,
+  WorkflowDomainError,
+} from '../../../shared/domain-errors.js';
 
 /**
  * The request dialog's Update: merge the target into the proposal branch on
@@ -54,6 +58,7 @@ function harness(opts: {
     .mockResolvedValueOnce(opts.first === undefined ? detail() : opts.first)
     .mockResolvedValue(refreshed);
   const prs = { getPrDetail, invalidateDetailCache: vi.fn() };
+  const pendingCommits = { enqueueIfAbsent: vi.fn().mockResolvedValue(true) };
   const svc = new WorkflowService(
     {} as unknown as Database,
     git as unknown as GitService,
@@ -62,10 +67,10 @@ function harness(opts: {
     {} as unknown as WorkspaceService,
     {} as unknown as IAccessControl,
     {} as unknown as FileLockService,
-    {} as unknown as PendingCommitsService,
+    pendingCommits as unknown as PendingCommitsService,
     'knowledge-base',
   );
-  return { svc, git, prs, refreshed };
+  return { svc, git, prs, pendingCommits, refreshed };
 }
 
 describe('WorkflowService.updateFromTarget', () => {
@@ -121,6 +126,16 @@ describe('WorkflowService.updateFromTarget', () => {
     await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
     expect(h.git.push).not.toHaveBeenCalled();
     expect(h.prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+  });
+
+  it('a rebase conflict refreshing the checkout queues recovery for the saves, then refuses', async () => {
+    const conflict = new PullRebaseConflictError('alice/deal', ['Sales/Deal.md'], 'rebase stopped');
+    const h = harness({ pullError: conflict });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).rejects.toBe(conflict);
+    expect(h.pendingCommits.enqueueIfAbsent).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: WS, branch: 'alice/deal', path: 'Sales/Deal.md', authorEmail: USER.email }),
+    );
+    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
   });
 
   it('a failed refresh of the proposal checkout stops the Update before any merge', async () => {
