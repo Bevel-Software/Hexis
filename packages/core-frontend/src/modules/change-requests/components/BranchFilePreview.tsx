@@ -124,6 +124,14 @@ function useBranchFileAccess(
         }
       })
       .catch(() => {
+        // Default-ALLOW, and NOT a third "the lookup failed" state: see the
+        // note above. What makes it safe is that the viewer this then mounts
+        // reports its own rejected read — the pane hands over to the raw
+        // endpoint's answer rather than claiming the read succeeded. Every
+        // viewer here says so out loud (`ImageRenderer` was the last one that
+        // did not, and now names the status); a viewer that swallowed a 403
+        // would strand this path on a spinner.
+        //
         // `canDownload: null` — unknown, so the button stays clickable and the
         // backend keeps the last word on it.
         if (!cancelled) setAnswer({ key, access: { canRead: true, canDownload: null } });
@@ -251,6 +259,16 @@ export function BranchFilePreview({
             // The viewers here fetch their own bytes; the text buffer is
             // never read, and there is nothing to seed it from on a branch
             // the dialog deliberately does not check out.
+            //
+            // Which also means the FRESHNESS of those bytes is the viewer's
+            // own business, and the branch under review is one its author may
+            // still be pushing to. `ImageRenderer` folds this workspace's
+            // image revision into its URL (`useImageRevision`), so a replaced
+            // picture reaches this pane while it stays open. A document viewer
+            // has no equivalent signal to fold in — `file-changed` carries a
+            // path, and only the image resolvers count it — so a pdf or a deck
+            // replaced mid-review is still read at the revision the pane
+            // opened on.
             content=""
             savedContent=""
             filePath={`${workspace.kbDirName}/${repoRelativePath}`}
