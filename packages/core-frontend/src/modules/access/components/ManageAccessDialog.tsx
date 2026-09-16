@@ -289,7 +289,7 @@ const MENU_MIN_WIDTH = 200;
  * `Dialog` renders its body inside `overflow-y-auto` so a long access list
  * scrolls under the pinned header and footer. An ABSOLUTELY positioned menu in
  * that box is clipped by it: open the verb menu on a low grantee row and
- * everything past the first item or two — "Remove access" included — is cut off
+ * everything past the first item or two — "Can download" included — is cut off
  * at the body's edge, unreachable without scrolling the list out from under the
  * menu.
  *
@@ -814,9 +814,10 @@ export function ManageAccessDialog({
     return verbs;
   }, [effectiveNewVerbs]);
 
-  const doGrant = useCallback(async () => {
+  /** Grant every picked principal the chosen verbs. Resolves `true` only when all of them landed. */
+  const doGrant = useCallback(async (): Promise<boolean> => {
     if (!workspaceId || repoRelative === null || pickedChips.length === 0 || grantVerbs.length === 0)
-      return;
+      return false;
     setBusy(true);
     setMutateError(null);
     // No batch grant endpoint exists, so apply each principal/verb pair and
@@ -862,16 +863,24 @@ export function ManageAccessDialog({
           `${failures.length} grant${failures.length === 1 ? '' : 's'} failed (the rest were applied):\n${failures.join('\n')}`,
         );
       }
+      return failures.length === 0;
     } finally {
       reload();
       setBusy(false);
     }
   }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, effectiveNewVerbs, reload]);
 
-  // WHY the node is public, said in the band and acted on in the rows: every
-  // literal `everyone` line (here, or in a parent) is the Everyone row's
+  // The footer's one primary action. With picks it shares them and closes; a
+  // grant that fails keeps the dialog — and the picks — up with the failure
+  // shown. With nothing picked it only closes.
+  const doShare = useCallback(async () => {
+    if (await doGrant()) onClose();
+  }, [doGrant, onClose]);
+
+  // WHY the node is public, said in the reach line and acted on in the rows:
+  // every literal `everyone` line (here, or in a parent) is the Everyone row's
   // source; every public plugin principal granted read is that plugin's
-  // row. The band only describes — one mechanism removes, and it is the
+  // row. The line only describes — one mechanism removes, and it is the
   // same one for every principal.
   const publicReasons = [
     ...(lookupSources(data?.sources, 'r:everyone')?.read ?? []).map((s) =>
@@ -882,6 +891,26 @@ export function ManageAccessDialog({
       return `through ${parsed ? pluginPrincipalLabel(parsed.plugin, parsed.verb) : token}`;
     }),
   ];
+
+  // The item's reach, in one line: the only place the sheet says whether it is
+  // restricted or public. A statement, not a control — each public reason is a
+  // grant with a row below, and the row is where it is removed.
+  const reachLine = data ? (
+    <p className="mt-2 flex items-start gap-1.5 text-detail text-ink-muted">
+      {data.readers.restricted ? (
+        <Lock size={13} aria-hidden className="mt-0.5 shrink-0" />
+      ) : (
+        <Globe size={13} aria-hidden className="mt-0.5 shrink-0 text-ok" />
+      )}
+      <span className="min-w-0">
+        {data.readers.restricted
+          ? 'Restricted: only the people below can open it'
+          : `Public: anyone signed in can read it${
+              publicReasons.length > 0 ? ` — ${publicReasons.join(', ')}` : ''
+            }. Editing needs access.`}
+      </span>
+    </p>
+  ) : null;
 
   // Toggle a single verb on an existing grantee: check → grant that verb, uncheck
   // → revoke just that verb. The server's fresh view is authoritative (we never
@@ -1073,9 +1102,22 @@ export function ManageAccessDialog({
     return names.slice(0, 3).join(', ');
   }, [data]);
 
-  // One grantee row. Direct rows get the inline verb editor; inherited rows are
-  // read-only with a Remove that opens the cascade flow; external rows are
-  // read-only with no action.
+  // Every managed row ends in the same two slots: the verb control, then
+  // Remove. A row with nothing removable here (a role or policy grant) keeps
+  // the slot empty, so the verb control still lines up with its neighbours'.
+  const removeSlot = (p: PrincipalRow | null) => (
+    <span className="flex w-16 shrink-0 justify-end">
+      {p && (
+        <Button variant="danger" size="tiny" disabled={busy} onClick={() => doRevoke(p)}>
+          Remove
+        </Button>
+      )}
+    </span>
+  );
+
+  // One grantee row. Direct rows get the inline verb editor and a Remove that
+  // revokes in place; inherited rows are read-only with a Remove that opens the
+  // cascade flow; external rows are read-only with no action.
   const renderRow = (p: PrincipalRow) => {
     const tone = avatarTone(p.label);
     return (
@@ -1123,87 +1165,82 @@ export function ManageAccessDialog({
             <span className="whitespace-nowrap text-detail text-ink-faint">
               {summarizeVerbs(p.verbs)}
             </span>
-            <Button variant="danger" size="tiny" disabled={busy} onClick={() => doRevoke(p)}>
-              Remove
-            </Button>
+            {removeSlot(p)}
           </div>
         ) : canManage && p.manage === 'external' ? (
           // No file-backed grant to remove here — managed elsewhere (a role or
           // group's membership, the everyone policy, or admin rescue).
-          <span
-            className="ml-auto shrink-0 text-detail text-ink-faint"
-            title="Granted via a role or policy. Manage it there"
-          >
-            {summarizeVerbs(p.verbs)}
-          </span>
-        ) : canManage ? (
-          <div className="ml-auto shrink-0">
-            {/* Not `disabled={busy}`: the checklist's items freeze while a
-                grant or revoke is in flight, and this button only opens or
-                closes the checklist. Disabled, it could not take focus back
-                on Escape (`.focus()` on a disabled button is a no-op), and
-                focus fell to `document`. */}
-            <Button
-              ref={openRowKey === p.key ? openRowTriggerRef : undefined}
-              variant="quiet"
-              size="sm"
-              onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
-              trailingIcon={<ChevronDown size={14} />}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <span
+              className="whitespace-nowrap text-detail text-ink-faint"
+              title="Granted via a role or policy. Manage it there"
             >
               {summarizeVerbs(p.verbs)}
-            </Button>
-            {openRowKey === p.key && (
-              <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
-                {/* Everyone is public READ only (the grant route refuses the
-                    rest), so its row offers exactly the verb it can hold. */}
-                {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : TIER_ROLES).map((role) => {
-                  const k = ROLE_TO_KEY[role];
-                  const checked = p.verbs[k];
-                  const disabled =
-                    busy ||
-                    (role === 'Can edit' && p.verbs.owner) ||
-                    (role === 'Can read' && (p.verbs.owner || p.verbs.write));
-                  return (
-                    <MenuItem
-                      key={role}
-                      disabled={disabled}
-                      active={checked}
-                      onClick={() => doToggleVerb(p.principal, role, checked)}
-                      trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
-                    >
-                      {role}
-                    </MenuItem>
-                  );
-                })}
-                {!isEveryoneRole(p.principal) && <div className="my-1 border-t border-line" />}
-                {!isEveryoneRole(p.principal) &&
-                  (() => {
-                    const checked = p.verbs.download;
-                    const disabled = busy || p.verbs.owner;
+            </span>
+            {removeSlot(null)}
+          </div>
+        ) : canManage ? (
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {/* Its own box: the checklist anchors to its DOM parent, which must
+                be the trigger alone, not the trigger and Remove together. */}
+            <div>
+              {/* Not `disabled={busy}`: the checklist's items freeze while a
+                  grant or revoke is in flight, and this button only opens or
+                  closes the checklist. Disabled, it could not take focus back
+                  on Escape (`.focus()` on a disabled button is a no-op), and
+                  focus fell to `document`. */}
+              <Button
+                ref={openRowKey === p.key ? openRowTriggerRef : undefined}
+                variant="quiet"
+                size="sm"
+                onClick={() => setOpenRowKey((k) => (k === p.key ? null : p.key))}
+                trailingIcon={<ChevronDown size={14} />}
+              >
+                {summarizeVerbs(p.verbs)}
+              </Button>
+              {openRowKey === p.key && (
+                <AnchoredMenu onDismiss={() => setOpenRowKey(null)} triggerRef={openRowTriggerRef}>
+                  {/* Everyone is public READ only (the grant route refuses the
+                      rest), so its row offers exactly the verb it can hold. */}
+                  {(isEveryoneRole(p.principal) ? (['Can read'] as Role[]) : TIER_ROLES).map((role) => {
+                    const k = ROLE_TO_KEY[role];
+                    const checked = p.verbs[k];
+                    const disabled =
+                      busy ||
+                      (role === 'Can edit' && p.verbs.owner) ||
+                      (role === 'Can read' && (p.verbs.owner || p.verbs.write));
                     return (
                       <MenuItem
+                        key={role}
                         disabled={disabled}
                         active={checked}
-                        onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
+                        onClick={() => doToggleVerb(p.principal, role, checked)}
                         trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
                       >
-                        Can download
+                        {role}
                       </MenuItem>
                     );
-                  })()}
-                <div className="my-1 border-t border-line" />
-                <MenuItem
-                  tone="danger"
-                  disabled={busy}
-                  onClick={() => {
-                    setOpenRowKey(null);
-                    doRevoke(p);
-                  }}
-                >
-                  Remove access
-                </MenuItem>
-              </AnchoredMenu>
-            )}
+                  })}
+                  {!isEveryoneRole(p.principal) && <div className="my-1 border-t border-line" />}
+                  {!isEveryoneRole(p.principal) &&
+                    (() => {
+                      const checked = p.verbs.download;
+                      const disabled = busy || p.verbs.owner;
+                      return (
+                        <MenuItem
+                          disabled={disabled}
+                          active={checked}
+                          onClick={() => doToggleVerb(p.principal, 'Can download', checked)}
+                          trailing={checked ? <Check size={14} className="text-accent" /> : undefined}
+                        >
+                          Can download
+                        </MenuItem>
+                      );
+                    })()}
+                </AnchoredMenu>
+              )}
+            </div>
+            {removeSlot(p)}
           </div>
         ) : (
           <span className="ml-auto shrink-0 text-detail text-ink-muted">
@@ -1222,9 +1259,23 @@ export function ManageAccessDialog({
         title="Manage access"
         size="lg"
         footer={
-          <Button variant="primary" size="sm" onClick={onClose}>
-            Done
-          </Button>
+          // One primary action, named for what it will do: Share while
+          // anything is picked, Done when there is nothing to grant.
+          pickedChips.length > 0 ? (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={grantVerbs.length === 0 || busy}
+              onClick={doShare}
+              leadingIcon={busy ? <Loader2 size={14} className="animate-spin" /> : undefined}
+            >
+              Share
+            </Button>
+          ) : (
+            <Button variant="primary" size="sm" onClick={onClose}>
+              Done
+            </Button>
+          )
         }
       >
         <p className="truncate text-detail text-ink-muted" title={entry.relativePath}>
@@ -1239,10 +1290,10 @@ export function ManageAccessDialog({
 
         {governed && canManage && (
           <div className="mt-3">
-            {/* `items-start`, not `items-stretch`: the buttons are `rounded-full`,
-                so stretching them to match the chip box turned Share into a
-                circle the moment a chip wrapped the box onto a second line.
-                `flex-wrap` lets them drop below the box rather than crushing it. */}
+            {/* `items-start`, not `items-stretch`: the verb button is `rounded-full`,
+                so stretching it to match the chip box turned it into a pill the
+                height of the box the moment a chip wrapped onto a second line.
+                `flex-wrap` lets it drop below the box rather than crushing it. */}
             <div className="relative flex flex-wrap items-start gap-1.5">
               <div className="relative min-w-48 flex-1">
                 {/* A TextField that grew chips: same border, radius and focus
@@ -1276,7 +1327,7 @@ export function ManageAccessDialog({
                         addChip(addPending);
                       }
                     }}
-                    placeholder={pickedChips.length ? '' : 'Add people, groups, or roles…'}
+                    placeholder={pickedChips.length ? '' : 'Add people, groups, roles or plugins…'}
                     className="min-w-32 flex-1 bg-transparent px-1 py-1 text-ui text-ink placeholder:text-ink-faint focus:outline-none"
                   />
                 </div>
@@ -1407,21 +1458,11 @@ export function ManageAccessDialog({
                   </AnchoredMenu>
                 )}
               </div>
-
-              <Button
-                variant="primary"
-                size="sm"
-                className="shrink-0"
-                disabled={pickedChips.length === 0 || grantVerbs.length === 0 || busy}
-                onClick={doGrant}
-                leadingIcon={busy ? <Loader2 size={14} className="animate-spin" /> : undefined}
-              >
-                Share
-              </Button>
             </div>
+            {reachLine}
             {query.trim() && !addPending && !suggest?.peopleWithheld && (
               <p className="mt-1.5 text-detail text-ink-muted">
-                Type a full email to add someone, or pick a group or role from the list.
+                Type a full email to add someone, or pick a group, role or plugin from the list.
               </p>
             )}
             {pickedChips.some(isEveryoneRole) && (
@@ -1451,6 +1492,8 @@ export function ManageAccessDialog({
           </Banner>
         ) : (
           <>
+            {/* No field to sit under: the reach line leads the sheet instead. */}
+            {!canManage && reachLine}
             {!canManage && (
               <Banner tone="neutral" role="note" className="mt-3">
                 Only people with edit access can share this {targetKind}.
@@ -1470,26 +1513,6 @@ export function ManageAccessDialog({
                 <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
               )}
             </h3>
-
-            {/* A statement, not a control: it says the node is public and
-                why. Each reason is a grant with a row below — the Everyone
-                row for a literal line, the plugin's row for a public plugin
-                principal — and the row is where it is removed. */}
-            {data && !data.readers.restricted && (
-              <div className="flex items-center gap-3 py-1.5">
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-ok-soft text-ok">
-                  <Globe size={16} />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="text-ui text-ink">Anyone can read</div>
-                  <div className="text-detail text-ink-muted">
-                    {`Public: every signed-in user can read this ${targetKind}${
-                      publicReasons.length > 0 ? ` — ${publicReasons.join(', ')}` : ''
-                    }.`}
-                  </div>
-                </div>
-              </div>
-            )}
 
             {directRows.length === 0 ? (
               <p className="py-2 text-ui text-ink-muted">
@@ -1586,18 +1609,6 @@ export function ManageAccessDialog({
                 )}
               </div>
             )}
-
-            <div className="mt-4 flex items-center gap-3 border-t border-line pt-4">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-sunken text-ink-muted">
-                <Lock size={16} />
-              </span>
-              <div className="flex-1">
-                <div className="text-ui font-semibold text-ink">Restricted</div>
-                <div className="text-detail text-ink-muted">
-                  Only people granted access can edit this item.
-                </div>
-              </div>
-            </div>
           </>
         )}
       </Dialog>
