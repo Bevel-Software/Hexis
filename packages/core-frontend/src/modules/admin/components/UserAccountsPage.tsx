@@ -6,7 +6,9 @@ import { useAuth } from '../../auth/state/auth.context';
 import {
   createAccount,
   deleteAccount,
+  getAccountReferences,
   listAccounts,
+  type AccountReferences,
   type AccountSummary,
 } from '../../auth/services/account.api';
 
@@ -36,6 +38,23 @@ function signInAfterDelete(account: AccountSummary): string {
   return `${label}: they can sign in again later with single sign-on, but will start fresh.`;
 }
 
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "Named in 5 places: 1 role, 1 group, 2 access rules and 1 file grant." */
+function referencesSummary(refs: AccountReferences): string {
+  if (refs.total === 0) return 'Their address is not named in any role, group or access rule.';
+  const parts = [
+    refs.roles > 0 ? plural(refs.roles, 'role', 'roles') : null,
+    refs.groups > 0 ? plural(refs.groups, 'group', 'groups') : null,
+    refs.accessRules > 0 ? plural(refs.accessRules, 'access rule', 'access rules') : null,
+    refs.fileGrants > 0 ? plural(refs.fileGrants, 'file grant', 'file grants') : null,
+  ].filter((part): part is string => part !== null);
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts[0];
+  return `Their address is named in ${plural(refs.total, 'place', 'places')}: ${list}.`;
+}
+
 /**
  * The User Accounts page (`/user-accounts`, admins only) — the ONE
  * account-management surface: every account on the deployment, whether it can
@@ -57,6 +76,14 @@ export function UserAccountsPage() {
   // Dialog. `deleting` keeps the confirm open while the request is in flight.
   const [pendingDelete, setPendingDelete] = useState<AccountSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Where the pending account's address is named, and whether to remove it
+  // from those files in the same delete (on by default).
+  const [references, setReferences] = useState<AccountReferences | null>(null);
+  const [referencesError, setReferencesError] = useState<string | null>(null);
+  const [removeFromAccess, setRemoveFromAccess] = useState(true);
+  // After a delete whose access-file cleanup did not fully land: what went
+  // wrong and which files still name the deleted user.
+  const [accessNotice, setAccessNotice] = useState<{ message: string; files: string[] } | null>(null);
   // The account whose password is being set; non-null drives the password
   // Dialog. Success feedback surfaces inline above the list.
   const [passwordTarget, setPasswordTarget] = useState<AccountSummary | null>(null);
@@ -90,12 +117,45 @@ export function UserAccountsPage() {
     if (isAdmin) refresh();
   }, [isAdmin, refresh]);
 
+  function openDeleteDialog(account: AccountSummary) {
+    setPendingDelete(account);
+    setReferences(null);
+    setReferencesError(null);
+    setRemoveFromAccess(true);
+    getAccountReferences(account.id)
+      .then((refs) => {
+        setReferences(refs);
+        if (!refs.removable) setRemoveFromAccess(false);
+      })
+      .catch((err) => {
+        setReferencesError(err instanceof Error ? err.message : "Couldn't count where they are named.");
+      });
+  }
+
+  const removalBlocked = references !== null && !references.removable;
+
   async function confirmDelete() {
     if (!pendingDelete || deleting) return;
     setDeleting(true);
     setError(null);
+    setAccessNotice(null);
     try {
-      await deleteAccount(pendingDelete.id);
+      const outcome = await deleteAccount(pendingDelete.id, {
+        removeFromAccess: removeFromAccess && !removalBlocked,
+      });
+      if (outcome && !outcome.ok) {
+        setAccessNotice({
+          message: `The account was deleted, but removing them from roles, groups and access rules failed${
+            outcome.error ? `: ${outcome.error}` : '.'
+          }`,
+          files: outcome.stillNamedIn,
+        });
+      } else if (outcome && outcome.stillNamedIn.length > 0) {
+        setAccessNotice({
+          message: 'The account was deleted. Some files still name them and need a manual edit:',
+          files: outcome.stillNamedIn,
+        });
+      }
       setPendingDelete(null);
       refresh();
     } catch (err) {
@@ -180,6 +240,23 @@ export function UserAccountsPage() {
               {error}
             </div>
           )}
+          {accessNotice && (
+            <div
+              className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-sm px-2 py-1.5"
+              role="alert"
+            >
+              {accessNotice.message}
+              {accessNotice.files.length > 0 && (
+                <ul className="mt-1 list-disc pl-4">
+                  {accessNotice.files.map((file) => (
+                    <li key={file} className="font-mono">
+                      {file}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {passwordSetFor && (
             <div
               className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-sm px-2 py-1.5"
@@ -226,7 +303,7 @@ export function UserAccountsPage() {
                     )}
                     {!isSelf && (
                       <button
-                        onClick={() => setPendingDelete(account)}
+                        onClick={() => openDeleteDialog(account)}
                         className="text-xs px-2 py-1 rounded-sm text-red-700 hover:bg-red-50 border border-red-200"
                         title="Permanently delete this account and its personal data."
                         aria-label={`Delete account ${account.email}`}
@@ -379,6 +456,33 @@ export function UserAccountsPage() {
           Their saves in the knowledge base keep their history.{' '}
           {pendingDelete && signInAfterDelete(pendingDelete)}
         </p>
+        <div className="mt-3 space-y-1.5 text-xs text-ink leading-snug">
+          {references ? (
+            <p>{referencesSummary(references)}</p>
+          ) : referencesError ? (
+            <p className="text-ink-muted">{referencesError}</p>
+          ) : (
+            <p className="text-ink-muted">Counting where they are named…</p>
+          )}
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={removeFromAccess && !removalBlocked}
+              disabled={deleting || removalBlocked}
+              onChange={(e) => setRemoveFromAccess(e.target.checked)}
+            />
+            <span>Also remove them from roles, groups and access rules</span>
+          </label>
+          {removalBlocked && references?.blockedReason && (
+            <p className="text-ink-muted">{references.blockedReason}</p>
+          )}
+          {(!removeFromAccess || removalBlocked) && (
+            <p className="text-ink-muted">
+              Their address will remain in those files.
+            </p>
+          )}
+        </div>
       </Dialog>
     </>
   );

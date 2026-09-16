@@ -17,7 +17,7 @@ const authService = {
 // Satisfies the route's narrow Pick<IAccountErasureService, 'eraseUser'>
 // contract directly — no concrete-service cast needed.
 const accountErasure = {
-  eraseUser: vi.fn(async (_userId: string) => true),
+  eraseUser: vi.fn(async (_userId: string, _opts?: { erasureId?: string }) => true),
 };
 
 function makeApp(opts: { admin: boolean; email?: string }) {
@@ -177,5 +177,120 @@ describe('account routes — admin gate', () => {
     expect(tooShort.status).toBe(400);
     const body = (await tooShort.json()) as { error: string };
     expect(body.error).toContain('at least 8');
+  });
+});
+
+describe('account routes — removing the erased address from access files', () => {
+  const lee = { id: 'u2', email: 'lee@example.com', name: 'Lee' };
+  const caller = { id: 'u1', email: 'caller@example.com', name: 'Caller' };
+
+  function makeRemovalApp() {
+    const auth = {
+      ...authService,
+      getUserById: vi.fn(async (id: string) => (id === 'u2' ? lee : id === 'u1' ? caller : null)),
+    } as unknown as AuthService;
+    const accessRemoval = {
+      report: vi.fn(async () => ({
+        roles: 1,
+        groups: 1,
+        accessRules: 2,
+        fileGrants: 1,
+        total: 5,
+        files: ['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml'],
+        removable: true,
+        blockedReason: null,
+      })),
+      assertRemovable: vi.fn(async () => {}),
+      remove: vi.fn(async () => ({ removedFrom: ['roles.yaml'], stillNamedIn: [] as string[] })),
+      filesNaming: vi.fn(async () => ['Sales/access.md', 'roles.yaml']),
+    };
+    const app = express();
+    app.use((req, _res, next) => {
+      req.userId = 'u1';
+      req.userEmail = 'caller@example.com';
+      next();
+    });
+    app.use('/api', createAccountRoutes(auth, { isAdmin: async () => true }, accountErasure, accessRemoval));
+    return { app, accessRemoval };
+  }
+
+  it('reports the reference counts for the confirmation, without the address', async () => {
+    const { app, accessRemoval } = makeRemovalApp();
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/u2/references`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(JSON.parse(text)).toMatchObject({ total: 5, roles: 1, groups: 1, accessRules: 2, fileGrants: 1 });
+    expect(accessRemoval.report).toHaveBeenCalledWith('lee@example.com');
+    expect(text).not.toContain('lee@example.com');
+    expect((await fetch(`${base}/api/admin/accounts/ghost/references`)).status).toBe(404);
+  });
+
+  it('option off: erases as today (204) and never touches the access files', async () => {
+    const { app, accessRemoval } = makeRemovalApp();
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/u2`, { method: 'DELETE' });
+    expect(res.status).toBe(204);
+    expect(accountErasure.eraseUser).toHaveBeenLastCalledWith('u2');
+    expect(accessRemoval.assertRemovable).not.toHaveBeenCalled();
+    expect(accessRemoval.remove).not.toHaveBeenCalled();
+  });
+
+  it('option on: erases, then removes in one call named by the anonymised id', async () => {
+    const { app, accessRemoval } = makeRemovalApp();
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/u2?removeFromAccess=1`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { erased: boolean; accessRemoval: { ok: boolean; removedFrom: string[] } };
+    expect(body).toEqual({ erased: true, accessRemoval: { ok: true, removedFrom: ['roles.yaml'], stillNamedIn: [] } });
+
+    const [, opts] = vi.mocked(accountErasure.eraseUser).mock.calls.at(-1)! as unknown as [string, { erasureId: string }];
+    expect(opts.erasureId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(accessRemoval.remove).toHaveBeenCalledTimes(1);
+    const [actor, email, accountId] = accessRemoval.remove.mock.calls[0] as unknown as [
+      { email: string },
+      string,
+      string,
+    ];
+    expect(actor.email).toBe('caller@example.com');
+    expect(email).toBe('lee@example.com');
+    expect(accountId).toBe(`deleted-${opts.erasureId}`);
+    // Erasure happened before the removal.
+    expect(vi.mocked(accountErasure.eraseUser).mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      accessRemoval.remove.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('commit failure: the account is still erased and the response lists the files still naming the user', async () => {
+    const { app, accessRemoval } = makeRemovalApp();
+    accessRemoval.remove.mockRejectedValueOnce(new Error('push rejected: /srv/kb internal detail'));
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/u2?removeFromAccess=1`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const body = JSON.parse(text) as {
+      erased: boolean;
+      accessRemoval: { ok: boolean; error: string; stillNamedIn: string[] };
+    };
+    expect(accountErasure.eraseUser).toHaveBeenCalledTimes(1);
+    expect(body.erased).toBe(true);
+    expect(body.accessRemoval.ok).toBe(false);
+    expect(body.accessRemoval.stillNamedIn).toEqual(['Sales/access.md', 'roles.yaml']);
+    expect(text).not.toContain('/srv/kb');
+    expect(text).not.toContain('lee@example.com');
+  });
+
+  it('the guards refuse up front: nothing is erased', async () => {
+    const { app, accessRemoval } = makeRemovalApp();
+    const { WorkflowDomainError } = await import('../../../shared/domain-errors.js');
+    accessRemoval.assertRemovable.mockRejectedValueOnce(
+      new WorkflowDomainError('This is the last Admin; the Admin role must keep at least one direct email member.', 409),
+    );
+    const base = await listen(app);
+    const res = await fetch(`${base}/api/admin/accounts/u2?removeFromAccess=1`, { method: 'DELETE' });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/last Admin/);
+    expect(accountErasure.eraseUser).not.toHaveBeenCalled();
+    expect(accessRemoval.remove).not.toHaveBeenCalled();
   });
 });
