@@ -15,7 +15,7 @@ import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
-import { createWorkflowRoutes } from '../workflow.routes.js';
+import { APPLY_FAILURE_REASON_WITHHELD, createWorkflowRoutes } from '../workflow.routes.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 
 /**
@@ -39,6 +39,7 @@ interface RouteHarness {
     getChangeRequestDetail: ReturnType<typeof vi.fn>;
     mergeChangeRequest: ReturnType<typeof vi.fn>;
     beginApplyAttempt: ReturnType<typeof vi.fn>;
+    endApplyAttempt: ReturnType<typeof vi.fn>;
     recordApplyFailure: ReturnType<typeof vi.fn>;
   };
 }
@@ -55,6 +56,7 @@ async function routeHarness(merge: () => Promise<unknown>): Promise<RouteHarness
     })),
     mergeChangeRequest: vi.fn(merge),
     beginApplyAttempt: vi.fn(() => 1),
+    endApplyAttempt: vi.fn(),
     recordApplyFailure: vi.fn(async () => true),
   };
   const app = express();
@@ -169,6 +171,19 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
     expect(h.workflow.mergeChangeRequest).toHaveBeenCalledTimes(1);
     expect(h.workflow.recordApplyFailure).not.toHaveBeenCalled();
     expect(h.emitted.filter((e) => e.kind === 'change-request-merge-failed')).toEqual([]);
+    // The attempt ended, so the service holds no entry for it.
+    expect(h.workflow.endApplyAttempt).toHaveBeenCalledWith(7, 1);
+  });
+
+  it('a failed attempt ends too, after its refusal is recorded', async () => {
+    h = await routeHarness(async () => {
+      throw new WorkflowValidationError('gate says no');
+    });
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.workflow.endApplyAttempt).toHaveBeenCalledWith(7, 1));
+    expect(h.workflow.recordApplyFailure.mock.invocationCallOrder[0]).toBeLessThan(
+      h.workflow.endApplyAttempt.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('the clicker still hears the refusal when persisting it fails', async () => {
@@ -257,6 +272,27 @@ describe('WorkflowService — the persisted apply refusal', () => {
     expect(await svc.recordApplyFailure(7, { reason: 'older', conflicts: false }, ADMIN, older)).toBe(false);
     expect(sets.map((v) => v.applyFailureReason)).toEqual(['newer']);
     expect(emitted).toHaveLength(1);
+  });
+
+  it('holds no entry once attempts end, and a token is never reissued', async () => {
+    const { db, sets } = updateDb();
+    const { svc } = service(db, () => {});
+    const attempts = (svc as unknown as { applyAttempts: Map<number, number> }).applyAttempts;
+    for (let n = 1; n <= 50; n++) svc.endApplyAttempt(n, svc.beginApplyAttempt(n));
+    expect(attempts.size).toBe(0);
+
+    // A running attempt, then a newer one that ends first: the older one, ending
+    // later, finds nothing to match and records nothing — even though a third
+    // attempt started after the entry left.
+    const older = svc.beginApplyAttempt(7);
+    const newer = svc.beginApplyAttempt(7);
+    svc.endApplyAttempt(7, newer);
+    const third = svc.beginApplyAttempt(7);
+    expect(third).not.toBe(older);
+    expect(await svc.recordApplyFailure(7, { reason: 'older', conflicts: false }, ADMIN, older)).toBe(false);
+    svc.endApplyAttempt(7, older);
+    expect(attempts.get(7)).toBe(third);
+    expect(sets).toEqual([]);
   });
 
   it('a request a concurrent apply already landed announces no failure', async () => {
@@ -398,5 +434,104 @@ describe('PullRequestService — a read the refusal overtook is not cached', () 
 
     const next = await svc.getPrDetail(7, { viewerEmail: 'bo@example.com' });
     expect(next?.lastApplyFailure?.reason).toBe('gate says no');
+  });
+});
+
+// ── Who reads the reason ────────────────────────────────────────────────────
+
+describe('GET change requests — the refusal reason reaches only viewers who can read every touched file', () => {
+  const FAILURE = {
+    reason: 'Waiting on approval for Plugins/x/SKILL.md',
+    conflicts: false,
+    at: '2026-09-16T10:00:00.000Z',
+    byName: 'Ada Admin',
+  };
+  const CR = {
+    number: 7,
+    state: 'open',
+    touchedNodePaths: ['Plugins/x/SKILL.md', 'Plugins/x/access.md'],
+    lastApplyFailure: FAILURE,
+  };
+  const BO = { id: 'u-bo', email: 'bo@example.com', name: 'Bo' } as AuthUser;
+
+  let server: Server | null = null;
+  afterEach(async () => {
+    if (server) await closeServer(server);
+    server = null;
+  });
+
+  async function serve(opts: { userId?: string; canReadBatch: (paths: string[]) => Promise<Map<string, boolean>> }) {
+    const cached = { ...CR, lastApplyFailure: { ...FAILURE } };
+    const workflow = {
+      listChangeRequests: vi.fn(async () => [cached]),
+      listChangeRequestsAuthoredBy: vi.fn(async () => [cached]),
+      listChangeRequestsForUser: vi.fn(async () => [cached]),
+      getChangeRequest: vi.fn(async () => cached),
+      getChangeRequestDetail: vi.fn(async () => ({ ...cached, files: [{ path: 'Plugins/x/SKILL.md' }] })),
+    };
+    const canReadBatch = vi.fn(async (_ws: string, _email: string, paths: string[]) => opts.canReadBatch(paths));
+    const app = express();
+    app.use('/api', (req, _res, next) => {
+      if (opts.userId) (req as unknown as { userId: string }).userId = opts.userId;
+      next();
+    });
+    app.use(
+      '/api',
+      createWorkflowRoutes(
+        workflow as unknown as IWorkflowService,
+        { getOrCreateForUser: vi.fn(async () => ({ id: 'ws-bo' })) } as unknown as WorkspaceService,
+        { getUserById: vi.fn(async () => BO) } as unknown as AuthService,
+        { emit: () => {} } as unknown as WorkflowEventBus,
+        { canReadBatch } as unknown as IAccessControl,
+        'knowledge-base',
+      ),
+    );
+    server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/workflow/change-requests`;
+    return { base, cached, canReadBatch };
+  }
+
+  const reasonsFrom = async (base: string) => {
+    const read = async (url: string) => (await fetch(url)).json();
+    return [
+      (await read(base))[0].lastApplyFailure,
+      (await read(`${base}/mine`))[0].lastApplyFailure,
+      (await read(`${base}/for-me`))[0].lastApplyFailure,
+      (await read(`${base}/7`)).lastApplyFailure,
+      (await read(`${base}/7/detail`)).lastApplyFailure,
+    ];
+  };
+
+  it('a viewer who can read every touched file reads the reason on every endpoint', async () => {
+    const { base } = await serve({
+      userId: BO.id,
+      canReadBatch: async (paths) => new Map(paths.map((p) => [p, true])),
+    });
+    for (const failure of await reasonsFrom(base)) expect(failure).toEqual(FAILURE);
+  });
+
+  it("a reader of the folder's access.md but not its content learns the apply failed, not the reason", async () => {
+    const { base, cached } = await serve({
+      userId: BO.id,
+      canReadBatch: async (paths) => new Map(paths.map((p) => [p, p.endsWith('access.md')])),
+    });
+    for (const failure of await reasonsFrom(base)) {
+      expect(failure).toEqual({ ...FAILURE, reason: APPLY_FAILURE_REASON_WITHHELD });
+    }
+    // The service's (cached) object is never rewritten.
+    expect(cached.lastApplyFailure.reason).toBe(FAILURE.reason);
+  });
+
+  it('an access lookup that fails withholds the reason', async () => {
+    const { base } = await serve({
+      userId: BO.id,
+      canReadBatch: async () => {
+        throw new Error('access tree unreadable');
+      },
+    });
+    const [failure] = await reasonsFrom(base);
+    expect(failure.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
   });
 });

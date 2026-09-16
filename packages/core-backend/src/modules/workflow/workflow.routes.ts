@@ -25,6 +25,7 @@ const crLog = logger('cr');
 import type {
   AuthUser,
   ChangeInput,
+  ChangeRequest,
   IWorkflowService,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -48,6 +49,9 @@ function toHttpError(
   log.error('unhandled error:', { err });
   return { status: 500, body: { error: 'Internal server error' } };
 }
+
+/** What a viewer who cannot read every touched file reads in place of a refusal's reason. */
+export const APPLY_FAILURE_REASON_WITHHELD = 'The reason names files you do not have access to read.';
 
 function parsePrNumber(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
@@ -153,6 +157,38 @@ export function createWorkflowRoutes(
       return false;
     }
     return true;
+  }
+
+  /**
+   * A saved apply refusal is git's or the gate's own text, and it names files
+   * ("Waiting on approval for Plugins/x/SKILL.md …"). Every viewer still learns
+   * THAT the apply failed, who tried and when; the reason itself only reaches a
+   * viewer who can read every file the request touches. Anyone else — an
+   * unauthenticated read, or a reader of the folder's `access.md` but not its
+   * content — gets a withheld line instead. Fails closed: an access lookup that
+   * errors withholds. Returns copies; the cached objects are never touched.
+   */
+  async function scopeApplyFailures<T extends ChangeRequest>(req: express.Request, items: T[]): Promise<T[]> {
+    const failing = items.filter((c) => c.lastApplyFailure);
+    if (failing.length === 0) return items;
+    let readable: Map<string, boolean> | null = null;
+    try {
+      const user = req.userId ? await authService.getUserById(req.userId) : null;
+      if (user) {
+        const workspace = await workspaceService.getOrCreateForUser(user);
+        const paths = [...new Set(failing.flatMap((c) => c.touchedNodePaths))];
+        readable = paths.length > 0 ? await accessControl.canReadBatch(workspace.id, user.email, paths) : new Map();
+      }
+    } catch (err) {
+      log.warn('apply-failure read scope lookup failed; withholding reasons:', { err });
+      readable = null;
+    }
+    return items.map((c) => {
+      const failure = c.lastApplyFailure;
+      if (!failure) return c;
+      const mayRead = readable !== null && c.touchedNodePaths.every((p) => readable!.get(p) === true);
+      return mayRead ? c : { ...c, lastApplyFailure: { ...failure, reason: APPLY_FAILURE_REASON_WITHHELD } };
+    });
   }
 
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -537,7 +573,7 @@ export function createWorkflowRoutes(
   router.get('/workflow/change-requests', async (req, res) => {
     const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await workflow.listChangeRequests({ fresh }));
+      res.json(await scopeApplyFailures(req, await workflow.listChangeRequests({ fresh })));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -552,7 +588,7 @@ export function createWorkflowRoutes(
     // the list changed, and a cached answer would hide their own change.
     const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await workflow.listChangeRequestsAuthoredBy(user.email, { fresh }));
+      res.json(await scopeApplyFailures(req, await workflow.listChangeRequestsAuthoredBy(user.email, { fresh })));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -565,7 +601,9 @@ export function createWorkflowRoutes(
     const fresh = isTruthyQuery(req.query.fresh);
     try {
       const workspace = await workspaceService.getOrCreateForUser(user);
-      res.json(await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh }));
+      res.json(
+        await scopeApplyFailures(req, await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh })),
+      );
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -584,7 +622,8 @@ export function createWorkflowRoutes(
         res.status(404).json({ error: 'change request not found' });
         return;
       }
-      res.json(cr);
+      const [scoped] = await scopeApplyFailures(req, [cr]);
+      res.json(scoped);
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -646,7 +685,8 @@ export function createWorkflowRoutes(
           crLog.warn(`lazy empty-close of #${num} failed (non-fatal):`, { err });
         }
       }
-      res.json(detail);
+      const [scoped] = await scopeApplyFailures(req, [detail]);
+      res.json(scoped);
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -1073,6 +1113,8 @@ export function createWorkflowRoutes(
           false,
           !aboutTheCaller,
         );
+      } finally {
+        workflow.endApplyAttempt(num, attempt);
       }
     })();
   });

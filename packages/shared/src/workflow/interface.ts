@@ -522,6 +522,9 @@ export interface IWorkflowService {
   /** Start an apply attempt on a request; the token scopes `recordApplyFailure`. */
   beginApplyAttempt(number: number): number;
 
+  /** End an attempt `beginApplyAttempt` started, whatever its outcome. */
+  endApplyAttempt(number: number, attempt: number): void;
+
   /**
    * Persist why an apply did not land on the (still open) request, and
    * announce `change-request-apply-failed` to every session so the author and

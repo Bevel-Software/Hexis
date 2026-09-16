@@ -579,8 +579,14 @@ export class WorkflowService implements IWorkflowService {
    */
   private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
 
-  /** The latest apply attempt per change-request number (see `beginApplyAttempt`). */
+  /**
+   * The latest RUNNING apply attempt per change-request number (see
+   * `beginApplyAttempt`). Entries leave when their attempt ends, so the map
+   * holds only attempts in flight, never every number anyone ever posted.
+   */
   private readonly applyAttempts = new Map<number, number>();
+  /** Process-wide attempt counter: a token is never reissued, even after its entry leaves. */
+  private applyAttemptSeq = 0;
 
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
@@ -2514,11 +2520,21 @@ export class WorkflowService implements IWorkflowService {
    * attempt may record a refusal: when two people apply the same request at
    * once, an older attempt that finishes last must not overwrite the newer
    * one's verdict. In-process, like the detail and list caches this reads with.
+   * Every attempt must be ended with `endApplyAttempt`.
    */
   beginApplyAttempt(number: number): number {
-    const attempt = (this.applyAttempts.get(number) ?? 0) + 1;
+    const attempt = ++this.applyAttemptSeq;
     this.applyAttempts.set(number, attempt);
     return attempt;
+  }
+
+  /**
+   * An attempt finished. Its entry leaves only if no newer attempt replaced it;
+   * an older attempt ending later then finds no entry and records nothing,
+   * because its token can never match one issued again.
+   */
+  endApplyAttempt(number: number, attempt: number): void {
+    if (this.applyAttempts.get(number) === attempt) this.applyAttempts.delete(number);
   }
 
   /**

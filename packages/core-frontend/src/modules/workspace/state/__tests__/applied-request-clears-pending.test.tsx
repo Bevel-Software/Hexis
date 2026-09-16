@@ -214,27 +214,42 @@ describe('an applied change request stops showing as pending — for every viewe
     await waitFor(() => expect(pending(result)).toBe(true));
   });
 
-  it('an older list read resolving after the merge refresh does not restore the marker', async () => {
-    serverHasOpenRequest(true);
+  it('older reads of either list resolving after the merge refresh do not restore the marker', async () => {
+    // The submitter's tab: the request is in the broad list AND in /mine, and
+    // both feed the tree's markers and suggestion rows.
+    serverHasOpenRequest(true, { submitter: true });
     const bus = fakeBus();
     const { result } = renderTab(bus.value);
-    await waitFor(() => expect(pending(result)).toBe(true));
+    await waitFor(() => expect(result.current.mineNumbers.has(7)).toBe(true));
 
-    // A read that left before the merge (a fallback poll) is still in flight…
-    let releaseOld!: (v: PullRequestSummary[]) => void;
+    // Reads that left before the merge (a fallback poll) are still in flight…
+    let releaseOldOpen!: (v: PullRequestSummary[]) => void;
+    let releaseOldMine!: (v: PullRequestSummary[]) => void;
     api.listOpenChangeRequests.mockReturnValueOnce(
       new Promise((r) => {
-        releaseOld = r;
+        releaseOldOpen = r;
+      }),
+    );
+    api.listMyChangeRequests.mockReturnValueOnce(
+      new Promise((r) => {
+        releaseOldMine = r;
       }),
     );
     act(() => bus.emit({ kind: 'change-request-rejected', number: 99 }));
     // …when the merge lands and the refresh reads the truth.
-    api.listOpenChangeRequests.mockResolvedValue([]);
+    serverHasOpenRequest(false, { submitter: true });
     act(() => bus.emit({ kind: 'change-request-merged', number: 7 }));
     await waitFor(() => expect(pending(result)).toBe(false));
+    expect(result.current.mineNumbers.has(7)).toBe(false);
 
-    await act(async () => releaseOld([pr()]));
+    // Both stale answers still say "open".
+    await act(async () => {
+      releaseOldOpen([pr()]);
+      releaseOldMine([pr()]);
+    });
     expect(pending(result)).toBe(false);
+    expect(result.current.mineNumbers.has(7)).toBe(false);
+    expect(result.current.minePaths.size).toBe(0);
   });
 });
 
