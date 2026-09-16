@@ -5,7 +5,7 @@ import type { GitService } from '../git.service.js';
 import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
-import { hashEmail as hash } from '../../../../shared/hash-email.js';
+import { hashEmail as hash } from '../../../../shared/email-identity.js';
 
 function pr(overrides: Partial<PullRequestSummary>): PullRequestSummary {
   return {
