@@ -152,21 +152,25 @@ function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number })
   const promise = new Promise<Captured>((resolve, reject) => {
     const out: Buffer[] = [];
     const errOut: Buffer[] = [];
-    let total = 0;
     let failed: CommandFailure | null = null;
     const fail = (error: CommandFailure) => {
       failed ??= error;
     };
-    const collect = (into: Buffer[], stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-      total += chunk.length;
-      if (total > options.maxBuffer) {
-        const error: CommandFailure = new RangeError(`${stream} maxBuffer length exceeded`);
-        error.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
-        fail(error);
-        killTree(child, 'SIGKILL');
-        return;
-      }
-      into.push(chunk);
+    // One ceiling per stream, as execFile has it: stderr chatter on a large
+    // `ls-tree -r` must not eat into the stdout the ceiling was sized for.
+    const collect = (into: Buffer[], stream: 'stdout' | 'stderr') => {
+      let total = 0;
+      return (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > options.maxBuffer) {
+          const error: CommandFailure = new RangeError(`${stream} maxBuffer length exceeded`);
+          error.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          fail(error);
+          killTree(child, 'SIGKILL');
+          return;
+        }
+        into.push(chunk);
+      };
     };
     child.stdout?.on('data', collect(out, 'stdout'));
     child.stderr?.on('data', collect(errOut, 'stderr'));
