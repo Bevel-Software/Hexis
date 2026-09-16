@@ -1,5 +1,6 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DEFAULT_BRANCH,
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
@@ -19,7 +20,8 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { isBinaryFile } from '../../workspace/components/renderers';
+import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderers';
+import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
 
@@ -268,6 +270,48 @@ export function ChangeRequestDialog({
     [selectedIsMarkdown, bothSidesIn, selected, isAdded, mainRaw, branchRaw],
   );
   const touchesSelected = changedFiles.has(selected);
+
+  /**
+   * The branch this request is against — where the CURRENT version of
+   * everything it touches lives, and the only honest source for a file it
+   * doesn't touch. `base` is always populated by the PR APIs; the fallback is
+   * for fixtures and for a summary that predates the field.
+   */
+  const targetBranch = cr.base || DEFAULT_BRANCH;
+
+  /**
+   * A binary file the file page has a VIEWER for — so the dialog shows the
+   * document rather than describing it.
+   *
+   * Which version, and from where:
+   *   - added    → the request's branch, "Proposed version". No current one.
+   *   - changed  → the request's branch, "Proposed version", with the current
+   *                version one click away on the target branch.
+   *   - untouched→ the TARGET branch, "Current version". Reading the request's
+   *                branch would work too (its copy is identical), but naming
+   *                the target is what makes the label true.
+   *
+   * `null` for everything else — a format with no viewer (a `.zip`, a legacy
+   * `.doc`) keeps the note below, and a text or markdown file never reaches
+   * here at all: `isBinaryFile` gates this whole branch, so the diff path —
+   * including a `.csv`, whose text diff says far more than its bytes would —
+   * is untouched.
+   */
+  const selectedPreview = useMemo<{
+    branch: string;
+    label: 'Proposed version' | 'Current version';
+    currentVersionBranch: string | null;
+  } | null>(() => {
+    if (!selectedIsBinary || !hasFileViewer(selected)) return null;
+    if (!touchesSelected) {
+      return { branch: targetBranch, label: 'Current version', currentVersionBranch: null };
+    }
+    return {
+      branch: cr.branch,
+      label: 'Proposed version',
+      currentVersionBranch: isAdded ? null : targetBranch,
+    };
+  }, [selectedIsBinary, selected, touchesSelected, isAdded, cr.branch, targetBranch]);
 
   /**
    * The unmarked reading — the file itself, when there is no honest diff.
@@ -573,7 +617,11 @@ export function ChangeRequestDialog({
                 {detail === null
                   ? ''
                   : touchesSelected
-                    ? ' · what changes is marked'
+                    ? // Nothing is marked in a rendered document: the pane
+                      // below shows the proposed version whole, and says so.
+                      selectedPreview !== null
+                      ? ''
+                      : ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
             </div>
@@ -603,13 +651,42 @@ export function ChangeRequestDialog({
                   soon as those arrive rather than waiting on the (slow) detail
                   fetch that tells us which files were touched. */}
               {selectedIsBinary ? (
-                <p className="py-6 text-center text-detail text-ink-faint">
-                  {isAdded
-                    ? 'A new binary file (an image, a document…). There is no text to compare. Apply the request to take it as proposed.'
-                    : touchesSelected
-                      ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
-                      : 'A binary file. No text to show, and this request does not touch it.'}
-                </p>
+                // Which branch this pane reads — and whether there is a
+                // current version to offer beside it — is a fact about the
+                // FILE LIST, so the pane waits for the detail rather than
+                // guessing and flipping branches under the reader.
+                detail === null ? (
+                  <p className="py-6 text-center text-detail text-ink-faint">Loading…</p>
+                ) : selectedPreview !== null ? (
+                  // The proposed document itself, with the viewer the file
+                  // page uses. A file the request does not touch reads from
+                  // the TARGET branch instead — there is no proposed version
+                  // of it, and the current one is what there is to show.
+                  <BranchFilePreview
+                    branch={selectedPreview.branch}
+                    repoRelativePath={selected}
+                    label={selectedPreview.label}
+                    currentVersionBranch={selectedPreview.currentVersionBranch}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-4 py-6">
+                    <p className="text-center text-detail text-ink-faint">
+                      {isAdded
+                        ? 'A new binary file (an image, a document…). There is no text to compare. Apply the request to take it as proposed.'
+                        : touchesSelected
+                          ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
+                          : 'A binary file. No text to show, and this request does not touch it.'}
+                    </p>
+                    {/* No viewer renders this format, so the bytes themselves
+                        are the only honest offer — from the request's branch,
+                        so what downloads is what would be applied. */}
+                    <BranchFileDownload
+                      branch={touchesSelected ? cr.branch : targetBranch}
+                      repoRelativePath={selected}
+                      label={touchesSelected ? 'Download the proposed file' : 'Download the file'}
+                    />
+                  </div>
+                )
               ) : mdPayload !== null && !unreadable.has(selected) ? (
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —

@@ -1,14 +1,32 @@
+import type { ReactNode } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock('../../../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
-vi.mock('../../../state/workspace.context', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  useWorkspace: () => ({ workspaceId: 'ws-1', kbDirName: 'knowledge-base' }),
-}));
-
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+} from '../../../state/workspace.context';
 import { CanDownloadContext, DownloadFileButton } from '../DownloadFileButton';
+
+/**
+ * The button reads its workspace through `useRendererWorkspaceId`, so the
+ * checked-out workspace is PROVIDED here rather than the hook mocked away —
+ * the change-request dialog overrides that same lookup to point the viewers
+ * at a request's branch, and a mocked hook would hide whether it still works.
+ */
+function withWorkspace(node: ReactNode) {
+  return (
+    <WorkspaceContext.Provider
+      value={
+        { workspaceId: 'ws-1', kbDirName: 'knowledge-base' } as unknown as WorkspaceContextValue
+      }
+    >
+      {node}
+    </WorkspaceContext.Provider>
+  );
+}
 
 /**
  * The button reflects the per-path `download:` verb the backend resolves —
@@ -19,9 +37,11 @@ import { CanDownloadContext, DownloadFileButton } from '../DownloadFileButton';
 describe('DownloadFileButton — download permission', () => {
   const renderWith = (canDownload: boolean | null) =>
     render(
-      <CanDownloadContext.Provider value={canDownload}>
-        <DownloadFileButton filePath="knowledge-base/Plugins/GTM/deck.pptx" />
-      </CanDownloadContext.Provider>,
+      withWorkspace(
+        <CanDownloadContext.Provider value={canDownload}>
+          <DownloadFileButton filePath="knowledge-base/Plugins/GTM/deck.pptx" />
+        </CanDownloadContext.Provider>,
+      ),
     );
 
   it('is disabled with an explanation when the download verb says no', () => {
@@ -61,9 +81,11 @@ describe('DownloadFileButton — the URL it fetches', () => {
     );
     (globalThis.URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = vi.fn();
     render(
-      <CanDownloadContext.Provider value={true}>
-        <DownloadFileButton filePath="knowledge-base/Plugins/GTM/deck.pptx" />
-      </CanDownloadContext.Provider>,
+      withWorkspace(
+        <CanDownloadContext.Provider value={true}>
+          <DownloadFileButton filePath="knowledge-base/Plugins/GTM/deck.pptx" />
+        </CanDownloadContext.Provider>,
+      ),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Download' }));
     await waitFor(() => expect(apiMock.authFetch).toHaveBeenCalled());

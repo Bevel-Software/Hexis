@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
@@ -96,7 +96,7 @@ interface SheetView {
  * as raw serial numbers / decimals.
  */
 export function XlsxRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [workbook, setWorkbook] = useState<XLSX.WorkBook | null>(null);
   const [activeSheet, setActiveSheet] = useState(0);
   const [error, setError] = useState<string | null>(null);

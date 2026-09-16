@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import type { FileRendererProps } from './types';
 
 export function ImageRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
   useEffect(() => {

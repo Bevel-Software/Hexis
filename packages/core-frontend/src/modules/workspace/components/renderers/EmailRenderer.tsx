@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, Mail, Paperclip } from 'lucide-react';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { copyToClipboard } from '../../../../lib/clipboard';
@@ -39,7 +39,7 @@ import type { FileRendererProps } from './types';
  * ignores `onSave` / `onValueChange` / `readOnly`.
  */
 export function EmailRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [view, setView] = useState<EmailMessageView | null>(null);
   // The sender's own markup, made safe to show. Rebuilt only when the message
   // changes — the sanitize + inline pass walks the whole body.
