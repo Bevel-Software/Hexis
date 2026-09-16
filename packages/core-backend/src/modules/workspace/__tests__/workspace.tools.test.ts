@@ -1363,12 +1363,14 @@ describe('path inputs tell the agent about the repository folder', () => {
  *   HR/     — read + write, no download, no owner: a move here changes access
  *   Locked/ — read only: writes are refused, proposing is possible
  *   Secret/ — nothing: writes are refused, proposing is not
+ *   …/sealed.md — read only, wherever it sits: a denied file inside a writable folder
  */
 describe('preflight for moves and deletes', () => {
   const PROTECTED = 'target-company-state';
   const KB = (p: string) => `${KB_DIR}/${p}`;
 
   const verbsFor = (rel: string) => {
+    if (rel.endsWith('/sealed.md')) return { read: true, write: false, download: false, owner: false };
     if (rel.startsWith('HR/')) return { read: true, write: true, download: false, owner: false };
     if (rel.startsWith('Locked/')) return { read: true, write: false, download: false, owner: false };
     if (rel.startsWith('Secret/')) return { read: false, write: false, download: false, owner: false };
@@ -1507,6 +1509,20 @@ describe('preflight for moves and deletes', () => {
       expect(run.body.proposal.targetBranch).toBe(PROTECTED);
       expect(run.body.proposal.steps.join('\n')).toMatch(/create_branch[\s\S]*move_file[\s\S]*open_change_request/);
       expect(await exists(args.src)).toBe(true);
+    });
+
+    it('a folder move judges every file under it: one denied file blocks the move, in the dry run and for real', async () => {
+      const base = await seeded();
+      await fs.writeFile(KB('Sales/archive/nested/sealed.md'), 'sealed');
+      const args = { src: KB('Sales/archive'), dest: KB('Sales/archive-2026') };
+      const dry = await call(base, 'move_file', { ...args, dryRun: true });
+      expect(dry.body).toMatchObject({ kind: 'folder', descendants: 4, accessChanges: false, allowed: false });
+      expect(dry.body.reason).toContain('sealed.md');
+      const run = await call(base, 'move_file', { ...args, confirm: true });
+      expect(run.status).toBe(403);
+      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Sales/archive/nested/sealed.md'), canPropose: true });
+      expect(await exists(KB('Sales/archive/nested/sealed.md'))).toBe(true);
+      expect(await exists(args.dest)).toBe(false);
     });
 
     it('a denied move into a path the caller cannot read cannot be proposed, and says why', async () => {

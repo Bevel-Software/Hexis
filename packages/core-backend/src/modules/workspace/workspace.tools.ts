@@ -1449,7 +1449,7 @@ export function registerWorkspaceTools(
     name: 'move_file',
     description:
       'Move or rename a workspace FILE or FOLDER; a folder moves recursively, with everything under it. `dest` is the full new path, not the folder to move into. Lands as a delete + create, committed + pushed as you. ' +
-      'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) and git metadata are refused; a move cannot create a platform file or folder at `dest` either (renaming a note to `access.md` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends. ' +
+      'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) and git metadata are refused; a move cannot create a platform file or folder at `dest` either (renaming a note to `access.md` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ' +
       'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
       'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.' +
       PROPOSAL_NOTE +
@@ -1533,13 +1533,18 @@ export function registerWorkspaceTools(
             : `"${destOnDisk}" is a platform folder; a move cannot create one.`;
       const managedWhy = srcManaged ?? createsManaged;
       const managed = managedWhy !== undefined;
-      const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest]);
+      // A folder move deletes every file under `src` and creates it again under
+      // `dest`, so every one of them is judged at both paths — a file its own
+      // rules deny you is not carried off because its folder is writable. The
+      // lock gate locks only the two folder paths, so this is the check.
+      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
+      const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
       const reason = collision
         ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
         : managed
           ? managedWhy
           : blocked.length > 0
-            ? `You may not write "${blocked[0]}", so the move cannot run.`
+            ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
             : undefined;
       const impact = {
         src,
