@@ -501,14 +501,14 @@ export class UserAccessRemovalService {
         this.accessControl.invalidate(workspaceId);
         this.emitWrites(workspaceId, actor, removedFrom);
       } catch (err) {
-        log.warn(`erased account ${erasedId} was removed, but refreshing access and clients failed: ${printable(err instanceof Error ? err.message : String(err))}`);
+        log.warn(`erased account ${printable(erasedId)} was removed, but refreshing access and clients failed: ${printable(err instanceof Error ? err.message : String(err))}`);
       }
     }
     let stillNamedIn: string[] | null = null;
     try {
       stillNamedIn = await this.filesNaming(email);
     } catch (err) {
-      log.warn(`could not re-scan the files naming erased account ${erasedId}: ${printable(err instanceof Error ? err.message : String(err))}`);
+      log.warn(`could not re-scan the files naming erased account ${printable(erasedId)}: ${printable(err instanceof Error ? err.message : String(err))}`);
     }
     return { removedFrom, stillNamedIn, ...(publishPending ? { publishPending } : {}) };
   }

@@ -278,6 +278,9 @@ describe('UserAccessRemovalService', () => {
       expect(workflow.commits).toHaveLength(1);
       expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
       expect(result.stillNamedIn).toEqual([]);
+      // The refresh really ran after the commit and really threw.
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(invalidate.mock.results[0].type).toBe('throw');
     } finally {
       invalidate.mockRestore();
     }
