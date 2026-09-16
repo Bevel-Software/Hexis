@@ -42,7 +42,7 @@ const SETTINGS: SettingStatus[] = [
   { key: 'pluginsDir', envVar: 'KB_PLUGINS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
+  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: false },
 ];
 
 /**

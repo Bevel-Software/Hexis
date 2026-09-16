@@ -20,7 +20,8 @@ interface OidcDiscovery {
   userinfo_endpoint: string;
 }
 
-export interface OidcAuthProviderOptions {
+/** The settings that make up one OIDC configuration. */
+export interface OidcSettings {
   /** Issuer base URL; `<issuer>/.well-known/openid-configuration` must exist. */
   issuerUrl: string;
   clientId: string;
@@ -29,6 +30,38 @@ export interface OidcAuthProviderOptions {
   scopes: string;
   /** Login-button label shown by the login screen. */
   label: string;
+}
+
+/**
+ * The OIDC configuration in effect, resolved through deployment settings —
+ * the environment first, then what an admin saved on the setup screen (see
+ * DeploymentSettingsService). Null unless issuer, client id and secret are
+ * all set.
+ */
+export function oidcSettingsFrom(settings: { resolve(key: string): string }): OidcSettings | null {
+  // Trailing slashes stripped so `<issuer>/.well-known/…` is well-formed and
+  // `https://idp/` and `https://idp` are one issuer to the discovery cache.
+  const issuerUrl = settings.resolve('oidcIssuerUrl').replace(/\/+$/, '');
+  const clientId = settings.resolve('oidcClientId');
+  const clientSecret = settings.resolve('oidcClientSecret');
+  if (!issuerUrl || !clientId || !clientSecret) return null;
+  return {
+    issuerUrl,
+    clientId,
+    clientSecret,
+    scopes: settings.resolve('oidcScopes') || 'openid profile email',
+    label: settings.resolve('oidcProviderLabel') || 'Single sign-on',
+  };
+}
+
+export interface OidcAuthProviderOptions {
+  /**
+   * The configuration in effect, or null while it is incomplete. Called on
+   * every probe and every sign-in step rather than once at construction, so a
+   * configuration saved on a running deployment applies to the next sign-in
+   * without a restart.
+   */
+  settings(): OidcSettings | null;
   publicBackendUrl: string;
   publicFrontendUrl: string;
   /** See MicrosoftAuthDeps.cookieSecure — scheme-derived, not NODE_ENV. */
@@ -58,7 +91,12 @@ function readCookie(req: express.Request, name: string): string | null {
 /**
  * Generic OIDC single sign-on as an {@link AuthProviderPlugin} — works with
  * any spec-compliant provider (Entra, Okta, Auth0, Keycloak, Google, …),
- * configured purely from the environment (see CoreConfig `oidc*`).
+ * configured from the environment or the setup screen ({@link oidcSettingsFrom}).
+ *
+ * Registered once and LIVE: the configuration is read on every use, so the
+ * provider is advertised only while it is complete ({@link isEnabled}), its
+ * label and scopes follow the latest save, and a changed issuer is
+ * re-discovered on the next sign-in.
  *
  * Flow: authorization-code with PKCE (S256) as a confidential client.
  * Identity claims come from the `userinfo` endpoint called with the freshly
@@ -71,15 +109,26 @@ function readCookie(req: express.Request, name: string): string | null {
  */
 export class OidcAuthProvider implements AuthProviderPlugin {
   readonly key = 'oidc';
-  readonly label: string;
   readonly startPath = '/api/auth/oidc/login';
 
   private readonly fetchImpl: typeof fetch;
-  private discovery: OidcDiscovery | null = null;
+  /**
+   * The discovery for exactly one issuer — the one last asked for. Held as a
+   * promise so concurrent sign-ins share one fetch; replaced whenever the
+   * issuer differs, so no other issuer's document is ever served.
+   */
+  private discovery: { issuerUrl: string; doc: Promise<OidcDiscovery> } | null = null;
 
   constructor(private readonly opts: OidcAuthProviderOptions) {
-    this.label = opts.label;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  get label(): string {
+    return this.opts.settings()?.label ?? '';
+  }
+
+  isEnabled(): boolean {
+    return this.opts.settings() !== null;
   }
 
   /**
@@ -87,21 +136,29 @@ export class OidcAuthProvider implements AuthProviderPlugin {
    * boot) so a temporarily unreachable issuer delays the first login instead
    * of failing the whole deployment; a failed attempt is not cached.
    */
-  private async discover(): Promise<OidcDiscovery> {
-    if (this.discovery) return this.discovery;
-    const url = `${this.opts.issuerUrl}/.well-known/openid-configuration`;
+  private discover(issuerUrl: string): Promise<OidcDiscovery> {
+    if (this.discovery?.issuerUrl === issuerUrl) return this.discovery.doc;
+    const entry = { issuerUrl, doc: this.fetchDiscovery(issuerUrl) };
+    this.discovery = entry;
+    entry.doc.catch(() => {
+      if (this.discovery === entry) this.discovery = null;
+    });
+    return entry.doc;
+  }
+
+  private async fetchDiscovery(issuerUrl: string): Promise<OidcDiscovery> {
+    const url = `${issuerUrl}/.well-known/openid-configuration`;
     const res = await this.fetchImpl(url);
     if (!res.ok) throw new Error(`OIDC discovery failed: ${res.status} ${url}`);
     const doc = (await res.json()) as Partial<OidcDiscovery>;
     if (!doc.authorization_endpoint || !doc.token_endpoint || !doc.userinfo_endpoint) {
       throw new Error('OIDC discovery document is missing required endpoints');
     }
-    this.discovery = {
+    return {
       authorization_endpoint: doc.authorization_endpoint,
       token_endpoint: doc.token_endpoint,
       userinfo_endpoint: doc.userinfo_endpoint,
     };
-    return this.discovery;
   }
 
   private redirectUri(): string {
@@ -113,10 +170,16 @@ export class OidcAuthProvider implements AuthProviderPlugin {
 
     // GET /api/auth/oidc/login — start the round-trip: mint state + PKCE
     // verifier (both in one short-lived HttpOnly cookie), redirect to the
-    // provider's authorization endpoint.
+    // provider's authorization endpoint. An incomplete configuration is an
+    // answer, not an error: back to the sign-in page, which says so.
     router.get('/auth/oidc/login', async (_req, res) => {
+      const oidc = this.opts.settings();
+      if (!oidc) {
+        res.redirect(`${publicFrontendUrl}/auth/oidc/callback#error=not_configured`);
+        return;
+      }
       try {
-        const discovery = await this.discover();
+        const discovery = await this.discover(oidc.issuerUrl);
         const state = randomBytes(16).toString('hex');
         const verifier = randomBytes(32).toString('base64url');
         const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -129,9 +192,9 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         });
         const url = new URL(discovery.authorization_endpoint);
         url.searchParams.set('response_type', 'code');
-        url.searchParams.set('client_id', this.opts.clientId);
+        url.searchParams.set('client_id', oidc.clientId);
         url.searchParams.set('redirect_uri', this.redirectUri());
-        url.searchParams.set('scope', this.opts.scopes);
+        url.searchParams.set('scope', oidc.scopes);
         url.searchParams.set('state', state);
         url.searchParams.set('code_challenge', challenge);
         url.searchParams.set('code_challenge_method', 'S256');
@@ -158,9 +221,16 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           return;
         }
 
-        const discovery = await this.discover();
+        // Read again rather than carried from the login step: the token
+        // endpoint is asked with whatever is in effect now.
+        const oidc = this.opts.settings();
+        if (!oidc) {
+          fail('not_configured');
+          return;
+        }
+        const discovery = await this.discover(oidc.issuerUrl);
         const basic = Buffer.from(
-          `${encodeURIComponent(this.opts.clientId)}:${encodeURIComponent(this.opts.clientSecret)}`,
+          `${encodeURIComponent(oidc.clientId)}:${encodeURIComponent(oidc.clientSecret)}`,
           'utf8',
         ).toString('base64');
         const tokenRes = await this.fetchImpl(discovery.token_endpoint, {
