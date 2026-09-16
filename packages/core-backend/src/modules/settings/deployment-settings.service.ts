@@ -1,4 +1,4 @@
-import { and, eq, inArray, like, ne } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
@@ -598,36 +598,35 @@ export class DeploymentSettingsService {
     return rows.some((row) => row.key === key && row.value === 'verified') ? 'verified' : 'unverified';
   }
 
-  /** Record what is known about one set of single sign-on values. */
+  /**
+   * Record what is known about one set of single sign-on values.
+   *
+   * ONLY EVER UPGRADES, atomically: `verified` overwrites, `unverified` only
+   * fills an empty slot. The same values cannot stop being proven by an
+   * inconclusive answer — an overlapping check that could not reach the token
+   * endpoint says nothing against the sign-in that worked.
+   *
+   * Records about values no longer in effect are left in place rather than
+   * swept: they are inert (nothing reads a key the current values do not hash
+   * to), and a sweep racing a save on another replica could delete the record
+   * of the values that end up in effect.
+   */
   async recordOidcVerification(
     state: Exclude<OidcVerificationState, 'not-configured'>,
     credentials: OidcCredentials,
   ): Promise<void> {
     const key = this.oidcVerificationKey(credentials);
-    await this.db
+    const insert = this.db
       .insert(deploymentSettings)
-      .values({ key, value: state, encrypted: false, updatedBy: null })
-      .onConflictDoUpdate({
-        target: deploymentSettings.key,
-        set: { value: state, encrypted: false, updatedBy: null, updatedAt: new Date() },
-      });
-  }
-
-  /**
-   * Drop the records about every set of values but these — once a save has put
-   * them in effect, the others describe nothing. Housekeeping only: a record
-   * that reappears (a sign-in through the old provider still finishing) is
-   * about values not in effect, so it is inert.
-   */
-  async dropOtherOidcVerifications(credentials: OidcCredentials): Promise<void> {
-    await this.db
-      .delete(deploymentSettings)
-      .where(
-        and(
-          like(deploymentSettings.key, `${OIDC_VERIFICATION_PREFIX}%`),
-          ne(deploymentSettings.key, this.oidcVerificationKey(credentials)),
-        ),
-      );
+      .values({ key, value: state, encrypted: false, updatedBy: null });
+    if (state === 'unverified') {
+      await insert.onConflictDoNothing({ target: deploymentSettings.key });
+      return;
+    }
+    await insert.onConflictDoUpdate({
+      target: deploymentSettings.key,
+      set: { value: state, encrypted: false, updatedBy: null, updatedAt: new Date() },
+    });
   }
 
   private oidcVerificationKey(credentials: OidcCredentials): string {

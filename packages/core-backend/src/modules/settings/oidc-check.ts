@@ -187,7 +187,9 @@ export async function checkOidcConfiguration(
         // Random, so it cannot collide with a code anyone was issued.
         code: `hexis-configuration-check-${randomBytes(16).toString('hex')}`,
         redirect_uri: config.redirectUri,
-        code_verifier: randomBytes(32).toString('base64url'),
+        // No `code_verifier`: no challenge was ever issued for this code, and
+        // a PKCE-enforcing provider could answer a verifier it cannot match
+        // with something other than the code rejection this reads.
       }).toString(),
       redirect: 'error',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

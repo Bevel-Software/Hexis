@@ -231,11 +231,6 @@ export function createSetupRoutes(
         await settings.recordOidcVerification(oidc.record.state, oidc.record.credentials);
       }
       const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
-      if (oidc.record) {
-        await settings.dropOtherOidcVerifications(oidc.record.credentials).catch((err: unknown) => {
-          console.error('[setup] could not drop old sign-in records:', err instanceof Error ? err.message : String(err));
-        });
-      }
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
       /** Whether this save put the stored branch model into the running process. */

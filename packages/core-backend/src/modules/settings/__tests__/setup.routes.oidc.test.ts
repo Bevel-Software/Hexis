@@ -64,10 +64,14 @@ function memoryDb(rows: Row[] = [], deleted: string[][] = []) {
     select: () => ({ from: () => Object.assign(all(), { where: all }) }),
     insert: () => ({
       values: (row: Row) => ({
-        onConflictDoUpdate: (conflict: { set: { value: string } }) => {
+        onConflictDoUpdate: (conflict: { set: Pick<Row, 'value' | 'encrypted'> }) => {
           const existing = rows.find((r) => r.key === row.key);
-          if (existing) existing.value = conflict.set.value;
+          if (existing) Object.assign(existing, { value: conflict.set.value, encrypted: conflict.set.encrypted });
           else rows.push({ ...row });
+          return Promise.resolve();
+        },
+        onConflictDoNothing: () => {
+          if (!rows.some((r) => r.key === row.key)) rows.push({ ...row });
           return Promise.resolve();
         },
       }),
@@ -468,6 +472,18 @@ describe('the verification state', () => {
     // The old provider's onSignedIn lands late.
     await settings.recordOidcVerification('verified', old);
     await settings.recordOidcVerification('unverified', old);
+    expect(await settings.oidcVerification()).toBe('verified');
+  });
+
+  it('an inconclusive answer never downgrades values already proven', async () => {
+    const settings = new DeploymentSettingsService(memoryDb(), ENC_KEY);
+    await settings.save(FULL, null);
+    const credentials = settings.resolveOidcCredentials();
+    await settings.recordOidcVerification('unverified', credentials);
+    expect(await settings.oidcVerification()).toBe('unverified');
+    await settings.recordOidcVerification('verified', credentials);
+    // An overlapping check that could not reach the token endpoint lands last.
+    await settings.recordOidcVerification('unverified', credentials);
     expect(await settings.oidcVerification()).toBe('verified');
   });
 

@@ -135,6 +135,8 @@ describe('checkOidcConfiguration — token probe', () => {
     expect(form.get('grant_type')).toBe('authorization_code');
     expect(form.get('redirect_uri')).toBe(CONFIG.redirectUri);
     expect(form.get('code')).toBeTruthy();
+    // No challenge was issued for the made-up code, so no verifier goes with it.
+    expect(form.has('code_verifier')).toBe(false);
     // The secret travels in the header alone, and discovery never carried it.
     expect(String(init.body)).not.toContain(SECRET);
     const discoveryInit = fetchImpl.mock.calls[0][1] as RequestInit;

@@ -15,34 +15,50 @@ export function isBlockedHost(hostname: string): boolean {
   // IPv6 literals only: they contain a colon, whereas a plain hostname never does
   // — so domains like `fc.example.org` / `fd.example.com` are not matched.
   if (host.includes(':')) {
-    // IPv4-mapped IPv6 connects to the embedded v4 — validate it. The textual
-    // form may be dotted (`::ffff:169.254.169.254`) OR two hex hextets
-    // (`::ffff:a9fe:a9fe`) — WHATWG `new URL` canonicalizes the mapped address
-    // to the HEX form, so the dotted regex alone would miss a normalized
-    // hostname. Handle both.
-    const mappedDotted = /:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host);
-    if (mappedDotted && isBlockedV4(mappedDotted[1])) return true;
-    const mappedHex = /:ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
-    if (mappedHex) {
-      const hi = parseInt(mappedHex[1], 16);
-      const lo = parseInt(mappedHex[2], 16);
-      const v4 = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
-      if (isBlockedV4(v4)) return true;
+    const hextets = parseIPv6(host);
+    // Not an address `new URL` would accept either — nothing to connect to.
+    if (!hextets) return true;
+    // IPv4-mapped (::ffff:0:0/96) connects to the embedded v4 — judge that.
+    // Decoded from the hextets, so every spelling lands here: dotted
+    // (`::ffff:169.254.169.254`), the hex form WHATWG `new URL` canonicalizes
+    // to (`::ffff:a9fe:a9fe`) and the fully expanded `0:0:0:0:0:ffff:…`.
+    if (hextets.slice(0, 5).every((h) => h === 0) && hextets[5] === 0xffff) {
+      const [hi, lo] = [hextets[6], hextets[7]];
+      return isBlockedV4(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
     }
-    // A mapped public v4 connects to that public address.
-    if (/^::ffff:/.test(host) && (mappedDotted || mappedHex)) return false;
     // Everything else must be global unicast (2000::/3). That excludes loopback
     // and unspecified (`::1`, `::`, `::2`…), link-local fe80::/10, unique-local
-    // fc00::/7, multicast ff00::/8 — and anything that does not parse.
-    const first = /^([0-9a-f]{1,4}):/.exec(host);
-    if (!first) return true;
-    const hextet = parseInt(first[1], 16);
-    if (hextet < 0x2000 || hextet > 0x3fff) return true;
+    // fc00::/7 and multicast ff00::/8.
+    if (hextets[0] < 0x2000 || hextets[0] > 0x3fff) return true;
     // Documentation 2001:db8::/32 is never a real host.
-    if (/^2001:0?db8:/.test(host)) return true;
+    if (hextets[0] === 0x2001 && hextets[1] === 0x0db8) return true;
     return false;
   }
   return isBlockedV4(host);
+}
+
+/**
+ * The eight hextets of an IPv6 literal (`::` expanded, a dotted IPv4 tail
+ * decoded), or null when it is not one. A zone id (`%eth0`) is ignored.
+ */
+function parseIPv6(literal: string): number[] | null {
+  let text = literal.replace(/%.*$/, '');
+  const dotted = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const octets = dotted.slice(2).map(Number);
+    if (octets.some((o) => o > 255)) return null;
+    text = `${dotted[1]}${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const part = (half: string) => (half === '' ? [] : half.split(':'));
+  const head = part(halves[0]);
+  const tail = halves.length === 2 ? part(halves[1]) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const groups = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
 }
 
 /** True for an IPv4 literal in a private / loopback / link-local (incl. cloud IMDS) range. */
