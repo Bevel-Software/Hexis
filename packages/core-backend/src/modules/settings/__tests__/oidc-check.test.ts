@@ -25,7 +25,7 @@ const json = (status: number, body: unknown) =>
 
 /** A provider: discovery answers `discovery`, the token endpoint answers `token`. */
 function provider(discovery: () => Response | Promise<Response>, token?: () => Response | Promise<Response>) {
-  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+  return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url === DISCOVERY_URL) return discovery();
     if (url === TOKEN_URL && token) return token();

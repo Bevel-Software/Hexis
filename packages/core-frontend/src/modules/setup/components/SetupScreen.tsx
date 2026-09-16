@@ -295,11 +295,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVe
   const oidcEpoch = useRef(0);
   /**
    * A verification state newer than the one the host last passed in — what a
-   * save or a test just answered — until the host's own refresh catches up.
+   * save or a test just answered. It remembers which passed-in value it
+   * superseded, so the host's own refresh (a different value) takes over.
    */
-  const [latestVerification, setLatestVerification] = useState<OidcVerification | undefined>();
-  useEffect(() => setLatestVerification(undefined), [oidcVerification]);
-  const verification = latestVerification ?? oidcVerification;
+  const [latest, setLatest] = useState<{ over: OidcVerification | undefined; value: OidcVerification } | null>(null);
+  const setLatestVerification = (value: OidcVerification) => setLatest({ over: oidcVerification, value });
+  const verification = latest && latest.over === oidcVerification ? latest.value : oidcVerification;
 
   /**
    * What a field would save as, given a set of typed answers: what is in them,
