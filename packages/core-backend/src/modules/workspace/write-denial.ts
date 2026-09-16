@@ -54,6 +54,12 @@ function draftNameFor(email: string, path: string): string {
   return `${local}/propose-${slug}`;
 }
 
+/** A suggested change-request title, within `open_change_request`'s 256-character limit. */
+function titleFor(path: string): string {
+  const title = `Propose a change to ${path}`;
+  return title.length <= 256 ? title : `${title.slice(0, 255)}…`;
+}
+
 /**
  * Turn a permission refusal from a write tool into a `write-denied` ToolError
  * that says whether the caller may propose the change instead, and how.
@@ -110,8 +116,8 @@ export async function writeDenial(
         },
         {
           tool: 'open_change_request',
-          args: { sourceBranch: draft, targetBranch: input.branch },
-          note: 'Open a change request from the draft into the target, with a short title saying what changes.',
+          args: { sourceBranch: draft, targetBranch: input.branch, title: titleFor(rel) },
+          note: 'Open a change request from the draft into the target; a sharper title saying what changes is better than the suggested one.',
         },
       ],
     },

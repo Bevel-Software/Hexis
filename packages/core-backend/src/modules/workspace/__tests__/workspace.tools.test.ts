@@ -1480,7 +1480,8 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(json.proposal.steps.map((s: { tool: string }) => s.tool)).toEqual(['create_branch', tool, 'open_change_request']);
     expect(json.proposal.steps[0].args).toEqual({ name: draft, branch: TARGET });
     expect(json.proposal.steps[1].args).toEqual({ branch: draft });
-    expect(json.proposal.steps[2].args).toEqual({ sourceBranch: draft, targetBranch: TARGET });
+    // Every argument open_change_request requires is present, so the step works as given.
+    expect(json.proposal.steps[2].args).toEqual({ sourceBranch: draft, targetBranch: TARGET, title: 'Propose a change to Sales/deal.md' });
     // The read verdict was asked of the repo-relative path.
     expect(calls).toContain('Sales/deal.md');
     // Nothing was created: no workspace was resolved for a draft, and the context's
