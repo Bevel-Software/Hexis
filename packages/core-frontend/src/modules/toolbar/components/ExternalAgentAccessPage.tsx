@@ -18,7 +18,7 @@ import {
   useCopyFeedback,
   workspaceBaseUrl,
 } from '../../../shared/mcp';
-import { GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
+import { CODEX_LOGIN_NOTE, GITHUB_LINK_KIND, marketplaceCommands, marketplaceGitUrl } from '../../../shared/marketplace-url';
 import { AgentInstructionsCard } from './AgentInstructionsCard';
 import { CoworkSetupSteps } from './CoworkSetupSteps';
 import { useAdmin } from '../../admin/state/admin.context';
@@ -445,8 +445,9 @@ export function ExternalAgentAccessPage() {
                 <CopyBlock
                   label="Codex"
                   value={marketplaceCommands('<external-api-key>').codex}
-                  rows={2}
+                  rows={5}
                 />
+                <p className="text-meta text-ink-muted leading-snug">{CODEX_LOGIN_NOTE}</p>
                 <CopyBlock
                   label="Any other agent, via the skills CLI"
                   value={marketplaceCommands('<external-api-key>').skills}
@@ -782,12 +783,14 @@ export function ExternalAgentAccessPage() {
                     className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                     onFocus={(e) => e.currentTarget.select()}
                   />
-                  <p className="text-meta text-ink-muted leading-snug">Codex installs every plugin on add:</p>
+                  <p className="text-meta text-ink-muted leading-snug">
+                    Codex — add the marketplace, install the plugin, sign in, check. {CODEX_LOGIN_NOTE}
+                  </p>
                   <textarea
                     readOnly
                     aria-label="Codex marketplace command"
                     value={marketplaceCommands(reveal.plaintext).codex}
-                    rows={2}
+                    rows={5}
                     className="w-full font-mono text-meta bg-sunken border border-line rounded px-2 py-1.5 resize-none"
                     onFocus={(e) => e.currentTarget.select()}
                   />
