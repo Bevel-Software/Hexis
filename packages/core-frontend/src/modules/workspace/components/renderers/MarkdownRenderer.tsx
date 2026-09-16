@@ -8,6 +8,8 @@ import {
   useCanonicalFileUrl,
 } from '../../routing/kb-routes';
 import { useRendererWorkspaceId } from './rendererWorkspace';
+import { useWorkspace } from '../../state/workspace.context';
+import { markdownLinkForPaste } from '../../utils/pasteLink';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
 
@@ -190,6 +192,30 @@ export function MarkdownRenderer({
     onValueChange?.(next);
   }, [onValueChange]);
 
+  // Pasting a bare workspace path (what Copy path gives) or a URL makes a
+  // link, so nobody has to know `[]()` to link a page. Anything else pastes
+  // as it always did.
+  const { kbDirName } = useWorkspace();
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    const { selectionStart: start, selectionEnd: end } = el;
+    const link = markdownLinkForPaste(
+      e.clipboardData.getData('text/plain'),
+      kbDirName,
+      el.value.slice(start, end),
+    );
+    if (link === null) return;
+    e.preventDefault();
+    // `insertText` keeps the paste on the browser's undo stack and fires the
+    // usual change; where it is unavailable, splice the buffer directly.
+    if (typeof document.execCommand === 'function' && document.execCommand('insertText', false, link)) return;
+    const next = el.value.slice(0, start) + link + el.value.slice(end);
+    setValue(next);
+    onValueChange?.(next);
+    const caret = start + link.length;
+    requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
+  }, [kbDirName, onValueChange]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
@@ -254,6 +280,7 @@ export function MarkdownRenderer({
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           spellCheck={false}
           autoFocus
         />

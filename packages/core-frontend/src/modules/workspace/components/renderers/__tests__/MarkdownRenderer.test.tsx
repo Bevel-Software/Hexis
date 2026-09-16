@@ -141,6 +141,58 @@ describe('MarkdownRenderer', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('hello world');
   });
 
+  // --- Paste makes a link ---
+
+  function paste(textarea: HTMLElement, text: string) {
+    fireEvent.paste(textarea, { clipboardData: { getData: (type: string) => (type === 'text/plain' ? text : '') } });
+  }
+
+  function editorWith(value: string, selection: [number, number]) {
+    const onValueChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <WorkspaceContext.Provider value={makeWorkspace()}>
+          <GitContext.Provider value={makeGit()}>
+            <MarkdownRenderer content={value} filePath="Knowledge/Foo.md" onSave={async () => {}} onValueChange={onValueChange} />
+          </GitContext.Provider>
+        </WorkspaceContext.Provider>
+      </MemoryRouter>,
+    );
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    textarea.setSelectionRange(...selection);
+    return { textarea, onValueChange };
+  }
+
+  it('pasting a bare workspace path with no selection inserts a root-anchored link named after the file', () => {
+    const { textarea, onValueChange } = editorWith('See  here', [4, 4]);
+    paste(textarea, '/knowledge-base/KnowledgeBase/File Type examples/subfile.md');
+    const expected = 'See [subfile](</knowledge-base/KnowledgeBase/File Type examples/subfile.md>) here';
+    expect(textarea.value).toBe(expected);
+    expect(onValueChange).toHaveBeenCalledWith(expected);
+  });
+
+  it('pasting a URL with no selection inserts a link labelled with host and path', () => {
+    const { textarea } = editorWith('', [0, 0]);
+    paste(textarea, 'https://example.com/docs/guide?x=1');
+    expect(textarea.value).toBe('[example.com/docs/guide](https://example.com/docs/guide?x=1)');
+  });
+
+  it('pasting with a selection makes the selection the label', () => {
+    const { textarea } = editorWith('read the guide now', [9, 14]);
+    paste(textarea, '/knowledge-base/Knowledge/Guide.md');
+    expect(textarea.value).toBe('read the [guide](/knowledge-base/Knowledge/Guide.md) now');
+  });
+
+  it('pasting ordinary text is left to the browser', () => {
+    const { textarea, onValueChange } = editorWith('hello', [5, 5]);
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.assign(event, { clipboardData: { getData: () => 'just some words' } });
+    fireEvent(textarea, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(textarea.value).toBe('hello');
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+
   // --- Link rendering in preview (readOnly) mode ---
 
   function renderPreview(content: string, filePath: string) {
@@ -183,6 +235,21 @@ describe('MarkdownRenderer', () => {
     const link = screen.getByRole('link', { name: 'Open' });
     await user.click(link);
     expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/Some%20File.md');
+  });
+
+  // The link a paste wraps a Copy path in: root-anchored, so it opens the same
+  // file however deep the linking page sits.
+  it('opens a pasted root-anchored link from a file in a different folder', async () => {
+    navigateMock.mockClear();
+    const user = userEvent.setup();
+    renderPreview(
+      '[subfile](</knowledge-base/KnowledgeBase/File Type examples/subfile.md>)',
+      'knowledge-base/KnowledgeBase/Other/Deep/parent.md',
+    );
+    await user.click(screen.getByRole('link', { name: 'subfile' }));
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/alice%2Fdraft/knowledge-base/KnowledgeBase/File%20Type%20examples/subfile.md',
+    );
   });
 
   it('keeps the branch of an absolute citation URL instead of resolving it against the file', async () => {

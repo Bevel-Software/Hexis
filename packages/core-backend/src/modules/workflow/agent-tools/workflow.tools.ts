@@ -6,7 +6,7 @@ import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
 
 // A function, not a constant: the branch model is applied during boot, and a
 // module-scope capture would freeze this at the empty set that exists before it.
@@ -153,7 +153,9 @@ export function registerWorkflowTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      toolHandler(spec.handler, { write: spec.write }),
+      // A leading slash is the root-anchored form Copy path gives and names
+      // the same workspace path — normalised once here, for every path input.
+      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args), ctx), { write: spec.write }),
     );
   };
 
@@ -228,7 +230,7 @@ export function registerWorkflowTools(
         path: {
           type: 'string',
           minLength: 1,
-          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).`,
+          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash.`,
         },
       },
       required: ['path'],
@@ -376,7 +378,7 @@ export function registerWorkflowTools(
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
         body: { type: 'string', minLength: 1, description: 'Comment body (Markdown).' },
-        path: { type: 'string', description: 'Workspace-relative path for a file-level/inline comment.' },
+        path: { type: 'string', description: 'Workspace-relative path for a file-level/inline comment, with or without a leading slash.' },
         line: { type: 'integer', minimum: 1, description: 'Line number for an inline comment. Requires `path`.' },
         parentId: { type: 'string', description: 'Comment id to reply to.' },
       },

@@ -37,6 +37,7 @@ import {
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
+import { rootAnchoredPath } from '../utils/pasteLink';
 import { findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
@@ -319,19 +320,23 @@ function ContextMenu({
   const isZip = !proposed && entry.type === 'file' && /\.zip$/i.test(entry.name);
 
   // The one prototype context-menu item the platform has never had
-  // (proto:3948). The page-level `⋯ → Copy path` does not cover it: that only
+  // (proto:3948). The page-level Share `⌄ → Copy path` does not cover it: that only
   // ever reaches the file you have open, never a folder row or an unopened
   // one. A clipboard write can be refused outright (a non-secure origin), and
   // a silent no-op is the worst possible answer to "copy this" — so a refusal
   // surfaces the same way every other failure in this tree does.
+  // The ROOT-ANCHORED form: pasted into a Markdown link it resolves from any
+  // folder, where the bare `knowledge-base/…` resolved against the linking
+  // file's own folder and landed on File not found.
   const handleCopyPath = async () => {
+    const copied = rootAnchoredPath(entry.relativePath);
     try {
-      await navigator.clipboard.writeText(entry.relativePath);
+      await navigator.clipboard.writeText(copied);
       onClose();
     } catch (err) {
       console.error('Failed to copy path:', err);
       onClose();
-      alert(`Couldn't copy the path to the clipboard.\n\n${entry.relativePath}`);
+      alert(`Couldn't copy the path to the clipboard.\n\n${copied}`);
     }
   };
 

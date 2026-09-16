@@ -240,6 +240,28 @@ describe('save_file and the repository folder', () => {
     expect(calls).toContainEqual(['releaseLock', WS, WS, 'knowledge-base/KnowledgeBase/Reviews/PR-12.html']);
   });
 
+  it('accepts the root-anchored form Copy path gives, as the same path', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {
+      path: '/knowledge-base/KnowledgeBase/Reviews/PR-12.html',
+      branch: WS,
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toContainEqual(['acquireLock', WS, WS, 'knowledge-base/KnowledgeBase/Reviews/PR-12.html']);
+  });
+
+  it('still refuses a slash-led path outside the repository', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {
+      path: '/KnowledgeBase/Reviews/PR-12.html',
+      branch: WS,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('outside the knowledge base repository');
+    expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
+  });
+
   it('describes the prefix on its path input', async () => {
     await start();
     const tools = await registryRef!.listInternal();
@@ -247,5 +269,6 @@ describe('save_file and the repository folder', () => {
     // `toolDef` wraps a tool's inputs under a single `body` property.
     const body = (def!.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
     expect(body.properties.path.description).toContain('`knowledge-base/`');
+    expect(body.properties.path.description).toContain('with or without a leading slash');
   });
 });

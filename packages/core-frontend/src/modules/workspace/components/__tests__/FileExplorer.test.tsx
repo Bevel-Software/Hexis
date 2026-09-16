@@ -902,7 +902,9 @@ describe('FileExplorer rows: the prototype tree', () => {
   });
 
   // The one prototype context-menu item the platform never had.
-  it('offers Copy path in the context menu and writes the entry path', async () => {
+  // Root-anchored, so the text pasted into a Markdown link opens the file from
+  // any folder rather than resolving against the linking file's own folder.
+  it('offers Copy path in the context menu and writes the root-anchored entry path', async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -914,7 +916,22 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('brief.md');
+    expect(writeText).toHaveBeenCalledWith('/brief.md');
+  });
+
+  it('copies a nested entry as its full root-anchored path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('a.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('/docs/a.md');
   });
 
   it('offers Copy path on a folder row too', () => {
