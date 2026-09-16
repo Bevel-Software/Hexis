@@ -166,7 +166,9 @@ export function createWorkflowRoutes(
    * viewer who can read every file the request touches. Anyone else — an
    * unauthenticated read, or a reader of the folder's `access.md` but not its
    * content — gets a withheld line instead. Fails closed: an access lookup that
-   * errors withholds. Returns copies; the cached objects are never touched.
+   * errors withholds, and so does a request with NO resolved touched paths,
+   * since read access to its files cannot be proven. Returns copies; the
+   * cached objects are never touched.
    */
   async function scopeApplyFailures<T extends ChangeRequest>(req: express.Request, items: T[]): Promise<T[]> {
     const failing = items.filter((c) => c.lastApplyFailure);
@@ -186,9 +188,32 @@ export function createWorkflowRoutes(
     return items.map((c) => {
       const failure = c.lastApplyFailure;
       if (!failure) return c;
-      const mayRead = readable !== null && c.touchedNodePaths.every((p) => readable!.get(p) === true);
+      const mayRead = readable !== null && readsEveryPath(readable, c.touchedNodePaths);
       return mayRead ? c : { ...c, lastApplyFailure: { ...failure, reason: APPLY_FAILURE_REASON_WITHHELD } };
     });
+  }
+
+  /**
+   * The one predicate both scopes apply: a non-empty path set, every path
+   * readable. An empty set proves nothing, so it never grants the reason.
+   */
+  function readsEveryPath(readable: Map<string, boolean>, paths: string[]): boolean {
+    return paths.length > 0 && paths.every((p) => readable.get(p) === true);
+  }
+
+  /**
+   * Whether `user` may read the reason of a refusal on a request touching
+   * `paths` — the clicker's own answer on the bus is scoped exactly like the
+   * persisted one the read endpoints serve. Fails closed.
+   */
+  async function mayReadApplyFailureReason(user: AuthUser, workspaceId: string, paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return false;
+    try {
+      return readsEveryPath(await accessControl.canReadBatch(workspaceId, user.email, paths), paths);
+    } catch (err) {
+      log.warn('apply-failure read scope lookup failed; withholding the reason:', { err });
+      return false;
+    }
   }
 
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -1051,13 +1076,20 @@ export function createWorkflowRoutes(
     // refusal simply overwrites the old one.
     res.status(202).json({ status: 'merging', number: num });
     const attempt = workflow.beginApplyAttempt(num);
+    // What the clicker's reason is scoped against, once the request is loaded.
+    // Unset (a failure before that) means read access is unproven: withheld.
+    let readScope: { workspaceId: string; paths: string[] } | null = null;
     const reportFailure = async (reason: string, conflicts: boolean, persist = true) => {
       const at = new Date();
+      // The raw reason is persisted below and scoped per viewer on read; the
+      // clicker's direct answer must not bypass that scope.
+      const clickerMayRead =
+        readScope !== null && (await mayReadApplyFailureReason(user, readScope.workspaceId, readScope.paths));
       events.emit({
         kind: 'change-request-merge-failed',
         forUserId: user.id,
         number: num,
-        reason,
+        reason: clickerMayRead ? reason : APPLY_FAILURE_REASON_WITHHELD,
         conflicts,
         at: at.toISOString(),
       });
@@ -1087,6 +1119,7 @@ export function createWorkflowRoutes(
           });
           return;
         }
+        readScope = { workspaceId: workspace.id, paths: detail.touchedNodePaths };
         const outcome = await workflow.mergeChangeRequest(
           num,
           user,

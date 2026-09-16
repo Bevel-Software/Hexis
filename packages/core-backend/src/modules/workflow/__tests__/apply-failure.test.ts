@@ -44,8 +44,15 @@ interface RouteHarness {
   };
 }
 
-async function routeHarness(merge: () => Promise<unknown>): Promise<RouteHarness> {
+async function routeHarness(
+  merge: () => Promise<unknown>,
+  opts: {
+    touchedNodePaths?: string[];
+    canReadBatch?: (paths: string[]) => Promise<Map<string, boolean>>;
+  } = {},
+): Promise<RouteHarness> {
   const emitted: WorkflowEvent[] = [];
+  const canReadBatch = opts.canReadBatch ?? (async (paths: string[]) => new Map(paths.map((p) => [p, true])));
   const workflow = {
     getChangeRequestDetail: vi.fn(async () => ({
       headSha: 'h',
@@ -53,6 +60,7 @@ async function routeHarness(merge: () => Promise<unknown>): Promise<RouteHarness
       state: 'open',
       title: 'Upload into Plugins/x',
       base: 'main',
+      touchedNodePaths: opts.touchedNodePaths ?? ['Plugins/x/SKILL.md'],
     })),
     mergeChangeRequest: vi.fn(merge),
     beginApplyAttempt: vi.fn(() => 1),
@@ -72,7 +80,9 @@ async function routeHarness(merge: () => Promise<unknown>): Promise<RouteHarness
       { getOrCreateForUser: vi.fn(async () => ({ id: 'ws-admin' })) } as unknown as WorkspaceService,
       { getUserById: vi.fn(async () => ADMIN) } as unknown as AuthService,
       { emit: (e: WorkflowEvent) => emitted.push(e) } as unknown as WorkflowEventBus,
-      {} as unknown as IAccessControl,
+      {
+        canReadBatch: async (_ws: string, _email: string, paths: string[]) => canReadBatch(paths),
+      } as unknown as IAccessControl,
       'knowledge-base',
     ),
   );
@@ -127,6 +137,41 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
         at: at.toISOString(),
       }),
     );
+  });
+
+  it("the clicker's own answer is scoped like the stored one: a clicker who cannot read the files gets no reason", async () => {
+    h = await routeHarness(
+      async () => {
+        throw new WorkflowValidationError('Waiting on approval for Plugins/x/SKILL.md');
+      },
+      { canReadBatch: async (paths) => new Map(paths.map((p) => [p, false])) },
+    );
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.workflow.recordApplyFailure).toHaveBeenCalled());
+    const answer = h.emitted.find((e) => e.kind === 'change-request-merge-failed') as { reason: string };
+    expect(answer.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
+    // The raw reason is still what is stored, for the viewers who may read it.
+    expect(h.workflow.recordApplyFailure).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ reason: expect.stringContaining('Plugins/x/SKILL.md') }),
+      ADMIN,
+      1,
+    );
+  });
+
+  it("a request with no resolved touched paths withholds the clicker's reason too", async () => {
+    h = await routeHarness(
+      async () => {
+        throw new WorkflowValidationError('Waiting on approval for Plugins/x/SKILL.md');
+      },
+      { touchedNodePaths: [] },
+    );
+    await post(h.baseUrl);
+    await vi.waitFor(() =>
+      expect(h!.emitted).toContainEqual(expect.objectContaining({ kind: 'change-request-merge-failed' })),
+    );
+    const answer = h.emitted.find((e) => e.kind === 'change-request-merge-failed') as { reason: string };
+    expect(answer.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
   });
 
   it('a refusal of the caller reaches the caller alone and erases nobody\'s verdict', async () => {
@@ -460,13 +505,22 @@ describe('GET change requests — the refusal reason reaches only viewers who ca
     server = null;
   });
 
-  async function serve(opts: { userId?: string; canReadBatch: (paths: string[]) => Promise<Map<string, boolean>> }) {
-    const cached = { ...CR, lastApplyFailure: { ...FAILURE } };
+  async function serve(opts: {
+    userId?: string;
+    touchedNodePaths?: string[];
+    canReadBatch: (paths: string[]) => Promise<Map<string, boolean>>;
+  }) {
+    const cached = {
+      ...CR,
+      touchedNodePaths: opts.touchedNodePaths ?? CR.touchedNodePaths,
+      lastApplyFailure: { ...FAILURE },
+    };
     const workflow = {
       listChangeRequests: vi.fn(async () => [cached]),
       listChangeRequestsAuthoredBy: vi.fn(async () => [cached]),
       listChangeRequestsForUser: vi.fn(async () => [cached]),
       getChangeRequest: vi.fn(async () => cached),
+      // A non-empty file list, so the detail route's lazy empty-close stays out of it.
       getChangeRequestDetail: vi.fn(async () => ({ ...cached, files: [{ path: 'Plugins/x/SKILL.md' }] })),
     };
     const canReadBatch = vi.fn(async (_ws: string, _email: string, paths: string[]) => opts.canReadBatch(paths));
@@ -522,6 +576,18 @@ describe('GET change requests — the refusal reason reaches only viewers who ca
     }
     // The service's (cached) object is never rewritten.
     expect(cached.lastApplyFailure.reason).toBe(FAILURE.reason);
+  });
+
+  it('a request with no resolved touched paths withholds the reason — read access is unproven', async () => {
+    const { base, canReadBatch } = await serve({
+      userId: BO.id,
+      touchedNodePaths: [],
+      canReadBatch: async (paths) => new Map(paths.map((p) => [p, true])),
+    });
+    for (const failure of await reasonsFrom(base)) {
+      expect(failure.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
+    }
+    expect(canReadBatch).not.toHaveBeenCalled();
   });
 
   it('an access lookup that fails withholds the reason', async () => {
