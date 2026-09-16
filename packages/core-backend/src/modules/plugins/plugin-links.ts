@@ -1,4 +1,7 @@
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
 import { DEFAULT_BRANCH, pluginManifestName, skillUnderRoot } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -116,7 +119,7 @@ export class PluginLinkIndex {
     };
 
     const discovered = await this.source.discover(kbRoot);
-    for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+    for (const w of discovered.warnings) log.warn(w);
 
     // Inline skills: the ones sitting INSIDE a plugin's folder, matched by
     // folder prefix (a plugin may sit at any depth, so the second path

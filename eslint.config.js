@@ -26,6 +26,15 @@ export default defineConfig([
     extends: [reactHooks.configs.flat.recommended, reactRefresh.configs.vite],
   },
   {
+    // The backend logs through one port (`shared/logging.ts`), so that a
+    // deployment's shell decides where lines go and what shape they take. A
+    // bare `console.*` in a module bypasses that decision; the sink itself is
+    // the one file allowed to call it, and suites may still spy on it.
+    files: ['packages/core-backend/src/**/*.ts'],
+    ignores: ['packages/core-backend/src/**/__tests__/**', 'packages/core-backend/src/shared/logging.ts'],
+    rules: { 'no-console': 'error' },
+  },
+  {
     // Operator scripts, run by hand with `node`, not bundled and not typed.
     // CommonJS is what `node scripts/x.cjs` wants, so the rule that forbids
     // `require()` in app source is measuring the wrong thing here.

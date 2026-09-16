@@ -1,4 +1,7 @@
 import { desc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('cr');
 import type {
   FileApprovalState,
   IPullRequestService,
@@ -154,9 +157,9 @@ export class PullRequestService implements IPullRequestService {
         // Best-effort, but log it: an empty result silently hides a CR from the
         // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
         // shouldn't be invisible.
-        console.warn(
-          `[cr] changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
-          err,
+        log.warn(
+          `changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
+          { err },
         );
         return [] as string[];
       });
@@ -339,7 +342,7 @@ export class PullRequestService implements IPullRequestService {
     const [comments, approvals] = this.detailEnricher
       ? await Promise.all([
           this.detailEnricher.listComments(prNumber).catch((err) => {
-            console.warn(`[cr] listComments failed for #${prNumber}:`, err);
+            log.warn(`listComments failed for #${prNumber}:`, { err });
             return [] as PrReviewComment[];
           }),
           this.detailEnricher
@@ -357,7 +360,7 @@ export class PullRequestService implements IPullRequestService {
               // with empty approvals would tell the merge gate "nothing to
               // approve", and a reviewer nothing at all.
               if (err instanceof AccessUnreadableError) throw err;
-              console.warn(`[cr] getApprovalStates failed for #${prNumber}:`, err);
+              log.warn(`getApprovalStates failed for #${prNumber}:`, { err });
               return [] as FileApprovalState[];
             }),
         ])
@@ -386,7 +389,7 @@ export class PullRequestService implements IPullRequestService {
         );
         viewerCanBypassMerge = isAdmin === true;
       } catch (err) {
-        console.warn(`[cr] viewerCanBypassMerge lookup failed for #${prNumber}:`, err);
+        log.warn(`viewerCanBypassMerge lookup failed for #${prNumber}:`, { err });
       }
     }
 

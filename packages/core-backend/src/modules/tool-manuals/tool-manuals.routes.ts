@@ -1,4 +1,7 @@
 import express, { type Request, type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tool-manuals');
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import AdmZip from 'adm-zip';
@@ -74,7 +77,7 @@ export function createToolManualsAgentRoutes(
       const manuals: CallTemplate[] = [kbManualTemplate(), ...userManuals];
       res.json({ manuals });
     } catch (err) {
-      console.error('[tool-manuals] all-tools failed:', err instanceof Error ? err.message : err);
+      log.error('all-tools failed:', { err });
       res.status(500).json({ error: 'Failed to list tools' });
     }
   });
@@ -133,7 +136,7 @@ export function createToolManualsAgentRoutes(
             // nowhere.
             if (!e.isSymbolicLink()) return;
             const childRel = dir ? `${dir}/${e.name}` : e.name;
-            console.warn(`[tool-manuals] archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
+            log.warn(`archive of "${folder}": ${childRel} is a symlink — not supported in plugins, skipped.`);
           },
         },
       ]);
@@ -176,7 +179,7 @@ export function createToolManualsAgentRoutes(
         });
         if (realNow === null || realNow !== path.join(pluginRealBase, ...rel.split('/'))) {
           if (realNow !== null) {
-            console.warn(`[tool-manuals] archive of "${folder}": ${rel} no longer resolves to itself — skipped.`);
+            log.warn(`archive of "${folder}": ${rel} no longer resolves to itself — skipped.`);
           }
           continue;
         }
@@ -195,7 +198,7 @@ export function createToolManualsAgentRoutes(
             if (isAbsence(err)) return null; // deleted since the walk — an absence
             if (err.code === 'ELOOP') {
               // O_NOFOLLOW's spelling of "the final component is a symlink".
-              console.warn(`[tool-manuals] archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);
+              log.warn(`archive of "${folder}": ${rel} is a symlink — not supported in plugins, skipped.`);
               return null;
             }
             throw err;
@@ -231,7 +234,7 @@ export function createToolManualsAgentRoutes(
       res.setHeader('Content-Type', 'application/zip');
       res.send(zip.toBuffer());
     } catch (err) {
-      console.error('[tool-manuals] plugin archive failed:', err instanceof Error ? err.message : err);
+      log.error('plugin archive failed:', { err });
       res.status(500).json({ error: 'Failed to archive plugin' });
     }
   });
@@ -245,7 +248,7 @@ export function createToolManualsAgentRoutes(
       if (!manual) return void res.status(404).json({ error: 'Not found' });
       res.json(manual);
     } catch (err) {
-      console.error('[tool-manuals] manual resolve failed:', err instanceof Error ? err.message : err);
+      log.error('manual resolve failed:', { err });
       res.status(500).json({ error: 'Failed to resolve manual' });
     }
   });
@@ -284,7 +287,7 @@ export function createToolManualsBrowserRoutes(
       if (!view) return void res.status(404).json({ error: 'Not found' });
       res.json(view);
     } catch (err) {
-      console.error('[tool-manuals] server read failed:', err instanceof Error ? err.message : err);
+      log.error('server read failed:', { err });
       res.status(500).json({ error: 'Failed to read the server' });
     }
   });
@@ -305,7 +308,7 @@ export function createToolManualsBrowserRoutes(
       if (err instanceof McpServerEditError) {
         return void res.status(err.status).json({ error: err.message });
       }
-      console.error('[tool-manuals] server write failed:', err instanceof Error ? err.message : err);
+      log.error('server write failed:', { err });
       res.status(500).json({ error: 'Failed to save the server' });
     }
   });
@@ -316,7 +319,7 @@ export function createToolManualsBrowserRoutes(
     try {
       res.json({ tools: await toolManualService.listAccessible(email) });
     } catch (err) {
-      console.error('[tool-manuals] list failed:', err);
+      log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -340,7 +343,7 @@ export function createToolManualsBrowserRoutes(
       if (!tool) return void res.status(404).json({ error: 'Not found' });
       res.json({ tool });
     } catch (err) {
-      console.error('[tool-manuals] detail failed:', err);
+      log.error('detail failed:', { err });
       res.status(500).json({ error: 'Failed to load tool' });
     }
   });

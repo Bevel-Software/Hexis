@@ -169,13 +169,24 @@ function known(kind: Exclude<GitFailureKind, 'step-failed'>): GitFailure {
  * classification leave it.
  */
 export class ClassifiedFailure extends Error {
+  /**
+   * `cause` carries the failure this one classifies when a caller still needs
+   * its shape — a `GitRunError` whose fields say whether git ran at all. It is
+   * a redacted error by then, never the raw text.
+   */
   constructor(
     message: string,
     readonly failure: GitFailure,
+    opts?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, opts);
     this.name = 'ClassifiedFailure';
   }
+}
+
+/** A failure of a known kind, with its fixed sentence — for a caller that knows the kind without reading text. */
+export function gitFailure(kind: Exclude<GitFailureKind, 'step-failed'>): GitFailure {
+  return known(kind);
 }
 
 /** The classification a failure carries, else one read from its message. */

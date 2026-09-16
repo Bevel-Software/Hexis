@@ -18,6 +18,10 @@
  */
 
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workflow.routes');
+const crLog = logger('cr');
 import type {
   AuthUser,
   ChangeInput,
@@ -41,7 +45,7 @@ function toHttpError(
   if (err instanceof WorkflowDomainError) {
     return { status: err.status, body: domainErrorBody(err) };
   }
-  console.error('[workflow.routes] unhandled error:', err);
+  log.error('unhandled error:', { err });
   return { status: 500, body: { error: 'Internal server error' } };
 }
 
@@ -89,7 +93,7 @@ export function createWorkflowRoutes(
       }
       return user;
     } catch (err) {
-      console.error('[workflow.routes] requireUser failed:', err);
+      log.error('requireUser failed:', { err });
       res.status(500).json({ error: 'Internal server error' });
       return null;
     }
@@ -639,7 +643,7 @@ export function createWorkflowRoutes(
               })) ?? detail;
           }
         } catch (err) {
-          console.warn(`[cr] lazy empty-close of #${num} failed (non-fatal):`, err);
+          crLog.warn(`lazy empty-close of #${num} failed (non-fatal):`, { err });
         }
       }
       res.json(detail);
@@ -1041,7 +1045,7 @@ export function createWorkflowRoutes(
         // Success path: `workflow.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {
         const { body: errBody } = toHttpError(err);
-        console.error(`[workflow.routes] async merge of change request #${num} failed:`, err);
+        log.error(`async merge of change request #${num} failed:`, { err });
         events.emit({
           kind: 'change-request-merge-failed',
           forUserId: user.id,

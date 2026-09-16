@@ -18,6 +18,15 @@
  */
 
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+// One logger per tag this file has always written under, so a line's prefix
+// is unchanged for a reader and its `module` field is exact for a filter.
+const log = logger('workflow');
+const syncLog = logger('sync');
+const lockLog = logger('lock');
+const crLog = logger('cr');
+const mergeLog = logger('merge');
 import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -291,11 +300,11 @@ export class WorkflowService implements IWorkflowService {
         .sweepOrphanedWorkspaces(branches.map((b) => b.name))
         .then(({ removed }) => {
           if (removed.length > 0) {
-            console.log(`[workflow] swept ${removed.length} orphaned workspace(s):`, removed);
+            log.info(`swept ${removed.length} orphaned workspace(s):`, { removed });
           }
         })
         .catch((err) => {
-          console.warn('[workflow] orphan workspace sweep failed:', err);
+          log.warn('orphan workspace sweep failed:', { err });
         });
     }
     return branches;
@@ -454,10 +463,7 @@ export class WorkflowService implements IWorkflowService {
         await this.workspaceService.deleteWorkspace(branchWorkspaceId);
       }
     } catch (err) {
-      console.warn(
-        `[workflow] could not retire workspace clone of deleted branch "${name}":`,
-        err,
-      );
+      log.warn(`could not retire workspace clone of deleted branch "${name}":`, { err });
     }
   }
 
@@ -595,7 +601,7 @@ export class WorkflowService implements IWorkflowService {
         // is a different tree, and replaying the old paths against it would
         // announce changes that never happened there.
         this.owedAnnouncements.delete(id);
-        console.log(`[sync] branch "${branch}" no longer exists on the host`);
+        syncLog.info(`branch "${branch}" no longer exists on the host`);
         return { branch, outcome: 'remote-gone' };
       }
       if (err instanceof PullRebaseConflictError) {
@@ -608,12 +614,12 @@ export class WorkflowService implements IWorkflowService {
         // next clean pull or push.
         await this.queuePullConflictRecovery(gitId, err);
         const message = syncConflictMessage(branch, err.conflictedPaths);
-        console.warn(`[sync] ${message}`);
+        syncLog.warn(message);
         this.noteGitSyncFailed(gitId, branch, err, { paths: err.conflictedPaths, message });
         return { branch, outcome: 'conflict', conflictedPaths: err.conflictedPaths, error: message };
       }
       const message = sanitizeError(err);
-      console.warn(`[sync] pull failed for branch "${branch}": ${message}`);
+      syncLog.warn(`pull failed for branch "${branch}": ${message}`);
       this.noteGitSyncFailed(gitId, branch, err);
       return { branch, outcome: 'error', error: message };
     }
@@ -673,7 +679,7 @@ export class WorkflowService implements IWorkflowService {
       // move HEAD again, so it must find the debt here rather than in the shas.
       this.owedAnnouncements.set(id, announce);
       const message = sanitizeError(err);
-      console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
+      syncLog.warn(`pulled "${branch}" but could not announce it: ${message}`);
       return { branch, outcome: 'error', error: message };
     }
     this.owedAnnouncements.delete(id);
@@ -720,15 +726,12 @@ export class WorkflowService implements IWorkflowService {
         authorName: user?.name ?? RECOVERY_BOT_NAME,
       });
       if (queued) {
-        console.warn(
-          `[workflow] pull conflict on ws=${workspaceId} branch=${err.branch} (${err.conflictedPaths.join(', ')}) — queued background recovery`,
+        log.warn(
+          `pull conflict on ws=${workspaceId} branch=${err.branch} (${err.conflictedPaths.join(', ')}) — queued background recovery`,
         );
       }
     } catch (queueErr) {
-      console.error(
-        `[workflow] failed to queue pull-conflict recovery for ws=${workspaceId}:`,
-        queueErr instanceof Error ? queueErr.message : queueErr,
-      );
+      log.error(`failed to queue pull-conflict recovery for ws=${workspaceId}:`, { err: queueErr });
     }
   }
 
@@ -918,8 +921,8 @@ export class WorkflowService implements IWorkflowService {
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {
-      console.log(
-        `[lock] ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → acquired`,
+      lockLog.info(
+        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → acquired`,
       );
       // Only fire on successful acquisition — a contention "false" return
       // means nothing observable changed for other users (someone else
@@ -934,8 +937,8 @@ export class WorkflowService implements IWorkflowService {
         holderName: user.name,
       });
     } else {
-      console.log(
-        `[lock] ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderName} (${result.lock.holderUserId})`,
+      lockLog.info(
+        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderName} (${result.lock.holderUserId})`,
       );
     }
     return result;
@@ -950,13 +953,13 @@ export class WorkflowService implements IWorkflowService {
     const targetPath = canonicalFileIdentity(rawPath);
     try {
       const lock = await this.fileLocks.heartbeat(workspaceId, branch, targetPath, user);
-      console.log(
-        `[lock] HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ok (expires ${lock.expiresAt})`,
+      lockLog.info(
+        `HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ok (expires ${lock.expiresAt})`,
       );
       return lock;
     } catch (err) {
-      console.warn(
-        `[lock] HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → FAIL ${err instanceof Error ? err.message : err}`,
+      lockLog.warn(
+        `HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → FAIL ${err instanceof Error ? err.message : err}`,
       );
       throw err;
     }
@@ -1027,9 +1030,9 @@ export class WorkflowService implements IWorkflowService {
             this.noteGitSyncOk(workspaceId, branch);
           } catch (recoveryErr) {
             recoveryError = recoveryErr;
-            console.warn(
-              '[workflow] autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
-              recoveryErr instanceof Error ? recoveryErr.message : recoveryErr,
+            log.warn(
+              'autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
+              { err: recoveryErr },
             );
           }
         }
@@ -1048,10 +1051,7 @@ export class WorkflowService implements IWorkflowService {
           if (!looksLikeNonFastForward) {
             this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? err);
           }
-          console.warn(
-            '[workflow] push after autosave commit failed (commit landed locally):',
-            detail,
-          );
+          log.warn('push after autosave commit failed (commit landed locally):', { detail });
         }
       }
       this.events?.emit({
@@ -1109,13 +1109,11 @@ export class WorkflowService implements IWorkflowService {
     // commit attributed to whoever called us. The guard rejects callers
     // who don't actually hold the row so impersonation can't enqueue
     // commits as a third party.
-    console.log(
-      `[lock] RELEASE start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
-    );
+    lockLog.info(`RELEASE start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`);
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
-      console.warn(
-        `[lock] RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderName} (${lock.holderUserId})` : 'no lock row'}`,
+      lockLog.warn(
+        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderName} (${lock.holderUserId})` : 'no lock row'}`,
       );
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}": not held by you (or no longer exists).`,
@@ -1132,8 +1130,8 @@ export class WorkflowService implements IWorkflowService {
     // and `releaseLockUntouched`. Worst case a refused caller strands the
     // row until its TTL.
     if (lock.mode === 'coordination') {
-      console.warn(
-        `[lock] RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → coordination hold (no commit may be enqueued)`,
+      lockLog.warn(
+        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → coordination hold (no commit may be enqueued)`,
       );
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}" with a commit: it is a coordination hold. Use releaseLockNoCommit.`,
@@ -1158,8 +1156,8 @@ export class WorkflowService implements IWorkflowService {
       authorName: user.name,
     });
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
-    console.log(
-      `[lock] RELEASE done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} (commit queued for background worker)`,
+    lockLog.info(
+      `RELEASE done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} (commit queued for background worker)`,
     );
     // The `file-changed` SSE event used to fire here after the synchronous
     // commit landed, carrying the new sha. Under the queue model the
@@ -1261,7 +1259,7 @@ export class WorkflowService implements IWorkflowService {
     // emitted id so every consumer sees one spelling.
     const id = branchForWorkspaceId(workspaceId);
     if (!this.gitSyncFailing.delete(id)) return;
-    console.log(`[workflow] git sync recovered for workspace=${id} branch=${branch}`);
+    log.info(`git sync recovered for workspace=${id} branch=${branch}`);
     this.events?.emit({ kind: 'git-sync-recovered', workspaceId: id, branch });
   }
 
@@ -1374,15 +1372,15 @@ export class WorkflowService implements IWorkflowService {
           await this.git.push(workspaceId, user, opts);
           recovered = true;
           this.noteGitSyncOk(workspaceId, branch);
-          console.log(
-            `[workflow] non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,
+          log.info(
+            `non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,
           );
         } catch (recoveryErr) {
           recoveryError = recoveryErr;
           recoveryDetail = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
-          console.warn(
-            `[workflow] cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
-            recoveryDetail,
+          log.warn(
+            `cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
+            { detail: recoveryDetail },
           );
         }
       }
@@ -1395,9 +1393,9 @@ export class WorkflowService implements IWorkflowService {
         // first rejection may be a stale non-fast-forward the pull already
         // cured); when it was skipped, the first error is all there is.
         this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? firstPushErr);
-        console.warn(
-          `[workflow] push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
-          firstDetail,
+        log.warn(
+          `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
+          { detail: firstDetail },
         );
         throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail);
       }
@@ -1426,13 +1424,13 @@ export class WorkflowService implements IWorkflowService {
     // without this guard a non-holder calling this method would emit
     // `lock-released` and trick every other client into clearing their
     // "Locked by X" banner even though the lock is still held.
-    console.log(
-      `[lock] RELEASE-NO-COMMIT start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
+    lockLog.info(
+      `RELEASE-NO-COMMIT start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
     );
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
-      console.log(
-        `[lock] RELEASE-NO-COMMIT no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
+      lockLog.info(
+        `RELEASE-NO-COMMIT no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
       );
       return;
     }
@@ -1460,10 +1458,9 @@ export class WorkflowService implements IWorkflowService {
       } catch (err) {
         // Queue unreadable — fall back to the discard (the strict default:
         // never let a coordination hold end with publishable stray bytes).
-        console.warn(
-          `[workflow] pending-commit lookup failed for workspace=${workspaceId} path=${targetPath}; discarding:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`pending-commit lookup failed for workspace=${workspaceId} path=${targetPath}; discarding:`, {
+          err,
+        });
       }
     }
     let discarded = false;
@@ -1475,15 +1472,14 @@ export class WorkflowService implements IWorkflowService {
         // Best-effort: a discard failure is logged but doesn't block the
         // lock release. Worst case the working tree stays dirty for one
         // path until the next save on it cleans up.
-        console.warn(
-          `[workflow] discardPath failed for workspace=${workspaceId} branch=${branch} path=${targetPath}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`discardPath failed for workspace=${workspaceId} branch=${branch} path=${targetPath}:`, {
+          err,
+        });
       }
     }
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
-    console.log(
-      `[lock] RELEASE-NO-COMMIT done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${discarded ? 'discarded + released' : 'released (working tree untouched)'}`,
+    lockLog.info(
+      `RELEASE-NO-COMMIT done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${discarded ? 'discarded + released' : 'released (working tree untouched)'}`,
     );
     this.events?.emit({
       kind: 'lock-released',
@@ -1526,19 +1522,19 @@ export class WorkflowService implements IWorkflowService {
     user: AuthUser,
   ): Promise<void> {
     const targetPath = canonicalFileIdentity(rawPath);
-    console.log(
-      `[lock] RELEASE-UNTOUCHED start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
+    lockLog.info(
+      `RELEASE-UNTOUCHED start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
     );
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
-      console.log(
-        `[lock] RELEASE-UNTOUCHED no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
+      lockLog.info(
+        `RELEASE-UNTOUCHED no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
       );
       return;
     }
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
-    console.log(
-      `[lock] RELEASE-UNTOUCHED done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → released (disk + queue untouched)`,
+    lockLog.info(
+      `RELEASE-UNTOUCHED done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → released (disk + queue untouched)`,
     );
     this.events?.emit({
       kind: 'lock-released',
@@ -2155,10 +2151,7 @@ export class WorkflowService implements IWorkflowService {
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
       paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
     } catch (err) {
-      console.warn(
-        `[cr] empty-check for change request #${number} failed — leaving it open:`,
-        err,
-      );
+      crLog.warn(`empty-check for change request #${number} failed — leaving it open:`, { err });
       return false;
     }
     if (paths.length > 0) return false;
@@ -2241,13 +2234,13 @@ export class WorkflowService implements IWorkflowService {
       });
       live = new Set(branches.map((b) => b.name));
     } catch (err) {
-      console.warn('[cr] branch sweep skipped — could not list branches:', err);
+      crLog.warn('branch sweep skipped — could not list branches:', { err });
       return 0;
     }
     // An empty branch list means something is wrong with the clone, not that
     // every branch in the repo was deleted at once. Refuse to act on it.
     if (live.size === 0) {
-      console.warn('[cr] branch sweep skipped — branch list came back empty');
+      crLog.warn('branch sweep skipped — branch list came back empty');
       return 0;
     }
 
@@ -2273,9 +2266,7 @@ export class WorkflowService implements IWorkflowService {
       if (updated.length === 0) continue;
       this.prs.invalidateDetailCache(cr.number);
       this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
-      console.log(
-        `[cr] closed change request #${cr.number}: branch "${missing}" no longer exists`,
-      );
+      crLog.info(`closed change request #${cr.number}: branch "${missing}" no longer exists`);
       closed++;
     }
     return closed;
@@ -2301,12 +2292,10 @@ export class WorkflowService implements IWorkflowService {
     this.sweepKick = this.closeChangeRequestsWithDeletedBranches()
       .then((n) => {
         if (n > 0) {
-          console.log(
-            `[cr] on-demand sweep closed ${n} stranded change request${n === 1 ? '' : 's'}`,
-          );
+          crLog.info(`on-demand sweep closed ${n} stranded change request${n === 1 ? '' : 's'}`);
         }
       })
-      .catch((err) => console.warn('[cr] on-demand deleted-branch sweep failed:', err))
+      .catch((err) => crLog.warn('on-demand deleted-branch sweep failed:', { err }))
       .finally(() => {
         this.sweepKick = null;
       });
@@ -2502,10 +2491,9 @@ export class WorkflowService implements IWorkflowService {
       if (err instanceof PullRebaseConflictError && targetWorkspaceId) {
         await this.queuePullConflictRecovery(targetWorkspaceId, err, user);
       }
-      console.warn(
-        `[merge] post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`,
+      mergeLog.warn(`post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`, {
         err,
-      );
+      });
     }
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-merged', number });
@@ -2563,13 +2551,12 @@ export class WorkflowService implements IWorkflowService {
         // "does origin still have it?" probe skips the remote delete.
         await this.workspaceService.ensureRemotesFetched(targetWs.id).catch(() => {});
         await this.deleteBranchUnlocked(targetWs.id, sourceBranch, user, { systemCleanup: true });
-        console.log(`[merge] retired merged source branch "${sourceBranch}"`);
+        mergeLog.info(`retired merged source branch "${sourceBranch}"`);
       });
     } catch (err) {
-      console.warn(
-        `[merge] could not retire the merged source branch of change request #${number} (non-fatal):`,
+      mergeLog.warn(`could not retire the merged source branch of change request #${number} (non-fatal):`, {
         err,
-      );
+      });
     }
   }
 
@@ -2693,7 +2680,7 @@ export class WorkflowService implements IWorkflowService {
       const detail = err instanceof Error ? err.message : String(err);
       // Log the raw git/push detail server-side; the thrown error keeps it OFF
       // the client-facing 502 message (see RolesYamlPreservationError).
-      console.warn(`[merge] roles.yaml preservation failed for #${number}:`, detail);
+      mergeLog.warn(`roles.yaml preservation failed for #${number}:`, { detail });
       throw new RolesYamlPreservationError(detail);
     }
   }
@@ -2718,10 +2705,9 @@ export class WorkflowService implements IWorkflowService {
       );
       return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
     } catch (err) {
-      console.warn(
-        '[workflow] listChangedPathsBetweenBranches failed:',
-        redactTokens(err instanceof Error ? err.message : String(err)),
-      );
+      log.warn('listChangedPathsBetweenBranches failed:', {
+        detail: redactTokens(err instanceof Error ? err.message : String(err)),
+      });
       return [];
     }
   }
@@ -2753,10 +2739,7 @@ export class WorkflowService implements IWorkflowService {
         paths,
       );
     } catch (err) {
-      console.warn(
-        '[workflow] eligibleWritersForPathsAtRef failed:',
-        err instanceof Error ? err.message : String(err),
-      );
+      log.warn('eligibleWritersForPathsAtRef failed:', { err });
     }
     if (!resolved || resolved.size === 0) return '';
 

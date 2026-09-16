@@ -1,4 +1,7 @@
 import type { IAccessControl } from '../access/access-control.interface.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('admin');
 import { type WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { canonicalEmail } from '../../shared/email-identity.js';
@@ -44,7 +47,7 @@ export class AdminAccessService implements IAdminAccessService {
     } catch (err) {
       // Log so an admin lockout caused by a clone / roles.yaml failure is
       // diagnosable rather than a silent denial.
-      console.warn('[admin] isAdmin resolution failed:', err instanceof Error ? err.message : String(err));
+      log.warn('isAdmin resolution failed:', { err });
       return false;
     }
   }

@@ -19,6 +19,9 @@
  * (id-repair) does so on its own, after the locks have already been released.
  */
 import type { AuthUser } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('file-change');
 
 export interface FilesChange {
   workspaceId: string;
@@ -47,7 +50,7 @@ export class FileChangeNotifier {
       try {
         listener(change);
       } catch (err) {
-        console.error('[file-change] listener threw:', err instanceof Error ? err.message : err);
+        log.error('listener threw:', { err });
       }
     }
   }

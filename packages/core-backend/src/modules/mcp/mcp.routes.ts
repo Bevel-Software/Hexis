@@ -1,4 +1,7 @@
 import express, { type Request, type Response, type RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -101,7 +104,7 @@ export function createMcpRoutes(
     res.on('close', () => {
       // Closing the server closes its transport too.
       void server?.close().catch((err) => {
-        console.warn('[mcp] closing a request server failed:', err);
+        log.warn('closing a request server failed:', { err });
       });
     });
     try {
@@ -129,7 +132,7 @@ export function createMcpRoutes(
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      console.error('[mcp] POST /mcp failed:', msg);
+      log.error('POST /mcp failed:', { detail: msg });
       if (!res.headersSent) {
         jsonRpcError(res, 500, INTERNAL_ERROR, msg);
       } else {
@@ -363,7 +366,7 @@ export function createMcpRoutes(
       if (err instanceof InvalidTokenError) {
         unauthorized('Invalid, expired, or revoked access token');
       } else {
-        console.error('[mcp] local-token exchange failed:', err);
+        log.error('local-token exchange failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
       }
     }
