@@ -15,7 +15,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
 const DETAIL_CACHE_TTL_MS = 30_000;
@@ -188,7 +188,7 @@ export class PullRequestService implements IPullRequestService {
     loginOrEmail: string,
     opts: { fresh?: boolean } = {},
   ): Promise<PullRequestSummary[]> {
-    const needle = loginOrEmail.trim().toLowerCase();
+    const needle = canonicalEmail(loginOrEmail);
     if (!needle) return [];
     const prs = await this.listOpenPrs(opts);
     const needleIsEmail = needle.includes('@');
@@ -204,7 +204,7 @@ export class PullRequestService implements IPullRequestService {
     email: string,
     opts: { fresh?: boolean } = {},
   ): Promise<PullRequestSummary[]> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalEmail(email);
     if (!normalized) return [];
     const prs = await this.listOpenPrs({ ...opts, workspaceId });
 
@@ -286,7 +286,7 @@ export class PullRequestService implements IPullRequestService {
     if (!row) return null;
 
     const now = Date.now();
-    const viewerKey = opts.viewerEmail ? opts.viewerEmail.trim().toLowerCase() : 'anon';
+    const viewerKey = opts.viewerEmail ? canonicalEmail(opts.viewerEmail) : 'anon';
     const workspaceId = await this.resolveWorkspaceId(opts.workspaceId);
     const cacheKey = `${workspaceId ?? 'global'}:${viewerKey}:${prNumber}`;
 

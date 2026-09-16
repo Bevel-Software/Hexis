@@ -16,6 +16,7 @@ import type { ICreatorAccess } from '../access-model/creator.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -243,30 +244,21 @@ export function createWorkspaceRoutes(
   /**
    * Map any thrown error to an HTTP response. Centralises the response
    * shape so each route handler stays focused on its own logic.
-   *   - `WorkflowDomainError` → its `.status` + `.payload`
-   *   - Path traversal → 403
-   *   - Invalid path / zip → 400 (Only .zip is also 400)
-   *   - Could not read zip → 422
+   *   - `WorkflowDomainError` → its `.status` + `.payload` (a traversal is a
+   *     403, an invalid path a 400, an unreadable archive a 422 — each by
+   *     its TYPE; this surface used to recognise all three by their message)
    *   - Anything else with a `.status` → that status
    *   - Default → 500
    */
   function sendError(res: express.Response, err: unknown): void {
     if (err instanceof WorkflowDomainError) {
-      res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+      res.status(err.status).json(domainErrorBody(err));
       return;
     }
     const msg = err instanceof Error ? err.message : 'Unknown error';
     const status = (err as { status?: number } | null)?.status;
     if (typeof status === 'number') {
       res.status(status).json({ error: msg });
-      return;
-    }
-    if (msg.startsWith('Invalid path') || msg.startsWith('Only .zip')) {
-      res.status(400).json({ error: msg });
-      return;
-    }
-    if (msg.startsWith('Could not read zip file')) {
-      res.status(422).json({ error: msg });
       return;
     }
     res.status(500).json({ error: msg });

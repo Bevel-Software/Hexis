@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
 import { PendingSkillsService } from '../pending-skills.service.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ISkillService, SkillSummary } from '../skills.contract.js';
