@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1704,6 +1704,45 @@ describe('preflight for moves and deletes', () => {
       expect(collided.body.error).toContain('symbolic link');
       expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
+
+    it('a path with "." or ".." segments is refused by every move and delete, before anything changes', async () => {
+      const base = await seeded();
+      const sneaky = KB('Sales/../Locked/rules.md');
+      const del = await call(base, 'delete_file', { path: sneaky });
+      expect(del.status).toBe(400);
+      expect(del.body.error).toContain('".." segments');
+      expect((await call(base, 'move_file', { src: sneaky, dest: KB('Sales/rules.md'), dryRun: true })).status).toBe(400);
+      expect((await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/../Locked/deal.md') })).status).toBe(400);
+      expect((await call(base, 'delete_folder', { path: KB('Sales/../Locked'), confirm: true })).status).toBe(400);
+      expect((await call(base, 'file_stat', { path: KB('Sales/./deal.md') })).body).toMatchObject({ movable: false, deletable: false });
+      expect(await exists(KB('Locked/rules.md'))).toBe(true);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it.skipIf(process.platform === 'win32')('file_stat agrees with move and delete about links on the way, a dangling one included', async () => {
+      const base = await seeded();
+      await symlink(join(tempDir, KB('Locked')), join(tempDir, KB('Sales/alias')));
+      expect((await call(base, 'file_stat', { path: KB('Sales/alias/rules.md') })).body).toMatchObject({ movable: false, deletable: false });
+      await symlink(join(tempDir, 'nowhere'), join(tempDir, KB('Sales/gone')));
+      const dangling = await call(base, 'file_stat', { path: KB('Sales/gone/x.md') });
+      expect(dangling.status).toBe(400);
+      expect(dangling.body.error).toContain(`the symbolic link "${KB('Sales/gone')}"`);
+    });
+
+    it.skipIf(process.platform === 'win32')('a link past the descendants cap still makes a folder not deletable', async () => {
+      const base = await seeded();
+      const dir = join(tempDir, KB('Sales/bulk'));
+      await mkdir(join(dir, 'a'), { recursive: true });
+      const names = Array.from({ length: 10_001 }, (_, i) => `f${i}.md`);
+      for (let i = 0; i < names.length; i += 500) {
+        await Promise.all(names.slice(i, i + 500).map((n) => writeFile(join(dir, 'a', n), '')));
+      }
+      await mkdir(join(dir, 'z'), { recursive: true });
+      await symlink(join(tempDir, 'nowhere'), join(dir, 'z', 'link'));
+      const stat = await call(base, 'file_stat', { path: KB('Sales/bulk') });
+      expect(stat.body).toMatchObject({ descendants: 10_000, descendantsTruncated: true, deletable: false });
+      expect((await call(base, 'delete_folder', { path: KB('Sales/bulk'), dryRun: true })).body).toMatchObject({ allowed: false });
+    }, 60_000);
 
     it.skipIf(process.platform === 'win32')('a link inside the repository is not followed either, so a move cannot write into a folder whose rules it never judged', async () => {
       const base = await seeded();

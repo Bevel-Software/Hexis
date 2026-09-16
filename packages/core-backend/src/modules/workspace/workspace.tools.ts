@@ -593,31 +593,54 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * Refuse `path` when any part of it inside the repository is a symbolic link
-   * — the last part too, unless `allowLast` (a link removed on its own is just
-   * the link). Moves and deletes are judged on the path as written: its access
-   * rules, its platform status, its lock. A link on the way would carry the
-   * write somewhere else — beside the clone, where git never sees it, or into
-   * another folder whose rules were never consulted — so none is followed.
+   * Refuse a path with a `.` or `..` segment or a backslash. Moves and deletes
+   * judge the path as written — its access rules, its platform status, its
+   * links — so it must be the path of the item that is changed:
+   * `knowledge-base/Public/../Locked/x.md` would be judged under `Public/`
+   * while removing `Locked/x.md`, or leave the clone altogether.
+   */
+  const assertPlainPath = (path: string): void => {
+    const segments = path.replace(/^\.?\/+/, '').replace(/\/+$/, '').split('/');
+    if (path.includes('\\') || segments.some((seg) => seg === '.' || seg === '..')) {
+      throw new ToolError(`"${path}" may not contain "." or ".." segments or backslashes; name the item by its own path.`, 400);
+    }
+  };
+
+  /**
+   * The first part of `path` inside the repository that is a symbolic link —
+   * the last part too, unless `allowLast` — or undefined. Never follows one.
    * The workspace root and the clone folder itself are the operator's and are
    * not judged.
    */
-  const assertNoSymlinkOnPath = async (root: string, path: string, allowLast = false): Promise<void> => {
+  const symlinkOnPath = async (root: string, path: string, allowLast = false): Promise<string | undefined> => {
     const segments = path.replace(/^\.?\/+/, '').replace(/\/+$/, '').split('/').filter(Boolean);
-    if (segments[0] !== kbDirName) return;
+    if (segments[0] !== kbDirName) return undefined;
     const last = allowLast ? segments.length - 1 : segments.length;
     for (let i = 2; i <= last; i++) {
       const prefix = segments.slice(0, i).join('/');
-      let isLink: boolean;
       try {
-        isLink = (await nodeFs.lstat(join(root, prefix))).isSymbolicLink();
+        if ((await nodeFs.lstat(join(root, prefix))).isSymbolicLink()) return prefix;
       } catch (err) {
-        if (isAbsence(err)) return;
+        if (isAbsence(err)) return undefined;
         throw err;
       }
-      if (isLink) {
-        throw new ToolError(`"${path}" goes through the symbolic link "${prefix}"; moves and deletes never follow links.`, 400);
-      }
+    }
+    return undefined;
+  };
+
+  /**
+   * Refuse `path` when it is not plain (see `assertPlainPath`) or any part of
+   * it inside the repository is a symbolic link — the last part too, unless
+   * `allowLast` (a link removed on its own is just the link). A link on the way
+   * would carry the write somewhere else — beside the clone, where git never
+   * sees it, or into another folder whose rules were never consulted — so none
+   * is followed.
+   */
+  const assertNoSymlinkOnPath = async (root: string, path: string, allowLast = false): Promise<void> => {
+    assertPlainPath(path);
+    const link = await symlinkOnPath(root, path, allowLast);
+    if (link !== undefined) {
+      throw new ToolError(`"${path}" goes through the symbolic link "${link}"; moves and deletes never follow links.`, 400);
     }
   };
 
@@ -649,8 +672,8 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * Every file under `dir`, at any depth, as workspace-relative paths; stops at
-   * `cap`. A symbolic link is listed as the entry it is, never followed, so the
+   * Every file under `dir`, at any depth, as workspace-relative paths; counts to
+   * `cap` (the walk itself goes on, for `links`). A symbolic link is listed as the entry it is, never followed, so the
    * walk cannot wander into a folder elsewhere, and is ALSO named in `links`:
    * the per-file delete cannot remove a link (it stats through it, so a dangling
    * link or a link to a folder fails), so a folder holding one is refused before
@@ -663,22 +686,25 @@ export function registerWorkspaceTools(
   ): Promise<{ files: string[]; links: string[]; truncated: boolean }> => {
     const files: string[] = [];
     const links: string[] = [];
-    const walk = async (d: string): Promise<boolean> => {
+    let truncated = false;
+    // Past the cap the walk goes on, recording links only: a link anywhere
+    // decides whether the folder can be deleted, so a capped count must not
+    // hide one.
+    const walk = async (d: string): Promise<void> => {
       for (const e of (await fs.readdir(d)) as DirEntry[]) {
         const child = `${d.replace(/\/+$/, '')}/${e.name}`;
         if (e.name === '.git') continue;
         if (e.type === 'directory' && !e.isSymlink) {
-          if (!(await walk(child))) return false;
+          await walk(child);
         } else {
-          if (files.length >= cap) return false;
-          files.push(child);
           if (e.isSymlink) links.push(child);
+          if (files.length < cap) files.push(child);
+          else truncated = true;
         }
       }
-      return true;
     };
-    const complete = await walk(dir);
-    return { files, links, truncated: !complete };
+    await walk(dir);
+    return { files, links, truncated };
   };
 
   /** Whether `path` itself is a symbolic link (never followed). */
@@ -944,12 +970,27 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       const fs = await ctx.getFilesystem(branch);
-      const stat = await fs.stat(p);
+      const root = await workspaceRoot(branch, ctx);
+      // Judged before `stat`, which follows links: a link anywhere on the path
+      // (or a path move_file and delete_file would refuse as not plain) is
+      // never movable or deletable, and a dangling one is named, not a 404.
+      const segments = p.replace(/^\.?\/+/, '').replace(/\/+$/, '').split('/');
+      const plain = !p.includes('\\') && !segments.some((seg) => seg === '.' || seg === '..');
+      const viaLink = plain ? await symlinkOnPath(root, p) : undefined;
+      let stat: Awaited<ReturnType<LocalFilesystem['stat']>>;
+      try {
+        stat = await fs.stat(p);
+      } catch (err) {
+        if (viaLink !== undefined) {
+          throw new ToolError(`"${p}" goes through the symbolic link "${viaLink}", which leads nowhere; the agent tools never follow links.`, 400);
+        }
+        throw err;
+      }
       const kind = stat.type === 'directory' ? 'folder' : 'file';
-      const managed = managedReason(await onDiskSpelling(await workspaceRoot(branch, ctx), p), kind) !== undefined;
+      const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
       const access = await accessAt(branch, ctx, p);
       const writable = (await writeBlocked(branch, ctx, [p])).length === 0;
-      const link = await isSymlinkAt(await workspaceRoot(branch, ctx), p);
+      const link = !plain || viaLink !== undefined;
       const out: Record<string, unknown> = {
         ...stat,
         managed,
@@ -1258,6 +1299,7 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, path);
       await recordOntologyRead(sessionOntologyGate, ctx, path);
       const fs = await ctx.getFilesystem(branch);
+      assertPlainPath(path);
       const root = await workspaceRoot(branch, ctx);
       if (await isSymlinkAt(root, path)) throw new ToolError(linkRefusal(path), 400);
       if ((await kindOf(fs, path)) === 'folder') {
