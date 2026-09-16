@@ -1,10 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('access');
 
 import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
+import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
 import { hashEmail } from '../../shared/email-identity.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -51,8 +54,6 @@ import {
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
 
-const execFileAsync = promisify(execFile);
-
 /**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
@@ -61,55 +62,39 @@ const execFileAsync = promisify(execFile);
  * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
  * (the spec may itself contain spaces, hence the endsWith checks).
  */
-function catFileBatch(repoDir: string, specs: string[]): Promise<(string | null)[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', repoDir, 'cat-file', '--batch'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    child.stdout.on('data', (c: Buffer) => chunks.push(c));
-    child.stderr.on('data', (c: Buffer) => errChunks.push(c));
-    // A dying git can close stdin mid-write; the 'close' handler below still
-    // fires with the exit code, which is the error we want to surface.
-    child.stdin.on('error', () => undefined);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git cat-file --batch exited ${code}: ${Buffer.concat(errChunks).toString('utf-8').trim()}`));
-        return;
-      }
-      try {
-        const out = Buffer.concat(chunks);
-        const results: (string | null)[] = [];
-        let off = 0;
-        for (let i = 0; i < specs.length; i++) {
-          const nl = out.indexOf(0x0a, off);
-          if (nl < 0) throw new Error('unexpected end of git cat-file output');
-          const header = out.subarray(off, nl).toString('utf-8');
-          off = nl + 1;
-          if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-            results.push(null);
-            continue;
-          }
-          const parts = header.split(' ');
-          const size = Number(parts[2]);
-          if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
-            throw new Error(`unexpected git cat-file header: ${header}`);
-          }
-          // Non-blob (a directory path resolves to a tree) → null, but the
-          // payload still has to be skipped to stay aligned.
-          results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
-          off += size + 1; // payload + trailing LF
-        }
-        resolve(results);
-      } catch (err) {
-        reject(err);
-      }
-    });
-    child.stdin.write(`${specs.join('\n')}\n`);
-    child.stdin.end();
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  // Bytes, not text: every `<size>` in the header counts bytes, and the walk
+  // below has to step by that count through content that is not all ASCII.
+  const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
+    input: `${specs.join('\n')}\n`,
+    encoding: 'buffer',
   });
+  const results: (string | null)[] = [];
+  let off = 0;
+  for (let i = 0; i < specs.length; i++) {
+    const nl = out.indexOf(0x0a, off);
+    if (nl < 0) throw new Error('unexpected end of git cat-file output');
+    const header = out.subarray(off, nl).toString('utf-8');
+    off = nl + 1;
+    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
+      results.push(null);
+      continue;
+    }
+    const parts = header.split(' ');
+    const size = Number(parts[2]);
+    if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
+      throw new Error(`unexpected git cat-file header: ${header}`);
+    }
+    // Non-blob (a directory path resolves to a tree) → null, but the
+    // payload still has to be skipped to stay aligned.
+    results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
+    off += size + 1; // payload + trailing LF
+  }
+  return results;
 }
 
 
@@ -305,14 +290,12 @@ function accessFileListener(
       if (!parsed.ok) {
         // Treat as if the file didn't exist for resolution purposes.
         // Admin-rescue on access.md paths still lets an admin fix it.
-        for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
+        for (const e of parsed.errors) log.warn(`${e} — file ignored`);
         return;
       }
-      for (const w of parsed.warnings) console.warn(`[access] ${w}`);
+      for (const w of parsed.warnings) log.warn(w);
       if (out.has(parsed.file.dir)) {
-        console.warn(
-          `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
-        );
+        log.warn(`${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`);
         return;
       }
       out.set(parsed.file.dir, parsed.file);
@@ -1025,6 +1008,13 @@ export class AccessControlService implements IAccessControl {
      * current behaviour (no owner, roles.yaml is the only authority).
      */
     deploymentOwners: readonly string[] = [],
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner; the default is the same runner on its default
+     * deadline, kept for the same reason as `deploymentOwners` above: a great
+     * many fixtures construct this service directly.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1640,17 +1630,17 @@ export class AccessControlService implements IAccessControl {
       }
     });
     if (!activeGroups.health.ok) {
-      console.error(
-        `[access] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      log.error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access] ${w}`);
+    for (const w of activeGroups.warnings) log.warn(w);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access] ${w}`);
+    for (const w of mergeWarnings) log.warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
 
@@ -1685,9 +1675,7 @@ export class AccessControlService implements IAccessControl {
       for (const verb of KNOWN_VERBS) {
         file.entries[verb] = file.entries[verb].filter((entry) => {
           if (entry.kind === 'role' && !roleKnown(rolesParsed.index, entry.role)) {
-            console.warn(
-              `[access] ${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`,
-            );
+            log.warn(`${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`);
             return false;
           }
           return true;
@@ -1775,7 +1763,7 @@ export class AccessControlService implements IAccessControl {
       else if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
-    const texts = await catFileBatch(repoDir, wanted.map((p) => `${ref}:${p}`));
+    const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
       if (text === null) result.set(p, null);
@@ -1819,15 +1807,7 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<{ kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'error' }> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'show', `${ref}:${relativePath}`],
-        {
-          encoding: 'utf-8',
-          maxBuffer: 16 * 1024 * 1024,
-          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-        },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['show', `${ref}:${relativePath}`]);
       return { kind: 'text', text: stdout };
     } catch (err) {
       const stderr =
@@ -1852,11 +1832,7 @@ export class AccessControlService implements IAccessControl {
     ref: string,
   ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'ls-tree', '-r', '--name-only', ref],
-        { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
       for (const line of stdout.split('\n')) {
@@ -1939,14 +1915,19 @@ export class AccessControlService implements IAccessControl {
   private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
     if (!ref || ref.startsWith('-')) return null;
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
-        { encoding: 'utf-8' },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `${ref}^{commit}`,
+      ]);
       const sha = stdout.trim();
       return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
-    } catch {
+    } catch (err) {
+      // Null means "does not resolve". A deadline says nothing about the ref,
+      // and as a null it would turn a stalled git into a gate that quietly
+      // reads no roles at that ref; it surfaces instead, as a read failure.
+      if (isGitTimeout(err)) throw err;
       return null;
     }
   }
@@ -1983,7 +1964,7 @@ export class AccessControlService implements IAccessControl {
       if (outcome.kind === 'error') {
         // The operational signal: one line per failed read, naming the commit
         // and the path, so a run of these is visible in the logs.
-        console.warn(`[access@${tag}] git read of ${relativePath} failed; refusing to decide from a partial tree`);
+        logger(`access@${tag}`).warn(`git read of ${relativePath} failed; refusing to decide from a partial tree`);
         throw new AccessUnreadableError(label, relativePath);
       }
       return outcome.kind === 'text' ? outcome.text : null;
@@ -2003,22 +1984,22 @@ export class AccessControlService implements IAccessControl {
     // fires only on a file that was read and would not parse.
     const activeGroups = await loadActiveGroups(read);
     if (!activeGroups.health.ok) {
-      console.error(
-        `[access@${tag}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      logger(`access@${tag}`).error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access@${tag}] ${w}`);
+    for (const w of activeGroups.warnings) logger(`access@${tag}`).warn(w);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access@${tag}] ${w}`);
+    for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
     const listed = await this.listAccessFilesAtRef(repoDir, commit);
     if (listed === 'error') {
-      console.warn(`[access@${tag}] listing access.md files failed; refusing to decide from a partial tree`);
+      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
     for (const p of listed.accessFiles) {

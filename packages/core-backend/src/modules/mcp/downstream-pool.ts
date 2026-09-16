@@ -36,6 +36,10 @@
  * value lives.
  */
 
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
+
 export interface DownstreamPoolOptions<V> {
   /** Close a value the pool is dropping. Errors are logged, never thrown. */
   dispose: (value: V) => Promise<void>;
@@ -237,7 +241,7 @@ export class DownstreamPool<V> {
     void Promise.resolve()
       .then(() => this.dispose(value))
       .catch((err) => {
-        console.warn(`[mcp] closing pooled downstream connection failed (${poolKeyLabel(key)}):`, err);
+        log.warn(`closing pooled downstream connection failed (${poolKeyLabel(key)}):`, { err });
       });
   }
 }

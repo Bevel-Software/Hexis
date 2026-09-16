@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { KbStartupRunner } from '../kb-startup-runner.js';
 import { WorkspaceService } from '../../workspace.service.js';
+import { NodeGitRunner } from '../../../workflow/git/node-git-runner.js';
 import { ClassifiedFailure, classifyGitFailure, failureOf } from '../../../../shared/git-failure.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -64,6 +65,7 @@ function makeRunner(steps: OnServerStart[], overrides: Partial<Parameters<typeof
 
 function runnerOpts(steps: OnServerStart[], overrides: Record<string, unknown> = {}) {
   return {
+    gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
     gitUsername: () => 'x-access-token',
     workspacesRoot,

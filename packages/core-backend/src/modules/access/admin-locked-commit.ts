@@ -46,6 +46,7 @@
  */
 
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
 
 import { LockingFilesystem, type WriteValidator } from '../kb-fs/locking-filesystem.js';
 import { PushNeedsAgentResolutionError, WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -255,10 +256,10 @@ export class AdminLockedCommits {
             await this.deps.workflowService.releaseLock(workspaceId, this.defaultBranch, h, actor);
           }
         } catch (releaseErr) {
-          console.warn(
-            `[${this.deps.logTag}] could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
+          logger(this.deps.logTag).warn(
+            `could not release lock on ${h}${pushRetry ? ' (push-retry release)' : ''}; ` +
               'it frees on TTL — continuing with the remaining locks:',
-            releaseErr instanceof Error ? releaseErr.message : releaseErr,
+            { err: releaseErr },
           );
         }
       }
@@ -305,9 +306,7 @@ export class AdminLockedCommits {
       // normally; the error itself tells the caller "saved locally, sharing
       // will be resolved" and the pending-commit ladder retries the push.
       if (err instanceof PushNeedsAgentResolutionError) {
-        console.warn(
-          `[${logTag}] commit landed but the push needs resolution — edit saved; publishing will be retried`,
-        );
+        logger(logTag).warn('commit landed but the push needs resolution — edit saved; publishing will be retried');
         throw err;
       }
       const unrestored = new Set<string>();
@@ -319,7 +318,7 @@ export class AdminLockedCommits {
           // Deleting an already-absent file IS the original state.
           if (f.original === null && isAbsence(restoreErr)) continue;
           unrestored.add(this.wsRel(f.repoRel));
-          console.warn(`[${logTag}] could not restore ${f.repoRel} after a failed commit`);
+          logger(logTag).warn(`could not restore ${f.repoRel} after a failed commit`);
         }
       }
       if (unrestored.size > 0 && typeof err === 'object' && err !== null) {

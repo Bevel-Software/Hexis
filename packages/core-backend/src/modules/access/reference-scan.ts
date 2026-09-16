@@ -23,7 +23,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-import type { FileTreeEntry, IWorkspaceService } from '@bevel-software/platform-shared';
+import { isFrontmatterFence, type FileTreeEntry, type IWorkspaceService } from '@bevel-software/platform-shared';
 import {
   KNOWN_VERBS,
   accessMdDeclaresBodyRules,
@@ -46,9 +46,9 @@ import {
  *     nothing is rewritten.
  */
 function configLineRange(lines: string[], isMarkdown: boolean): { start: number; end: number } {
-  if (lines.length > 0 && lines[0].trim() === '---') {
+  if (lines.length > 0 && isFrontmatterFence(lines[0])) {
     for (let i = 1; i < lines.length; i++) {
-      if (lines[i].trim() === '---') return { start: 1, end: i };
+      if (isFrontmatterFence(lines[i])) return { start: 1, end: i };
     }
     // Unterminated frontmatter — treat nothing as eligible (don't risk the body).
     return { start: 0, end: 0 };
@@ -63,9 +63,9 @@ function configLineRange(lines: string[], isMarkdown: boolean): { start: number;
  *  fence-less access.md is a hard parse error to the resolver, so it is not
  *  a rule source and must not be rewritten). */
 function bodyLineRange(lines: string[]): { start: number; end: number } {
-  if (lines.length > 0 && lines[0].trim() === '---') {
+  if (lines.length > 0 && isFrontmatterFence(lines[0])) {
     for (let i = 1; i < lines.length; i++) {
-      if (lines[i].trim() === '---') return { start: i + 1, end: lines.length };
+      if (isFrontmatterFence(lines[i])) return { start: i + 1, end: lines.length };
     }
   }
   return { start: 0, end: 0 };

@@ -1,4 +1,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tools');
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
 import type { AuthService } from '../auth/auth.service.js';
 import { InternalTokenService } from './internal-token.service.js';
@@ -165,7 +168,7 @@ export function createToolAuthMiddleware(
       req.toolAuth = result.auth;
       next();
     } catch (err) {
-      console.error('[tools] connection-key verification failed:', err);
+      log.error('connection-key verification failed:', { err });
       res.status(500).json({ error: 'Authentication backend unavailable' });
     }
   };
@@ -209,7 +212,7 @@ export function createManualAuthMiddleware(
         req.toolAuth = result.auth;
         next();
       } catch (err) {
-        console.error('[tools] connection-key verification failed:', err);
+        log.error('connection-key verification failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
       }
       return;

@@ -1,4 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('oidc');
 import type express from 'express';
 import type { AuthProviderPlugin } from './auth.routes.js';
 import { AUTH_COOKIE_MAX_AGE_S } from './auth.routes.js';
@@ -186,7 +189,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         url.searchParams.set('code_challenge_method', 'S256');
         res.redirect(url.toString());
       } catch (error) {
-        console.error('OIDC start error:', error instanceof Error ? error.message : error);
+        log.error('OIDC start error:', { err: error });
         res.redirect(`${publicFrontendUrl}/auth/oidc/callback#error=start`);
       }
     });
@@ -233,7 +236,10 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           }).toString(),
         });
         if (!tokenRes.ok) {
-          console.error('OIDC token exchange failed:', tokenRes.status, await tokenRes.text().catch(() => ''));
+          log.error('OIDC token exchange failed:', {
+            status: tokenRes.status,
+            body: await tokenRes.text().catch(() => ''),
+          });
           fail('auth');
           return;
         }
@@ -247,7 +253,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           headers: { Authorization: `Bearer ${tokens.access_token}` },
         });
         if (!infoRes.ok) {
-          console.error('OIDC userinfo failed:', infoRes.status);
+          log.error('OIDC userinfo failed:', { status: infoRes.status });
           fail('auth');
           return;
         }
@@ -260,7 +266,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         };
         if (!claims.email) {
           // Most likely a missing `email` scope / claim mapping at the provider.
-          console.error('OIDC userinfo returned no email claim');
+          log.error('OIDC userinfo returned no email claim');
           fail('auth');
           return;
         }
@@ -280,7 +286,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
         });
         res.redirect(`${publicFrontendUrl}/auth/oidc/callback#token=${encodeURIComponent(token)}`);
       } catch (error) {
-        console.error('OIDC callback error:', error instanceof Error ? error.message : error);
+        log.error('OIDC callback error:', { err: error });
         fail('auth');
       }
     });

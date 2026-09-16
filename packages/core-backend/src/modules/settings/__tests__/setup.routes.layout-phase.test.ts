@@ -11,6 +11,7 @@ import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-s
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import { KbStartupRunner } from '../../workspace/startup/kb-startup-runner.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import { TemplateFilesStep } from '../../workspace/startup/steps/template-files.step.js';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { defaultKbTemplateDir } from '../../../assets.js';
@@ -102,6 +103,7 @@ function boot() {
   } as unknown as Database;
   const settings = new DeploymentSettingsService(db, ENC_KEY);
   const runner = new KbStartupRunner({
+    gitRunner: new NodeGitRunner(),
     kbRepoUrl: () => upstream,
     gitUsername: () => 'x-access-token',
     workspacesRoot: path.join(root, 'workspaces'),

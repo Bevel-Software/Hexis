@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('connection-keys');
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import { TokenNotFoundError } from './external-api-key.errors.js';
 import type { IExternalApiKeyService } from './external-api-key.interface.js';
@@ -35,7 +38,7 @@ export function createConnectionKeysAdminRoutes(
     try {
       res.json({ keys: await externalApiKeyService.listForDeployment() });
     } catch (err) {
-      console.error('[connection-keys] admin list failed:', err);
+      log.error('admin list failed:', { err });
       res.status(500).json({ error: 'Failed to load connection keys' });
     }
   });
@@ -57,17 +60,14 @@ export function createConnectionKeysAdminRoutes(
       await externalApiKeyService.revokeAny(id);
       // Accountability record: WHO revoked WHICH key. Ids only — the key's
       // label is the owner's free text and does not belong in logs.
-      console.log(
-        '[connection-keys] revoke audit:',
-        JSON.stringify({ action: 'admin-revoke-key', actorUserId: req.userId, tokenId: id }),
-      );
+      log.info('revoke audit:', { action: 'admin-revoke-key', actorUserId: req.userId, tokenId: id });
       res.json({ status: 'revoked' });
     } catch (err) {
       if (err instanceof TokenNotFoundError) {
         res.status(404).json({ error: err.message });
         return;
       }
-      console.error('[connection-keys] admin revoke failed:', err);
+      log.error('admin revoke failed:', { err });
       res.status(500).json({ error: 'Failed to revoke this key' });
     }
   });

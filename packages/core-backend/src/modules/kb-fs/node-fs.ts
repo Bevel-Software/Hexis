@@ -148,4 +148,18 @@ export class NodeFs implements ITreeWalker, IFsProbe {
     }
     return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
   }
+
+  async freeBytes(p: string): Promise<number | null> {
+    try {
+      // `bavail`, not `bfree`: the blocks an unprivileged process may still
+      // write, which is what a git run as this process will actually get.
+      const stats = await fs.statfs(p);
+      return Number(stats.bavail) * Number(stats.bsize);
+    } catch {
+      // A path that is not there, or a filesystem that cannot answer — the
+      // contract's null: "cannot say", which the reader treats as not known
+      // to be full rather than as full.
+      return null;
+    }
+  }
 }

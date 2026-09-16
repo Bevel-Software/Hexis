@@ -1,6 +1,4 @@
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -9,9 +7,8 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
 import type { PluginSource } from '../discovery/plugin-source.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
+import type { IGitRunner } from '../../../shared/git.contract.js';
 import { compileMarketplace, type VirtualTree } from './compile-marketplace.js';
-
-const execFileAsync = promisify(execFile);
 
 /** Whose view of the knowledge base to compile. */
 export type CompileAudience = { userEmail: string } | { everyone: true };
@@ -44,6 +41,8 @@ export class MarketplaceCompilerService {
     },
     private readonly source: PluginSource,
     private readonly disk: ITreeWalker,
+    /** How git is run — see `shared/git.contract.ts`. */
+    private readonly gitRunner: IGitRunner,
   ) {}
 
   /**
@@ -54,7 +53,7 @@ export class MarketplaceCompilerService {
    */
   async sourceCommit(): Promise<string> {
     const { kbRoot } = await this.checkout();
-    const { stdout } = await execFileAsync('git', ['-C', kbRoot, 'rev-parse', 'HEAD']);
+    const { stdout } = await this.gitRunner.run(kbRoot, ['rev-parse', 'HEAD']);
     const sha = stdout.trim();
     // SHA-1 or SHA-256 object format: any hex object id is a commit.
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {

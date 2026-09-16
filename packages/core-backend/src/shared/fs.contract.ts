@@ -215,4 +215,11 @@ export interface IFsProbe {
    * same non-answer to it; there is no such collapse for raw text.
    */
   readTextFile(p: string): Promise<string>;
+  /**
+   * Bytes still writable on the volume holding `p`, as an unprivileged process
+   * sees them; null when the volume cannot say. The one question the readiness
+   * answer asks of the disk: a volume that fills turns every git write into a
+   * failure, and the queue behind those writes stops moving.
+   */
+  freeBytes(p: string): Promise<number | null>;
 }

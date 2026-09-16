@@ -1,7 +1,7 @@
 /**
  * THE line-based scan of a `---` frontmatter block, for the access model.
  *
- * The access model deliberately does NOT use the regex splitter in
+ * The access model deliberately does NOT use the two-string splitter in
  * `@bevel-software/platform-shared`: a splice has to put bytes back exactly
  * as it found them — comments, blank lines, the file's own line endings —
  * and that needs the LINES, not two captured strings. Two readers here
@@ -11,14 +11,15 @@
  *
  * What it decides, and what it leaves to the caller:
  *
- *   - THE FENCE RULE is here: a line whose trimmed form is `---`. So an
- *     indented or trailing-spaced fence counts. (The shared regex splitter is
- *     stricter — see `frontmatter-fences.test.ts`, which pins where the two
- *     disagree so the difference stays deliberate rather than discovered.)
+ *   - THE FENCE RULE is NOT decided here: it is `isFrontmatterFence` from the
+ *     shared package, the same function the splitter asks, so the access
+ *     model and the catalog can never again disagree about whether a file
+ *     has frontmatter (`frontmatter-fences.test.ts` asserts they agree).
  *   - WHAT AN UNTERMINATED BLOCK MEANS is the caller's: the grammar reads it
  *     as a parse error, the body reader as no body, the splice as a refusal.
  *     One scan, three answers, none of them re-deriving the fences.
  */
+import { isFrontmatterFence } from '@bevel-software/platform-shared';
 
 /** An opening fence with no closing one — the caller decides what that means. */
 export interface UnterminatedFrontmatter {
@@ -48,10 +49,8 @@ export interface ScannedFrontmatter {
 
 export type FrontmatterScan = ScannedFrontmatter | NoFrontmatter | UnterminatedFrontmatter;
 
-/** Whether a line IS a fence: `---`, ignoring surrounding whitespace. */
-function isFence(line: string | undefined): boolean {
-  return line?.trim() === '---';
-}
+/** Whether a line IS a fence — the platform's one rule, shared with the catalog's splitter. */
+const isFence = isFrontmatterFence;
 
 /**
  * The line ending a rewrite of `text` should use: the one MOST of its lines

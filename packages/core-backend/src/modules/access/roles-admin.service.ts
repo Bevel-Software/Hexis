@@ -33,6 +33,9 @@
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('roles.recover');
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthUser, IWorkspaceService, IWorkflowService } from '@bevel-software/platform-shared';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
@@ -335,10 +338,7 @@ export class RolesAdminService {
       await this.workflowService.resetToRemote(workspaceId, this.defaultBranch);
       this.accessControl.invalidate(workspaceId);
     } catch (err) {
-      console.warn(
-        '[roles.recover] could not sync with origin before recovery; proceeding with local state:',
-        err instanceof Error ? err.message : err,
-      );
+      log.warn('could not sync with origin before recovery; proceeding with local state:', { err });
     }
 
     const current = await this.readRolesYaml(workspaceId);

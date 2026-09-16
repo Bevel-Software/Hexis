@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('auth');
 import type { AuthService } from './auth.service.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
 import { FixedWindowRateLimiter } from './rate-limit.js';
@@ -111,7 +114,7 @@ export function createAuthRoutes(
       res.json(result);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Login error:', msg);
+      log.error('Login error:', { detail: msg });
       res.status(401).json({ error: 'Authentication failed' });
     }
   });
@@ -190,7 +193,7 @@ export function createAuthRoutes(
       // A raw driver message here would hand an unauthenticated-adjacent
       // caller the schema, the host, or the connection string.
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Onboarding-done error:', msg);
+      log.error('Onboarding-done error:', { detail: msg });
       res.status(500).json({ error: 'Could not save that' });
     }
   });

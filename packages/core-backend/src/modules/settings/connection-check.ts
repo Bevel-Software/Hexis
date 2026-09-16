@@ -2,13 +2,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { validateHttpsRemote } from './deployment-settings.service.js';
 import { classifyGitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-
-const execFileAsync = promisify(execFile);
+import { GitRunError, type IGitRunner } from '../../shared/git.contract.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 
 /** The repository connection a deployment reads and writes its knowledge base with. */
 export interface RepositoryConnection {
@@ -56,10 +54,41 @@ export type GitRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ st
 
 const TOKEN_ENV = 'BEVEL_PROBE_TOKEN';
 
-const runGit: GitRunner = async (args, env) => {
-  const { stdout } = await execFileAsync('git', args, { timeout: 20_000, env });
-  return { stdout: stdout.toString() };
-};
+/**
+ * A short deadline of its own: this is an interactive check behind a form,
+ * and an admin waiting on a wrong URL should hear so in seconds, not after
+ * the port's default.
+ */
+const PROBE_TIMEOUT_MS = 20_000;
+
+/**
+ * The probe's git, run through the deployment's git port (see
+ * `shared/git.contract.ts`) so it carries the same environment, deadline
+ * handling and token redaction as every other git the backend runs — and so
+ * a host that never answers is killed with its helpers rather than left
+ * holding a request open.
+ */
+export function gitRunnerFor(runner: IGitRunner): GitRunner {
+  return async (args, env) => {
+    const { stdout } = await runner.run(process.cwd(), args, { env, timeoutMs: PROBE_TIMEOUT_MS });
+    return { stdout };
+  };
+}
+
+/** The check bound to one runner: what the composition root hands the setup routes. */
+export function repositoryConnectionCheck(
+  runner: IGitRunner,
+): (connection: RepositoryConnection) => Promise<ConnectionCheck> {
+  const run = gitRunnerFor(runner);
+  return (connection) => checkRepositoryConnection(connection, run);
+}
+
+let defaultRun: GitRunner | null = null;
+/** The check's own runner when none is injected — a port with default settings, made once. */
+function runGit(): GitRunner {
+  defaultRun ??= gitRunnerFor(new NodeGitRunner());
+  return defaultRun;
+}
 
 /**
  * Ask the remote whether this connection can do what a deployment needs of it:
@@ -83,7 +112,7 @@ const runGit: GitRunner = async (args, env) => {
  */
 export async function checkRepositoryConnection(
   connection: RepositoryConnection,
-  run: GitRunner = runGit,
+  run: GitRunner = runGit(),
 ): Promise<ConnectionCheck> {
   const { url, token, username } = connection;
   // The callers validate what they are sent; this is the floor under them,
@@ -120,11 +149,16 @@ export async function checkRepositoryConnection(
   /** What git said, as git said it — the classifier's input. */
   const gitSaid = (err: unknown) => {
     let raw = err instanceof Error ? err.message : String(err);
-    // execFile's timeout kills git with SIGTERM and says so only in `killed` /
-    // `signal` — the message is a bare "Command failed". Without the marker a
+    // The port carries git's stderr beside the message, and that is where the
+    // host's own words are — the classifier reads them.
+    if (err instanceof GitRunError && err.stderr) raw += `\n${err.stderr}`;
+    // A deadline expiry says so in `timedOut` (the port) or in `killed` /
+    // `signal` (a bare execFile) — never in the message. Without the marker a
     // host that never answers classifies as `unknown`, not unreachable.
     const exit = err as { killed?: boolean; signal?: string | null } | null;
-    if (exit?.killed && exit.signal === 'SIGTERM') raw += '\ntimed out';
+    if ((err instanceof GitRunError && err.timedOut) || (exit?.killed && exit.signal === 'SIGTERM')) {
+      raw += '\ntimed out';
+    }
     return raw;
   };
   // Classification reads the raw text; only a scrubbed copy is ever echoed —
