@@ -76,9 +76,10 @@ const ROW_TONE = (current: boolean) =>
 const indentFor = (depth: number) => 10 + depth * 13;
 
 /**
- * The caret's slot — 13px wide, and rendered EMPTY for a file and for a
- * childless folder. It is what keeps a file's name in line with its siblings'
- * once the icons are gone: the indent is the tree, so it has to survive them
+ * The caret's slot — 13px wide, and rendered EMPTY for a file. Every folder
+ * shows the caret, an empty one included: without it a folder reads as a file.
+ * The slot is what keeps a file's name in line with its siblings' once the
+ * icons are gone: the indent is the tree, so it has to survive them
  * (proto:3571-3572).
  */
 function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
@@ -90,6 +91,37 @@ function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
           className={cn('transition-transform duration-150', open && 'rotate-90')}
         />
       )}
+    </span>
+  );
+}
+
+/** How many trailing characters of a file name always stay on screen. */
+const FILE_NAME_TAIL = 8;
+
+/**
+ * A file's name, truncated in the MIDDLE when it does not fit: the lead is
+ * shortened with an ellipsis and the last `FILE_NAME_TAIL` characters stay —
+ * for an ordinary name that is the extension, the part that says what the
+ * file is. A name that fits reads exactly as before, because the two halves
+ * sit flush against each other.
+ *
+ * The split halves are a picture, so they are hidden from assistive tech; the
+ * whole name is carried once, unsplit, in a visually hidden span. A folder has
+ * no extension to protect and keeps the plain end truncation.
+ */
+function FileName({ name }: { name: string }) {
+  // By code point, so the split never lands inside a surrogate pair.
+  const chars = Array.from(name);
+  if (chars.length <= FILE_NAME_TAIL) return <span className="truncate">{name}</span>;
+  return (
+    <span className="flex min-w-0" data-file-name>
+      <span className="sr-only">{name}</span>
+      <span aria-hidden className="truncate" data-name-lead>
+        {chars.slice(0, -FILE_NAME_TAIL).join('')}
+      </span>
+      <span aria-hidden className="flex-none whitespace-pre" data-name-tail>
+        {chars.slice(-FILE_NAME_TAIL).join('')}
+      </span>
     </span>
   );
 }
@@ -654,9 +686,9 @@ export function FileTreeNode({
   const paddingLeft = indentFor(depth);
   const isRoot = entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
-  // A folder with nothing in it doesn't get a caret, because there is nothing
-  // to open (proto:3565).
-  const hasChildren = (entry.children?.length ?? 0) > 0;
+  // A folder with nothing in it still gets its caret — without one it reads
+  // as a file — and opening it says so with a muted "Empty" row.
+  const isEmpty = (entry.children?.length ?? 0) === 0;
   // Escape inside the context menu hands focus back to the row it came from.
   const rowRef = useRef<HTMLButtonElement>(null);
 
@@ -874,14 +906,11 @@ export function FileTreeNode({
             ref={rowRef}
             type="button"
             data-tree-path={entry.relativePath}
-            // A folder with nothing in it has no caret and nothing to expand,
-            // so it claims neither state: `aria-expanded` is for a control
-            // that can open, and an empty folder cannot.
-            aria-expanded={hasChildren ? isExpanded : undefined}
+            aria-expanded={isExpanded}
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            onClick={() => { if (hasChildren) setUserIntent(!isExpanded); }}
+            onClick={() => setUserIntent(!isExpanded)}
           >
-            <CaretSlot open={isExpanded} show={hasChildren} />
+            <CaretSlot open={isExpanded} show />
             {renaming ? (
               <RenameInput
                 currentName={entry.name}
@@ -948,6 +977,19 @@ export function FileTreeNode({
                 />
               </div>
             )}
+            {isEmpty && !creating && (
+              // Not a row anyone acts on — no path, no focus, no menu — so
+              // keyboard navigation and the context menu never meet it. It
+              // sits where a first child would, name column included.
+              <div
+                data-tree-empty
+                className={cn(ROW_CLASS, 'text-ink-faint')}
+                style={{ paddingLeft: indentFor(depth + 1) }}
+              >
+                <CaretSlot show={false} />
+                <span className="truncate">Empty</span>
+              </div>
+            )}
             {entry.children?.map((child) => (
               <FileTreeNode
                 key={child.relativePath}
@@ -1008,7 +1050,7 @@ export function FileTreeNode({
           title="Proposed by you: opens the change request"
         >
           <CaretSlot show={false} />
-          <span className="truncate">{entry.name}</span>
+          <FileName name={entry.name} />
           <span
             aria-hidden
             className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
@@ -1086,7 +1128,7 @@ export function FileTreeNode({
             onCancel={() => setRenaming(false)}
           />
         ) : (
-          <span className="truncate">{entry.name}</span>
+          <FileName name={entry.name} />
         )}
         {/* News about a file you are not looking at (proto:692). Amber, not
             the tab dot's accent: on a tab the dot marks the file you have

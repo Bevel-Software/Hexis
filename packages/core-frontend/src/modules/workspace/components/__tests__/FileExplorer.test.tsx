@@ -803,18 +803,95 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(row.querySelectorAll('svg')).toHaveLength(0);
   });
 
-  it('gives a childless folder no caret and does not toggle it', async () => {
+  it('gives a childless folder the caret, like any folder', () => {
     renderExplorer({ fileTree: TREE });
+    // Without the caret an empty folder reads as a file.
     const empty = screen.getByText('reports').closest('button')!;
-    expect(empty.querySelectorAll('svg')).toHaveLength(0);
-    // Nothing to open, so no claim about being open: `aria-expanded` is
-    // for a control that can expand — and a click changes nothing.
-    expect(empty).not.toHaveAttribute('aria-expanded');
-    fireEvent.click(empty);
-    expect(empty).not.toHaveAttribute('aria-expanded');
+    expect(empty.querySelectorAll('svg')).toHaveLength(1);
+    expect(empty).toHaveAttribute('aria-expanded');
 
     const withKids = screen.getByText('docs').closest('button')!;
     expect(withKids.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('shows one muted, inert "Empty" row under an open empty folder', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: 'outer',
+          relativePath: 'outer',
+          type: 'directory',
+          children: [{ name: 'reports', relativePath: 'outer/reports', type: 'directory', children: [] }],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: tree });
+    // Depth 2 starts closed, so nothing says "Empty" until it is opened.
+    const reports = screen.getByText('reports').closest('button')!;
+    expect(reports).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+
+    fireEvent.click(reports);
+    expect(reports).toHaveAttribute('aria-expanded', 'true');
+    const emptyRows = screen.getAllByText('Empty');
+    expect(emptyRows).toHaveLength(1);
+    const emptyRow = emptyRows[0].closest('[data-tree-empty]') as HTMLElement;
+    expect(emptyRow).toHaveClass('text-ink-faint');
+    // A statement, not a row: no controls, no path, nothing to focus.
+    expect(emptyRow.querySelector('button, [tabindex], svg')).toBeNull();
+    expect(emptyRow).not.toHaveAttribute('data-tree-path');
+    // One indent step deeper than the folder, where a first child would sit.
+    expect(emptyRow.style.paddingLeft).toBe(`${parseInt(reports.parentElement!.style.paddingLeft) + 13}px`);
+
+    fireEvent.click(reports);
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+  });
+
+  it('truncates a long file name in the middle, keeping its last 8 characters', () => {
+    const name = 'Sidebar-Rows-Say-What-They-Are.md';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name, relativePath: name, type: 'file' }],
+    };
+    renderExplorer({ fileTree: tree });
+    const row = screen.getByRole('button', { name });
+    const lead = row.querySelector('[data-name-lead]')!;
+    const tail = row.querySelector('[data-name-tail]')!;
+    // The lead is what shrinks behind an ellipsis; the tail never does.
+    expect(lead.textContent).toBe('Sidebar-Rows-Say-What-The');
+    expect(lead).toHaveClass('truncate');
+    expect(tail.textContent).toBe('y-Are.md');
+    expect(tail).toHaveClass('flex-none');
+    expect(tail).not.toHaveClass('truncate');
+    // Together they are the whole name, so a name that fits is unchanged.
+    expect(`${lead.textContent}${tail.textContent}`).toBe(name);
+  });
+
+  it('renders a short file name whole, in one piece', () => {
+    renderExplorer({ fileTree: TREE });
+    const name = screen.getByText('brief.md');
+    expect(name.tagName).toBe('SPAN');
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
+  });
+
+  it('keeps end truncation for a folder name — no extension to protect', () => {
+    const folder = 'a-very-long-folder-name-that-will-not-fit';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name: folder, relativePath: folder, type: 'directory', children: [] }],
+    };
+    renderExplorer({ fileTree: tree });
+    const name = screen.getByText(folder);
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
   });
 
   it('marks directory rows with aria-expanded and the open file with aria-current', () => {
