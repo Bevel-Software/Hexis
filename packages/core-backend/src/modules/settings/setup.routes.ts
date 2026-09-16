@@ -21,6 +21,8 @@ import {
   validateBranchModel,
   validateKbLayout,
 } from '@bevel-software/platform-shared';
+import { failureOf, type GitFailure } from '../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -76,6 +78,8 @@ export function createSetupRoutes(
      * (tests, a distribution's own runner) reads as never having failed.
      */
     lastFailure?(): string | null;
+    /** That failure classified, for the setup screen; absent, the message is read instead. */
+    lastFailureKind?(): GitFailure | null;
   },
   /**
    * The remote-sync facts the Deployment page shows beside the sync secret:
@@ -101,16 +105,18 @@ export function createSetupRoutes(
   const router = express.Router();
 
   /**
-   * Whether the last setup-time run of the KB startup phase FAILED. While
-   * true the deployment stays GATED: the settings are saved but the KB was
+   * Why the last setup-time run of the KB startup phase FAILED, or null. While
+   * set the deployment stays GATED: the settings are saved but the KB was
    * never initialized, and reporting setup complete would open the app over
-   * an unmaintained (possibly unseeded) knowledge base. Saving the setup
-   * form again retries the phase; a server restart retries it at boot; a
-   * success clears the flag. Per-process state, like the gate itself.
+   * an unmaintained (possibly unseeded) knowledge base. Any save — including
+   * an empty one, which is what "Retry initialization" sends — retries the
+   * phase; a server restart retries it at boot; a success clears it.
+   * Per-process state, like the gate itself.
+   *
+   * Classified, never raw: the admin gets a kind and a remediation sentence,
+   * and what git actually said stays in the server log.
    */
-  let kbInitFailed = false;
-  /** The failure's message, surfaced to the ADMIN on the status endpoint. */
-  let kbInitError: string | null = null;
+  let kbInit: GitFailure | null = null;
   /**
    * The setup-time run currently executing, if any. Its jobs: (a) keeping the
    * status gate SHUT while a run executes (the settings read complete the
@@ -133,9 +139,15 @@ export function createSetupRoutes(
    * clears it without any save passing through here.
    */
   const bootFailure = () => kbStartupRunner.lastFailure?.() ?? null;
+  /** The boot failure in the setup screen's terms: the runner's own reading, else one read from its message. */
+  const bootFailureKind = (): GitFailure | null => {
+    const message = bootFailure();
+    if (message === null) return null;
+    return kbStartupRunner.lastFailureKind?.() ?? failureOf(message);
+  };
   /** The app-gate answer: settings complete AND the KB phase settled clean, whoever ran it. */
   const kbReady = () =>
-    isComplete(settings) && !kbInitFailed && kbInitInFlight === null && bootFailure() === null;
+    isComplete(settings) && kbInit === null && kbInitInFlight === null && bootFailure() === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -173,7 +185,7 @@ export function createSetupRoutes(
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
-      ...(kbInitFailed ? { kbInitError } : bootFailure() !== null ? { kbInitError: bootFailure() } : {}),
+      ...(kbInit ? { kbInit } : bootFailure() !== null ? { kbInit: bootFailureKind() } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
   });
@@ -256,11 +268,11 @@ export function createSetupRoutes(
        * Runs on the false→true completion transition — including when the
        * branch model was configured by an EARLIER save and the repository
        * URL arrives on a later one — and again on any save while a previous
-       * setup-time run stands failed (`kbInitFailed`), so saving the form is
-       * the retry. Never on a re-save of a complete, healthy setup: with the
-       * gate open, sessions may be live and that is no longer a quiet moment.
+       * setup-time run stands failed (`kbInit`), so a save is the retry. Never
+       * on a re-save of a complete, healthy setup: with the gate open,
+       * sessions may be live and that is no longer a quiet moment.
        */
-      if ((!wasComplete || kbInitFailed || bootFailure() !== null) && isComplete(settings)) {
+      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings)) {
         /**
          * The folder names, applied BEFORE the phase for the same reason as
          * the branch model above: they are otherwise applied once at boot, so
@@ -271,7 +283,7 @@ export function createSetupRoutes(
          * the names an earlier setup save applied before a run that failed:
          * the gate never opened, so the retry initializes what is saved now.
          */
-        if (isDefaultKbLayout() || (kbInitFailed && layoutAppliedBySetup)) {
+        if (isDefaultKbLayout() || (kbInit !== null && layoutAppliedBySetup)) {
           const layout = settings.resolveKbLayout();
           if (!validateKbLayout(layout)) {
             configureKbLayout(layout);
@@ -289,20 +301,24 @@ export function createSetupRoutes(
           // and opens the gate DELIBERATELY — booting unmaintained so the
           // operator can get in and fix things is exactly what the
           // break-glass is for.
-          kbInitFailed = false;
-          kbInitError = null;
+          kbInit = null;
         } catch (initErr) {
           // The settings ARE saved — only the KB initialization failed. The
           // deployment stays gated (see the status endpoint) until a retry
-          // succeeds. Logged in full, returned actionable.
-          const msg = initErr instanceof Error ? initErr.message : String(initErr);
-          log.error('KB initialization failed after setup completed:', { detail: msg });
-          kbInitFailed = true;
-          kbInitError = msg;
+          // succeeds. Logged in full (scrubbed of the token in effect, which
+          // may be the one this very save stored), returned classified — by
+          // the classification the runner's failure carries, read before any
+          // scrub rewrote git's words (`failureOf`).
+          const raw = initErr instanceof Error ? initErr.message : String(initErr);
+          const msg = redactSecret(raw, [
+            settings.resolve('gitToken'),
+            ...urlQuerySecrets(settings.resolve('kbRepoUrl')),
+          ]);
+          log.error(`KB initialization failed after setup completed: ${msg}`);
+          kbInit = failureOf(initErr);
           res.status(500).json({
-            error:
-              'Settings saved, but the knowledge base could not be initialized. ' +
-              'Saving the setup form again retries; restarting the server retries too.',
+            error: 'Settings saved, but the knowledge base could not be initialized.',
+            kbInit,
           });
           return;
         } finally {
@@ -482,7 +498,11 @@ export function createSetupRoutes(
     try {
       check = await checkConnection({ url, token, username });
     } catch (err) {
-      log.error('connection check failed:', { detail: err instanceof Error ? err.message : String(err) });
+      // The check answers every refusal it can read as an outcome; a throw is
+      // the check itself breaking. Logged scrubbed — git failures have been
+      // known to quote the credential back — and returned generic.
+      const raw = err instanceof Error ? err.message : String(err);
+      log.error(`connection check failed: ${redactSecret(raw, [token, ...urlQuerySecrets(url)])}`);
       res.status(500).json({ ok: false, error: 'Could not run the connection check.' });
       return;
     }

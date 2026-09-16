@@ -2,7 +2,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { cloneCredentialArgs, credentialHelperValue } from '../../kb-fs/clone-config.js';
-import type { IGitRunner } from '../../../shared/git.contract.js';
+import { GitRunError, type IGitRunner } from '../../../shared/git.contract.js';
+import { ClassifiedFailure, classifyGitFailure } from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 /**
  * The startup phase's own git plumbing — the runner owns every remote and
@@ -59,12 +61,26 @@ export async function git(
   args: string[],
 ): Promise<string> {
   const argv = [...credArgs(gitUsername), ...withPersistedCloneConfig(gitUsername, args)];
-  // A floor under the configured ceiling, not a replacement for it: an
-  // operator who raised GIT_TIMEOUT_MS past ten minutes gets that here too.
-  const { stdout } = await runner.run(cwd, argv, {
-    timeoutMs: Math.max(runner.defaultTimeoutMs, STARTUP_GIT_TIMEOUT_MS),
-  });
-  return stdout;
+  try {
+    // A floor under the configured ceiling, not a replacement for it: an
+    // operator who raised GIT_TIMEOUT_MS past ten minutes gets that here too.
+    const { stdout } = await runner.run(cwd, argv, {
+      timeoutMs: Math.max(runner.defaultTimeoutMs, STARTUP_GIT_TIMEOUT_MS),
+    });
+    return stdout;
+  } catch (err) {
+    // Classified here, from what git said — the port's error already names the
+    // subcommand and carries git's stderr in its message — before the scrub
+    // can rewrite it; the message that leaves is the scrubbed one. A remote in
+    // the argv has its query values scrubbed as secrets of their own. The
+    // port's error rides along as the cause: its fields say whether git ran
+    // at all, which the runner reads to tell a missing git from a remote
+    // that would not answer.
+    const msg = err instanceof Error ? err.message : String(err);
+    const raw = err instanceof GitRunError ? msg : `git ${args[0]} failed: ${msg}`;
+    const querySecrets = args.flatMap((arg) => urlQuerySecrets(arg));
+    throw new ClassifiedFailure(redactSecret(raw, querySecrets), classifyGitFailure(raw), { cause: err });
+  }
 }
 
 export async function stampIdentity(runner: IGitRunner, repo: string, gitUsername: string): Promise<void> {

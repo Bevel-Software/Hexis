@@ -107,8 +107,8 @@ describe('KbStartupRunner with an unreachable remote', () => {
     };
     const runner = makeRunner([], () => upstream, noGit);
     const err = await runner.runAll().catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(GitRunError);
     expect(err).not.toBeInstanceOf(KbRemoteUnreachableError);
+    expect((err as Error).message).toMatch(/spawn git ENOENT/);
   });
 
   it('records its attempts to reach the remote, for the readiness answer', async () => {

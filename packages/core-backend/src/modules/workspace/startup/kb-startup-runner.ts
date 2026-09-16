@@ -10,7 +10,15 @@ const startupLog = logger('kb-startup');
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import type { KbBranch, OnServerStart, ServerStartContext } from './on-server-start.js';
 import { git, lsRemoteHeads, stampIdentity, withTempDir } from './kb-git.js';
-import { GitRunError, redactGitToken, type IGitRunner } from '../../../shared/git.contract.js';
+import { GitRunError, type IGitRunner } from '../../../shared/git.contract.js';
+import {
+  ClassifiedFailure,
+  classifyGitFailure,
+  failureOf,
+  gitFailure,
+  type GitFailure,
+} from '../../../shared/git-failure.js';
+import { redactSecret, urlQuerySecrets } from '../../../shared/redact-secret.js';
 
 /**
  * The KB startup phase: run every registered {@link OnServerStart} step, in
@@ -40,6 +48,12 @@ export interface KbStartupRunnerOptions {
   gitRunner: IGitRunner;
   kbRepoUrl: () => string;
   gitUsername: () => string;
+  /**
+   * The git token in effect (settings-stored or environment), scrubbed from
+   * every message the phase throws or logs. Optional: `GITHUB_TOKEN` and its
+   * aliases are scrubbed regardless.
+   */
+  gitToken?: () => string;
   workspacesRoot: string;
   kbDirName: string;
   templateDir: string;
@@ -66,10 +80,14 @@ export interface KbStartupRunnerOptions {
  * the knowledge base — what we would write is not known to be wrong, we
  * simply cannot get there right now — and so the one a boot may survive:
  * the deployment comes up gated and unmaintained, and tries again.
+ *
+ * A {@link ClassifiedFailure} of the `unreachable` kind by construction: the
+ * setup screen shows the same remediation for a boot that survived this as
+ * for a setup-time run that hit it.
  */
-export class KbRemoteUnreachableError extends Error {
+export class KbRemoteUnreachableError extends ClassifiedFailure {
   constructor(message: string, opts?: { cause?: unknown }) {
-    super(message, opts);
+    super(message, gitFailure('unreachable'), opts);
     this.name = 'KbRemoteUnreachableError';
   }
 }
@@ -91,8 +109,21 @@ export class KbStartupRunner {
   private inFlight: Promise<void> | null = null;
   /** Why the last run failed, redacted; null after a run that finished. */
   private failure: string | null = null;
+  /** The same failure classified — what the setup screen shows. */
+  private failureKind: GitFailure | null = null;
   /** The phase's last attempt to reach the remote — for the readiness answer. */
   private remoteContact: { at: number; ok: boolean } | null = null;
+
+  /**
+   * {@link redactSecret} plus the token in effect, which may never have reached
+   * the environment. Tokens, URL userinfo and URL query strings go — and the
+   * configured remote's own query values (a presigned remote's credential) are
+   * named as secrets too, so they are scrubbed even where git's text carries
+   * them without the URL around them.
+   */
+  private redact(text: string): string {
+    return redactSecret(text, [this.opts.gitToken?.(), ...urlQuerySecrets(this.opts.kbRepoUrl())]);
+  }
 
   /**
    * When this runner last tried the remote and whether it answered. The
@@ -114,6 +145,11 @@ export class KbStartupRunner {
     return this.failure;
   }
 
+  /** The most recent failure in the terms an admin can act on; null when the last run finished. */
+  lastFailureKind(): GitFailure | null {
+    return this.failureKind;
+  }
+
   /**
    * Run the whole phase. Throws to stop the boot; returns normally when the
    * KB is fully maintained (or safe boot abandoned the phase, loudly).
@@ -126,9 +162,11 @@ export class KbStartupRunner {
     this.inFlight ??= this.runAllOnce()
       .then(() => {
         this.failure = null;
+        this.failureKind = null;
       })
       .catch((err: unknown) => {
-        this.failure = redactGitToken(err instanceof Error ? err.message : String(err));
+        this.failure = this.redact(err instanceof Error ? err.message : String(err));
+        this.failureKind = failureOf(err);
         throw err;
       })
       .finally(() => {
@@ -244,15 +282,17 @@ export class KbStartupRunner {
         const started = Date.now();
         const result = await step.run(ctx).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(redactGitToken(`KB startup step "${step.name}" failed: ${msg}`));
+          const raw = `KB startup step "${step.name}" failed: ${msg}`;
+          // A git failure inside the step was classified where git's words were
+          // still whole; anything else is read here, before the scrub.
+          const failure = err instanceof ClassifiedFailure ? err.failure : classifyGitFailure(raw);
+          throw new ClassifiedFailure(this.redact(raw), failure, { cause: err });
         });
         const took = `${((Date.now() - started) / 1000).toFixed(1)}s`;
         if (result.outcome === 'stopBoot') {
-          // Redacted like every other exit: the message travels beyond logs
-          // (the setup status endpoint surfaces it to admins).
-          throw new Error(
-            redactGitToken(`KB startup step "${step.name}" stopped the boot: ${result.message}`),
-          );
+          // Redacted like every other exit: the message reaches the log.
+          const raw = `KB startup step "${step.name}" stopped the boot: ${result.message}`;
+          throw new ClassifiedFailure(this.redact(raw), classifyGitFailure(raw));
         }
         if (result.outcome === 'skipped') {
           startupLog.warn(`${step.name}: skipped — ${result.reason} (${took})`);
@@ -287,9 +327,19 @@ export class KbStartupRunner {
         await this.finalize(h);
       }
     } catch (err) {
-      if (!safeBoot) throw err;
+      // Every exit carries a scrubbed message: the port scrubs only what the
+      // environment holds, and a token saved on the setup screen is the one
+      // this runner alone knows about. The classification rides along, read
+      // from text no scrub had touched.
+      const msg = this.redact(err instanceof Error ? err.message : String(err));
+      if (!safeBoot) {
+        // An unreachable remote keeps its own type: it is the one failure a
+        // boot survives, and the callers tell it apart by that type.
+        if (err instanceof KbRemoteUnreachableError) throw err;
+        throw new ClassifiedFailure(msg, failureOf(err), { cause: err });
+      }
       startupLog.error('SAFE BOOT: abandoning the phase after a failure — the KB is UNMAINTAINED this run.', {
-        detail: redactGitToken(err instanceof Error ? err.message : String(err)),
+        detail: msg,
       });
       // Reset only DIRTY handles — ones an apply at least began on (the mark
       // is set before the first op, so a mid-apply failure is covered). A
@@ -324,10 +374,12 @@ export class KbStartupRunner {
       // this host, not the remote, and retrying the remote would not change
       // it: that failure stops the boot with its own words. What git itself
       // reported (an exit) or a deadline is the remote's answer, and survivable.
-      if (err instanceof GitRunError && err.exitCode === undefined && !err.timedOut) throw err;
+      // The port's error is the classified failure's cause (see `kb-git.ts`).
+      const run = err instanceof ClassifiedFailure ? err.cause : err;
+      if (run instanceof GitRunError && run.exitCode === undefined && !run.timedOut) throw err;
       this.remoteContact = { at: Date.now(), ok: false };
       throw new KbRemoteUnreachableError(
-        `The knowledge-base remote could not be reached: ${redactGitToken(
+        `The knowledge-base remote could not be reached: ${this.redact(
           err instanceof Error ? err.message : String(err),
         )}`,
         { cause: err },
@@ -539,9 +591,9 @@ export class KbStartupRunner {
         throw err;
       }
       startupLog.warn(`${h.name}: push rejected (concurrent replica?) — rolling back local commit.`, {
-        detail: redactGitToken(msg),
+        detail: this.redact(msg),
       });
-      await git(this.opts.gitRunner, repoDir, user,['reset', '--hard', preCommit]).catch(() => {});
+      await git(this.opts.gitRunner, repoDir, user, ['reset', '--hard', preCommit]).catch(() => {});
     }
   }
 }

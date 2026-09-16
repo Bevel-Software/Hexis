@@ -374,6 +374,7 @@ export async function createCoreServices(
     // the first thing that needs them.
     kbRepoUrl: () => settings.resolve('kbRepoUrl'),
     gitUsername: () => settings.resolve('gitUsername') || 'x-access-token',
+    gitToken: () => settings.resolve('gitToken'),
     workspacesRoot: config.workspacesRoot,
     kbDirName,
     templateDir: config.kbTemplateDir,

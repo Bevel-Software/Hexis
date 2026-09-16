@@ -87,7 +87,9 @@ describe('setup routes after a boot that survived an unreachable remote', () => 
 
     const status = await (await fetch(`${base}/api/setup/status`)).json();
     expect(status.complete).toBe(false);
-    expect(status.kbInitError).toMatch(/could not be reached/);
+    // Classified for the setup screen, never the raw message.
+    expect(status.kbInit).toMatchObject({ kind: expect.any(String), cause: expect.any(String) });
+    expect(JSON.stringify(status)).not.toContain('could not be reached');
   });
 
   it('a save retries the phase, and the gate opens once the runner no longer stands on a failure', async () => {
@@ -102,7 +104,7 @@ describe('setup routes after a boot that survived an unreachable remote', () => 
 
     const status = await (await fetch(`${base}/api/setup/status`)).json();
     expect(status.complete).toBe(true);
-    expect(status.kbInitError).toBeUndefined();
+    expect(status.kbInit).toBeUndefined();
   });
 
   it('the runner clearing its own failure — the background retry succeeding — opens the gate without a save', async () => {
