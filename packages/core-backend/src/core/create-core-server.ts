@@ -289,6 +289,10 @@ export async function createCoreServer(
   // from that template; the runner then brings every branch up to this build
   // before any route can serve KB content. Throws to stop the boot (the
   // container's restart policy is the retry) — see kb-startup-runner.ts.
+  //
+  // Runs in the booting process whether or not it holds the commit-worker
+  // lease, so on a redeploy it overlaps the outgoing holder's commits for the
+  // seconds it takes — the documented window at `holdCommitWorkerLease`.
   try {
     await core.kbStartupRunner.runAll();
   } catch (err) {

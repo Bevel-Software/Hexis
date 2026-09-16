@@ -8,8 +8,6 @@ import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.j
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
-/** See `CoreConfig.workspaceRetentionMs`. */
-const DEFAULT_WORKSPACE_RETENTION_DAYS = 30;
 /** The largest delay a Node timer honours; anything larger fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -243,16 +241,6 @@ export class CoreConfig {
    */
   readonly gitTimeoutMs: number;
   /**
-   * How long a branch's clone may go unopened before the idle sweep retires
-   * it from the workspaces volume, in milliseconds; `0` switches the sweep
-   * off. From `WORKSPACE_RETENTION_DAYS`, default 30. A retired clone costs
-   * its next opener one re-clone and nothing else — the sweep never touches a
-   * clone with unpublished work — so the knob trades disk against that
-   * re-clone, and a deployment with a large knowledge base and a slow git
-   * host may want it longer.
-   */
-  readonly workspaceRetentionMs: number;
-  /**
    * Public base URL of THIS backend, used to build OAuth redirect URIs.
    * Must match a redirect URI registered with the OAuth provider(s).
    * Defaults to `https://<DOMAIN>` when `DOMAIN` is set.
@@ -406,13 +394,6 @@ export class CoreConfig {
       Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS
         ? gitTimeout
         : DEFAULT_GIT_TIMEOUT_MS;
-    // Zero is a meaning ("never retire"), so it is honoured; anything that is
-    // not a non-negative number is a misconfiguration and gets the default.
-    const retentionDays = Number((process.env.WORKSPACE_RETENTION_DAYS ?? '').trim() || NaN);
-    this.workspaceRetentionMs =
-      Number.isFinite(retentionDays) && retentionDays >= 0
-        ? retentionDays * 86_400_000
-        : DEFAULT_WORKSPACE_RETENTION_DAYS * 86_400_000;
     this.publicBackendUrl = (
       process.env.PUBLIC_BACKEND_URL ||
       (domain ? `https://${domain}` : `http://localhost:${this.port}`)

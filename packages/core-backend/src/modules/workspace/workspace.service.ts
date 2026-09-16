@@ -37,22 +37,6 @@ interface HeldTurn {
 }
 
 /**
- * The file whose mtime records when a clone was last OPENED — inside `.git`,
- * where git ignores unknown files and the file tree never looks. See
- * {@link WorkspaceService.idleWorkspaces} for what reads it.
- */
-const LAST_OPENED_STAMP = 'hexis-last-opened';
-/** How often at most one process re-stamps a clone it keeps opening. */
-const STAMP_INTERVAL_MS = 60 * 60 * 1000;
-
-/** A clone no one has opened for at least `idleMs`. */
-export interface IdleWorkspace {
-  id: string;
-  branch: string;
-  idleMs: number;
-}
-
-/**
  * Workspaces are per-branch, not per-user (PLAN §3). One on-disk clone per
  * branch name, shared by every user editing that branch — coordination of
  * concurrent edits lives in the file-lock service, not in giving each user
@@ -209,12 +193,6 @@ export class WorkspaceService implements IWorkspaceService {
    * each other's working tree.
    */
   private readonly inFlightBootstraps = new Map<string, Promise<void>>();
-
-  /**
-   * When this process last wrote a branch's last-opened stamp, so a branch
-   * opened on every request costs one `utimes` an hour rather than one each.
-   */
-  private readonly lastStampAt = new Map<string, number>();
 
   /** Per-workspace-dir `git fetch origin` timestamp + in-flight tracker. */
   private readonly lastFetchAt = new Map<string, number>();
@@ -480,22 +458,8 @@ export class WorkspaceService implements IWorkspaceService {
    * Get-or-create the per-branch workspace. Idempotent — repeat calls for
    * the same branch reuse the existing clone. Concurrent first-callers
    * share one bootstrap via `inFlightBootstraps`.
-   *
-   * This is also where a clone counts as OPENED for the idle sweep (see
-   * {@link idleWorkspaces}). It is the one call every deliberate use of a
-   * branch makes — the UI's workspace load, the workflow routes' warm-up,
-   * the agent tools' branch switch — and the one call the background
-   * machinery does NOT make: the remote sync, the commit worker and the
-   * sweep itself resolve ids through `getWorkspacePath`, so a webhook that
-   * pulls every clone on the volume does not make every clone look in use.
    */
   async getOrCreateForBranch(branch: string): Promise<WorkspaceInfo> {
-    const info = await this.openOrCreateForBranch(branch);
-    await this.stampOpened(branch, info.absolutePath);
-    return info;
-  }
-
-  private async openOrCreateForBranch(branch: string): Promise<WorkspaceInfo> {
     assertValidBranchName(branch);
     const id = workspaceIdForBranch(branch);
     const workspaceDir = path.join(this.workspacesRoot, id);
@@ -591,81 +555,6 @@ export class WorkspaceService implements IWorkspaceService {
    */
   async getOrCreateForUser(_user: AuthUser, branch?: string): Promise<WorkspaceInfo> {
     return this.getOrCreateForBranch(branch ?? DEFAULT_BRANCH);
-  }
-
-  private stampPath(workspaceDir: string): string {
-    return path.join(workspaceDir, this.kbDirName, '.git', LAST_OPENED_STAMP);
-  }
-
-  /**
-   * Record that `branch` was opened now, by touching its stamp. Never throws
-   * and never blocks an open on a stamp that cannot be written: a clone whose
-   * `.git` is unwritable is a clone the sweep leaves alone anyway (it fails
-   * closed on a missing stamp only when the `.git` mtime is missing too).
-   */
-  private async stampOpened(branch: string, workspaceDir: string): Promise<void> {
-    const now = Date.now();
-    const last = this.lastStampAt.get(branch);
-    if (last !== undefined && now - last < STAMP_INTERVAL_MS) return;
-    const stamp = this.stampPath(workspaceDir);
-    const when = new Date(now);
-    try {
-      try {
-        await fs.utimes(stamp, when, when);
-      } catch {
-        await fs.writeFile(stamp, '');
-      }
-      // Recorded only once the stamp is on disk: a throttle set on a failed
-      // write would hold every retry off for an hour while the clone's
-      // recorded age fell further behind its use.
-      this.lastStampAt.set(branch, now);
-    } catch {
-      // The next open tries again; see `lastOpenedAt` for what the sweep
-      // reads meanwhile.
-    }
-  }
-
-  /**
-   * When `workspaceDir`'s clone was last opened, as a timestamp — or `null`
-   * when that cannot be told, which the caller treats as "not idle".
-   *
-   * Two sources, the later wins: the stamp {@link getOrCreateForBranch}
-   * writes, and the mtime of `.git` itself, which every commit, checkout and
-   * rebase bumps (git creates and removes `index.lock` there). The second is
-   * what dates a clone from before the stamp existed, and what keeps a clone
-   * someone is committing to through a path that never opened it from
-   * reading as idle.
-   */
-  private async lastOpenedAt(workspaceDir: string): Promise<number | null> {
-    const gitDir = path.join(workspaceDir, this.kbDirName, '.git');
-    const times = await Promise.all(
-      [this.stampPath(workspaceDir), gitDir].map((p) => fs.stat(p).then((s) => s.mtimeMs, () => null)),
-    );
-    const known = times.filter((t): t is number => t !== null);
-    return known.length > 0 ? Math.max(...known) : null;
-  }
-
-  /**
-   * Every finished clone on disk that no one has opened for at least
-   * `olderThanMs`, oldest first. Read from the DISK like
-   * {@link listClonedWorkspaces}, because the clones worth retiring are
-   * precisely the ones nothing in this process has touched since it started.
-   *
-   * This only names candidates. Whether a candidate may go — no unpushed
-   * commit, nothing queued, a clean tree — is the git layer's call, made with
-   * the clone locked; see `GitService.retireClone`.
-   */
-  async idleWorkspaces(olderThanMs: number): Promise<IdleWorkspace[]> {
-    const now = Date.now();
-    const idle: IdleWorkspace[] = [];
-    for (const clone of await this.listClonedWorkspaces()) {
-      if (clone.unreadable) continue;
-      const openedAt = await this.lastOpenedAt(path.join(this.workspacesRoot, clone.id));
-      if (openedAt === null) continue;
-      const idleMs = now - openedAt;
-      if (idleMs >= olderThanMs) idle.push({ id: clone.id, branch: clone.branch, idleMs });
-    }
-    return idle.sort((a, b) => b.idleMs - a.idleMs);
   }
 
   private buildWorkspaceInfo(branch: string, workspaceDir: string): WorkspaceInfo {
@@ -944,8 +833,6 @@ export class WorkspaceService implements IWorkspaceService {
     await fs.rm(workspaceDir, { recursive: true, force: true });
     const branch = branchForWorkspaceId(workspaceId);
     this.branchDirs.delete(branch);
-    // A re-created clone starts without a stamp; the next open must write one.
-    this.lastStampAt.delete(branch);
   }
 
   async listFiles(workspaceId: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {

@@ -28,13 +28,7 @@ import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
 import type { IGitRunner } from '../shared/git.contract.js';
 import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
-import {
-  holdCommitWorkerLease,
-  leasedWorkers,
-  periodicTask,
-  withStartupTask,
-  type LeaseLoopHandle,
-} from './lifecycle.js';
+import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -924,18 +918,7 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  // The idle-clone sweep rides the same lease as the commit worker: it removes
-  // clones from the shared volume, which is exactly the kind of work only one
-  // process may do at a time. Hourly is plenty against a retention measured in
-  // days; the first run waits ten minutes so a boot is not also a sweep.
-  const idleCloneSweep = periodicTask(
-    async () => {
-      await workflowService.retireIdleWorkspaces(config.workspaceRetentionMs);
-    },
-    { label: 'idle-clone sweep', intervalMs: 60 * 60 * 1000, initialDelayMs: 10 * 60 * 1000 },
-  );
-  const drain = withStartupTask(pendingCommitsWorker, reconcileQueue);
-  const leased = config.workspaceRetentionMs > 0 ? leasedWorkers(drain, idleCloneSweep) : drain;
+  const leased = withStartupTask(pendingCommitsWorker, reconcileQueue);
   // Not `start()`: the worker runs only while this process holds the
   // commit-worker lease. On a redeploy the outgoing container still holds it,
   // so this one serves requests and declines to drain until that one exits;

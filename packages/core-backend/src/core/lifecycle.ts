@@ -71,6 +71,19 @@ function defaultSleep(ms: number): Promise<void> {
  * session dies only when the database or the network does — a fault the
  * whole deployment is already reporting, not a redeploy, where the outgoing
  * holder releases only after its worker has stopped.
+ *
+ * THE OTHER WINDOW, ON EVERY REDEPLOY. The knowledge-base startup phase — the
+ * boot's maintenance of the protected-branch clones, and its retry while the
+ * remote is unreachable — runs in the process that is booting, whether or
+ * not that process holds the lease (see `createCoreServer`). For the seconds
+ * the phase takes, the replacement writes to the shared clones while the
+ * outgoing holder may still be committing to them. This is known and left
+ * open here: closing it means running the phase only in the holder — before
+ * the routes open when the lease is free, as the first leased task when it
+ * is not — since waiting for the lease at boot would deadlock the redeploy
+ * (the outgoing container stops only once the new one is healthy, and the
+ * new one is healthy only after boot). That reshapes the boot and is its own
+ * change.
  */
 export function holdCommitWorkerLease(
   lease: AdvisoryLease,
@@ -150,74 +163,6 @@ export function holdCommitWorkerLease(
   };
 }
 
-export interface PeriodicTaskOptions {
-  /** Names the task in its log lines. */
-  label: string;
-  /** Time between the end of one run and the start of the next. */
-  intervalMs: number;
-  /** Time before the first run; defaults to `intervalMs`. */
-  initialDelayMs?: number;
-  /** Test seam — defaults to `setTimeout` wrapped as a promise. */
-  sleep?: (ms: number) => Promise<void>;
-  log?: (message: string) => void;
-}
-
-/**
- * A housekeeping job as a {@link LeasedWorker}, so it runs exactly where the
- * commit worker runs: in the one process holding the lease. Anything that
- * touches the shared clone volume on a timer belongs here rather than on a
- * bare `setInterval`, for the same reason the commit worker does — two
- * processes overlap on every redeploy, and two sweeps of one volume is the
- * interleaving the lease exists to rule out.
- *
- * A run that throws is logged and the schedule continues; a `stop()` during
- * a run awaits the run, and one during the wait ends the wait at once.
- */
-export function periodicTask(run: () => Promise<void>, opts: PeriodicTaskOptions): LeasedWorker {
-  const sleep = opts.sleep ?? defaultSleep;
-  const log = opts.log ?? ((message: string) => logger('lifecycle').info(message));
-  const initialDelayMs = opts.initialDelayMs ?? opts.intervalMs;
-
-  let running = false;
-  let loop: Promise<void> | null = null;
-  let wake: (() => void) | null = null;
-
-  const wait = (ms: number) =>
-    Promise.race([
-      sleep(ms),
-      new Promise<void>((resolve) => {
-        wake = resolve;
-      }),
-    ]).finally(() => {
-      wake = null;
-    });
-
-  return {
-    start() {
-      if (running) return;
-      running = true;
-      loop = (async () => {
-        await wait(initialDelayMs);
-        while (running) {
-          try {
-            await run();
-          } catch (err) {
-            log(`${opts.label} failed: ${String(err)}`);
-          }
-          if (running) await wait(opts.intervalMs);
-        }
-      })();
-    },
-    async stop() {
-      if (!running) return;
-      running = false;
-      wake?.();
-      await loop;
-      loop = null;
-    },
-  };
-}
-
 /**
  * A worker whose start is preceded by one asynchronous task, run under the
  * same lease: the commit queue's recovery, which resets rows a dead holder
@@ -244,24 +189,6 @@ export function withStartupTask(
     async stop() {
       if (starting) await starting;
       await worker.stop();
-    },
-  };
-}
-
-/**
- * Several workers as one, for the lease loop: all start when the lease is
- * taken, all stop when it is lost or the process ends. A stop is awaited
- * for every member even when one of them fails to stop.
- */
-export function leasedWorkers(...workers: LeasedWorker[]): LeasedWorker {
-  return {
-    start() {
-      for (const worker of workers) worker.start();
-    },
-    async stop() {
-      const outcomes = await Promise.allSettled(workers.map((worker) => worker.stop()));
-      const failed = outcomes.find((o): o is PromiseRejectedResult => o.status === 'rejected');
-      if (failed) throw failed.reason;
     },
   };
 }
