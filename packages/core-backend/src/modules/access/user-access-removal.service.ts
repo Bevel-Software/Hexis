@@ -32,9 +32,11 @@ import {
   accessMdDeclaresBodyRules,
   canonicalEmail,
   canonicalRoleName,
+  hasAccessFrontmatterExtension,
   isAccessMdPath,
   parseAccessFile,
   parseOwnAccessEntries,
+  stripComment,
   type ParsedEntry,
   type Verb,
 } from '../access-model/access-grammar.js';
@@ -44,7 +46,10 @@ import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js
 import { emitRolesModel, isGroupRefMember, parseRolesModel } from './roles-edit.js';
 import { emitGroupsModel, parseGroupsModel } from './groups-edit.js';
 import { AdminLockedCommits, type LockedWrite } from './admin-locked-commit.js';
-import { KbReferenceScanner } from './reference-scan.js';
+import { logger } from '../../shared/logging.js';
+import type { ITreeWalker } from '../../shared/fs.contract.js';
+
+const log = logger('user-access-removal');
 
 const ROLES_YAML = 'roles.yaml';
 
@@ -130,6 +135,47 @@ export function removeUserFromAccessText(text: string, repoRel: string, email: s
   return out;
 }
 
+/**
+ * Remove `email` from every member list of a roles/groups file by deleting
+ * its list lines in place — comments, the header and ordering survive. A key
+ * left with no items becomes `Key: []`. Callers check the result parses to
+ * the model they expect and fall back to a canonical re-emit otherwise.
+ */
+export function removeEmailListLines(text: string, email: string): string {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(eol);
+  const out: string[] = [];
+  let removed = false;
+  for (const line of lines) {
+    const m = /^(\s*)-\s+(.*)$/.exec(stripComment(line).replace(/\s+$/, ''));
+    if (m && canonicalEmail(m[2]) === email) {
+      removed = true;
+      continue;
+    }
+    out.push(line);
+  }
+  if (!removed) return text;
+  // A mapping key whose list is now empty: `  Name:` with no deeper item next.
+  const indentOf = (l: string) => /^( *)/.exec(l)![1].length;
+  for (let i = 0; i < out.length; i++) {
+    const content = stripComment(out[i]).replace(/\s+$/, '');
+    if (!/^\s*[^\s-][^:]*:$/.test(content)) continue;
+    let j = i + 1;
+    while (j < out.length && !stripComment(out[j]).trim()) j++;
+    const next = j < out.length ? stripComment(out[j]).replace(/\s+$/, '') : '';
+    const opensChild = next !== '' && indentOf(next) > indentOf(content);
+    const opensList = next !== '' && indentOf(next) === indentOf(content) && /^\s*-(\s|$)/.test(next);
+    if (!opensChild && !opensList && indentOf(content) > 0) {
+      out[i] = `${content} []${out[i].slice(content.length)}`;
+    }
+  }
+  return out.join(eol);
+}
+
+function sameModel(a: { displayName: string; members: string[] }[], b: { displayName: string; members: string[] }[]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 /** Roles listing `email` as a direct member; null when roles.yaml won't parse. */
 function rolesNaming(text: string, email: string): string[] | null {
   try {
@@ -151,12 +197,17 @@ function groupsNaming(text: string, email: string): number {
 
 export class UserAccessRemovalService {
   private readonly locked: AdminLockedCommits;
-  private readonly references: KbReferenceScanner;
 
   constructor(
     private readonly workspaceService: IWorkspaceService,
     workflowService: IWorkflowService,
     private readonly accessControl: IAccessControl,
+    /**
+     * The resolver's own walk. NOT `workspaceService.listFiles`: that honours
+     * `.bevelignore`, and the seeded template hides every `access.md` — a
+     * scan built on it finds no access rule at all.
+     */
+    private readonly disk: ITreeWalker,
     private readonly kbDirName: string,
     /** Live-binding thunk — DEFAULT_BRANCH stays empty until setup. */
     private readonly defaultBranchOf: () => string,
@@ -174,7 +225,6 @@ export class UserAccessRemovalService {
       contendedSubject: 'Roles, groups or access rules',
       validateWrite: makeRolesYamlWriteValidator(kbDirName),
     });
-    this.references = new KbReferenceScanner(workspaceService, kbDirName);
   }
 
   private get defaultBranch(): string {
@@ -186,9 +236,29 @@ export class UserAccessRemovalService {
     return workspaceIdForBranch(this.defaultBranch);
   }
 
+  /**
+   * Every `access.md` and access-frontmatter file (`.md`, `.tool`) in the
+   * checkout, repo-relative — the walk the access resolver itself does, with
+   * `.bevelignore` NOT honoured. A folder that cannot be listed is logged.
+   */
+  private async accessFiles(workspaceId: string): Promise<string[]> {
+    const wsDir = await this.workspaceService.getWorkspacePath(workspaceId);
+    const repoDir = `${wsDir}/${this.kbDirName}`;
+    const out: string[] = [];
+    const { holes } = await this.disk.walkKb(repoDir, [
+      {
+        onFile(dir, name) {
+          if (hasAccessFrontmatterExtension(name)) out.push(dir ? `${dir}/${name}` : name);
+        },
+      },
+    ]);
+    if (holes.length > 0) log.warn(`folders that could not be listed are not scanned: ${holes.join(', ')}`);
+    return out;
+  }
+
   /** Read every file that could name an address: roles, both group files, access files. */
   private async readAll(workspaceId: string): Promise<Map<string, string>> {
-    const candidates = await this.references.collectCandidateFiles(workspaceId);
+    const candidates = await this.accessFiles(workspaceId);
     const paths = [ROLES_YAML, GROUPS_YAML, SYNCED_GROUPS_YAML, ...candidates];
     const texts = await Promise.all(paths.map((p) => this.locked.readKbFile(workspaceId, p)));
     const out = new Map<string, string>();
@@ -324,7 +394,13 @@ export class UserAccessRemovalService {
         }
       }
       if (!changed) return text;
-      const candidate = emitRolesModel(model);
+      const spliced = removeEmailListLines(text, email);
+      let candidate = emitRolesModel(model);
+      try {
+        if (sameModel(parseRolesModel(spliced), model)) candidate = spliced;
+      } catch {
+        // The in-place edit did not parse — the canonical re-emit stands.
+      }
       const v = this.accessControl.validateRolesYaml(candidate);
       if (!v.ok) throw new UserAccessRemovalError(`roles.yaml would be invalid: ${v.errors.join('; ')}`, 422);
       return candidate;
@@ -340,7 +416,13 @@ export class UserAccessRemovalService {
         }
       }
       if (!changed) return text;
-      const candidate = emitGroupsModel(model);
+      const spliced = removeEmailListLines(text, email);
+      let candidate = emitGroupsModel(model);
+      try {
+        if (sameModel(parseGroupsModel(spliced), model) && validateGroupsFile(spliced, GROUPS_YAML).ok) candidate = spliced;
+      } catch {
+        // The in-place edit did not parse — the canonical re-emit stands.
+      }
       const v = validateGroupsFile(candidate, GROUPS_YAML);
       if (!v.ok) throw new UserAccessRemovalError(`groups.yaml would be invalid: ${v.errors.join('; ')}`, 422);
       return candidate;

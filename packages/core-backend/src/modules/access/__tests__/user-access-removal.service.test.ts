@@ -6,12 +6,13 @@ import os from 'node:os';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
-import type { AuthUser, FileTreeEntry } from '@bevel-software/platform-shared';
+import type { AuthUser } from '@bevel-software/platform-shared';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { AccessControlService } from '../access-control.service.js';
 import {
   UserAccessRemovalService,
   countUserEntriesInAccessText,
+  removeEmailListLines,
   removeUserFromAccessText,
 } from '../user-access-removal.service.js';
 
@@ -19,7 +20,9 @@ const KB = 'knowledge-base';
 const ADMIN: AuthUser = { id: 'u-admin', email: 'admin@x.io', name: 'Admin' } as AuthUser;
 const LEE = 'lee@x.io';
 
-const ROLES = `roles:\n  Admin:\n    - admin@x.io\n    - lee@x.io\n  Reviewer:\n    - lee@x.io\n    - rev@x.io\n`;
+// The seeded header comments must survive the edit.
+const ROLES_HEADER = '# Identity → role mapping for access control.\n# only Admins may edit this file.\n';
+const ROLES = `${ROLES_HEADER}roles:\n  Admin:\n    - admin@x.io\n    - lee@x.io\n  Reviewer:\n    - lee@x.io\n    - rev@x.io\n`;
 const GROUPS = `groups:\n  Product:\n    - Lee@x.io\n    - felix@x.io\n  GTM Team:\n    - sara@x.io\n`;
 const ROOT_ACCESS = '---\nwrite:\n  - Admin\n---\n# The knowledge base\n\n- Lee <lee@x.io> is mentioned in prose\n';
 // Body-governed access.md: the frontmatter governs the file, the body the folder.
@@ -35,26 +38,15 @@ async function write(repo: string, rel: string, contents: string): Promise<void>
 
 function stubWorkspace(workspaceDir: string): WorkspaceService {
   const resolve = (wsRel: string) => path.join(workspaceDir, wsRel);
-  const buildTree = async (absDir: string): Promise<FileTreeEntry> => {
-    const rel = path.relative(workspaceDir, absDir).replace(/\\/g, '/');
-    const children: FileTreeEntry[] = [];
-    for (const e of await fs.readdir(absDir, { withFileTypes: true })) {
-      const childAbs = path.join(absDir, e.name);
-      if (e.isDirectory()) children.push(await buildTree(childAbs));
-      else if (e.isFile()) {
-        children.push({
-          name: e.name,
-          relativePath: path.relative(workspaceDir, childAbs).replace(/\\/g, '/'),
-          type: 'file',
-        });
-      }
-    }
-    return { name: path.basename(absDir), relativePath: rel || '.', type: 'directory', children };
-  };
   return {
     getWorkspacePath: async () => workspaceDir,
     getOrCreateForBranch: async () => ({}) as unknown,
-    listFiles: async () => buildTree(workspaceDir),
+    // The real listFiles honours .bevelignore, and the seeded template hides
+    // every access.md and roles.yaml — a scan built on it finds no rule at
+    // all. The service must walk the disk instead, so this stub refuses.
+    listFiles: async () => {
+      throw new Error('listFiles honours .bevelignore and must not drive the scan');
+    },
     readFile: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel), 'utf-8'),
     writeFile: async (_id: string, wsRel: string, content: string) => {
       await fs.mkdir(path.dirname(resolve(wsRel)), { recursive: true });
@@ -117,6 +109,14 @@ describe('access-file text helpers', () => {
   });
 });
 
+describe('removeEmailListLines', () => {
+  it('drops the list lines in place and empties a key it leaves bare', () => {
+    const text = '# header\nroles:\n  Admin:\n    - admin@x.io  # owner\n  Ops:\n    - LEE@x.io # temp\n  Empty: []\n';
+    expect(removeEmailListLines(text, LEE)).toBe('# header\nroles:\n  Admin:\n    - admin@x.io  # owner\n  Ops: []\n  Empty: []\n');
+    expect(removeEmailListLines(text, 'nobody@x.io')).toBe(text);
+  });
+});
+
 describe('UserAccessRemovalService', () => {
   let root: string;
   let repo: string;
@@ -130,6 +130,12 @@ describe('UserAccessRemovalService', () => {
     await write(repo, 'access.md', ROOT_ACCESS);
     await write(repo, 'Sales/access.md', SALES_ACCESS);
     await write(repo, 'Sales/Plan.md', NODE);
+    // The seeded template's ignore file, verbatim — it hides **/access.md.
+    await write(
+      repo,
+      '.bevelignore',
+      await fs.readFile(path.join(__dirname, '../../../../kb-template/.bevelignore'), 'utf-8'),
+    );
     workspace = stubWorkspace(root);
   });
 
@@ -143,7 +149,7 @@ describe('UserAccessRemovalService', () => {
     const access = new AccessControlService(workspace as never, KB, new NodeFs());
     return {
       workflow,
-      service: new UserAccessRemovalService(workspace, workflow.svc, access, KB, () => DEFAULT_BRANCH, undefined, owners),
+      service: new UserAccessRemovalService(workspace, workflow.svc, access, new NodeFs(), KB, () => DEFAULT_BRANCH, undefined, owners),
     };
   }
 
@@ -178,9 +184,11 @@ describe('UserAccessRemovalService', () => {
     expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
     expect(result.stillNamedIn).toEqual([]);
 
-    expect(await read('roles.yaml')).toBe('roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n');
+    expect(await read('roles.yaml')).toBe(`${ROLES_HEADER}roles:\n  Admin:\n    - admin@x.io\n  Reviewer:\n    - rev@x.io\n`);
     expect(await read('groups.yaml')).toBe('groups:\n  Product:\n    - felix@x.io\n  GTM Team:\n    - sara@x.io\n');
     expect(await read('access.md')).toBe(before);
+    // The nested access.md the template's .bevelignore hides is really edited.
+    expect(await read('Sales/access.md')).not.toContain('lee@x.io');
     expect((await service.report(LEE)).total).toBe(0);
     // No locks left behind.
     expect(workflow.locks.size).toBe(0);

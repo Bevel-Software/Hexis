@@ -991,6 +991,7 @@ export async function createCoreServices(
     workspaceService,
     workflowService,
     accessControl,
+    disk,
     kbDirName,
     () => DEFAULT_BRANCH,
     eventBus,
