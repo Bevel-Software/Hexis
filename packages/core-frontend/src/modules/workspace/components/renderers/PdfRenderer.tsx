@@ -4,7 +4,7 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Button } from '../../../../shared/components';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { authFetch } from '../../../../lib/api';
 import { rawFileUrl } from '../../services/workspace.api';
 import { DownloadFileButton } from './DownloadFileButton';
@@ -36,7 +36,7 @@ GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
  * `onSave` / `onValueChange` / `readOnly`.
  */
 export function PdfRenderer({ filePath }: FileRendererProps) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [error, setError] = useState<string | null>(null);

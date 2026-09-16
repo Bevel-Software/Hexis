@@ -10,6 +10,7 @@ import { LegacyOfficeRenderer } from './LegacyOfficeRenderer';
 import { lazyRenderer } from './lazyRenderer';
 
 export type { FileRendererProps, RendererSaveState } from './types';
+export { RendererWorkspaceContext, useRendererWorkspaceId } from './rendererWorkspace';
 
 /**
  * The document viewers are code-split: their parsers (xlsx ~141 KB gzip,
@@ -93,6 +94,26 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
   if (name === ACCESS_RULES_FILE) return TextRenderer;
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
   return renderersByExtension[ext] ?? fallbackRenderer;
+}
+
+/**
+ * Does this file get a real VIEWER — a renderer that fetches the file and
+ * shows it — as opposed to the text fallback or the no-preview note?
+ *
+ * Derived from the registry rather than kept as a second list, so a renderer
+ * added (or removed) above answers here on the same day. The two negatives
+ * are the whole definition: `TextRenderer` is the fallback for anything
+ * unmapped (a `.zip`, an unknown binary — bytes nobody can read as text), and
+ * `LegacyOfficeRenderer` renders nothing at all, it is a sentence and a
+ * Download.
+ *
+ * The change-request dialog asks this before offering to show a proposed
+ * document: with a viewer it mounts the same one the file page uses; without
+ * one it keeps its note and offers the bytes.
+ */
+export function hasFileViewer(filePath: string): boolean {
+  const renderer = getFileRenderer(filePath);
+  return renderer !== fallbackRenderer && renderer !== LegacyOfficeRenderer;
 }
 
 /**
