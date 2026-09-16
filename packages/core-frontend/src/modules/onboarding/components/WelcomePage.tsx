@@ -38,7 +38,7 @@ export function WelcomePage() {
   const onboarding = useOnboarding();
   const toast = useLibraryToast();
   const navigate = useNavigate();
-  const [clientId, setClientId] = useState<AgentClient['id']>('local');
+  const [clientId, setClientId] = useState<AgentClient['id']>('claude');
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
 
   // Once, on arrival — this is what makes the welcome redirect one-time.
@@ -170,7 +170,7 @@ export function WelcomePage() {
    * Selection FOLLOWS focus, which is the pattern's default for a plugin this
    * cheap to change — picking a client re-renders one snippet, nothing is
    * submitted, so there is no cost to arriving on an option and no reason to
-   * make people confirm. Wraps at both ends: three options in a row have no
+   * make people confirm. Wraps at both ends: four options in a row have no
    * meaningful edge to stop at.
    *
    * Paired with the roving `tabIndex` below — one stop for the whole plugin,
