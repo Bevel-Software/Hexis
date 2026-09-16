@@ -1038,3 +1038,209 @@ describe('ManageAccessDialog: the reworked layout', () => {
     expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
   });
 });
+
+// ── access words, explained where they are met ──
+//
+// "Group", "Role" and "Plugin" are app words a business user has no reason to
+// know, and "the root folder" is a repository word. The dialog calls the root
+// the whole workspace, explains all four kinds of grantee behind an info
+// control beside the field, and hangs each kind's line on its tag.
+describe('ManageAccessDialog: explaining the access words', () => {
+  const HELP = {
+    user: 'People: one person, by email.',
+    group:
+      'Groups: a way to group people together and give them access in the app. A group can be a team or department, like Engineering, or a functional group, like skill reviewers.',
+    role: 'Roles: special app roles that give people extra abilities in the app. They are pre-defined; you can only add or remove people. Example: Admin, which opens the platform and user management screens.',
+    plugin: 'Plugins: the readers, writers or owners of a plugin, whoever they are at the time.',
+  };
+
+  const view = (over: Partial<AccessResponse> = {}): AccessResponse =>
+    ({
+      canRead: true,
+      canWrite: true,
+      canDownload: false,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: true, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+      ...over,
+    }) as AccessResponse;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['Admin'],
+      groups: ['GTM Team'],
+      pluginPrincipals: ['crm'],
+      people: [],
+      peopleWithheld: false,
+    });
+  });
+
+  it('calls a grant at the repository root the whole workspace', async () => {
+    const user = userEvent.setup();
+    const onManageAncestor = vi.fn();
+    api.fetchFileAccess.mockResolvedValue(
+      view({
+        eligible: { roles: [], users: [A] },
+        readers: { restricted: true, roles: [], users: [A] },
+        sources: { 'u:alice@x.com': { read: [{ kind: 'ancestor', path: 'access.md' }] } },
+      }),
+    );
+    render(
+      <ManageAccessDialog entry={ENTRY} onClose={() => {}} onManageAncestor={onManageAncestor} />,
+    );
+
+    await user.click(
+      await screen.findByRole('button', { name: /People invited to the whole workspace/ }),
+    );
+    expect(screen.getByText('via the whole workspace')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Manage the whole workspace →' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/root folder/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Remove$/ }));
+    expect(
+      await screen.findByRole('heading', { name: 'Remove from the whole workspace?' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Remove from the whole workspace' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/root folder/i)).not.toBeInTheDocument();
+  });
+
+  it('opens the four explanations beside the field, and closes on a second press', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await screen.findByRole('button', { name: 'What can I share with?' });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await user.click(trigger);
+
+    const list = screen.getByRole('list', { name: 'What can I share with?' });
+    expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      HELP.user,
+      HELP.group,
+      HELP.role,
+      HELP.plugin,
+    ]);
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+
+    await user.click(trigger);
+    expect(screen.queryByRole('list', { name: 'What can I share with?' })).not.toBeInTheDocument();
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  // A press puts focus on the control, so a second press needs no hand-back of
+  // its own; what matters is that closing from the keyboard leaves it there,
+  // ready to open again, rather than dropping it to the page.
+  it('opens and closes from the keyboard with focus kept on the control', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await screen.findByRole('button', { name: 'What can I share with?' });
+    trigger.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('list', { name: 'What can I share with?' })).toBeInTheDocument();
+
+    await user.keyboard('{Enter}');
+    expect(screen.queryByRole('list', { name: 'What can I share with?' })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+
+    await user.keyboard(' ');
+    expect(screen.getByRole('list', { name: 'What can I share with?' })).toBeInTheDocument();
+  });
+
+  it('closes on Escape without closing the dialog, and hands focus back', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    api.fetchFileAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={onClose} />);
+
+    const trigger = await screen.findByRole('button', { name: 'What can I share with?' });
+    await user.click(trigger);
+    expect(screen.getByRole('list', { name: 'What can I share with?' })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('list', { name: 'What can I share with?' })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  // Focus is not pulled back here: the click put it where the user wanted it.
+  it('closes on an outside click, leaving the dialog open', async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const trigger = await screen.findByRole('button', { name: 'What can I share with?' });
+    await user.click(trigger);
+    expect(screen.getByRole('list', { name: 'What can I share with?' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('dialog'));
+    expect(screen.queryByRole('list', { name: 'What can I share with?' })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it("hangs each kind's line on the suggestion tags", async () => {
+    const user = userEvent.setup();
+    api.fetchFileAccess.mockResolvedValue(view());
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    await user.type(await screen.findByPlaceholderText(/add people, groups, roles or plugins/i), 'a');
+    await screen.findByRole('button', { name: /GTM Team/ });
+
+    const groupTag = screen.getByText('group');
+    expect(groupTag).toHaveAttribute('title', HELP.group);
+    expect(groupTag).toHaveAccessibleDescription(HELP.group);
+    const roleTag = screen.getByText('role');
+    expect(roleTag).toHaveAttribute('title', HELP.role);
+    expect(roleTag).toHaveAccessibleDescription(HELP.role);
+    for (const pluginTag of screen.getAllByText('plugin')) {
+      expect(pluginTag).toHaveAttribute('title', HELP.plugin);
+      expect(pluginTag).toHaveAccessibleDescription(HELP.plugin);
+    }
+  });
+
+  it("hangs each kind's line on the grantee row badges", async () => {
+    api.fetchFileAccess.mockResolvedValue(
+      view({
+        eligible: {
+          principals: [{ name: 'GTM Team', kind: 'group' }],
+          roles: ['GTM Team'],
+          users: [],
+        },
+        readers: {
+          restricted: true,
+          principals: [
+            { name: 'Engineering', kind: 'role' },
+            { name: 'plugin/crm/read', kind: 'plugin' },
+          ],
+          roles: ['Engineering', 'plugin/crm/read'],
+          users: [],
+        },
+        sources: {
+          'r:gtm team': { write: [{ kind: 'direct' }] },
+          'r:engineering': { read: [{ kind: 'direct' }] },
+          'p:plugin/crm/read': { read: [{ kind: 'direct' }] },
+        },
+      } as Partial<AccessResponse>),
+    );
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const groupBadge = await screen.findByText('Group');
+    expect(groupBadge).toHaveAttribute('title', HELP.group);
+    expect(groupBadge).toHaveAccessibleDescription(HELP.group);
+    const roleBadge = screen.getByText('Role');
+    expect(roleBadge).toHaveAttribute('title', HELP.role);
+    expect(roleBadge).toHaveAccessibleDescription(HELP.role);
+    const pluginBadge = screen.getByText('Plugin');
+    expect(pluginBadge).toHaveAttribute('title', HELP.plugin);
+    expect(pluginBadge).toHaveAccessibleDescription(HELP.plugin);
+  });
+});
