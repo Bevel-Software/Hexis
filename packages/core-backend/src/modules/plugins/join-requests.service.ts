@@ -6,6 +6,9 @@ import {
   type IWorkflowService,
 } from '@bevel-software/platform-shared';
 import { type WorkspaceService } from '../workspace/workspace.service.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { pendingProposals, type JoinProposal } from './join-proposals.js';
 
@@ -133,8 +136,8 @@ export class JoinRequestsService {
         wsId,
       );
     } catch (err) {
-      console.warn(
-        `[plugins] could not close settled join request #${cr.number}: ${
+      log.warn(
+        `could not close settled join request #${cr.number}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -145,8 +148,8 @@ export class JoinRequestsService {
     } catch (err) {
       // The request is closed either way; a leftover branch is cosmetic and
       // the author can still delete it themselves.
-      console.warn(
-        `[plugins] closed join request #${cr.number} but could not delete "${cr.branch}": ${
+      log.warn(
+        `closed join request #${cr.number} but could not delete "${cr.branch}": ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

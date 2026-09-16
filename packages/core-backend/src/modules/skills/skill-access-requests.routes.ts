@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('skills');
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
   DEFAULT_BRANCH,
@@ -143,7 +146,7 @@ export function createSkillAccessRequestRoutes(deps: {
         res.status(err.status).json(domainErrorBody(err));
         return;
       }
-      console.error('[skills] failed to open an access request:', err);
+      log.error('failed to open an access request:', { err });
       res.status(500).json({ error: 'Failed to request access' });
     }
   });
@@ -170,7 +173,7 @@ export function createSkillAccessRequestRoutes(deps: {
       const crs = await workflow.listChangeRequests();
       res.json({ requests: await joinRequests.list(ctx.folder, ctx.folder, crs, ctx.user) });
     } catch (err) {
-      console.error('[skills] failed to list access requests:', err);
+      log.error('failed to list access requests:', { err });
       res.status(500).json({ error: 'Failed to list access requests' });
     }
   });
@@ -191,7 +194,7 @@ export function createSkillAccessRequestRoutes(deps: {
       }
       res.json({ closed: await joinRequests.reconcile(ctx.folder, ctx.folder, cr, ctx.user) });
     } catch (err) {
-      console.error('[skills] failed to reconcile an access request:', err);
+      log.error('failed to reconcile an access request:', { err });
       res.status(500).json({ error: 'Failed to reconcile the request' });
     }
   });

@@ -1,4 +1,7 @@
 import type { ISecretsVaultService, OAuthProviderConfig } from './secrets-vault.contract.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp-oauth-discovery');
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { utcpNamespacedKey, MCP_OAUTH_VAR } from '../../shared/utcp-namespace.js';
 
@@ -142,7 +145,7 @@ export class McpOAuthDiscoveryService {
       existing = await this.deps.secretsVault.getSharedOAuthProvider(key);
     } catch (err) {
       const reason = `provider lookup failed (not re-registering): ${err instanceof Error ? err.message : String(err)}`;
-      console.warn(`[mcp-oauth-discovery] "${manualName}" (${mcpUrl}): ${reason}`);
+      log.warn(`"${manualName}" (${mcpUrl}): ${reason}`);
       return { status: 'unsupported', reason };
     }
     if (existing) return this.remember(key, { status: 'oauth', provider: existing });
@@ -157,7 +160,7 @@ export class McpOAuthDiscoveryService {
       };
     }
     if (result.status === 'unsupported') {
-      console.warn(`[mcp-oauth-discovery] "${manualName}" (${mcpUrl}): ${result.reason}`);
+      log.warn(`"${manualName}" (${mcpUrl}): ${result.reason}`);
     }
     return this.remember(key, result);
   }
@@ -234,7 +237,7 @@ export class McpOAuthDiscoveryService {
         }))
         .then((result) => {
           if (result.status === 'unsupported') {
-            console.warn(`[mcp-oauth-discovery] "${manualName}" (${mcpUrl}): ${result.reason}`);
+            log.warn(`"${manualName}" (${mcpUrl}): ${result.reason}`);
           }
           this.asCache.set(mcpUrl, { result, expiresAt: this.now() + NEGATIVE_TTL_MS });
           return result;

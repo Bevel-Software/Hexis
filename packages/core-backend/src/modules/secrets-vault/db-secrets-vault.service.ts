@@ -1,4 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('vault');
 import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { secrets } from '../database/schema.js';
@@ -121,7 +124,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       try {
         listener(userId);
       } catch (err) {
-        console.warn('[vault] mutation listener failed:', err instanceof Error ? err.message : err);
+        log.warn('mutation listener failed:', { err });
       }
     }
   }

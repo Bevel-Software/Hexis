@@ -1,4 +1,7 @@
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tool-manuals');
 import fs from 'node:fs/promises';
 import { parse as parseYaml } from 'yaml';
 import '@utcp/http'; // side effect: register the 'http' call-template type (http + inline sub-manuals)
@@ -266,9 +269,7 @@ export class ToolManualService implements IToolManualService {
       try {
         callTemplate = callTemplateSerializer.validateDict(this.buildCallTemplateDict(m));
       } catch (err) {
-        console.warn(
-          `[tool-manuals] no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
-        );
+        log.warn(`no valid call template for "${m.path}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     return { name: m.name, type: m.type, remote: m.remote, healthCheck: m.healthCheck, callTemplate };
@@ -286,9 +287,7 @@ export class ToolManualService implements IToolManualService {
       } catch (err) {
         // A `.tool` that produces an invalid call-template is dropped here — at
         // the producing boundary — so the served list is always valid.
-        console.warn(
-          `[tool-manuals] skipping "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
-        );
+        log.warn(`skipping "${m.path}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     return out;
@@ -575,9 +574,7 @@ export class ToolManualService implements IToolManualService {
           ];
         } catch (err) {
           // Discovery must never break the catalog — the tool just stays bare.
-          console.warn(
-            `[tool-manuals] mcp auth discovery failed for "${m.path}": ${err instanceof Error ? err.message : String(err)}`,
-          );
+          log.warn(`mcp auth discovery failed for "${m.path}": ${err instanceof Error ? err.message : String(err)}`);
         }
       }),
     ]);
@@ -633,7 +630,7 @@ export class ToolManualService implements IToolManualService {
     } catch (err) {
       // Never break the catalog — the sign-in just isn't ready yet.
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[tool-manuals] sign-in endpoint discovery failed for "${m.path}": ${msg}`);
+      log.warn(`sign-in endpoint discovery failed for "${m.path}": ${msg}`);
       m.setup = { kind: 'oauth-manual', reason: `sign-in endpoint discovery failed: ${msg}` };
     }
   }
@@ -701,8 +698,8 @@ export class ToolManualService implements IToolManualService {
     // reachable — and the consequence is that two manuals share one set of
     // vault keys, with either able to resolve the other's secrets.
     return dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m, ns) =>
-      console.warn(
-        `[tool-manuals] skipping "${m.path}": manual "${m.name}" resolves to the secret-variable ` +
+      log.warn(
+        `skipping "${m.path}": manual "${m.name}" resolves to the secret-variable ` +
           `namespace "${ns}", which another manual already uses. Names differing only in \`-\` vs \`_\` ` +
           'share one namespace — rename one of them.',
       ),

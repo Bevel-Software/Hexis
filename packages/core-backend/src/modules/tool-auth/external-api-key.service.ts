@@ -1,4 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('external-api-key');
 import { and, asc, desc, eq, isNotNull, isNull, type SQL } from 'drizzle-orm';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
@@ -126,7 +129,7 @@ export class ExternalApiKeyService implements IExternalApiKeyService {
     // the worst case is a slightly stale `last_used_at`, which is fine for
     // a "when was this key last used" audit view.
     this.touchLastUsed(row.tokenId).catch((err) => {
-      console.warn('[external-api-key] touchLastUsed failed:', err);
+      log.warn('touchLastUsed failed:', { err });
     });
 
     return {

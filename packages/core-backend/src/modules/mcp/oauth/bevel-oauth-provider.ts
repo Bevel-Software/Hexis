@@ -1,4 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('mcp-oauth');
 import { and, eq, gt, isNull, lt, or } from 'drizzle-orm';
 import type { Response } from 'express';
 import type {
@@ -307,7 +310,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       .update(oauthTokens)
       .set({ lastUsedAt: now })
       .where(eq(oauthTokens.id, row.id))
-      .then(undefined, (err) => console.warn('[mcp-oauth] touch lastUsedAt failed:', err));
+      .then(undefined, (err) => log.warn('touch lastUsedAt failed:', { err }));
     return {
       token,
       clientId: row.clientId,
@@ -377,7 +380,7 @@ export class BevelOAuthProvider implements OAuthServerProvider {
       );
       await this.deps.db.delete(oauthAuthCodes).where(lt(oauthAuthCodes.expiresAt, cutoff));
     } catch (err) {
-      console.warn('[mcp-oauth] token-table prune failed (non-fatal):', err instanceof Error ? err.message : err);
+      log.warn('token-table prune failed (non-fatal):', { err });
     }
     await this.deps.db.insert(oauthTokens).values({
       accessTokenHash: hashToken(accessToken),

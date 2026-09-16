@@ -1,4 +1,10 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+// The audit lines this file writes have always carried their own tags —
+// `access.grant`, `access.revoke` and their sub-cases — so each keeps it.
+const grantLog = logger('access.grant');
+const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH, pluginManifestName } from '@bevel-software/platform-shared';
 import type {
@@ -786,17 +792,15 @@ export function createAccessRoutes(
       // re-resolve reads the just-written bytes (the async commit's own
       // invalidate is too late for this synchronous response).
       accessControl.invalidate(workspaceId);
-      console.log(
-        `[access.grant] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+      grantLog.info(
+        `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
           `verb=${verb} kind=${kind} target=${repoRelTarget} ` +
           `principalKind=${principal.kind} -> ok`,
       );
       res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
     } catch (err) {
       if (err instanceof AccessDeniedError) {
-        console.warn(
-          `[access.grant.denied] ws=${workspaceId} byUserId=${user.id} -> 403`,
-        );
+        logger('access.grant.denied').warn(`ws=${workspaceId} byUserId=${user.id} -> 403`);
       }
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -907,8 +911,8 @@ export function createAccessRoutes(
         });
 
         accessControl.invalidate(workspaceId);
-        console.log(
-          `[access.revoke.remove-from-parent] ws=${workspaceId} branch=${branch} ` +
+        logger('access.revoke.remove-from-parent').info(
+          `ws=${workspaceId} branch=${branch} ` +
             `byUserId=${user.id} ancestor=${ancestorDir} target=${repoRelTarget} verb=${verb ?? 'all'} -> ok`,
         );
         res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
@@ -924,8 +928,8 @@ export function createAccessRoutes(
           await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb, revokeOpts);
         });
         accessControl.invalidate(workspaceId);
-        console.log(
-          `[access.revoke.deny-here] ws=${workspaceId} branch=${branch} ` +
+        logger('access.revoke.deny-here').info(
+          `ws=${workspaceId} branch=${branch} ` +
             `byUserId=${user.id} target=${repoRelTarget} verb=${verb ?? 'all'} -> ok`,
         );
         res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
@@ -968,8 +972,8 @@ export function createAccessRoutes(
         const sourcesToCheck: GrantSources = verb ? { [verb]: sources[verb] } : sources;
         const inherited = collectInheritedSources(sourcesToCheck);
         if (inherited.length > 0) {
-          console.log(
-            `[access.revoke.inherited] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+          logger('access.revoke.inherited').info(
+            `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
               `target=${repoRelTarget} ancestors=${inherited.join(',')}`,
           );
           res.status(409).json({
@@ -989,15 +993,15 @@ export function createAccessRoutes(
       // shows an `ancestor` source). The dialog reads that to chain into
       // "Remove from parent?" with no extra response field needed (the old
       // `stillInherited` shortcut is subsumed by the richer per-verb sources).
-      console.log(
-        `[access.revoke] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+      revokeLog.info(
+        `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
           `kind=${kind} target=${repoRelTarget} principalKind=${principal.kind} changed=${changed} -> ok`,
       );
       res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
     } catch (err) {
       if (err instanceof AccessDeniedError || err instanceof AccessMutationError) {
-        console.warn(
-          `[access.revoke.denied] ws=${workspaceId} byUserId=${user.id} -> ${
+        logger('access.revoke.denied').warn(
+          `ws=${workspaceId} byUserId=${user.id} -> ${
             err instanceof WorkflowDomainError ? err.status : 500
           }`,
         );
@@ -1138,7 +1142,7 @@ export function createAccessRoutes(
     if (!user) return;
     try {
       const roles = await rolesAdmin.recover(user);
-      console.warn(`[access.roles.recover] roles.yaml recovered byUserId=${user.id}`);
+      logger('access.roles.recover').warn(`roles.yaml recovered byUserId=${user.id}`);
       res.json({ roles });
     } catch (err) {
       const { status, body } = toHttpError(err);

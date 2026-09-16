@@ -1,4 +1,7 @@
 import type { BranchSyncOutcome } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('sync');
 import { sanitizeError } from '../workflow/sanitize-error.js';
 import type {
   IKbSyncService,
@@ -155,7 +158,7 @@ export class KbSyncService implements IKbSyncService {
         // clone must never take the other branches, the sweep, or every
         // coalesced caller down with it, so the promise is enforced here too.
         const message = sanitizeError(err);
-        console.error(`[sync] unexpected failure syncing "${branch}": ${message}`);
+        log.error(`unexpected failure syncing "${branch}": ${message}`);
         outcome = { branch, outcome: 'error', error: message };
       }
       results.push(outcome);
@@ -167,10 +170,10 @@ export class KbSyncService implements IKbSyncService {
         // branch recreated since the pull keeps its clone. Best-effort.
         try {
           const removed = await this.workflow.retireRemoteGoneClone(id);
-          if (removed) console.log(`[sync] removed the clone of "${branch}" — deleted on the host`);
-          else console.log(`[sync] kept the clone of "${branch}" — it is back on the host, or already gone`);
+          if (removed) log.info(`removed the clone of "${branch}" — deleted on the host`);
+          else log.info(`kept the clone of "${branch}" — it is back on the host, or already gone`);
         } catch (err) {
-          console.warn(`[sync] could not remove the clone of "${branch}":`, sanitizeError(err));
+          log.warn(`could not remove the clone of "${branch}":`, { detail: sanitizeError(err) });
         }
       }
     }
@@ -182,7 +185,7 @@ export class KbSyncService implements IKbSyncService {
     try {
       closedDeletedBranch = await this.workflow.closeChangeRequestsWithDeletedBranches();
     } catch (err) {
-      console.warn('[sync] deleted-branch sweep failed:', err instanceof Error ? err.message : err);
+      log.warn('deleted-branch sweep failed:', { err });
     }
 
     const result: SyncResult = {

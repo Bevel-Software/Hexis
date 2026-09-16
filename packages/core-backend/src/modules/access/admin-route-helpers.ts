@@ -13,6 +13,7 @@
  */
 
 import type express from 'express';
+import { logger } from '../../shared/logging.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 
@@ -24,7 +25,7 @@ export function toHttpError(
   if (err instanceof WorkflowDomainError && err.status < 500) {
     return { status: err.status, body: domainErrorBody(err) };
   }
-  console.error(`[${logTag}] route failure:`, err instanceof Error ? err.stack ?? err.message : err);
+  logger(logTag).error('route failure:', { err });
   const status = err instanceof WorkflowDomainError ? err.status : 500;
   return { status, body: { error: 'Internal error.' } };
 }

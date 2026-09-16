@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { logger } from '../../../shared/logging.js';
 import type {
   AuthUser,
   BranchInfo,
@@ -37,18 +36,18 @@ import {
   RemoteBranchGoneError,
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
+import {
+  isGitTimeout,
+  redactGitToken,
+  type GitRunOptions,
+  type GitRunResult,
+  type IGitRunner,
+} from '../../../shared/git.contract.js';
+import { NodeGitRunner } from './node-git-runner.js';
 
-const execFileAsync = promisify(execFile);
+const log = logger('git');
+const crLog = logger('cr');
 
-interface GitRunResult {
-  stdout: string;
-  stderr: string;
-}
-
-function redact(msg: string): string {
-  const token = process.env.GITHUB_TOKEN;
-  return token ? msg.replaceAll(token, '***') : msg;
-}
 
 /**
  * Fallback committer identity. Every workflow commit overrides the author via
@@ -295,6 +294,14 @@ export class GitService implements IGitService {
     private readonly kbDirName: string,
     private readonly mutex: WorkspaceMutex = new WorkspaceMutex(),
     private readonly accessControl: IAccessControl | null = null,
+    /**
+     * How git is actually run — see `shared/git.contract.ts`. The composition
+     * root passes the one runner, carrying the deployment's configured
+     * deadline; the default here is the same runner on its default deadline,
+     * so a directly constructed service (every suite in this module) still has
+     * one rather than none.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {}
 
   /**
@@ -327,6 +334,22 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The most recent attempt any workspace made to reach the remote, and
+   * whether it succeeded — for the readiness answer. Null before the first
+   * attempt of this process's life. Read off the per-workspace fetch record
+   * above rather than kept separately, so it cannot disagree with it.
+   */
+  lastRemoteContact(): { at: number; ok: boolean } | null {
+    let latest: { at: number; ok: boolean } | null = null;
+    for (const [workspaceId, at] of this.lastImplicitFetchAt) {
+      if (latest === null || at > latest.at) {
+        latest = { at, ok: this.lastImplicitFetchOk.get(workspaceId) ?? false };
+      }
+    }
+    return latest;
+  }
+
+  /**
    * Run the registered ADVISORY commit-validation hooks at a commit site.
    * Preserves the semantics of the injected validator this replaced: a
    * `mustFix` report is logged (via `formatWarning`) but never blocks, and a
@@ -342,11 +365,11 @@ export class GitService implements IGitService {
       try {
         const report = await hook(ctx);
         if (report && report.mustFix.length > 0) {
-          console.warn(formatWarning(report));
+          log.warn(formatWarning(report));
         }
       } catch (validatorErr) {
         // Validator failure is non-fatal — advisory only.
-        console.warn('[git] validator crashed (advisory only, ignoring):', validatorErr instanceof Error ? validatorErr.message : validatorErr);
+        log.warn('validator crashed (advisory only, ignoring):', { err: validatorErr });
       }
     }
   }
@@ -574,7 +597,7 @@ export class GitService implements IGitService {
         this.lastImplicitFetchOk.set(workspaceId, true);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[git] implicit fetch failed for workspace ${workspaceId}: ${msg}`);
+        log.warn(`implicit fetch failed for workspace ${workspaceId}: ${msg}`);
         // Stamp the TTL on failure too so a hard-down origin doesn't make
         // every subsequent listBranches retry the (still-failing) fetch and
         // pile up 10s timeouts. Stale local refs are better than spinning.
@@ -937,19 +960,13 @@ export class GitService implements IGitService {
       }
       if (trackedAtHead) {
         await this.git(cwd, ['checkout', 'HEAD', '--', repoRelativePath]).catch((err) => {
-          console.warn(
-            `[git] discardPath checkout failed for "${repoRelativePath}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`discardPath checkout failed for "${repoRelativePath}":`, { err });
         });
       } else {
         // Untracked new file — remove from working tree.
         const fileAbs = path.join(cwd, repoRelativePath);
         await fs.rm(fileAbs, { force: true }).catch((err) => {
-          console.warn(
-            `[git] discardPath rm failed for "${repoRelativePath}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`discardPath rm failed for "${repoRelativePath}":`, { err });
         });
       }
     });
@@ -1408,7 +1425,7 @@ export class GitService implements IGitService {
           // Not a conflict — surface the underlying git error so the real cause
           // (e.g. missing identity, unrelated histories) is diagnosable.
           throw new Error(
-            `git merge failed without detectable conflicts: ${redact(
+            `git merge failed without detectable conflicts: ${redactGitToken(
               err instanceof Error ? err.message : String(err),
             )}`,
           );
@@ -1589,7 +1606,9 @@ export class GitService implements IGitService {
     try {
       const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', rev]);
       return stdout.trim() || null;
-    } catch {
+    } catch (err) {
+      // Null is "no such rev"; a deadline is not that answer (see GitRunError).
+      if (isGitTimeout(err)) throw err;
       return null;
     }
   }
@@ -2298,8 +2317,8 @@ export class GitService implements IGitService {
       // +/- to a file.
       const aligned = counts.length === statuses.length;
       if (!aligned) {
-        console.warn(
-          `[cr] diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
+        crLog.warn(
+          `diff name-status/numstat length mismatch (${statuses.length} vs ${counts.length}) ` +
             `for ${range} — reporting file list without +/- counts`,
         );
       }
@@ -2552,14 +2571,14 @@ export class GitService implements IGitService {
       }
       const dirtyList = porcelain.stdout.trim().replace(/\s+/g, ' ');
       if (queueExplainsIt) {
-        console.log(
-          `[git] workspace=${workspaceId} branch=${branch} working tree is dirty while ` +
+        log.info(
+          `workspace=${workspaceId} branch=${branch} working tree is dirty while ` +
             `pending commits drain (expected — the background worker is catching up). ` +
             `Files: ${dirtyList}`,
         );
       } else {
-        console.warn(
-          `[git] workspace=${workspaceId} branch=${branch} has a non-clean working ` +
+        log.warn(
+          `workspace=${workspaceId} branch=${branch} has a non-clean working ` +
             `tree under save=share with NO queued pending commits — this should never ` +
             `happen and likely indicates a missed lock-release commit. Files: ${dirtyList}`,
         );
@@ -2755,69 +2774,32 @@ export class GitService implements IGitService {
     return stdout.trim().length > 0;
   }
 
-  private async git(
-    cwd: string,
-    args: string[],
-    opts?: {
-      /**
-       * Bytes to feed the subprocess on stdin — used by the
-       * `--pathspec-from-file=-` commit/add paths so a several-hundred-file
-       * batch never has to ride the argv (Windows caps a command line at
-       * ~32K chars).
-       */
-      input?: string;
-    },
-  ): Promise<GitRunResult> {
-    try {
-      const pending = execFileAsync('git', args, {
-        cwd,
-        // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
-        // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as
-        // glob / magic syntax. KB files routinely arrive with bracketed
-        // prefixes like `[Approved] foo.docx` or `[Updated 2025] bar.md`; the
-        // upload pipeline (`writeFileBinary` + `releaseLock` + `commitFile`)
-        // passes the relative path straight through to `git add` / `git
-        // checkout -- <path>`, which would otherwise glob and either match the
-        // wrong file or no file at all. Setting it once here covers every git
-        // subprocess this service spawns.
-        //
-        // `LC_ALL=C` / `LANG=C` force git's human-readable output (including
-        // stderr) to stable, English, locale-independent text. Callers that
-        // classify errors by message — e.g. `readFileAtRef` distinguishing a
-        // "path does not exist in <ref>" absence from a hard failure — would
-        // otherwise misread a translated message on a non-English host and, for
-        // the fail-closed roles.yaml preservation path, fail OPEN.
-        env: { ...process.env, GIT_LITERAL_PATHSPECS: '1', LC_ALL: 'C', LANG: 'C' },
-        maxBuffer: 32 * 1024 * 1024,
-      });
-      if (opts?.input !== undefined && pending.child.stdin) {
-        // A dying git can close stdin mid-write; the promise below still
-        // rejects with the exit code, which is the error we want to surface.
-        pending.child.stdin.on('error', () => undefined);
-        pending.child.stdin.write(opts.input);
-        pending.child.stdin.end();
-      }
-      const { stdout, stderr } = await pending;
-      return { stdout: stdout.toString(), stderr: stderr.toString() };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Skip past any leading `-c key=val` pairs so the error names the actual
-      // git subcommand that failed (e.g. "git fetch failed:" not "git -c failed:").
-      let i = 0;
-      while (i < args.length && args[i] === '-c') i += 2;
-      const subcommand = args[i] ?? args[0];
-      const wrapped = new Error(`git ${subcommand} failed: ${redact(msg)}`) as Error & {
-        exitCode?: number;
-        stderr?: string;
-      };
-      // Preserve the underlying exit code / stderr so callers can distinguish
-      // expected non-zero exits (e.g. merge-base exit 1 = no common ancestor)
-      // from infra failures (ENOENT, exit 128) without parsing message strings.
-      const original = err as { code?: unknown; stderr?: unknown };
-      if (typeof original.code === 'number') wrapped.exitCode = original.code;
-      if (typeof original.stderr === 'string') wrapped.stderr = redact(original.stderr);
-      throw wrapped;
-    }
+  /**
+   * Every git invocation this service makes goes through here, and from here
+   * through the injected runner — which is what puts a deadline on it. The
+   * environment, the buffer ceiling, the stdin handling and the error shape all
+   * live in `NodeGitRunner` now; see `shared/git.contract.ts` for why.
+   *
+   * Errors arrive as `GitRunError`, which still carries `exitCode` and
+   * `stderr`, so the callers that read those to tell an expected non-zero exit
+   * from a real failure are unaffected.
+   */
+  private git(cwd: string, args: string[], opts?: Omit<GitRunOptions, 'encoding'>): Promise<GitRunResult> {
+    return this.gitRunner.run(cwd, args, {
+      ...opts,
+      // `GIT_LITERAL_PATHSPECS=1` makes git treat every pathspec literally
+      // instead of interpreting `[`, `]`, `*`, `?`, `!`, or `:(magic)` as glob
+      // / magic syntax. KB files routinely arrive with bracketed prefixes like
+      // `[Approved] foo.docx` or `[Updated 2025] bar.md`; the upload pipeline
+      // (`writeFileBinary` + `releaseLock` + `commitFile`) passes the relative
+      // path straight through to `git add` / `git checkout -- <path>`, which
+      // would otherwise glob and either match the wrong file or no file at all.
+      //
+      // THIS service's setting, not the runner's: the startup runner spells its
+      // literal paths as `:(literal)<path>`, which this variable would turn into
+      // a search for a file literally named that.
+      env: { GIT_LITERAL_PATHSPECS: '1', ...opts?.env },
+    });
   }
 }
 
