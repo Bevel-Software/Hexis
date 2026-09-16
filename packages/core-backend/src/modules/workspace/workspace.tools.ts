@@ -651,10 +651,18 @@ export function registerWorkspaceTools(
   /**
    * Every file under `dir`, at any depth, as workspace-relative paths; stops at
    * `cap`. A symbolic link is listed as the entry it is, never followed, so the
-   * walk cannot wander into a folder elsewhere; `.git` metadata is skipped.
+   * walk cannot wander into a folder elsewhere, and is ALSO named in `links`:
+   * the per-file delete cannot remove a link (it stats through it, so a dangling
+   * link or a link to a folder fails), so a folder holding one is refused before
+   * anything is deleted. `.git` metadata is skipped.
    */
-  const filesUnder = async (fs: LocalFilesystem, dir: string, cap = Infinity): Promise<{ files: string[]; truncated: boolean }> => {
+  const filesUnder = async (
+    fs: LocalFilesystem,
+    dir: string,
+    cap = Infinity,
+  ): Promise<{ files: string[]; links: string[]; truncated: boolean }> => {
     const files: string[] = [];
+    const links: string[] = [];
     const walk = async (d: string): Promise<boolean> => {
       for (const e of (await fs.readdir(d)) as DirEntry[]) {
         const child = `${d.replace(/\/+$/, '')}/${e.name}`;
@@ -664,13 +672,33 @@ export function registerWorkspaceTools(
         } else {
           if (files.length >= cap) return false;
           files.push(child);
+          if (e.isSymlink) links.push(child);
         }
       }
       return true;
     };
     const complete = await walk(dir);
-    return { files, truncated: !complete };
+    return { files, links, truncated: !complete };
   };
+
+  /** Whether `path` itself is a symbolic link (never followed). */
+  const isSymlinkAt = async (root: string, path: string): Promise<boolean> => {
+    try {
+      return (await nodeFs.lstat(join(root, path))).isSymbolicLink();
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
+  };
+
+  /** The refusal for a folder that holds symbolic links: named, with the way out. */
+  const linksRefusal = (path: string, links: string[]): string =>
+    `"${path}" holds ${links.length === 1 ? 'the symbolic link' : `${links.length} symbolic links, e.g.`} "${links[0]}"; ` +
+    'the agent tools never follow or remove links, so the folder cannot be deleted through them. Remove the link outside the agent tools first.';
+
+  /** The refusal for a path that is itself a symbolic link. */
+  const linkRefusal = (path: string): string =>
+    `"${path}" is a symbolic link; the agent tools never follow or remove links.`;
 
   const mount = (spec: {
     name: string;
@@ -921,17 +949,20 @@ export function registerWorkspaceTools(
       const managed = managedReason(await onDiskSpelling(await workspaceRoot(branch, ctx), p), kind) !== undefined;
       const access = await accessAt(branch, ctx, p);
       const writable = (await writeBlocked(branch, ctx, [p])).length === 0;
+      const link = await isSymlinkAt(await workspaceRoot(branch, ctx), p);
       const out: Record<string, unknown> = {
         ...stat,
         managed,
-        movable: !managed && writable,
-        deletable: !managed && writable,
+        movable: !managed && !link && writable,
+        deletable: !managed && !link && writable,
         access,
       };
       if (kind === 'folder') {
-        const { files, truncated } = await filesUnder(fs, p, DESCENDANTS_CAP);
+        const { files, links, truncated } = await filesUnder(fs, p, DESCENDANTS_CAP);
         out.descendants = files.length;
         if (truncated) out.descendantsTruncated = true;
+        // delete_folder refuses a folder holding a link; say so here too.
+        if (links.length > 0) out.deletable = false;
       }
       return out;
     },
@@ -1197,7 +1228,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_file',
     description:
-      'Delete ONE workspace file. Committed + pushed as you. Files only: a folder is refused with a pointer to `delete_folder`. ' +
+      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Files only: a folder is refused with a pointer to `delete_folder`. ' +
       'A platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) and git metadata are refused.' +
       PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
@@ -1227,10 +1258,11 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, path);
       await recordOntologyRead(sessionOntologyGate, ctx, path);
       const fs = await ctx.getFilesystem(branch);
+      const root = await workspaceRoot(branch, ctx);
+      if (await isSymlinkAt(root, path)) throw new ToolError(linkRefusal(path), 400);
       if ((await kindOf(fs, path)) === 'folder') {
         throw new ToolError(`"${path}" is a folder, not a file — use delete_folder to delete it and the files under it.`, 400);
       }
-      const root = await workspaceRoot(branch, ctx);
       const onDisk = await onDiskSpelling(root, path);
       if (isGitMetadata(onDisk)) throw new ToolError(managedReason(onDisk, 'file')!, 400);
       if (managedReason(onDisk, 'file') !== undefined) {
@@ -1249,7 +1281,7 @@ export function registerWorkspaceTools(
       'Delete a workspace FOLDER and every file under it, at any depth; each file lands as its own committed + pushed change as you, then the empty folder is removed. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
-      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
+      'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
       'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it, deleted last, so the rest of its files stay governed by them until they are gone; you must be able to write those platform files too.' +
       PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
@@ -1296,12 +1328,13 @@ export function registerWorkspaceTools(
       }
       const root = await workspaceRoot(branch, ctx);
       await assertNoSymlinkOnPath(root, path);
-      const { files } = await filesUnder(fs, path);
+      const { files, links } = await filesUnder(fs, path);
       // A restricted run is judged on what it would actually delete: the files.
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f);
       const managed = managedReason(await onDiskSpelling(root, path), 'folder');
       const blocked = managed !== undefined ? [] : await writeBlocked(branch, ctx, [path, ...files]);
-      const reason = managed ?? (blocked.length > 0
+      const linked = managed === undefined && links.length > 0 ? linksRefusal(path, links) : undefined;
+      const reason = managed ?? linked ?? (blocked.length > 0
         ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the folder cannot be deleted.`
         : undefined);
       const impact = {
@@ -1315,6 +1348,7 @@ export function registerWorkspaceTools(
       };
       if (a.dryRun === true) return { ...impact, dryRun: true };
       if (managed !== undefined) throw new ToolError(managed, 400);
+      if (linked !== undefined) throw new ToolError(linked, 400);
       if (blocked.length > 0) throw await writeDenied(branch, ctx, blocked[0], 'delete_folder');
       if (files.length > 0 && a.confirm !== true) {
         return {
@@ -1421,11 +1455,13 @@ export function registerWorkspaceTools(
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, src);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, dest);
       const fs = await ctx.getFilesystem(branch);
-      const kind = await kindOf(fs, src);
-      if (kind === null) throw new ToolError(`"${src}" does not exist.`, 404);
       const root = await workspaceRoot(branch, ctx);
+      // Before the kind check, which stats THROUGH a link: a dangling link at
+      // `src` would otherwise be answered "does not exist".
       await assertNoSymlinkOnPath(root, src);
       await assertNoSymlinkOnPath(root, dest);
+      const kind = await kindOf(fs, src);
+      if (kind === null) throw new ToolError(`"${src}" does not exist.`, 404);
       const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
       // A restricted run is judged on what it would actually write: each file
       // at its old and its new path, not an extensionless folder path.

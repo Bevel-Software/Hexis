@@ -1716,6 +1716,42 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(KB('Locked/deal.md'))).toBe(false);
     });
 
+    it.skipIf(process.platform === 'win32')('a folder holding a symbolic link is refused in the dry run and deletes nothing, instead of half-deleting', async () => {
+      const base = await seeded();
+      // The Local Testing shape: a file sorted before the link, the link (to a
+      // folder, so the per-file delete cannot remove it), a file after it.
+      await fs.writeFile(KB('Sales/links/aaa.md'), 'a');
+      await fs.writeFile(KB('Sales/links/real.md'), 'r');
+      await symlink('../archive', join(tempDir, KB('Sales/links/inside')));
+      const dry = await call(base, 'delete_folder', { path: KB('Sales/links'), dryRun: true });
+      expect(dry.status).toBe(200);
+      expect(dry.body).toMatchObject({ allowed: false });
+      expect(dry.body.reason).toContain(`"${KB('Sales/links/inside')}"`);
+      const run = await call(base, 'delete_folder', { path: KB('Sales/links'), confirm: true });
+      expect(run.status).toBe(400);
+      expect(run.body.error).toBe(dry.body.reason);
+      for (const p of ['Sales/links/aaa.md', 'Sales/links/real.md', 'Sales/archive/top.md']) {
+        expect(await exists(KB(p)), p).toBe(true);
+      }
+      expect((await call(base, 'file_stat', { path: KB('Sales/links') })).body).toMatchObject({ deletable: false });
+    });
+
+    it.skipIf(process.platform === 'win32')('a link itself is answered as a link by delete_file, move_file and file_stat, not "not found"', async () => {
+      const base = await seeded();
+      await symlink(join(tempDir, 'nowhere'), join(tempDir, KB('Sales/dangling.md')));
+      await symlink('deal.md', join(tempDir, KB('Sales/alias.md')));
+      for (const path of [KB('Sales/dangling.md'), KB('Sales/alias.md')]) {
+        const del = await call(base, 'delete_file', { path });
+        expect(del.status, path).toBe(400);
+        expect(del.body.error, path).toBe(`"${path}" is a symbolic link; the agent tools never follow or remove links.`);
+        const mv = await call(base, 'move_file', { src: path, dest: KB('Sales/moved.md'), dryRun: true });
+        expect(mv.status, path).toBe(400);
+        expect(mv.body.error, path).toContain('symbolic link');
+      }
+      expect((await call(base, 'file_stat', { path: KB('Sales/alias.md') })).body).toMatchObject({ movable: false, deletable: false });
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
     it('a move cannot create a platform file or folder at the destination', async () => {
       const base = await seeded();
       const dry = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/archive/access.md'), dryRun: true });
