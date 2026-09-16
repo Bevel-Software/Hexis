@@ -125,6 +125,20 @@ describe('GitService — fork point, behind, and Update', () => {
     expect((await forkPoint()).behind).toBe(true);
   });
 
+  it('a proposal with no history in common with the target has no fork point, and is behind', async () => {
+    const ORPHAN = 'alice/unrelated';
+    await runGit(repo, ['checkout', '--orphan', ORPHAN]);
+    await runGit(repo, ['rm', '-rf', '--quiet', '.']);
+    await fs.mkdir(path.join(repo, 'Sales'), { recursive: true });
+    await fs.writeFile(path.join(repo, DEAL), 'price: 500\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'unrelated root']);
+    await runGit(repo, ['push', '-u', 'origin', ORPHAN]);
+
+    const at = await git.resolvePrShas(WS, TARGET, ORPHAN);
+    await expect(git.forkPointForPr(WS, at)).resolves.toEqual({ mergeBaseSha: null, behind: true });
+  });
+
   it('Update merges the target in cleanly: pushed, and the request is no longer behind', async () => {
     await propose(['price: 100', 'price: 120']);
     await editTargetDirectly(['status: draft', 'status: signed']);

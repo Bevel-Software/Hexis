@@ -38,6 +38,7 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
 import {
+  GitRunError,
   isGitTimeout,
   redactGitToken,
   type GitRunOptions,
@@ -2601,13 +2602,6 @@ export class GitService implements IGitService {
   }
 
   /**
-   * Resolve a branch name to a concrete ref the local clone knows about.
-   * Tries the local head first, falls back to the matching remote-tracking
-   * ref. The workspace clone fetches all remotes on creation, so protected
-   * branches are reachable through `origin/` even when the user has never
-   * personally checked them out.
-   */
-  /**
    * `resolveBranchRef` with the preference reversed: the PUBLISHED ref
    * (`origin/<branch>`, just fetched by `fetchPrRefs`) before the local head.
    * A change request is a pair of published branches, and a clone's local
@@ -2621,13 +2615,24 @@ export class GitService implements IGitService {
       try {
         await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
         return ref;
-      } catch {
-        // Try the next candidate.
+      } catch (err) {
+        // Only git's own "no such ref" (exit 1 under --quiet) moves on to the
+        // next candidate. A deadline or any other failure is not that answer:
+        // skipping past it would pick the stale local copy, or call a real
+        // branch unknown.
+        if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
       }
     }
     throw new WorkflowValidationError(`unknown branch: ${branch}`);
   }
 
+  /**
+   * Resolve a branch name to a concrete ref the local clone knows about.
+   * Tries the local head first, falls back to the matching remote-tracking
+   * ref. The workspace clone fetches all remotes on creation, so protected
+   * branches are reachable through `origin/` even when the user has never
+   * personally checked them out.
+   */
   private async resolveBranchRef(cwd: string, branch: string): Promise<string> {
     for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
       try {

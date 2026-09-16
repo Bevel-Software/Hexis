@@ -1849,10 +1849,10 @@ export class WorkflowService implements IWorkflowService {
         403,
       );
     }
-    // Best-effort freshen of the source checkout, as the per-file revert
-    // does: a clone behind its own origin branch would merge onto a stale
-    // head and push non-fast-forward. A real failure still surfaces at push.
-    await this.pullWorkspace(workspaceId).catch(() => undefined);
+    // Freshen the source checkout first, and let a failure stop the Update:
+    // merging onto a head behind its own origin branch would leave a local
+    // merge commit that then cannot push, stranding it in the workspace.
+    await this.pullWorkspace(workspaceId);
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,

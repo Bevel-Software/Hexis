@@ -123,4 +123,27 @@ describe('GET /workflow/change-requests/:number/fork-point-file', () => {
     expect((await get(7, 'Secret/x.md', '')).status).toBe(403);
     expect(h.workflow.changeRequestForkPoint).not.toHaveBeenCalled();
   });
+
+  it('refuses a missing path and a non-numeric request before authorizing anything', async () => {
+    h = await makeHarness();
+    expect((await fetch(`${h.baseUrl}/api/workflow/change-requests/7/fork-point-file?sha=${SHA}`)).status).toBe(400);
+    expect((await fetch(`${h.baseUrl}/api/workflow/change-requests/abc/fork-point-file?path=Sales%2FDeal.md`)).status).toBe(400);
+    expect(h.canReadAtRef).not.toHaveBeenCalled();
+    expect(h.workflow.fileAtForkPoint).not.toHaveBeenCalled();
+  });
+
+  it('an access-model error fails closed, not open', async () => {
+    h = await makeHarness();
+    h.canReadAtRef.mockRejectedValueOnce(new Error('access tree unreadable'));
+    const res = await get(7, 'Sales/Deal.md');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(h.workflow.fileAtForkPoint).not.toHaveBeenCalled();
+  });
+
+  it('a failing git read surfaces as an error, never as an empty file', async () => {
+    h = await makeHarness();
+    h.workflow.fileAtForkPoint.mockRejectedValueOnce(new Error('git exploded'));
+    const res = await get(7, 'Sales/Deal.md');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+  });
 });

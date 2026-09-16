@@ -119,7 +119,8 @@ export function FileChangeBoxes({
         // `[]` is the diff hook's "overtaken" answer — the proposal and the
         // file now say the same thing — distinct from `null`, which only
         // means a side has not arrived yet.
-        const fileDiff = crDiffs.get(cr.number) ?? null;
+        const read = crDiffs.get(cr.number) ?? null;
+        const fileDiff = read === 'unreadable' ? null : read;
         return (
           <ChangeBox
             key={cr.number}
@@ -130,6 +131,7 @@ export function FileChangeBoxes({
             canDecide={canDecide && !mine}
             diff={fileDiff}
             binary={binary}
+            unreadable={read === 'unreadable'}
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}

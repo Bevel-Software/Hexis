@@ -187,6 +187,50 @@ describe('ChangeRequestDialog: the needs-updating notice', () => {
     expect([...container.querySelectorAll('ins')].map((n) => n.textContent)).toEqual(['price: 120']);
   });
 
+  it('a branch read still in flight when Update lands never overwrites the re-read', async () => {
+    const MERGED_FORK = 'e'.repeat(40);
+    detailMock.fetchPrDetail
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValue(detail({ behind: false, mergeBaseSha: MERGED_FORK }));
+    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue({});
+    let releaseStale: (text: string) => void = () => {};
+    filesApi.readFileOnBranch.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseStale = resolve)),
+    );
+    const { container } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+    await waitFor(() => expect(filesApi.readFileOnBranch).toHaveBeenCalledTimes(1));
+
+    filesApi.readFileOnBranch.mockImplementation(async () => 'price: 125\nstatus: signed\n');
+    filesApi.readFileAtForkPoint.mockImplementation(async (_n: number, sha: string) => ({
+      content: TARGET_TIP,
+      forkSha: sha,
+    }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 125'));
+
+    // The pre-update read finally answers — and lands on nothing.
+    releaseStale(PROPOSED);
+    await new Promise((r) => setTimeout(r, 20));
+    expect([...container.querySelectorAll('ins')].map((n) => n.textContent)).toEqual(['price: 125']);
+  });
+
+  it('a merge that succeeds but cannot be reloaded says so, and still re-reads the open file', async () => {
+    detailMock.fetchPrDetail.mockResolvedValueOnce(detail()).mockRejectedValue(new Error('503'));
+    mergeApi.refreshChangeRequestFromTarget.mockResolvedValue({});
+    const { container } = render(
+      <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />,
+    );
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 120'));
+
+    filesApi.readFileOnBranch.mockImplementation(async () => 'price: 125\nstatus: draft\n');
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    expect(await screen.findByText(/Updated, but couldn't reload this change request/)).toBeInTheDocument();
+    await waitFor(() => expect(filesApi.readFileOnBranch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(container.querySelector('ins')?.textContent).toBe('price: 125'));
+  });
+
   it('a conflicting Update shows the conflict help with the prompt for the agent', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detail());
     mergeApi.refreshChangeRequestFromTarget.mockRejectedValue(

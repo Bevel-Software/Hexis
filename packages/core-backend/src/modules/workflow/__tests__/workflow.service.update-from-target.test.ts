@@ -39,9 +39,12 @@ function detail(overrides: Partial<PullRequestDetail> = {}): PullRequestDetail {
 function harness(opts: {
   first?: PullRequestDetail | null;
   merge?: { kind: 'clean'; alreadyUpToDate: boolean } | { kind: 'conflicts'; paths: string[] };
+  pullError?: Error;
 }) {
   const git = {
-    pull: vi.fn().mockResolvedValue({ treeChanged: false }),
+    pull: opts.pullError
+      ? vi.fn().mockRejectedValue(opts.pullError)
+      : vi.fn().mockResolvedValue({ treeChanged: false }),
     mergeFromOrigin: vi.fn().mockResolvedValue(opts.merge ?? { kind: 'clean', alreadyUpToDate: false }),
     push: vi.fn().mockResolvedValue(undefined),
   };
@@ -101,8 +104,29 @@ describe('WorkflowService.updateFromTarget', () => {
   });
 
   it('refuses a request that is not open', async () => {
-    const h = harness({ first: detail({ state: 'merged', viewerCanUpdate: false }) });
+    const h = harness({ first: detail({ state: 'merged' }) });
     await expect(h.svc.updateFromTarget(WS, USER, 7)).rejects.toThrow(/only open requests/);
     expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+  });
+
+  it('refuses a request that does not exist — nothing is merged', async () => {
+    const h = harness({ first: null });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).rejects.toThrow(/not found/);
+    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+    expect(h.git.push).not.toHaveBeenCalled();
+  });
+
+  it('an already up-to-date merge pushes nothing but still returns the refreshed detail', async () => {
+    const h = harness({ merge: { kind: 'clean', alreadyUpToDate: true } });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).resolves.toBe(h.refreshed);
+    expect(h.git.push).not.toHaveBeenCalled();
+    expect(h.prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+  });
+
+  it('a failed refresh of the proposal checkout stops the Update before any merge', async () => {
+    const h = harness({ pullError: new Error('fetch failed') });
+    await expect(h.svc.updateFromTarget(WS, USER, 7)).rejects.toThrow(/fetch failed/);
+    expect(h.git.mergeFromOrigin).not.toHaveBeenCalled();
+    expect(h.git.push).not.toHaveBeenCalled();
   });
 });

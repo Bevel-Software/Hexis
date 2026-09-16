@@ -899,7 +899,8 @@ export function SkillPage({
           // `[]` is the hook's "overtaken" answer — the proposal and the file
           // now say the same thing — and is distinct from `null`, which only
           // means a side has not arrived yet.
-          const fileDiff = crDiffs.get(cr.number) ?? null;
+          const read = crDiffs.get(cr.number) ?? null;
+          const fileDiff = read === 'unreadable' ? null : read;
           return (
             <ChangeBox
               key={cr.number}
@@ -910,6 +911,7 @@ export function SkillPage({
               canDecide={canWrite && !mine}
               diff={fileDiff}
               binary={isBinaryFile(active)}
+              unreadable={read === 'unreadable'}
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}

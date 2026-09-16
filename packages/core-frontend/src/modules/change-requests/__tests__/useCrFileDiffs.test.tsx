@@ -20,8 +20,8 @@ const MAIN_NOW = 'price: 100\nstatus: signed\n'; // edited on main after the pro
 const PROPOSED = 'price: 120\nstatus: draft\n';
 const CR = { number: 21, branch: 'alice/deal', touchedNodePaths: [PATH] } as unknown as PullRequestSummary;
 
-const lines = (d: { kind: string; text: string }[] | null | undefined, kind: string) =>
-  (d ?? []).filter((l) => l.kind === kind).map((l) => l.text);
+const lines = (d: { kind: string; text: string }[] | null | undefined | 'unreadable', kind: string) =>
+  (d === 'unreadable' ? [] : (d ?? [])).filter((l) => l.kind === kind).map((l) => l.text);
 
 beforeEach(() => {
   api.readFileOnBranch.mockReset().mockResolvedValue(PROPOSED);
@@ -53,11 +53,15 @@ describe('useCrFileDiffs', () => {
     expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100', 'status: signed']);
   });
 
-  it('an unreadable fork point makes no claim — never a diff against main', async () => {
+  it('an unreadable fork point says so — never a diff against main, never loading forever', async () => {
     api.readFileAtForkPoint.mockRejectedValue(new Error('503'));
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
-    await waitFor(() => expect(api.readFileOnBranch).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 20));
-    expect(result.current.get(21)).toBeNull();
+    await waitFor(() => expect(result.current.get(21)).toBe('unreadable'));
+  });
+
+  it('an unreadable branch copy says so too', async () => {
+    api.readFileOnBranch.mockRejectedValue(new Error('403'));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    await waitFor(() => expect(result.current.get(21)).toBe('unreadable'));
   });
 });

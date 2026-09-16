@@ -176,17 +176,26 @@ export function ChangeRequestDialog({
   // Everything else keeps the marked-source view below.
   const selectedIsMarkdown = /\.md$/i.test(selected);
 
-  const asked = useRef<Set<string>>(new Set());
+  // Each read holds a token; forgetting a path (Update, a revert) drops its
+  // token, so a read that was still in flight lands on nothing instead of
+  // writing pre-update content over the read that replaced it.
+  const asked = useRef<Map<string, object>>(new Map());
   useEffect(() => {
     // `selected` is '' until the detail names any file in an unscoped dialog —
     // nothing to read yet. Binary files are never read at all (above).
     if (selected && !selectedIsBinary && !asked.current.has(selected)) {
-      asked.current.add(selected);
+      const token = {};
+      asked.current.set(selected, token);
+      const current = () => asked.current.get(selected) === token;
       readFileOnBranch(cr.branch, selected)
-        .then((content) => setBranchContents((c) => ({ ...c, [selected]: content })))
+        .then((content) => {
+          if (current()) setBranchContents((c) => ({ ...c, [selected]: content }));
+        })
         // NOT `''`. An unreadable branch copy stored as empty would diff as
         // "every line deleted" — a change request that erases the file.
-        .catch(() => setUnreadable((s) => new Set(s).add(selected)));
+        .catch(() => {
+          if (current()) setUnreadable((s) => new Set(s).add(selected));
+        });
     }
   }, [selected, selectedIsBinary, cr.branch, branchRevision]);
 
@@ -548,15 +557,21 @@ export function ChangeRequestDialog({
     setError(null);
     try {
       await refreshChangeRequestFromTarget(cr.number);
-      const fresh = await fetchPrDetail(cr.number, { fresh: true });
-      // Every branch copy read so far predates the merge — forget them and
-      // read again, in the same render the fresh detail (and so the fresh
-      // fork point) lands in.
+      // The branch has moved: every copy read so far predates the merge.
+      // Forget them now, before anything else can fail, so the dialog never
+      // goes on showing the pre-update text for a branch the server merged.
       asked.current.clear();
       setBranchContents({});
       setUnreadable(new Set());
-      setDetail(fresh);
-      setBranchRevision((r) => r + 1);
+      try {
+        // Re-read in the same render the fresh detail (and so the fresh fork
+        // point) lands in.
+        setDetail(await fetchPrDetail(cr.number, { fresh: true }));
+      } catch {
+        setError("Updated, but couldn't reload this change request. Close it and open it again.");
+      } finally {
+        setBranchRevision((r) => r + 1);
+      }
     } catch (err) {
       const conflicts =
         err instanceof GitApiError &&

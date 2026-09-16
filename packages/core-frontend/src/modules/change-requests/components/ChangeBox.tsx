@@ -29,6 +29,12 @@ export interface ChangeBoxProps {
    */
   binary?: boolean;
   /**
+   * One of the two file reads failed, so there is no comparison to show and
+   * none is coming. Said plainly rather than left on "Loading the change…",
+   * and never rendered as an empty or whole-file diff.
+   */
+  unreadable?: boolean;
+  /**
    * This file already reads the way the proposal wants it to — someone landed
    * the same edit first, or the author reverted it. There is nothing here to
    * decide, though the change request may still touch other files.
@@ -98,6 +104,7 @@ export function ChangeBox({
   canDecide,
   diff,
   binary = false,
+  unreadable = false,
   upToDate = false,
   blocked = false,
   conflictPrompt = null,
@@ -137,6 +144,10 @@ export function ChangeBox({
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">
           A binary file (an image, a document…). There is no text to compare. Read the whole
           change to decide.
+        </p>
+      ) : unreadable ? (
+        <p className="px-3.5 py-4 text-center text-detail text-ink-faint">
+          Couldn't read this change. Read the whole change to decide.
         </p>
       ) : diff === null ? (
         <p className="px-3.5 py-4 text-center text-detail text-ink-faint">Loading the change…</p>

@@ -20,16 +20,26 @@ import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
  * history have no fork point to read, and the tip is the only text left.
  *
  * Keyed by CR number + path + revision so a tab switch or a reload can never
- * show the previous file's diff under this file's heading.
+ * show the previous file's diff under this file's heading. The fork read is
+ * keyed by revision too: Update moves a request's fork point, and a revision
+ * bump is the only refresh signal this hook gets.
+ *
+ * Per request: the diff; `[]` when the proposal has been overtaken; `null`
+ * while a read is in flight; `'unreadable'` when a read failed, so the box
+ * can say so instead of loading forever.
  */
+export type CrFileDiff = DiffLine[] | null | 'unreadable';
+
 export function useCrFileDiffs(
   crs: PullRequestSummary[],
   repoRelativePath: string,
   mainRaw: string | null,
   revision = 0,
-): Map<number, DiffLine[] | null> {
+): Map<number, CrFileDiff> {
   const [contents, setContents] = useState<Map<string, string>>(new Map());
   const [forkReads, setForkReads] = useState<Map<string, ForkPointFile>>(new Map());
+  /** Keys whose branch or fork read failed — no comparison is coming. */
+  const [failed, setFailed] = useState<Set<string>>(new Set());
   /** Requests already made, so a failed read is not retried on every render. */
   const asked = useRef<Set<string>>(new Set());
 
@@ -60,7 +70,8 @@ export function useCrFileDiffs(
         .catch(() => {
           // Deliberately NOT `''`. Storing empty for an unreadable branch copy
           // would diff as "every line deleted" and present a proposal to erase
-          // the file. No content means no claim: the box keeps waiting.
+          // the file. No content means no claim: the box says it couldn't read.
+          setFailed((s) => new Set(s).add(k));
         });
       readFileAtForkPoint(cr.number, null, repoRelativePath)
         .then((read) => setForkReads((m) => new Map(m).set(k, read)))
@@ -68,6 +79,7 @@ export function useCrFileDiffs(
           // Same rule for the before side: an unreadable fork point is no
           // claim, and falling back to main would bring back the very
           // "deletions" this reads the fork point to avoid.
+          setFailed((s) => new Set(s).add(k));
         });
     }
     // `contents` is intentionally out: it changes on every arrival, and the
@@ -76,8 +88,12 @@ export function useCrFileDiffs(
   }, [wanted, repoRelativePath, revision]);
 
   return useMemo(() => {
-    const out = new Map<number, DiffLine[] | null>();
+    const out = new Map<number, CrFileDiff>();
     for (const cr of relevant) {
+      if (failed.has(key(cr.number))) {
+        out.set(cr.number, 'unreadable');
+        continue;
+      }
       const branchRaw = contents.get(key(cr.number));
       const fork = forkReads.get(key(cr.number));
       // The before side: the fork point's text; '' when the request ADDS the
@@ -95,5 +111,5 @@ export function useCrFileDiffs(
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [relevant, contents, forkReads, mainRaw, repoRelativePath, revision]);
+  }, [relevant, contents, forkReads, failed, mainRaw, repoRelativePath, revision]);
 }
