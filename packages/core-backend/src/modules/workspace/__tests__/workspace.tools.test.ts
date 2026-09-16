@@ -1387,6 +1387,7 @@ describe('preflight for moves and deletes', () => {
 
   const call = async (base: string, tool: string, body: Record<string, unknown>) => {
     const res = await post(`${base}/api/agent/tools/${tool}`, { branch: PROTECTED, ...body });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- a tool body is free-form JSON, probed field by field
     return { status: res.status, body: (await res.json()) as Record<string, any> };
   };
   const exists = async (p: string) => fs.exists(p);
@@ -1773,12 +1774,13 @@ describe('preflight for moves and deletes', () => {
   });
 
   describe('descriptions match behaviour', () => {
+    type Schema = { properties?: Record<string, Schema> };
     const def = async (name: string) => {
       const d = (await toolRegistry.listInternal()).find((t) => t.name === name);
       expect(d, name).toBeDefined();
-      return d as unknown as { description: string; inputs: any; outputs: any };
+      return d as unknown as { description: string; inputs: Schema; outputs: Schema };
     };
-    const declaredOutputs = (d: { outputs: any }) => Object.keys(d.outputs.properties ?? {});
+    const declaredOutputs = (d: { outputs: Schema }) => Object.keys(d.outputs.properties ?? {});
 
     it('move_file states folders, recursion, collisions, platform files and the confirm rule, and declares every field it returns', async () => {
       const base = await seeded();
