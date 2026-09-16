@@ -579,6 +579,9 @@ export class WorkflowService implements IWorkflowService {
    */
   private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
 
+  /** The latest apply attempt per change-request number (see `beginApplyAttempt`). */
+  private readonly applyAttempts = new Map<number, number>();
+
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const id = workspaceIdForBranch(branch);
@@ -2507,6 +2510,18 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * Start an apply attempt on `number` and return its token. Only the latest
+   * attempt may record a refusal: when two people apply the same request at
+   * once, an older attempt that finishes last must not overwrite the newer
+   * one's verdict. In-process, like the detail and list caches this reads with.
+   */
+  beginApplyAttempt(number: number): number {
+    const attempt = (this.applyAttempts.get(number) ?? 0) + 1;
+    this.applyAttempts.set(number, attempt);
+    return attempt;
+  }
+
+  /**
    * Persist why an apply did not land and tell every session. The apply route
    * already answers the clicker directly (user-scoped `merge-failed`); this is
    * for everyone else who can see the still-open request — above all its
@@ -2514,41 +2529,32 @@ export class WorkflowService implements IWorkflowService {
    * The event carries only the number: the reason is read back through the
    * list and detail endpoints, so a session that misses the event gets the
    * same answer on its next fetch.
+   *
+   * Returns false, writing and announcing nothing, when a newer attempt has
+   * started since `attempt` or the request is no longer open (a concurrent
+   * apply landed it) — a refusal nobody can act on must not reach anyone.
    */
   async recordApplyFailure(
     number: number,
-    failure: { reason: string; conflicts: boolean },
+    failure: { reason: string; conflicts: boolean; at?: Date },
     user: AuthUser,
-  ): Promise<void> {
-    await this.db
+    attempt: number,
+  ): Promise<boolean> {
+    if (this.applyAttempts.get(number) !== attempt) return false;
+    const updated = await this.db
       .update(changeRequests)
       .set({
         applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
         applyFailureConflicts: failure.conflicts,
-        applyFailedAt: new Date(),
+        applyFailedAt: failure.at ?? new Date(),
         applyFailedByName: user.name,
       })
-      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')));
+      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      .returning({ number: changeRequests.number });
+    if (updated.length === 0) return false;
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-apply-failed', number });
-  }
-
-  /**
-   * Forget the previous refusal as a new attempt starts, so no viewer reads an
-   * old reason as the verdict on an apply still running. No event: the attempt
-   * ends in `merged` or a fresh `apply-failed`, and both refresh every viewer.
-   */
-  async clearApplyFailure(number: number): Promise<void> {
-    await this.db
-      .update(changeRequests)
-      .set({
-        applyFailureReason: null,
-        applyFailureConflicts: null,
-        applyFailedAt: null,
-        applyFailedByName: null,
-      })
-      .where(eq(changeRequests.number, number));
-    this.prs.invalidateDetailCache(number);
+    return true;
   }
 
   /**

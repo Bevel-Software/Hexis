@@ -69,6 +69,12 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
 
   useEffect(() => {
     let cancelled = false;
+    // Loads overlap — the fallback poll, a stale event, a tab coming back into
+    // view — and each list's newest load is the only one allowed to publish:
+    // an older response resolving last would put an applied request's markers
+    // back in the tree. Numbered per list, since the two requests settle apart.
+    let requestsSeq = 0;
+    let mineSeq = 0;
     const load = (opts: { fresh?: boolean } = {}) => {
       // When THIS fetch left the building — only a fetch that STARTED after
       // an announcement may declare its request gone. The announce and the
@@ -76,19 +82,21 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       // still race the server's own row; timestamps make "predates the
       // announcement" checkable instead of assumed.
       const startedAt = Date.now();
+      const requestsLoad = ++requestsSeq;
+      const mineLoad = ++mineSeq;
       listOpenChangeRequests(opts)
         .then((data) => {
-          if (!cancelled) setRequests(data);
+          if (!cancelled && requestsLoad === requestsSeq) setRequests(data);
         })
         .catch((err) => {
           // A queue that cannot load is not an error state on a page about a
           // document. The dots and the banner simply do not appear.
           console.warn('[OpenChangeRequests] load failed:', err);
-          if (!cancelled) setRequests([]);
+          if (!cancelled && requestsLoad === requestsSeq) setRequests([]);
         });
       listMyChangeRequests(opts)
         .then((data) => {
-          if (cancelled) return;
+          if (cancelled || mineLoad !== mineSeq) return;
           const open = data.filter((c) => c.state === 'open');
           setMine(open);
           // Reconcile: an announced entry whose every path the real list now
@@ -108,7 +116,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         .catch((err) => {
           // Same degradation contract: no suggestion rows, not an error page.
           console.warn('[OpenChangeRequests] mine load failed:', err);
-          if (!cancelled) setMine([]);
+          if (!cancelled && mineLoad === mineSeq) setMine([]);
         });
     };
     load();

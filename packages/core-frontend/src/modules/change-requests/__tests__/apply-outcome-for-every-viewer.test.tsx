@@ -144,6 +144,53 @@ describe('a failed apply is visible to a second viewer', () => {
     expect(await screen.findByText(/Ada Admin could not apply this/)).toBeInTheDocument();
   });
 
+  it('an older detail read resolving last does not put back what a newer one replaced', async () => {
+    const bus = fakeBus();
+    let releaseOpening!: (d: ReturnType<typeof detail>) => void;
+    detailMock.fetchPrDetail.mockReturnValueOnce(
+      new Promise((r) => {
+        releaseOpening = r;
+      }),
+    );
+    render(
+      <EventBusContext.Provider value={bus.value}>
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </EventBusContext.Provider>,
+    );
+    detailMock.fetchPrDetail.mockResolvedValueOnce(detail({ lastApplyFailure: FAILURE }));
+    act(() => bus.emit({ kind: 'change-request-apply-failed', number: 7 }));
+    expect(await screen.findByText(/Ada Admin could not apply this/)).toBeInTheDocument();
+
+    // The opening read, sent before the failure, arrives last.
+    await act(async () => releaseOpening(detail()));
+    expect(screen.getByText(/Ada Admin could not apply this/)).toBeInTheDocument();
+  });
+
+  it('a request somebody else applies while the dialog is open offers no second apply', async () => {
+    const bus = fakeBus();
+    const approved = [
+      {
+        path: 'Plugins/x/SKILL.md',
+        isApproved: true,
+        viewerCanApprove: true,
+        eligibleApprovers: { roles: [], users: [] },
+      },
+    ];
+    detailMock.fetchPrDetail.mockResolvedValue({ ...detail(), approvals: approved });
+    render(
+      <EventBusContext.Provider value={bus.value}>
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </EventBusContext.Provider>,
+    );
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+
+    detailMock.fetchPrDetail.mockResolvedValue({ ...detail({ state: 'merged' }), approvals: approved });
+    act(() => bus.emit({ kind: 'change-request-merged', number: 7 }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument(),
+    );
+  });
+
   it('ignores another request’s failure', async () => {
     const bus = fakeBus();
     detailMock.fetchPrDetail.mockResolvedValue(detail());
@@ -172,8 +219,17 @@ describe('refusalLine — what a change box says about a failed apply', () => {
 
   it("this tab's own attempt speaks first, and its conflict speaks through the blocked state", () => {
     const withStored = { ...CR, lastApplyFailure: FAILURE };
-    expect(refusalLine(withStored, new Map([[7, { reason: 'mine', conflicts: false }]]))).toBe('mine');
-    expect(refusalLine(withStored, new Map([[7, { reason: 'mine', conflicts: true }]]))).toBeNull();
+    expect(refusalLine(withStored, new Map([[7, { reason: 'mine', conflicts: false, at: '2026-09-16T10:30:00.000Z' }]]))).toBe('mine');
+    expect(refusalLine(withStored, new Map([[7, { reason: 'mine', conflicts: true, at: '2026-09-16T10:30:00.000Z' }]]))).toBeNull();
+  });
+
+  it("a later refusal from somebody else's attempt replaces this tab's older one", () => {
+    const later = { ...FAILURE, reason: 'theirs', at: '2026-09-16T11:00:00.000Z' };
+    const mine = { reason: 'mine', conflicts: true, at: '2026-09-16T10:30:00.000Z' };
+    expect(refusalLine({ ...CR, lastApplyFailure: later }, new Map([[7, mine]]))).toBe('theirs');
+    // The echo of this tab's own refusal carries the same instant: its own still speaks.
+    const echo = { ...FAILURE, reason: 'mine', conflicts: true, at: mine.at };
+    expect(refusalLine({ ...CR, lastApplyFailure: echo }, new Map([[7, mine]]))).toBeNull();
   });
 
   it('nothing to say without a refusal', () => {

@@ -4,10 +4,12 @@ import { useEventBus } from './event-bus.context';
 
 /**
  * Bus events after which every change-request list on the page is out of
- * date, whoever caused them. `resync` is here because it means the server
- * could not replay what this tab missed — any of the others among it.
+ * date, whoever caused them — a request appearing as much as one leaving.
+ * `resync` is here because it means the server could not replay what this tab
+ * missed — any of the others among it.
  */
 const STALE_KINDS = [
+  'change-request-opened',
   'change-request-merged',
   'change-request-rejected',
   'change-request-apply-failed',

@@ -519,17 +519,20 @@ export interface IWorkflowService {
     opts?: { bypass?: boolean },
   ): Promise<MergeChangeRequestOutcome>;
 
+  /** Start an apply attempt on a request; the token scopes `recordApplyFailure`. */
+  beginApplyAttempt(number: number): number;
+
   /**
    * Persist why an apply did not land on the (still open) request, and
    * announce `change-request-apply-failed` to every session so the author and
-   * other viewers re-read it — not only the user who clicked.
+   * other viewers re-read it — not only the user who clicked. Resolves false,
+   * recording and announcing nothing, when `attempt` is no longer the latest
+   * or the request is no longer open.
    */
   recordApplyFailure(
     number: number,
-    failure: { reason: string; conflicts: boolean },
+    failure: { reason: string; conflicts: boolean; at?: Date },
     user: AuthUser,
-  ): Promise<void>;
-
-  /** Forget a previous apply failure — a new attempt is starting. */
-  clearApplyFailure(number: number): Promise<void>;
+    attempt: number,
+  ): Promise<boolean>;
 }

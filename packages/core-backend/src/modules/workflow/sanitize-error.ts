@@ -48,7 +48,10 @@ const REDACTIONS: Array<readonly [RegExp, string]> = [
  * gate refusal naming every file it waits on runs well past a prompt line).
  */
 export function sanitizeError(err: unknown, opts: { maxLen?: number } = {}): string {
-  const maxLen = opts.maxLen ?? MAX_LEN;
+  // Only a finite positive whole cap overrides: NaN / Infinity would disable
+  // truncation, and zero or less would slice into a malformed result.
+  const maxLen =
+    Number.isSafeInteger(opts.maxLen) && (opts.maxLen as number) > 0 ? (opts.maxLen as number) : MAX_LEN;
   const raw = err instanceof Error ? err.message : String(err);
   // Collapse newlines + control chars so the result is a single line. Stack
   // traces are deliberately dropped — `err.message` is the meaningful part;

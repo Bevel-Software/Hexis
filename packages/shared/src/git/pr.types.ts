@@ -48,7 +48,7 @@ export interface PullRequestSummary {
   /**
    * The most recent apply attempt that did not land, while the request is
    * still open — so its author and every other viewer see the refusal the
-   * person who clicked Apply saw. Cleared when a new attempt starts; null or
+   * person who clicked Apply saw. Replaced by a newer refusal; null or
    * absent when there is nothing to report.
    */
   lastApplyFailure?: ChangeRequestApplyFailure | null;

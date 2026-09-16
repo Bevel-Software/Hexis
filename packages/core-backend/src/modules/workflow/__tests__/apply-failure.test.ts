@@ -16,7 +16,7 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
 import { WorkflowService } from '../workflow.service.js';
 import { createWorkflowRoutes } from '../workflow.routes.js';
-import { WorkflowValidationError } from '../../../shared/domain-errors.js';
+import { WorkflowDomainError, WorkflowValidationError } from '../../../shared/domain-errors.js';
 
 /**
  * A failed apply used to reach ONE person: the merge route answered the user
@@ -38,8 +38,8 @@ interface RouteHarness {
   workflow: {
     getChangeRequestDetail: ReturnType<typeof vi.fn>;
     mergeChangeRequest: ReturnType<typeof vi.fn>;
+    beginApplyAttempt: ReturnType<typeof vi.fn>;
     recordApplyFailure: ReturnType<typeof vi.fn>;
-    clearApplyFailure: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -54,8 +54,8 @@ async function routeHarness(merge: () => Promise<unknown>): Promise<RouteHarness
       base: 'main',
     })),
     mergeChangeRequest: vi.fn(merge),
-    recordApplyFailure: vi.fn(async () => undefined),
-    clearApplyFailure: vi.fn(async () => undefined),
+    beginApplyAttempt: vi.fn(() => 1),
+    recordApplyFailure: vi.fn(async () => true),
   };
   const app = express();
   app.use(express.json());
@@ -110,17 +110,34 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
     await vi.waitFor(() => expect(h!.workflow.recordApplyFailure).toHaveBeenCalled());
     expect(h.workflow.recordApplyFailure).toHaveBeenCalledWith(
       7,
-      { reason: expect.stringContaining('Waiting on approval'), conflicts: false },
+      { reason: expect.stringContaining('Waiting on approval'), conflicts: false, at: expect.any(Date) },
       ADMIN,
+      1,
     );
+    // The clicker's event and the persisted refusal name the same instant.
+    const [, { at }] = h.workflow.recordApplyFailure.mock.calls[0] as [number, { at: Date }];
     // The clicker's own answer is unchanged.
     expect(h.emitted).toContainEqual(
-      expect.objectContaining({ kind: 'change-request-merge-failed', forUserId: ADMIN.id, number: 7 }),
+      expect.objectContaining({
+        kind: 'change-request-merge-failed',
+        forUserId: ADMIN.id,
+        number: 7,
+        at: at.toISOString(),
+      }),
     );
-    // The previous refusal was cleared before this attempt ran.
-    expect(h.workflow.clearApplyFailure.mock.invocationCallOrder[0]).toBeLessThan(
-      h.workflow.mergeChangeRequest.mock.invocationCallOrder[0]!,
+  });
+
+  it('a refusal of the caller reaches the caller alone and erases nobody\'s verdict', async () => {
+    h = await routeHarness(async () => {
+      throw new WorkflowDomainError('Only admins can merge with bypass.', 403);
+    });
+    await post(h.baseUrl);
+    await vi.waitFor(() =>
+      expect(h!.emitted).toContainEqual(
+        expect.objectContaining({ kind: 'change-request-merge-failed', forUserId: ADMIN.id }),
+      ),
     );
+    expect(h.workflow.recordApplyFailure).not.toHaveBeenCalled();
   });
 
   it('a conflict is persisted as a conflict', async () => {
@@ -131,14 +148,25 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
       7,
       expect.objectContaining({ conflicts: true }),
       ADMIN,
+      1,
     );
   });
 
   it('a landed apply records no failure', async () => {
-    h = await routeHarness(async () => ({ kind: 'merged', result: {} }));
+    // Resolve a deferred merge and await the route's own settle, so the negative
+    // assertion runs after the background attempt has finished — not after a
+    // guessed sleep.
+    let settled!: () => void;
+    const done = new Promise<void>((r) => (settled = r));
+    h = await routeHarness(async () => {
+      queueMicrotask(settled);
+      return { kind: 'merged', result: {} };
+    });
     await post(h.baseUrl);
-    await vi.waitFor(() => expect(h!.workflow.mergeChangeRequest).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 20));
+    await done;
+    // One macrotask: the route's continuation after `mergeChangeRequest` resolves.
+    await new Promise((r) => setImmediate(r));
+    expect(h.workflow.mergeChangeRequest).toHaveBeenCalledTimes(1);
     expect(h.workflow.recordApplyFailure).not.toHaveBeenCalled();
     expect(h.emitted.filter((e) => e.kind === 'change-request-merge-failed')).toEqual([]);
   });
@@ -155,9 +183,9 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
   });
 });
 
-// ── WorkflowService.recordApplyFailure / clearApplyFailure ──────────────────
+// ── WorkflowService.recordApplyFailure ──────────────────────────────────────
 
-function updateDb() {
+function updateDb(openRows = 1) {
   const sets: Record<string, unknown>[] = [];
   const chain = {
     update: vi.fn(() => chain),
@@ -165,7 +193,8 @@ function updateDb() {
       sets.push(values);
       return chain;
     }),
-    where: vi.fn(async () => undefined),
+    where: vi.fn(() => chain),
+    returning: vi.fn(async () => Array.from({ length: openRows }, () => ({ number: 7 }))),
   };
   return { db: chain as unknown as Database, sets };
 }
@@ -193,11 +222,13 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const emitted: unknown[] = [];
     const { svc, prs } = service(db, (e) => emitted.push(e));
 
-    await svc.recordApplyFailure(
+    const recorded = await svc.recordApplyFailure(
       7,
       { reason: 'push failed: https://x-access-token:ghp_secret123@github.com/acme/kb', conflicts: false },
       ADMIN,
+      svc.beginApplyAttempt(7),
     );
+    expect(recorded).toBe(true);
 
     expect(sets[0]).toMatchObject({ applyFailureConflicts: false, applyFailedByName: 'Ada Admin' });
     expect(sets[0]!.applyFailedAt).toBeInstanceOf(Date);
@@ -212,21 +243,35 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const { svc } = service(db, () => {});
     const reason = `Waiting on approval for ${Array.from({ length: 12 }, (_, i) => `Plugins/x/file-${i}.md`).join(', ')}`;
     expect(reason.length).toBeGreaterThan(200);
-    await svc.recordApplyFailure(7, { reason, conflicts: false }, ADMIN);
+    await svc.recordApplyFailure(7, { reason, conflicts: false }, ADMIN, svc.beginApplyAttempt(7));
     expect(sets[0]!.applyFailureReason).toBe(reason);
   });
 
-  it('clearing forgets every field of the refusal', async () => {
+  it('an older attempt finishing last does not overwrite the newer attempt\'s refusal', async () => {
     const { db, sets } = updateDb();
-    const { svc, prs } = service(db, () => {});
-    await svc.clearApplyFailure(7);
-    expect(sets[0]).toEqual({
-      applyFailureReason: null,
-      applyFailureConflicts: null,
-      applyFailedAt: null,
-      applyFailedByName: null,
-    });
-    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+    const emitted: unknown[] = [];
+    const { svc } = service(db, (e) => emitted.push(e));
+    const older = svc.beginApplyAttempt(7);
+    const newer = svc.beginApplyAttempt(7);
+    expect(await svc.recordApplyFailure(7, { reason: 'newer', conflicts: false }, ADMIN, newer)).toBe(true);
+    expect(await svc.recordApplyFailure(7, { reason: 'older', conflicts: false }, ADMIN, older)).toBe(false);
+    expect(sets.map((v) => v.applyFailureReason)).toEqual(['newer']);
+    expect(emitted).toHaveLength(1);
+  });
+
+  it('a request a concurrent apply already landed announces no failure', async () => {
+    const { db } = updateDb(0);
+    const emitted: unknown[] = [];
+    const { svc, prs } = service(db, (e) => emitted.push(e));
+    const recorded = await svc.recordApplyFailure(
+      7,
+      { reason: 'already merged', conflicts: false },
+      ADMIN,
+      svc.beginApplyAttempt(7),
+    );
+    expect(recorded).toBe(false);
+    expect(emitted).toEqual([]);
+    expect(prs.invalidateDetailCache).not.toHaveBeenCalled();
   });
 });
 
@@ -312,5 +357,46 @@ describe('PullRequestService — lastApplyFailure on the request', () => {
   it('a row with no refusal reports none', async () => {
     const detail = await detailFor({ ...ROW, applyFailureReason: null, applyFailedAt: null });
     expect(detail?.lastApplyFailure).toBeNull();
+  });
+});
+
+describe('PullRequestService — a read the refusal overtook is not cached', () => {
+  it('a detail read that started before recordApplyFailure cannot republish the old row', async () => {
+    const before = { number: 7, state: 'open', targetBranch: 'main', sourceBranch: 'b', title: 't', body: '',
+      authorEmail: 'bo@example.com', authorName: 'Bo', createdAt: new Date(), applyFailureReason: null, applyFailedAt: null };
+    const after = { ...before, applyFailureReason: 'gate says no', applyFailedAt: new Date(), applyFailedByName: 'Ada' };
+    let current: Record<string, unknown> = before;
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((r) => (releaseFirst = r));
+    let reads = 0;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => {
+              const row = current;
+              if (reads++ === 0) await firstHeld;
+              return [row];
+            },
+          }),
+        }),
+      }),
+    } as unknown as Database;
+    const svc = new RealPullRequestService(
+      db,
+      { findAnyWorkspaceId: async () => 'ws' } as unknown as WorkspaceService,
+      { canWriteAtRef: async () => false } as unknown as IAccessControl,
+      { resolvePrShas: async () => ({ baseSha: 'b', headSha: 'h' }), changedFilesForPr: async () => [] } as unknown as GitService,
+    );
+
+    const stale = svc.getPrDetail(7, { viewerEmail: 'bo@example.com' });
+    // The refusal lands while that read is still in flight.
+    current = after;
+    svc.invalidateDetailCache(7);
+    releaseFirst();
+    expect((await stale)?.lastApplyFailure).toBeNull();
+
+    const next = await svc.getPrDetail(7, { viewerEmail: 'bo@example.com' });
+    expect(next?.lastApplyFailure?.reason).toBe('gate says no');
   });
 });

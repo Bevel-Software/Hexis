@@ -261,6 +261,12 @@ export interface ChangeRequestMergeFailedEvent {
    * The UI routes to the agent resolution flow instead of showing an error.
    */
   conflicts: boolean;
+  /**
+   * When the attempt failed (ISO) — the same instant persisted as
+   * `lastApplyFailure.at` when the refusal is recorded, so the clicker's tab
+   * can tell its own refusal from a later one somebody else's attempt made.
+   */
+  at?: string;
 }
 
 /**

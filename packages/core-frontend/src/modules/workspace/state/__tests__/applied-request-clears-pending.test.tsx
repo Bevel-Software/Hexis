@@ -192,6 +192,50 @@ describe('an applied change request stops showing as pending — for every viewe
     act(() => bus.emit({ kind: 'resync', reason: 'buffer overflow' }));
     await waitFor(() => expect(api.listOpenChangeRequests).toHaveBeenCalledTimes(4));
   });
+
+  it('a request opened in another session shows up without waiting for the fallback', async () => {
+    serverHasOpenRequest(false);
+    const bus = fakeBus();
+    const { result } = renderTab(bus.value);
+    await waitFor(() => expect(api.listOpenChangeRequests).toHaveBeenCalledTimes(1));
+    expect(pending(result)).toBe(false);
+
+    serverHasOpenRequest(true);
+    act(() =>
+      bus.emit({
+        kind: 'change-request-opened',
+        number: 7,
+        source: 'suggestions/bo/knowledge',
+        target: 'main',
+        authorIdHash: null,
+        title: 'Upload into Plugins/x',
+      }),
+    );
+    await waitFor(() => expect(pending(result)).toBe(true));
+  });
+
+  it('an older list read resolving after the merge refresh does not restore the marker', async () => {
+    serverHasOpenRequest(true);
+    const bus = fakeBus();
+    const { result } = renderTab(bus.value);
+    await waitFor(() => expect(pending(result)).toBe(true));
+
+    // A read that left before the merge (a fallback poll) is still in flight…
+    let releaseOld!: (v: PullRequestSummary[]) => void;
+    api.listOpenChangeRequests.mockReturnValueOnce(
+      new Promise((r) => {
+        releaseOld = r;
+      }),
+    );
+    act(() => bus.emit({ kind: 'change-request-rejected', number: 99 }));
+    // …when the merge lands and the refresh reads the truth.
+    api.listOpenChangeRequests.mockResolvedValue([]);
+    act(() => bus.emit({ kind: 'change-request-merged', number: 7 }));
+    await waitFor(() => expect(pending(result)).toBe(false));
+
+    await act(async () => releaseOld([pr()]));
+    expect(pending(result)).toBe(false);
+  });
 });
 
 /**
@@ -230,10 +274,17 @@ function captureFallback() {
 
 describe('a lost event: the page reconciles from the server within the fallback window', () => {
   let fallback: ReturnType<typeof captureFallback>;
+  let hidden: ReturnType<typeof vi.spyOn> | null = null;
   beforeEach(() => {
     fallback = captureFallback();
   });
-  afterEach(() => fallback.restore());
+  afterEach(() => {
+    fallback.restore();
+    // Released whatever the test's outcome: a `document.hidden` spy left behind
+    // would silence every visibility-gated read in the tests after it.
+    hidden?.mockRestore();
+    hidden = null;
+  });
 
   it('clears the marker on the next fallback read, with no event and no reload', async () => {
     serverHasOpenRequest(true);
@@ -252,7 +303,7 @@ describe('a lost event: the page reconciles from the server within the fallback 
     serverHasOpenRequest(true);
     const { result } = renderTab(fakeBus().value);
     await waitFor(() => expect(pending(result)).toBe(true));
-    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
 
     serverHasOpenRequest(false);
     fallback.fire();
@@ -263,7 +314,6 @@ describe('a lost event: the page reconciles from the server within the fallback 
       document.dispatchEvent(new Event('visibilitychange'));
     });
     await waitFor(() => expect(pending(result)).toBe(false));
-    hidden.mockRestore();
   });
 
   it('stops reading once the page is gone', async () => {

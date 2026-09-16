@@ -1005,17 +1005,25 @@ export function createWorkflowRoutes(
     // merge error so the UI that kicked it off can react. A failure on a
     // request that exists is ALSO persisted and broadcast (`recordApplyFailure`)
     // — the request stays open, and its author and other viewers must see why.
+    // Nothing is cleared as an attempt starts: a caller the merge then refuses
+    // must not be able to erase the verdict everyone else reads. A landed apply
+    // needs no clearing (only an open request reports a refusal), and a newer
+    // refusal simply overwrites the old one.
     res.status(202).json({ status: 'merging', number: num });
-    const reportFailure = async (reason: string, conflicts: boolean) => {
+    const attempt = workflow.beginApplyAttempt(num);
+    const reportFailure = async (reason: string, conflicts: boolean, persist = true) => {
+      const at = new Date();
       events.emit({
         kind: 'change-request-merge-failed',
         forUserId: user.id,
         number: num,
         reason,
         conflicts,
+        at: at.toISOString(),
       });
+      if (!persist) return;
       try {
-        await workflow.recordApplyFailure(num, { reason, conflicts }, user);
+        await workflow.recordApplyFailure(num, { reason, conflicts, at }, user, attempt);
       } catch (err) {
         // The clicker already has the reason; only the other viewers lose it.
         log.warn(`could not record the failed apply of change request #${num}:`, { err });
@@ -1023,9 +1031,6 @@ export function createWorkflowRoutes(
     };
     void (async () => {
       try {
-        await workflow.clearApplyFailure(num).catch((err: unknown) => {
-          log.warn(`could not clear the previous apply failure of change request #${num}:`, { err });
-        });
         const workspace = await workspaceService.getOrCreateForUser(user);
         const detail = await workflow.getChangeRequestDetail(num, {
           fresh: true,
@@ -1058,9 +1063,16 @@ export function createWorkflowRoutes(
         }
         // Success path: `workflow.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {
-        const { body: errBody } = toHttpError(err);
+        const { status, body: errBody } = toHttpError(err);
         log.error(`async merge of change request #${num} failed:`, { err });
-        await reportFailure(typeof errBody.error === 'string' ? errBody.error : 'Merge failed', false);
+        // A refusal of the CALLER (not allowed, nothing to act on) says nothing
+        // about the request itself — it goes to the clicker alone.
+        const aboutTheCaller = status === 401 || status === 403 || status === 404;
+        await reportFailure(
+          typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
+          false,
+          !aboutTheCaller,
+        );
       }
     })();
   });

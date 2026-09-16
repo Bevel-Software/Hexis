@@ -89,11 +89,20 @@ export function ChangeRequestDialog({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [isTop, onClose]);
 
+  /**
+   * Every detail read takes a number; only the newest read may publish. The
+   * opening read, an event re-read and a post-revert read can overlap, and an
+   * older answer resolving last would put back state a newer one replaced —
+   * a merged request shown pending again, a cleared refusal back on screen.
+   */
+  const detailSeq = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
+    const seq = ++detailSeq.current;
     fetchPrDetail(cr.number)
       .then((d) => {
-        if (!cancelled) setDetail(d);
+        if (!cancelled && seq === detailSeq.current) setDetail(d);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -115,9 +124,10 @@ export function ChangeRequestDialog({
     let cancelled = false;
     const reread = (e: { number: number }) => {
       if (e.number !== cr.number) return;
+      const seq = ++detailSeq.current;
       fetchPrDetail(cr.number, { fresh: true })
         .then((d) => {
-          if (!cancelled) setDetail(d);
+          if (!cancelled && seq === detailSeq.current) setDetail(d);
         })
         .catch(() => undefined);
     };
@@ -408,10 +418,13 @@ export function ChangeRequestDialog({
    * either already approved or approvable BY THIS VIEWER (they hold write on
    * it, so their click completes the gate). Anything less and Apply was a
    * button that walked into "Waiting on approval for …" — offering a verdict
-   * the viewer cannot actually deliver.
+   * the viewer cannot actually deliver. And only while the request is OPEN:
+   * somebody else may apply or decline it with this dialog still up, and the
+   * re-read that tells the reader so must not leave a second merge a click away.
    */
   const canApply =
     detail !== null &&
+    detail.state === 'open' &&
     detail.approvals.length > 0 &&
     detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
 
@@ -461,7 +474,9 @@ export function ChangeRequestDialog({
         return next;
       });
       setPicked(null);
-      setDetail(await fetchPrDetail(cr.number));
+      const seq = ++detailSeq.current;
+      const next = await fetchPrDetail(cr.number);
+      if (seq === detailSeq.current) setDetail(next);
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
     } finally {
