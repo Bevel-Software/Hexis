@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useState } from 'react';
 import { Download } from 'lucide-react';
 import { Button } from '../../../../shared/components';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { rawFileUrl } from '../../services/workspace.api';
 import { downloadViaBlob } from './downloadFile';
 
@@ -28,12 +28,20 @@ export const CanDownloadContext = createContext<boolean | null>(null);
 export function DownloadFileButton({
   filePath,
   size = 'tiny',
+  label = 'Download',
 }: {
   filePath: string;
   /** `sm` where the download is the page's main affordance (pptx outline). */
   size?: 'tiny' | 'sm';
+  /**
+   * What the button says. `Download` beside a rendering that is already on
+   * screen; the change-request dialog names the VERSION instead ("Download
+   * the proposed file"), because there the bytes are the only thing on offer
+   * and which branch they come from is the whole question.
+   */
+  label?: string;
 }) {
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const canDownload = useContext(CanDownloadContext);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +90,7 @@ export function DownloadFileButton({
             : `Download ${fileName}`
         }
       >
-        {busy ? 'Downloading…' : 'Download'}
+        {busy ? 'Downloading…' : label}
       </Button>
     </span>
   );

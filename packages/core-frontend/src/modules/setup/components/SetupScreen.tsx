@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
 import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
@@ -101,23 +103,23 @@ const FIELDS: Record<
     placeholder: 'A long random string',
     advanced: true,
   },
+  // The three roots are NOT under Advanced: a repository whose skills live in
+  // `skills/` connected fine, got an empty `Skills/` scaffolded beside it and
+  // imported nothing — a choice that has to be seen to be made.
   knowledgeBaseDir: {
     label: 'Knowledge folder',
     help: 'The top-level folder in the repository that holds the knowledge. Change it only to read a repository laid out by someone else.',
     placeholder: 'KnowledgeBase',
-    advanced: true,
   },
   skillsDir: {
     label: 'Skills folder',
-    help: 'The top-level folder that holds shared skills. The three folder names must differ.',
+    help: 'The top-level folder that holds shared skills. The three folder names must differ. Case matters: skills and Skills are different folders.',
     placeholder: 'Skills',
-    advanced: true,
   },
   pluginsDir: {
     label: 'Plugins folder',
     help: 'The top-level folder that holds plugins. The three folder names must differ.',
     placeholder: 'Plugins',
-    advanced: true,
   },
   defaultBranch: {
     label: 'Main branch',
@@ -181,6 +183,18 @@ const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranc
  * it there would ask an admin to prove the same repository twice.
  */
 const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
+
+/** The three root folder fields, checked against the repository's listing. */
+const ROOT_FOLDER_KEYS: readonly (keyof KbLayout)[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
+const isRootFolderKey = (key: string): key is keyof KbLayout =>
+  (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
+
+/** How a near-miss folder differs from the configured name, as the warning words it. */
+const VARIANT_DIFFERENCE: Record<Extract<RootFolderState, { kind: 'variant' }>['difference'], string> = {
+  case: 'differs only by case',
+  'trailing-s': 'differs only by a trailing s',
+  'case-and-trailing-s': 'differs by case and a trailing s',
+};
 
 /** The blocks, in the order they are worked through. */
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
@@ -768,11 +782,56 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
    */
   const remoteBranches = test?.ok ? (test.branches ?? []) : [];
 
+  /**
+   * The top-level folders the connection test found, or null when there is
+   * nothing to judge the root fields against: no test yet, a failed one, a
+   * listing that did not come back — or an EMPTY repository, whose one message
+   * already says everything will be set up, and three "will be created" notes
+   * beneath it would only repeat that.
+   */
+  const remoteRootFolders =
+    test?.ok && !test.empty && Array.isArray(test.rootFolders) ? test.rootFolders : null;
+
+  /**
+   * What the repository holds for one root field, as it would save now. Judged
+   * live against the listing — the listing describes the repository, not the
+   * field, so correcting the name to the one suggested says "found" at once.
+   * Never a problem that blocks the save: an admin may mean to create the
+   * folder, or to rename the old one later.
+   */
+  function renderRootFolderState(key: keyof KbLayout) {
+    if (!remoteRootFolders) return null;
+    const name = resolved(key) || DEFAULT_KB_LAYOUT[key];
+    const state = rootFolderState(name, remoteRootFolders);
+    const folder = (value: string) => <code className="font-mono">{value}</code>;
+    return (
+      <p id={`${key}-repo-state`} className={`mt-1 text-meta ${state.kind === 'variant' ? 'text-wait' : 'text-ok'}`}>
+        {state.kind === 'found' && <>{folder(name)} found in the repository.</>}
+        {state.kind === 'missing' && (
+          <>{folder(name)} is not in the repository yet — it will be created.</>
+        )}
+        {state.kind === 'variant' && (
+          <>
+            Not found — the repository has {folder(state.candidate)} (
+            {VARIANT_DIFFERENCE[state.difference]}): set
+            this field to {folder(state.candidate)} or rename the folder.
+          </>
+        )}
+      </p>
+    );
+  }
+
   function renderField(setting: SettingStatus) {
     const copy = FIELDS[setting.key];
     if (!copy) return null;
     const isBranchField = setting.key === 'defaultBranch' || setting.key === 'protectedBranches';
-    const listId = isBranchField && remoteBranches.length > 0 ? `${setting.key}-options` : undefined;
+    const isFolderField = isRootFolderKey(setting.key);
+    const suggestions = isBranchField
+      ? remoteBranches
+      : isFolderField
+        ? (remoteRootFolders ?? []).filter(isRootFolderSuggestion)
+        : [];
+    const listId = suggestions.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>
         <label className="block space-y-1.5">
@@ -794,12 +853,13 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
         </label>
         {listId && (
           <datalist id={listId}>
-            {remoteBranches.map((b) => (
+            {suggestions.map((b) => (
               <option key={b} value={b} />
             ))}
           </datalist>
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+        {isRootFolderKey(setting.key) && renderRootFolderState(setting.key)}
         {setting.key === 'kbSyncSecret' && renderSyncPanel()}
         {/* Only AFTER setup: on first run there is nothing yet to lose, so
             the caution would be noise. Once a deployment is live, this field
@@ -938,7 +998,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     </p>
                   )}
                 </div>
-                {fields.filter((f) => !FIELDS[f.key]?.advanced).map((f) => renderField(f))}
+                {fields
+                  .filter((f) => !FIELDS[f.key]?.advanced && !isRootFolderKey(f.key))
+                  .map((f) => renderField(f))}
 
                 {/* Immediately under the two fields it proves, and above the
                     Advanced block it fills in — the middle of the sequence
@@ -962,8 +1024,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                         {testing ? 'Checking…' : 'Test connection'}
                       </Button>
                       <span className="text-meta text-ink-faint">
-                        Checks the address and token against the host, and fills in the versions
-                        below.
+                        Checks the address and token against the host, looks for the folders below,
+                        and fills in the versions.
                       </span>
                     </div>
                     {test && (
@@ -982,6 +1044,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
                     )}
                   </Surface>
                 )}
+
+                {/* The three root folders: in the main section, directly under
+                    the test whose listing they are checked against — the
+                    connection fields above it stay next to the button that
+                    proves them. */}
+                {fields.filter((f) => isRootFolderKey(f.key)).map((f) => renderField(f))}
 
                 {/* Everything a normal setup never touches, out of the way but
                     not hidden: a self-hosted git server does need the token

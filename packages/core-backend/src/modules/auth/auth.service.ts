@@ -207,16 +207,34 @@ export class AuthService {
       .where(eq(users.id, userId));
   }
 
-  /** Accounts overview for the admin management screen (never exposes hashes). */
+  /**
+   * Accounts overview for the admin management screen (never exposes hashes).
+   * The two password facts are independent: `hasPassword` is a stored hash;
+   * `isEnvAdmin` is the env bootstrap credential (`ADMIN_EMAIL` while
+   * `ADMIN_PASSWORD` is set), which signs in whether or not a hash exists —
+   * the same condition {@link loginWithPassword} checks first.
+   */
   async listAccounts(): Promise<
-    Array<{ id: string; email: string; name: string; hasPassword: boolean; createdAt: Date }>
+    Array<{
+      id: string;
+      email: string;
+      name: string;
+      hasPassword: boolean;
+      isEnvAdmin: boolean;
+      createdAt: Date;
+    }>
   > {
     const rows = await this.db.select().from(users).orderBy(users.email);
+    const envAdminEmail =
+      this.config.adminEmail.length > 0 && this.config.adminPassword.length > 0
+        ? this.config.adminEmail
+        : null;
     return rows.map((row) => ({
       id: row.id,
       email: row.email,
       name: row.name,
       hasPassword: row.passwordHash != null,
+      isEnvAdmin: envAdminEmail !== null && row.email === envAdminEmail,
       createdAt: row.createdAt,
     }));
   }

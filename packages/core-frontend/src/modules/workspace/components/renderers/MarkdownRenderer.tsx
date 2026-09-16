@@ -7,7 +7,7 @@ import {
   useNodeIdNav,
   useCanonicalFileUrl,
 } from '../../routing/kb-routes';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
 
@@ -162,7 +162,7 @@ export function MarkdownRenderer({
   // bevel_token cookie), and the URL carries the workspace's image revision,
   // which changes when a teammate replaces a file, so an open tab shows the
   // new picture.
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const resolveImage = useWorkspaceImageResolver(workspaceId, filePath);
 
   const save = useCallback(async (): Promise<boolean> => {

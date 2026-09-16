@@ -133,8 +133,6 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
 export class TemplateFilesStep implements OnServerStart {
   readonly name = 'template-files';
 
-  private readonly requiredDirs: readonly string[];
-
   /**
    * @param extraRootDirs Additional root folders this distribution reserves,
    *                      on top of core's two. Their `.gitkeep` is written
@@ -144,9 +142,14 @@ export class TemplateFilesStep implements OnServerStart {
    */
   constructor(
     private readonly disk: IFsProbe,
-    extraRootDirs: readonly string[] = [],
+    private readonly extraRootDirs: readonly string[] = [],
   ) {
-    this.requiredDirs = reservedRootDirs(extraRootDirs);
+    // Validated NOW, so a bad extra fails at boot beside the rest of the
+    // wiring — but the list itself is NOT kept: the core roots are live
+    // bindings, and the save that completes first-run setup applies the
+    // admin's names after this step was built. A snapshot taken here
+    // scaffolded `Skills/` beside the `skills/` they had just chosen.
+    reservedRootDirs(extraRootDirs);
   }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
@@ -287,7 +290,7 @@ export class TemplateFilesStep implements OnServerStart {
    */
   private async missingDirs(repoDir: string): Promise<string[]> {
     const missing: string[] = [];
-    for (const rootDir of this.requiredDirs) {
+    for (const rootDir of reservedRootDirs(this.extraRootDirs)) {
       const found = await this.disk.lstatOrNull(path.join(repoDir, rootDir));
       if (found) {
         if (found.isDirectory()) continue;

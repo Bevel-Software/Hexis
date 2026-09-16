@@ -12,12 +12,16 @@ import {
 } from './connection-check.js';
 import {
   configureBranchModel,
+  configureKbLayout,
   isBranchModelConfigured,
+  isDefaultKbLayout,
   validateBranchModel,
+  validateKbLayout,
 } from '@bevel-software/platform-shared';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
 import { printable } from '../../shared/printable.js';
+import { listRootFolders, pickListingBranch } from './git-root-folders.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 /** Which name a host expects beside the token when none is configured. */
@@ -26,6 +30,11 @@ const DEFAULT_GIT_USERNAME = 'x-access-token';
 /** The one rule, in the one wording, for a stored token and a repository it was not saved for. */
 const TOKEN_FOR_THAT_REPOSITORY =
   'Enter the access token for that repository — the saved one is only used with the repository it was saved for.';
+
+/** The three renameable roots, as setting keys. */
+const LAYOUT_KEYS: readonly string[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
+/** The branch model, as setting keys. */
+const BRANCH_KEYS: readonly string[] = ['defaultBranch', 'protectedBranches'];
 
 /**
  * The slice of a sync record the status endpoint publishes. Declared here
@@ -76,6 +85,8 @@ export function createSetupRoutes(
    * the remote; production uses the real one.
    */
   checkConnection: (connection: RepositoryConnection) => Promise<ConnectionCheck> = checkRepositoryConnection,
+  /** The root-folder listing Test connection reports. Injected for the same reason. */
+  listFolders: typeof listRootFolders = listRootFolders,
 ): express.Router {
   const router = express.Router();
 
@@ -102,6 +113,12 @@ export function createSetupRoutes(
    * at a time, phase included, so no second run can start while one executes.
    */
   let kbInitInFlight: Promise<void> | null = null;
+  /**
+   * Whether the folder names in effect were put there by a setup-time save
+   * rather than by boot. While that run stands failed the app is still gated
+   * shut, so a retrying save may apply names the admin corrected in between.
+   */
+  let layoutAppliedBySetup = false;
   /** The app-gate answer: settings complete AND the KB phase settled clean. */
   const kbReady = () => isComplete(settings) && kbInit === null && kbInitInFlight === null;
 
@@ -185,7 +202,11 @@ export function createSetupRoutes(
       // configured the branch model.
       const wasComplete = isComplete(settings);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
-      const { restartRequired } = await settings.save(entries, req.userId ?? null);
+      const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      /** Whether this save put the stored folder names into the running process. */
+      let layoutApplied = false;
+      /** Whether this save put the stored branch model into the running process. */
+      let branchModelApplied = false;
       /**
        * Apply the branch model to THIS process, so pressing Save finishes
        * setup instead of asking for a restart.
@@ -205,7 +226,10 @@ export function createSetupRoutes(
           defaultBranch: settings.resolve('defaultBranch'),
           protectedBranches: settings.resolve('protectedBranches'),
         };
-        if (!validateBranchModel(model)) configureBranchModel(model);
+        if (!validateBranchModel(model)) {
+          configureBranchModel(model);
+          branchModelApplied = true;
+        }
       }
       /**
        * The save that COMPLETES setup is the KB startup phase's SECOND quiet
@@ -222,6 +246,24 @@ export function createSetupRoutes(
        * sessions may be live and that is no longer a quiet moment.
        */
       if ((!wasComplete || kbInit !== null) && isComplete(settings)) {
+        /**
+         * The folder names, applied BEFORE the phase for the same reason as
+         * the branch model above: they are otherwise applied once at boot, so
+         * the phase would scaffold `Skills/` beside the `skills/` the admin
+         * just named, and the app would read the defaults until a restart.
+         * Only while the process still holds the defaults — a layout already
+         * in effect from the environment or the boot is left alone — or holds
+         * the names an earlier setup save applied before a run that failed:
+         * the gate never opened, so the retry initializes what is saved now.
+         */
+        if (isDefaultKbLayout() || (kbInit !== null && layoutAppliedBySetup)) {
+          const layout = settings.resolveKbLayout();
+          if (!validateKbLayout(layout)) {
+            configureKbLayout(layout);
+            layoutApplied = true;
+            layoutAppliedBySetup = true;
+          }
+        }
         try {
           // One run at a time. The save chain already serializes handlers
           // whole, so no second run can start while one executes; the `??=`
@@ -258,7 +300,16 @@ export function createSetupRoutes(
       }
       res.json({
         ok: true,
-        restartRequired,
+        // Folder names and a branch model this save just applied are in
+        // effect; a restart is owed only for whatever else changed.
+        restartRequired:
+          layoutApplied || branchModelApplied
+            ? restartKeys.some(
+                (key) =>
+                  !(layoutApplied && LAYOUT_KEYS.includes(key)) &&
+                  !(branchModelApplied && BRANCH_KEYS.includes(key)),
+              )
+            : restartRequired,
         complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
@@ -416,27 +467,9 @@ export function createSetupRoutes(
       return;
     }
 
+    let check: ConnectionCheck;
     try {
-      const check = await checkConnection({ url, token, username });
-      if (check.outcome === 'rejected') {
-        // 200: the check RAN and the host said no. A 4xx is for a request that
-        // never got as far as asking.
-        res.json({ ok: false, outcome: check.outcome, field: check.field, error: check.error });
-        return;
-      }
-      res.json({
-        // Only read AND write is "connected" — a read-only token is refused
-        // on save, so the button must not call it a success.
-        ok: check.outcome === 'connected',
-        outcome: check.outcome,
-        ...(check.outcome === 'read-only' ? { field: check.field, error: check.error } : {}),
-        // An EMPTY repository is a success, not a failure — seeding one is a
-        // supported path, and saying "no branches yet" beats an error that
-        // reads like the credentials are wrong.
-        empty: check.empty,
-        branches: check.branches,
-        defaultBranch: check.defaultBranch,
-      });
+      check = await checkConnection({ url, token, username });
     } catch (err) {
       // The check answers every refusal it can read as an outcome; a throw is
       // the check itself breaking. Logged scrubbed — git failures have been
@@ -448,7 +481,47 @@ export function createSetupRoutes(
         printable(redactSecret(raw, [token, ...urlQuerySecrets(url)])),
       );
       res.status(500).json({ ok: false, error: 'Could not run the connection check.' });
+      return;
     }
+    if (check.outcome === 'rejected') {
+      // 200: the check RAN and the host said no. A 4xx is for a request that
+      // never got as far as asking.
+      res.json({ ok: false, outcome: check.outcome, field: check.field, error: check.error });
+      return;
+    }
+    /**
+     * The repository's top-level folders on the branch it serves, so the
+     * screen can say whether each configured root is there — and catch the
+     * `skills/` a `Skills` setting would silently scaffold a twin beside.
+     * Listed for a read-only token too: it reads, and the folder advice holds
+     * whatever permission it is granted next. An empty repository has no
+     * tree: an empty list, not a lookup. A listing that fails is null — never
+     * a failed connection.
+     */
+    const listingBranch = pickListingBranch(
+      check.defaultBranch,
+      supplied('defaultBranch') ?? (settings.resolve('defaultBranch') || null),
+      check.branches,
+    );
+    const rootFolders = check.empty
+      ? []
+      : listingBranch
+        ? await listFolders({ url, branch: listingBranch, username, token })
+        : null;
+    res.json({
+      // Only read AND write is "connected" — a read-only token is refused
+      // on save, so the button must not call it a success.
+      ok: check.outcome === 'connected',
+      outcome: check.outcome,
+      ...(check.outcome === 'read-only' ? { field: check.field, error: check.error } : {}),
+      // An EMPTY repository is a success, not a failure — seeding one is a
+      // supported path, and saying "no branches yet" beats an error that
+      // reads like the credentials are wrong.
+      empty: check.empty,
+      branches: check.branches,
+      defaultBranch: check.defaultBranch,
+      rootFolders,
+    });
   });
 
   return router;

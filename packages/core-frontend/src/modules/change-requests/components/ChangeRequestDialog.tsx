@@ -1,5 +1,6 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DEFAULT_BRANCH,
   type FileDiffPayload,
   type PullRequestDetail,
   type PullRequestSummary,
@@ -19,7 +20,8 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { isBinaryFile } from '../../workspace/components/renderers';
+import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderers';
+import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
 
@@ -180,6 +182,21 @@ export function ChangeRequestDialog({
   const isAdded = addedFiles.includes(selected);
 
   /**
+   * The request's own record for the selection — `undefined` for a file it
+   * does not touch. Everything below reads the status and the previous path
+   * off this one lookup.
+   */
+  const selectedFile = useMemo(
+    () => (detail?.files ?? []).find((f) => f.path === selected),
+    [detail, selected],
+  );
+  /**
+   * The status that cannot be read on the request's branch at all: the path is
+   * gone there, so the viewer and the download both have to reach for the
+   * target branch's copy — see `selectedPreview`.
+   */
+  const isRemoved = selectedFile?.status === 'removed';
+  /**
    * A MOVED file's other side lives under its OLD name.
    *
    * The selection is the path on the change request's branch. For a rename
@@ -191,12 +208,12 @@ export function ChangeRequestDialog({
    * and a pure move read as no change at all.
    */
   const move = useMemo(() => {
-    const f = (detail?.files ?? []).find((x) => x.path === selected);
-    if (f?.status !== 'renamed') return null;
+    if (selectedFile?.status !== 'renamed') return null;
     // `previousPath` is what GitHub populates for a rename; a rename that
     // arrives without one is a move whose before-side we simply cannot name.
-    return { from: f.previousPath && f.previousPath !== f.path ? f.previousPath : null };
-  }, [detail, selected]);
+    const from = selectedFile.previousPath;
+    return { from: from && from !== selectedFile.path ? from : null };
+  }, [selectedFile]);
   const movedFrom = move?.from ?? null;
   /** A rename described without a `previousPath` — no before-side to read. */
   const renameWithoutOldPath = move !== null && move.from === null;
@@ -268,6 +285,79 @@ export function ChangeRequestDialog({
     [selectedIsMarkdown, bothSidesIn, selected, isAdded, mainRaw, branchRaw],
   );
   const touchesSelected = changedFiles.has(selected);
+
+  /**
+   * The branch this request is against — where the CURRENT version of
+   * everything it touches lives, and the only honest source for a file it
+   * doesn't touch. `base` is always populated by the PR APIs; the fallback is
+   * for fixtures and for a summary that predates the field.
+   */
+  const targetBranch = cr.base || DEFAULT_BRANCH;
+
+  /**
+   * A binary file the file page has a VIEWER for — so the dialog shows the
+   * document rather than describing it.
+   *
+   * Which version, and from where:
+   *   - added    → the request's branch, "Proposed version". No current one.
+   *   - changed  → the request's branch, "Proposed version", with the current
+   *                version one click away on the target branch. For a RENAME
+   *                that current version is under the OLD name.
+   *   - removed  → the TARGET branch, "Current version": the request's branch
+   *                does not have the path at all, and showing the document
+   *                about to be deleted is the whole question being asked. The
+   *                note above the pane says it is a deletion.
+   *   - untouched→ the TARGET branch, "Current version". Reading the request's
+   *                branch would work too (its copy is identical), but naming
+   *                the target is what makes the label true.
+   *
+   * `null` for everything else — a format with no viewer (a `.zip`, a legacy
+   * `.doc`) keeps the note below, and a text or markdown file never reaches
+   * here at all: `isBinaryFile` gates this whole branch, so the diff path —
+   * including a `.csv`, whose text diff says far more than its bytes would —
+   * is untouched.
+   */
+  const selectedPreview = useMemo<{
+    branch: string;
+    label: 'Proposed version' | 'Current version';
+    currentVersionBranch: string | null;
+    currentVersionPath: string;
+  } | null>(() => {
+    if (!selectedIsBinary || !hasFileViewer(selected)) return null;
+    // Both of these read the target branch, for the same reason: there is no
+    // proposed version of the file on the request's branch. An untouched file
+    // never had one; a REMOVED file's whole proposal is that it stop existing,
+    // and reading `selected` on the request's branch would 404 into a failed
+    // viewer.
+    if (!touchesSelected || isRemoved) {
+      return {
+        branch: targetBranch,
+        label: 'Current version',
+        currentVersionBranch: null,
+        currentVersionPath: selected,
+      };
+    }
+    return {
+      branch: cr.branch,
+      label: 'Proposed version',
+      // Nothing to open for an added file, and nothing to point AT for a
+      // rename the request described without a `previousPath`.
+      currentVersionBranch: isAdded || renameWithoutOldPath ? null : targetBranch,
+      // A rename's current version is under its OLD name; `selected` is the
+      // proposed one, which the target branch has never had.
+      currentVersionPath: movedFrom ?? selected,
+    };
+  }, [
+    selectedIsBinary,
+    selected,
+    touchesSelected,
+    isAdded,
+    isRemoved,
+    movedFrom,
+    renameWithoutOldPath,
+    cr.branch,
+    targetBranch,
+  ]);
 
   /**
    * The unmarked reading — the file itself, when there is no honest diff.
@@ -573,7 +663,11 @@ export function ChangeRequestDialog({
                 {detail === null
                   ? ''
                   : touchesSelected
-                    ? ' · what changes is marked'
+                    ? // Nothing is marked in a rendered document: the pane
+                      // below shows the proposed version whole, and says so.
+                      selectedPreview !== null
+                      ? ''
+                      : ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
             </div>
@@ -585,6 +679,12 @@ export function ChangeRequestDialog({
             {movedFrom && (
               <p className="truncate pb-1 font-mono text-meta text-ink-faint">
                 Moved: {movedFrom} → {selected}
+              </p>
+            )}
+            {isRemoved && selectedPreview !== null && (
+              <p className="pb-1 text-meta text-ink-faint">
+                This request DELETES this file. Below is the version on{' '}
+                <span className="font-mono">{targetBranch}</span> that would go.
               </p>
             )}
             {oldPathUnreadable && (
@@ -603,13 +703,49 @@ export function ChangeRequestDialog({
                   soon as those arrive rather than waiting on the (slow) detail
                   fetch that tells us which files were touched. */}
               {selectedIsBinary ? (
-                <p className="py-6 text-center text-detail text-ink-faint">
-                  {isAdded
-                    ? 'A new binary file (an image, a document…). There is no text to compare. Apply the request to take it as proposed.'
-                    : touchesSelected
-                      ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
-                      : 'A binary file. No text to show, and this request does not touch it.'}
-                </p>
+                // Which branch this pane reads — and whether there is a
+                // current version to offer beside it — is a fact about the
+                // FILE LIST, so the pane waits for the detail rather than
+                // guessing and flipping branches under the reader.
+                detail === null ? (
+                  <p className="py-6 text-center text-detail text-ink-faint">Loading…</p>
+                ) : selectedPreview !== null ? (
+                  // The proposed document itself, with the viewer the file
+                  // page uses. A file the request does not touch reads from
+                  // the TARGET branch instead — there is no proposed version
+                  // of it, and the current one is what there is to show.
+                  <BranchFilePreview
+                    branch={selectedPreview.branch}
+                    repoRelativePath={selected}
+                    label={selectedPreview.label}
+                    currentVersionBranch={selectedPreview.currentVersionBranch}
+                    currentVersionPath={selectedPreview.currentVersionPath}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-4 py-6">
+                    <p className="text-center text-detail text-ink-faint">
+                      {isRemoved
+                        ? 'A binary file (an image, a document…) this request DELETES. There is no text to compare; the bytes below are the ones that would go.'
+                        : isAdded
+                          ? 'A new binary file (an image, a document…). There is no text to compare. Apply the request to take it as proposed.'
+                          : touchesSelected
+                            ? 'A binary file (an image, a document…) changed in this request. There is no text to compare.'
+                            : 'A binary file. No text to show, and this request does not touch it.'}
+                    </p>
+                    {/* No viewer renders this format, so the bytes themselves
+                        are the only honest offer — from the request's branch,
+                        so what downloads is what would be applied. */}
+                    <BranchFileDownload
+                      branch={touchesSelected && !isRemoved ? cr.branch : targetBranch}
+                      repoRelativePath={selected}
+                      label={
+                        touchesSelected && !isRemoved
+                          ? 'Download the proposed file'
+                          : 'Download the file'
+                      }
+                    />
+                  </div>
+                )
               ) : mdPayload !== null && !unreadable.has(selected) ? (
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —

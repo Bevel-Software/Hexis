@@ -214,6 +214,44 @@ describe('AuthService.listAccounts', () => {
     ]);
     expect(JSON.stringify(accounts)).not.toContain('scrypt:');
   });
+
+  it('marks the env admin with and without a stored hash, independently of hasPassword', async () => {
+    const passwordHash = await hashPassword('pw-longer-than-8');
+    const rows = [
+      { ...ROW, id: 'root-hashed', email: 'root@example.com', passwordHash, createdAt: new Date() },
+      { ...ROW, id: 'user-2', email: 'bob@example.com', passwordHash, createdAt: new Date() },
+      { ...ROW, id: 'user-3', email: 'sso@example.com', passwordHash: null, createdAt: new Date() },
+    ];
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
+
+    const withHash = await new AuthService(makeFakeDb([rows]).db, config).listAccounts();
+    expect(withHash.map((a) => [a.email, a.hasPassword, a.isEnvAdmin])).toEqual([
+      ['root@example.com', true, true],
+      ['bob@example.com', true, false],
+      ['sso@example.com', false, false],
+    ]);
+
+    const noHashRows = [{ ...rows[0], passwordHash: null }];
+    const withoutHash = await new AuthService(makeFakeDb([noHashRows]).db, config).listAccounts();
+    expect(withoutHash.map((a) => [a.hasPassword, a.isEnvAdmin])).toEqual([[false, true]]);
+
+    // Neither the hash nor the environment password ever leaves the service.
+    const json = JSON.stringify([...withHash, ...withoutHash]);
+    expect(json).not.toContain('scrypt:');
+    expect(json).not.toContain('sup3r-secret');
+    for (const account of [...withHash, ...withoutHash]) {
+      expect(Object.keys(account).sort()).toEqual(
+        ['createdAt', 'email', 'hasPassword', 'id', 'isEnvAdmin', 'name'],
+      );
+    }
+  });
+
+  it('is not the env admin while ADMIN_PASSWORD is unset (SSO-only deployment)', async () => {
+    const rows = [{ ...ROW, email: 'root@example.com', passwordHash: null, createdAt: new Date() }];
+    const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
+    const accounts = await new AuthService(makeFakeDb([rows]).db, config).listAccounts();
+    expect(accounts[0].isEnvAdmin).toBe(false);
+  });
 });
 
 /**

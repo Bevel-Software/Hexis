@@ -11,6 +11,32 @@ import {
 } from '../../auth/services/account.api';
 
 /**
+ * How an account signs in, in the words this page uses everywhere (the row and
+ * the delete confirmation). The deployment admin wins over a stored hash: both
+ * can be true, and the environment credential is the one that survives.
+ */
+function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
+  if (account.isEnvAdmin) return 'Password (deployment admin)';
+  if (account.hasPassword) return 'Password';
+  return 'No password — signs in with single sign-on';
+}
+
+/**
+ * What deleting the account means for signing in again, keyed off the same
+ * facts as {@link signInMethodLabel} and opening with its wording.
+ */
+function signInAfterDelete(account: AccountSummary): string {
+  const label = signInMethodLabel(account);
+  if (account.isEnvAdmin) {
+    return `${label}: they can still sign in with the deployment admin password, but will start fresh.`;
+  }
+  if (account.hasPassword) {
+    return `${label}: to sign in again they will need an admin to create a new account for them.`;
+  }
+  return `${label}: they can sign in again later with single sign-on, but will start fresh.`;
+}
+
+/**
  * The User Accounts page (`/user-accounts`, admins only) — the ONE
  * account-management surface: every account on the deployment, whether it can
  * sign in with a password, set a user's password (accounts that predate
@@ -185,7 +211,7 @@ export function UserAccountsPage() {
                       </div>
                       <div className="text-meta text-ink-muted truncate">
                         {account.email} · Joined {new Date(account.createdAt).toLocaleDateString()} ·{' '}
-                        {account.hasPassword ? 'Password sign-in' : 'Single sign-on only'}
+                        {signInMethodLabel(account)}
                       </div>
                     </div>
                     {!isSelf && (
@@ -351,9 +377,7 @@ export function UserAccountsPage() {
           </span>
           ? This removes their personal data for good and anonymizes their past review activity.
           Their saves in the knowledge base keep their history.{' '}
-          {pendingDelete?.hasPassword
-            ? 'To sign in again they will need an admin to create a new account for them.'
-            : 'They can sign in again later with single sign-on, but will start fresh.'}
+          {pendingDelete && signInAfterDelete(pendingDelete)}
         </p>
       </Dialog>
     </>

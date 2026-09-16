@@ -47,8 +47,11 @@ export function isImagePath(path: string): boolean {
  * `fsRevision` is not this signal: it is bumped by the local user's own
  * mutations, never by the SSE handler, and every bump re-polls git status.
  *
- * Views of another revision than the checked-out tree (the change-request
- * dialog, the file history) do not use it: they show no live image at all.
+ * `ImageRenderer` counts it for the workspace it is POINTED AT, which in the
+ * change-request pane is the request's branch — one its author may still be
+ * pushing to while a reviewer reads it. The file history is the view that
+ * genuinely cannot use this: it shows a named commit's bytes, not a branch's,
+ * so there is no later revision of them to reach for.
  *
  * The hook also WATCHES `workspaceId` on the bus for as long as it is mounted,
  * so the events it counts are actually delivered even when that workspace is
