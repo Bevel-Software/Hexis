@@ -1,5 +1,4 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import {
   GitRunError,
   redactGitToken,
@@ -7,8 +6,6 @@ import {
   type GitRunResult,
   type IGitRunner,
 } from '../../../shared/git.contract.js';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * The deadline every git call carries unless its caller says otherwise.
@@ -90,9 +87,10 @@ const FIXED_ENV = {
  */
 function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  if (pid === undefined) return;
 
   if (process.platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode !== null) return;
     const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
     // taskkill failing is not actionable here — the child is either already
     // gone (the common case, and taskkill says so with a non-zero exit) or
@@ -101,12 +99,104 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
     return;
   }
 
+  // Signalled even once git itself has exited: the group outlives its leader
+  // for as long as a helper it spawned lives, and a helper still holding the
+  // pipes is exactly the case the second stage exists for. This is only ever
+  // called while the call is still waiting, so something in the group holds
+  // a pipe open and the group is still the one the pid names.
   try {
     process.kill(-pid, signal);
   } catch {
     // The group is already gone, or it vanished between the liveness check
     // above and the signal. Either way there is nothing left to stop.
   }
+}
+
+/** What a finished command produced, as bytes; `run` decodes. */
+interface Captured {
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+/**
+ * A failed command, in the shape `execFile` gives one — the shape the rest of
+ * this class, and every caller reading exit codes and stderr, was written to.
+ */
+interface CommandFailure extends Error {
+  code?: number | string;
+  signal?: NodeJS.Signals | null;
+  stdout?: Buffer;
+  stderr?: Buffer;
+}
+
+/**
+ * Spawn git and capture what it writes, the way `execFile` would — with one
+ * difference that is the whole point: the child is spawned through `spawn`,
+ * which honours `detached`, where `execFile` builds its own option set and
+ * silently drops it. Without `detached` the child is not a process-group
+ * leader on POSIX, the group signal in `killTree` finds no group, and the
+ * deadline only ends the wait through the abandonment backstop, ten seconds
+ * late, with the transport helper still running.
+ *
+ * Like `execFile`: settles on `close` (every pipe closed AND the child gone),
+ * rejects a non-zero exit with `Command failed: …` plus stderr and the exit
+ * code on `code`, rejects a spawn failure with the system error (`ENOENT` on a
+ * missing git — a string `code`, which is how callers tell "git never ran"
+ * from "git said no"), and cuts off a child whose output passes `maxBuffer`.
+ */
+function spawnGit(args: string[], options: SpawnOptions & { maxBuffer: number }): {
+  promise: Promise<Captured>;
+  child: ChildProcess;
+} {
+  const child = spawn('git', args, { ...options, stdio: ['pipe', 'pipe', 'pipe'] });
+  const promise = new Promise<Captured>((resolve, reject) => {
+    const out: Buffer[] = [];
+    const errOut: Buffer[] = [];
+    let total = 0;
+    let failed: CommandFailure | null = null;
+    const fail = (error: CommandFailure) => {
+      failed ??= error;
+    };
+    const collect = (into: Buffer[], stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > options.maxBuffer) {
+        const error: CommandFailure = new RangeError(`${stream} maxBuffer length exceeded`);
+        error.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+        fail(error);
+        killTree(child, 'SIGKILL');
+        return;
+      }
+      into.push(chunk);
+    };
+    child.stdout?.on('data', collect(out, 'stdout'));
+    child.stderr?.on('data', collect(errOut, 'stderr'));
+    child.on('error', (error: CommandFailure) => {
+      fail(error);
+      // A spawn failure fires `error` and may never fire `close`.
+      if (child.pid === undefined) reject(error);
+    });
+    child.on('close', (code, signal) => {
+      const stdout = Buffer.concat(out);
+      const stderr = Buffer.concat(errOut);
+      if (failed) {
+        failed.stdout = stdout;
+        failed.stderr = stderr;
+        reject(failed);
+        return;
+      }
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const error: CommandFailure = new Error(`Command failed: git ${args.join(' ')}\n${stderr.toString()}`);
+      error.code = code ?? undefined;
+      error.signal = signal;
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
+    });
+  });
+  return { promise, child };
 }
 
 /**
@@ -128,7 +218,7 @@ export class NodeGitRunner implements IGitRunner {
     let timedOut = false;
 
     try {
-      const spawnOptions = {
+      const { promise: pending, child } = spawnGit(args, {
         cwd,
         env: { ...process.env, ...opts.env, ...FIXED_ENV },
         maxBuffer: MAX_OUTPUT_BYTES,
@@ -137,21 +227,8 @@ export class NodeGitRunner implements IGitRunner {
         // where `detached` means "new console window" rather than "new process
         // group", and where `taskkill /T` walks the tree without it.
         detached: process.platform !== 'win32',
-      };
-      // Two calls rather than one with a computed encoding: `execFile`'s
-      // overloads are keyed on the encoding literal, and a union satisfies
-      // neither.
-      const pending =
-        opts.encoding === 'buffer'
-          ? execFileAsync('git', args, { ...spawnOptions, encoding: 'buffer' })
-          : execFileAsync('git', args, { ...spawnOptions, encoding: 'utf8' });
-
-      // `promisify(execFile)` carries the child on the promise through
-      // `execFile[promisify.custom]`. A double standing in for `execFile` (the
-      // access resolver's cache suite injects failures that way) returns a
-      // plain promise with no child on it; there is then nothing to feed, and
-      // nothing to kill, and neither is an error.
-      const child: ChildProcess | undefined = pending.child;
+        windowsHide: true,
+      });
 
       // Abandonment, as a promise that loses every race it is not needed for.
       // It is the backstop for a tree that outlived even a forced kill: at that
@@ -168,17 +245,17 @@ export class NodeGitRunner implements IGitRunner {
       timers.push(
         setTimeout(() => {
           timedOut = true;
-          if (child) killTree(child, 'SIGTERM');
+          killTree(child, 'SIGTERM');
           timers.push(
             setTimeout(() => {
-              if (child) killTree(child, 'SIGKILL');
+              killTree(child, 'SIGKILL');
               timers.push(setTimeout(() => abandon(new Error('child outlived SIGKILL')), KILL_GRACE_MS));
             }, KILL_GRACE_MS),
           );
         }, timeoutMs),
       );
 
-      if (opts.input !== undefined && child?.stdin) {
+      if (opts.input !== undefined && child.stdin) {
         // A dying git can close stdin mid-write; the promise still rejects with
         // the exit code, which is the error worth surfacing.
         child.stdin.on('error', () => undefined);
@@ -188,8 +265,8 @@ export class NodeGitRunner implements IGitRunner {
 
       const { stdout, stderr } = await Promise.race([pending, abandoned]);
       return {
-        stdout: opts.encoding === 'buffer' ? Buffer.from(stdout) : stdout.toString(),
-        stderr: stderr.toString(),
+        stdout: opts.encoding === 'buffer' ? stdout : stdout.toString('utf8'),
+        stderr: stderr.toString('utf8'),
       };
     } catch (err) {
       const subcommand = subcommandOf(args);
