@@ -41,6 +41,12 @@ export interface SyncStatus {
   last: LastSync | null;
 }
 
+/**
+ * Whether the single sign-on configuration in effect is known to work: proven
+ * against the provider (or by a sign-in), configured but unproven, or absent.
+ */
+export type OidcVerification = 'verified' | 'unverified' | 'not-configured';
+
 export interface SetupStatus {
   /** Reachable knowledge base AND a process that can serve it. */
   complete: boolean;
@@ -54,6 +60,8 @@ export interface SetupStatus {
   settings?: SettingStatus[];
   /** Admins only. Absent on a build without the sync module. */
   sync?: SyncStatus;
+  /** Admins only. Absent from an older server. */
+  oidcVerification?: OidcVerification;
 }
 
 export interface SaveResult {
@@ -61,6 +69,7 @@ export interface SaveResult {
   complete: boolean;
   awaitingRestart?: boolean;
   settings: SettingStatus[];
+  oidcVerification?: OidcVerification;
 }
 
 /** Field-keyed messages, so the form can mark the input that was wrong. */
@@ -217,4 +226,50 @@ export async function testConnection(fields: Record<string, string>): Promise<Co
   }
   if (!res.ok) await readError(res);
   return (await res.json()) as ConnectionTest;
+}
+
+export interface OidcTest {
+  /** True for credentials the provider accepted, or an issuer checked on its own. */
+  ok: boolean;
+  /**
+   * `verified`: the provider accepted the application ID and secret.
+   * `issuer-verified`: the address is a sign-in provider; no credentials to try yet.
+   * `unverified`: the provider is fine, but its answer said nothing definite
+   * about the credentials — saving is allowed and shows as Unverified.
+   * `rejected`: the address or the credentials were turned down (`field` says which).
+   */
+  outcome?: 'verified' | 'issuer-verified' | 'unverified' | 'rejected';
+  field?: string;
+  error?: string;
+  /** The configuration in effect, after this test. */
+  oidcVerification?: OidcVerification;
+}
+
+/**
+ * Try the single sign-on values against the provider before saving them. As
+ * with {@link testConnection}, a 400 is the server refusing these values and
+ * comes back as a rejection; any other failure throws.
+ */
+export async function testOidc(fields: Record<string, string>): Promise<OidcTest> {
+  const res = await authFetch('/api/setup/test-oidc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (res.status === 400) {
+    let data: { error?: string; field?: string } = {};
+    try {
+      data = (await res.json()) as typeof data;
+    } catch {
+      // The status alone still says "refused".
+    }
+    return {
+      ok: false,
+      outcome: 'rejected',
+      field: data.field,
+      error: data.error || `The sign-in check was refused (${res.status}).`,
+    };
+  }
+  if (!res.ok) await readError(res);
+  return (await res.json()) as OidcTest;
 }

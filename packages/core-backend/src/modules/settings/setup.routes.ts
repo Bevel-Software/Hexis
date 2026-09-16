@@ -4,7 +4,16 @@ import {
   DeploymentSettingsService,
   SettingsValidationError,
   validateHttpsRemote,
+  type OidcCredentials,
 } from './deployment-settings.service.js';
+import {
+  checkOidcConfiguration,
+  checkOidcIssuer,
+  normalizeIssuerUrl,
+  type IssuerCheck,
+  type OidcCheck,
+  type OidcConfiguration,
+} from './oidc-check.js';
 import {
   checkRepositoryConnection,
   type ConnectionCheck,
@@ -27,6 +36,10 @@ const DEFAULT_GIT_USERNAME = 'x-access-token';
 /** The one rule, in the one wording, for a stored token and a repository it was not saved for. */
 const TOKEN_FOR_THAT_REPOSITORY =
   'Enter the access token for that repository — the saved one is only used with the repository it was saved for.';
+
+/** The same rule for the application secret and a provider it was not saved for. */
+const SECRET_FOR_THAT_PROVIDER =
+  'Enter the application secret for that provider — the saved one is only sent to the provider it was saved for.';
 
 /** The three renameable roots, as setting keys. */
 const LAYOUT_KEYS: readonly string[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
@@ -84,6 +97,15 @@ export function createSetupRoutes(
   checkConnection: (connection: RepositoryConnection) => Promise<ConnectionCheck> = checkRepositoryConnection,
   /** The root-folder listing Test connection reports. Injected for the same reason. */
   listFolders: typeof listRootFolders = listRootFolders,
+  /**
+   * `<PUBLIC_BACKEND_URL>/api/auth/oidc/callback` — the redirect URI the
+   * single sign-on check sends, as the real callback does.
+   */
+  oidcRedirectUri = '',
+  /** The single sign-on check. Injected so route tests can answer for the provider. */
+  checkOidc: (config: OidcConfiguration) => Promise<OidcCheck> = checkOidcConfiguration,
+  /** The issuer-only half, for a test with no application id or secret yet. */
+  checkIssuer: (issuerUrl: string) => Promise<IssuerCheck> = (url) => checkOidcIssuer(url),
 ): express.Router {
   const router = express.Router();
 
@@ -153,6 +175,7 @@ export function createSetupRoutes(
       awaitingRestart: awaitingRestart(settings),
       isAdmin: true,
       settings: settings.describe(),
+      oidcVerification: settings.oidcVerification(),
       ...(kbInitFailed ? { kbInitError } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
@@ -197,7 +220,12 @@ export function createSetupRoutes(
       // configured the branch model.
       const wasComplete = isComplete(settings);
       if (!(await connectionHoldsFor(entries, wasComplete, res))) return;
+      const oidc = await signInHoldsFor(entries, res);
+      if (!oidc) return;
       const { restartRequired, restartKeys } = await settings.save(entries, req.userId ?? null);
+      if (oidc.record) {
+        await settings.recordOidcVerification(oidc.record.state, oidc.record.credentials);
+      }
       /** Whether this save put the stored folder names into the running process. */
       let layoutApplied = false;
       /** Whether this save put the stored branch model into the running process. */
@@ -304,6 +332,7 @@ export function createSetupRoutes(
         complete: kbReady(),
         awaitingRestart: awaitingRestart(settings),
         settings: settings.describe(),
+        oidcVerification: settings.oidcVerification(),
       });
     } catch (err) {
       if (err instanceof SettingsValidationError) {
@@ -389,6 +418,145 @@ export function createSetupRoutes(
     if (check.outcome === 'connected') return true;
     return refuse({ [check.field]: check.error });
   }
+
+  /**
+   * A SAVED SIGN-IN CONFIGURATION IS ONE THE PROVIDER HAS NOT TURNED DOWN.
+   *
+   * Without this an issuer that is not one, or a secret with a typo, saves as
+   * well as a working configuration, and the first news of it is the sign-in
+   * button failing for someone else after the restart.
+   *
+   * The same gate rule as the repository connection: checked on the values
+   * the save WOULD put in effect, and only when the save changes the issuer,
+   * the application id or the secret. Scopes, the button label, the allowed
+   * domains and everything outside single sign-on are never probed.
+   *
+   * A definitive refusal answers 400 with the problem on its field and returns
+   * null. Otherwise it returns what the save should record — verified, or
+   * unverified when the provider's answer said nothing definite — or no record
+   * when nothing about the configuration was proven.
+   */
+  async function signInHoldsFor(
+    entries: Record<string, string>,
+    res: express.Response,
+  ): Promise<{
+    record?: { state: 'verified' | 'unverified'; credentials: OidcCredentials };
+  } | null> {
+    const after = settings.resolveAfter(entries);
+    const now = settings.resolveOidcCredentials();
+    const next: OidcCredentials = {
+      issuerUrl: normalizeIssuerUrl(after('oidcIssuerUrl')),
+      clientId: after('oidcClientId'),
+      clientSecret: after('oidcClientSecret'),
+    };
+    const refuse = (problems: Record<string, string>) => {
+      res.status(400).json({ error: Object.values(problems)[0], problems });
+      return null;
+    };
+    const changes =
+      next.issuerUrl !== now.issuerUrl ||
+      next.clientId !== now.clientId ||
+      next.clientSecret !== now.clientSecret;
+    if (!changes) return {};
+
+    // THE CONFIGURED SECRET ONLY EVER GOES TO THE CONFIGURED PROVIDER: probing
+    // a new issuer with it would hand it to whoever runs that one.
+    const secretSupplied = Boolean(entries.oidcClientSecret?.trim());
+    if (next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
+      return settings.sourceOf('oidcClientSecret') === 'env'
+        ? refuse({
+            oidcIssuerUrl:
+              'The application secret is set by the OIDC_CLIENT_SECRET environment variable and is only sent to the provider it was set for — change both there.',
+          })
+        : refuse({ oidcClientSecret: SECRET_FOR_THAT_PROVIDER });
+    }
+
+    // Nothing to prove until all three are there; the save that completes
+    // them is the one probed.
+    if (!next.issuerUrl || !next.clientId || !next.clientSecret) return {};
+
+    const check = await checkOidc({ ...next, redirectUri: oidcRedirectUri });
+    if (check.outcome === 'rejected') return refuse({ [check.field]: check.error });
+    return { record: { state: check.outcome, credentials: next } };
+  }
+
+  /**
+   * "Test sign-in configuration": the same check the save runs, BEFORE
+   * anything is saved, on the values typed — falling back to those in effect.
+   *
+   * Answers 200 with `outcome` whenever the check ran: `verified`,
+   * `unverified` (the issuer is fine, the credentials could not be judged),
+   * `issuer-verified` (no application id or secret to try yet) or `rejected`
+   * with the field it is about. A 400 is a request that never got as far as
+   * asking. Never returns or logs the secret.
+   */
+  router.post('/setup/test-oidc', requireAdmin, async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const supplied = (key: string): string | null => {
+      const value = body[key];
+      return typeof value === 'string' && value.trim() ? value.trim() : null;
+    };
+    const current = settings.resolveOidcCredentials();
+    const issuerUrl = normalizeIssuerUrl(supplied('oidcIssuerUrl') ?? current.issuerUrl);
+    if (!issuerUrl) {
+      res.status(400).json({ ok: false, error: 'Enter the provider address first.' });
+      return;
+    }
+    const issuerProblem = settings.definitions.find((d) => d.key === 'oidcIssuerUrl')?.validate?.(issuerUrl);
+    if (issuerProblem) {
+      res.status(400).json({ ok: false, outcome: 'rejected', field: 'oidcIssuerUrl', error: issuerProblem });
+      return;
+    }
+    const clientId = supplied('oidcClientId') ?? current.clientId;
+    const suppliedSecret = supplied('oidcClientSecret');
+    // The stored secret is sent only to the issuer it was saved for; testing
+    // another one brings its own. Without it, only the issuer is checked.
+    const clientSecret = suppliedSecret ?? (issuerUrl === current.issuerUrl ? current.clientSecret : '');
+    if (!suppliedSecret && issuerUrl !== current.issuerUrl && current.clientSecret && clientId) {
+      res.status(400).json({
+        ok: false,
+        outcome: 'rejected',
+        field: 'oidcClientSecret',
+        error: SECRET_FOR_THAT_PROVIDER,
+      });
+      return;
+    }
+
+    try {
+      if (!clientId || !clientSecret) {
+        const issuer = await checkIssuer(issuerUrl);
+        if (issuer.outcome !== 'verified') {
+          res.json({ ok: false, outcome: 'rejected', field: issuer.field, error: issuer.error });
+          return;
+        }
+        res.json({ ok: true, outcome: 'issuer-verified' });
+        return;
+      }
+      const tested: OidcCredentials = { issuerUrl, clientId, clientSecret };
+      const check = await checkOidc({ ...tested, redirectUri: oidcRedirectUri });
+      if (check.outcome === 'rejected') {
+        res.json({ ok: false, outcome: check.outcome, field: check.field, error: check.error });
+        return;
+      }
+      // Proving the configuration in effect is as good as signing in with it.
+      const testsCurrent =
+        tested.issuerUrl === current.issuerUrl &&
+        tested.clientId === current.clientId &&
+        tested.clientSecret === current.clientSecret;
+      if (check.outcome === 'verified' && testsCurrent) {
+        await settings.recordOidcVerification('verified', tested);
+      }
+      res.json({
+        ok: check.outcome === 'verified',
+        outcome: check.outcome,
+        ...(check.outcome === 'unverified' ? { error: check.error } : {}),
+        oidcVerification: settings.oidcVerification(),
+      });
+    } catch (err) {
+      console.error('[setup] sign-in check failed:', err instanceof Error ? err.message : String(err));
+      res.status(500).json({ ok: false, error: 'Could not run the sign-in check.' });
+    }
+  });
 
   /**
    * Try the credentials against the real remote, BEFORE anything is saved.

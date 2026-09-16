@@ -10,9 +10,12 @@ import {
   syncNow,
   syncOutcomeError,
   testConnection,
+  testOidc,
   SettingsProblems,
   type ConnectionTest,
   type LastSync,
+  type OidcTest,
+  type OidcVerification,
   type SettingStatus,
   type SyncNowResult,
   type SyncStatus,
@@ -182,6 +185,20 @@ const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranc
  */
 const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
 
+/**
+ * The answers the sign-in check proves. Editing one invalidates its result on
+ * screen; the scopes, the button text and the allowed domains are not among
+ * them, and the server never re-checks a save that changes only those.
+ */
+const OIDC_KEYS = ['oidcIssuerUrl', 'oidcClientId', 'oidcClientSecret'];
+
+/** How the configuration in effect is labelled, in both variants. */
+const OIDC_VERIFICATION_LABEL: Record<OidcVerification, string> = {
+  verified: 'Verified',
+  unverified: 'Unverified — sign in once to confirm',
+  'not-configured': 'Not configured',
+};
+
 /** The three root folder fields, checked against the repository's listing. */
 const ROOT_FOLDER_KEYS: readonly (keyof KbLayout)[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
 const isRootFolderKey = (key: string): key is keyof KbLayout =>
@@ -228,6 +245,8 @@ interface Props {
    * calls, and what the last call did. Absent on a build without the module.
    */
   sync?: SyncStatus;
+  /** Whether the single sign-on configuration in effect is proven. Absent from an older server. */
+  oidcVerification?: OidcVerification;
 }
 
 /**
@@ -246,7 +265,7 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Props) {
+export function SetupScreen({ settings, onSaved, variant = 'setup', sync, oidcVerification }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [syncing, setSyncing] = useState(false);
   /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
@@ -270,6 +289,17 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
    * shown as if it were about the new ones.
    */
   const connectionEpoch = useRef(0);
+  const [oidcTest, setOidcTest] = useState<OidcTest | null>(null);
+  const [oidcTesting, setOidcTesting] = useState(false);
+  /** The same staleness guard as {@link connectionEpoch}, for the sign-in answers. */
+  const oidcEpoch = useRef(0);
+  /**
+   * A verification state newer than the one the host last passed in — what a
+   * save or a test just answered — until the host's own refresh catches up.
+   */
+  const [latestVerification, setLatestVerification] = useState<OidcVerification | undefined>();
+  useEffect(() => setLatestVerification(undefined), [oidcVerification]);
+  const verification = latestVerification ?? oidcVerification;
 
   /**
    * What a field would save as, given a set of typed answers: what is in them,
@@ -350,6 +380,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       delete next[key];
       return next;
     });
+    if (OIDC_KEYS.includes(key)) {
+      oidcEpoch.current++;
+      setOidcTest(null);
+    }
     if (CONNECTION_KEYS.includes(key)) {
       // Any in-flight test is now asking about values that are gone; the epoch
       // bump makes its answer land as stale rather than as evidence.
@@ -448,6 +482,94 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
     } finally {
       setTesting(false);
     }
+  }
+
+  /**
+   * "Test sign-in configuration": the check a save runs, on the values typed
+   * (the server falls back to those in effect). Nothing is saved.
+   */
+  async function runOidcTest() {
+    setOidcTesting(true);
+    setError(null);
+    const epoch = oidcEpoch.current;
+    const fields = Object.fromEntries(Object.entries(draft).filter(([key]) => OIDC_KEYS.includes(key)));
+    try {
+      const result = await testOidc(fields);
+      if (epoch !== oidcEpoch.current) return;
+      setOidcTest(result);
+      if (result.oidcVerification) setLatestVerification(result.oidcVerification);
+    } catch (err) {
+      if (epoch === oidcEpoch.current) {
+        setOidcTest({ ok: false, error: err instanceof Error ? err.message : 'Could not test the sign-in configuration.' });
+      }
+    } finally {
+      setOidcTesting(false);
+    }
+  }
+
+  /** What a sign-in test came back with, in words. */
+  function describeOidcTest(result: OidcTest): string {
+    switch (result.outcome) {
+      case 'verified':
+        return 'Verified. The provider accepted the application ID and secret.';
+      case 'issuer-verified':
+        return 'The provider address is a sign-in provider. Enter the application ID and secret to check them too.';
+      default:
+        return result.error ?? 'The sign-in configuration could not be checked.';
+    }
+  }
+
+  /**
+   * The test button, its answer and the verification label: beside the
+   * provider fields, or on its own when every one of them is set by the
+   * environment.
+   */
+  function renderOidcPanel() {
+    return (
+      <Surface tone="sunken" radius="md" className="p-4">
+        {verification && (
+          <p className="mb-3 text-detail text-ink-muted">
+            Status:{' '}
+            <span
+              data-testid="oidc-verification"
+              className={`font-medium ${
+                verification === 'verified'
+                  ? 'text-ok'
+                  : verification === 'unverified'
+                    ? 'text-wait'
+                    : 'text-ink-faint'
+              }`}
+            >
+              {OIDC_VERIFICATION_LABEL[verification]}
+            </span>
+          </p>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void runOidcTest()}
+            disabled={oidcTesting || saving}
+          >
+            {oidcTesting ? 'Checking…' : 'Test sign-in configuration'}
+          </Button>
+          <span className="text-meta text-ink-faint">
+            Checks the provider address, then the application ID and secret, with the provider.
+          </span>
+        </div>
+        {oidcTest && (
+          <p
+            role="status"
+            className={`mt-3 text-detail ${
+              oidcTest.ok ? 'text-ok' : oidcTest.outcome === 'unverified' ? 'text-wait' : 'text-danger'
+            }`}
+          >
+            {describeOidcTest(oidcTest)}
+          </p>
+        )}
+      </Surface>
+    );
   }
 
   async function runSync() {
@@ -601,6 +723,7 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       const result = await saveSettings(payload);
       setRestartRequired(result.restartRequired);
       setDraft({});
+      if (result.oidcVerification) setLatestVerification(result.oidcVerification);
       // A save can succeed and STILL leave the deployment unusable: a blank
       // field means "leave it alone", not "this is wrong", so the server
       // accepts a batch that answers only some of what it needs. Saying so is
@@ -854,8 +977,20 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                   )}
                 </div>
                 {fields
-                  .filter((f) => !FIELDS[f.key]?.advanced && !isRootFolderKey(f.key))
+                  .filter(
+                    (f) =>
+                      !FIELDS[f.key]?.advanced &&
+                      !isRootFolderKey(f.key) &&
+                      (section.id !== 'sign-in' || OIDC_KEYS.includes(f.key)),
+                  )
                   .map((f) => renderField(f))}
+
+                {/* Directly under the three answers it proves. */}
+                {section.id === 'sign-in' && renderOidcPanel()}
+                {section.id === 'sign-in' &&
+                  fields
+                    .filter((f) => !FIELDS[f.key]?.advanced && !OIDC_KEYS.includes(f.key))
+                    .map((f) => renderField(f))}
 
                 {/* Immediately under the two fields it proves, and above the
                     Advanced block it fills in — the middle of the sequence
@@ -966,6 +1101,18 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
               {renderSyncPanel()}
             </Surface>
           )}
+
+          {/* Every sign-in setting from the environment: the section above
+              does not render, but whether that configuration works is still
+              the admin's to see and to test. */}
+          {editable.every((s) => s.section !== 'sign-in') &&
+            verification &&
+            verification !== 'not-configured' && (
+              <Surface as="section" tone="surface" radius="lg" elevation="card" className="p-6 space-y-4">
+                <h2 className="text-title font-semibold text-ink">Single sign-on</h2>
+                {renderOidcPanel()}
+              </Surface>
+            )}
 
           {/* A rejected connection stops here rather than at the far side of
               it. Saving these answers would finish setup — the server checks

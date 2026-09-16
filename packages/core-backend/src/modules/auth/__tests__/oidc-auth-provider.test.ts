@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
-import { OidcAuthProvider } from '../oidc-auth-provider.js';
+import { OidcAuthProvider, oidcRedirectUri } from '../oidc-auth-provider.js';
 import type { AuthService } from '../auth.service.js';
 
 const ISSUER = 'https://idp.example.com';
@@ -11,7 +11,11 @@ const DISCOVERY = {
   userinfo_endpoint: `${ISSUER}/userinfo`,
 };
 
-function makeProvider(fetchImpl: typeof fetch, authService: AuthService) {
+function makeProvider(
+  fetchImpl: typeof fetch,
+  authService: AuthService,
+  onSignedIn?: () => void | Promise<void>,
+) {
   const provider = new OidcAuthProvider({
     issuerUrl: ISSUER,
     clientId: 'client-1',
@@ -22,6 +26,7 @@ function makeProvider(fetchImpl: typeof fetch, authService: AuthService) {
     publicFrontendUrl: 'http://localhost:5173',
     cookieSecure: false,
     fetchImpl,
+    onSignedIn,
   });
   const router = express.Router();
   provider.mountRoutes(router, authService);
@@ -170,5 +175,49 @@ describe('OidcAuthProvider', () => {
     });
     expect(cb.headers.get('location')).toBe('http://localhost:5173/auth/oidc/callback#error=auth');
     expect(authService.loginWithSso).not.toHaveBeenCalled();
+  });
+
+  /** Walk the round-trip once; returns the callback's redirect target. */
+  async function signIn(base: string): Promise<string> {
+    const start = await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' });
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const cookie = start.headers.get('set-cookie')!.split(';')[0];
+    const cb = await fetch(`${base}/api/auth/oidc/callback?code=c&state=${state}`, {
+      redirect: 'manual',
+      headers: { cookie },
+    });
+    return cb.headers.get('location')!;
+  }
+
+  it('reports a successful sign-in, which is what marks the configuration verified', async () => {
+    const onSignedIn = vi.fn();
+    const base = await listen(makeProvider(makeIdpFetch().impl, authService, onSignedIn));
+    expect(await signIn(base)).toContain('#token=');
+    expect(onSignedIn).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports nothing for a sign-in that failed', async () => {
+    const onSignedIn = vi.fn();
+    const base = await listen(
+      makeProvider(makeIdpFetch({ userinfo: { name: 'No Email' } }).impl, authService, onSignedIn),
+    );
+    expect(await signIn(base)).toContain('#error=auth');
+    expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  it('a failure to record the sign-in never fails the sign-in', async () => {
+    const onSignedIn = vi.fn(async () => {
+      throw new Error('database down');
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const base = await listen(makeProvider(makeIdpFetch().impl, authService, onSignedIn));
+    expect(await signIn(base)).toContain('#token=');
+    errors.mockRestore();
+  });
+
+  it('exchanges the code with the same redirect URI the configuration check sends', () => {
+    expect(oidcRedirectUri('https://hexis.example.com')).toBe(
+      'https://hexis.example.com/api/auth/oidc/callback',
+    );
   });
 });

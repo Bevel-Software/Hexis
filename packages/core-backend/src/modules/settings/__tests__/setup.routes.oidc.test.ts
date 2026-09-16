@@ -1,0 +1,443 @@
+import type { Server as HttpServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import express from 'express';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createSetupRoutes } from '../setup.routes.js';
+import { DeploymentSettingsService } from '../deployment-settings.service.js';
+import type { IssuerCheck, OidcCheck, OidcConfiguration } from '../oidc-check.js';
+import { OidcAuthProvider } from '../../auth/oidc-auth-provider.js';
+import type { AuthService } from '../../auth/auth.service.js';
+import type { Database } from '../../database/connection.js';
+import type { IAdminAccessService } from '../../admin/admin.interface.js';
+
+const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
+const ISSUER = 'https://login.example.com/tenant/v2.0';
+const REDIRECT = 'https://hexis.example.com/api/auth/oidc/callback';
+
+/**
+ * Cleared so `resolve` falls through to the stored layer, and restored after:
+ * the repo `.env` is loaded into `process.env` for every suite in the worker.
+ */
+const ENV = [
+  'KB_REPO_URL',
+  'GIT_TOKEN',
+  'GITHUB_TOKEN',
+  'OIDC_ISSUER_URL',
+  'OIDC_CLIENT_ID',
+  'OIDC_CLIENT_SECRET',
+  'OIDC_SCOPES',
+  'OIDC_PROVIDER_LABEL',
+  'ALLOWED_EMAIL_DOMAINS',
+] as const;
+let savedEnv: Partial<Record<(typeof ENV)[number], string | undefined>> = {};
+let server: HttpServer | null = null;
+
+beforeEach(() => {
+  savedEnv = {};
+  for (const k of ENV) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+});
+
+afterEach(() => {
+  server?.close();
+  server = null;
+  for (const k of ENV) {
+    const original = savedEnv[k];
+    if (original === undefined) delete process.env[k];
+    else process.env[k] = original;
+  }
+});
+
+const fakeDb = () =>
+  ({
+    select: () => ({ from: () => Promise.resolve([]) }),
+    insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
+    delete: () => ({ where: () => Promise.resolve() }),
+  }) as unknown as Database;
+
+/** Stands in for the provider: answers every check with `result` and records what was asked. */
+function provider(result: OidcCheck) {
+  const asked: OidcConfiguration[] = [];
+  return {
+    asked,
+    check: async (config: OidcConfiguration) => {
+      asked.push(config);
+      return result;
+    },
+  };
+}
+
+function listen(opts: {
+  checkOidc?: (config: OidcConfiguration) => Promise<OidcCheck>;
+  checkIssuer?: (issuerUrl: string) => Promise<IssuerCheck>;
+  isAdmin?: boolean;
+}) {
+  const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.userEmail = 'root@example.com';
+    req.userId = 'user-1';
+    next();
+  });
+  app.use(
+    '/api',
+    createSetupRoutes(
+      settings,
+      { isAdmin: async () => opts.isAdmin ?? true } as IAdminAccessService,
+      { runAll: async () => {} },
+      undefined,
+      // No repository in these suites, so the connection check is never reached.
+      async () => {
+        throw new Error('the repository connection must not be probed');
+      },
+      undefined,
+      REDIRECT,
+      opts.checkOidc,
+      opts.checkIssuer,
+    ),
+  );
+  server = app.listen(0);
+  const { port } = server.address() as AddressInfo;
+  return { base: `http://127.0.0.1:${port}`, settings };
+}
+
+const post = (base: string, path: string, body: unknown) =>
+  fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+const FULL = { oidcIssuerUrl: ISSUER, oidcClientId: 'app-id', oidcClientSecret: 'secret-1' };
+
+describe('POST /setup/settings — a sign-in configuration is checked before it is stored', () => {
+  it('refuses an issuer the check rejects, on the issuer field, and stores nothing', async () => {
+    const idp = provider({
+      outcome: 'rejected',
+      reason: 'not-oidc',
+      field: 'oidcIssuerUrl',
+      error: 'That address is not a single sign-on provider.',
+    });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/settings', { settings: FULL });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({
+      oidcIssuerUrl: 'That address is not a single sign-on provider.',
+    });
+    expect(idp.asked).toEqual([
+      { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-1', redirectUri: REDIRECT },
+    ]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe('');
+    expect(settings.resolve('oidcClientSecret')).toBe('');
+    expect(settings.oidcVerification()).toBe('not-configured');
+  });
+
+  it('refuses credentials the provider rejects, on the secret field, and stores nothing', async () => {
+    const idp = provider({
+      outcome: 'rejected',
+      reason: 'credentials',
+      field: 'oidcClientSecret',
+      error: 'The provider rejected the application ID or secret.',
+    });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/settings', { settings: FULL });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.problems).toEqual({ oidcClientSecret: 'The provider rejected the application ID or secret.' });
+    expect(JSON.stringify(body)).not.toContain('secret-1');
+    expect(settings.resolve('oidcClientId')).toBe('');
+  });
+
+  it('saves a configuration that could not be verified, and labels it Unverified', async () => {
+    const idp = provider({ outcome: 'unverified', error: 'could not be verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/settings', { settings: FULL });
+    expect(res.status).toBe(200);
+    expect((await res.json()).oidcVerification).toBe('unverified');
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+  });
+
+  it('saves a verified configuration, and labels it Verified', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/settings', { settings: FULL });
+    expect(res.status).toBe(200);
+    expect((await res.json()).oidcVerification).toBe('verified');
+    const status = await (await fetch(`${base}/api/setup/status`)).json();
+    expect(status.oidcVerification).toBe('verified');
+  });
+
+  it('checks a changed secret against the stored issuer and application id', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', { settings: { oidcClientSecret: 'secret-2' } });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([
+      { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-2', redirectUri: REDIRECT },
+    ]);
+  });
+
+  it('a changed secret the provider rejects leaves the stored one — and its verification — in place', async () => {
+    const { base, settings } = listen({
+      checkOidc: provider({
+        outcome: 'rejected',
+        reason: 'credentials',
+        field: 'oidcClientSecret',
+        error: 'The provider rejected the application ID or secret.',
+      }).check,
+    });
+    await settings.save(FULL, null);
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+    const res = await post(base, '/api/setup/settings', { settings: { oidcClientSecret: 'typo' } });
+    expect(res.status).toBe(400);
+    expect(settings.resolve('oidcClientSecret')).toBe('secret-1');
+    expect(settings.oidcVerification()).toBe('verified');
+  });
+
+  it.each([
+    ['the scopes', { oidcScopes: 'openid email' }],
+    ['the button label', { oidcProviderLabel: 'Company SSO' }],
+    ['the allowed domains', { allowedEmailDomains: 'example.com' }],
+    ['a non-sign-in setting', { kbDirName: 'kb' }],
+    ['the stored values sent back unchanged', { oidcIssuerUrl: `${ISSUER}/`, oidcClientId: 'app-id' }],
+  ])('never probes a save that changes only %s, and the verification stands', async (_name, entries) => {
+    const idp = provider({ outcome: 'unverified', error: 'x' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+    const res = await post(base, '/api/setup/settings', { settings: entries });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([]);
+    expect((await res.json()).oidcVerification).toBe('verified');
+  });
+
+  it('does not probe until the issuer, application id and secret are all there', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/settings', {
+      settings: { oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' },
+    });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([]);
+    expect((await res.json()).oidcVerification).toBe('not-configured');
+  });
+
+  it('refuses a new issuer without a secret, and never sends the saved secret there', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { oidcIssuerUrl: 'https://attacker.example/issuer' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcClientSecret).toMatch(/application secret for that provider/);
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+  });
+});
+
+describe('POST /setup/test-oidc', () => {
+  it('checks the typed values and reports the outcome, without saving them', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/test-oidc', FULL);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, outcome: 'verified' });
+    expect(idp.asked).toEqual([
+      { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'secret-1', redirectUri: REDIRECT },
+    ]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe('');
+  });
+
+  it('reports a rejection as an answer, with its field, and never echoes the secret', async () => {
+    const idp = provider({
+      outcome: 'rejected',
+      reason: 'credentials',
+      field: 'oidcClientSecret',
+      error: 'The provider rejected the application ID or secret.',
+    });
+    const { base } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/test-oidc', FULL);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      ok: false,
+      outcome: 'rejected',
+      field: 'oidcClientSecret',
+      error: 'The provider rejected the application ID or secret.',
+    });
+    expect(JSON.stringify(body)).not.toContain('secret-1');
+  });
+
+  it('reports "could not be verified" with its message', async () => {
+    const { base } = listen({ checkOidc: provider({ outcome: 'unverified', error: 'no idea' }).check });
+    expect(await (await post(base, '/api/setup/test-oidc', FULL)).json()).toMatchObject({
+      ok: false,
+      outcome: 'unverified',
+      error: 'no idea',
+    });
+  });
+
+  it('checks only the issuer when there are no credentials to try yet', async () => {
+    const issuers: string[] = [];
+    const idp = provider({ outcome: 'verified' });
+    const { base } = listen({
+      checkOidc: idp.check,
+      checkIssuer: async (url) => {
+        issuers.push(url);
+        return { outcome: 'verified', tokenEndpoint: 'https://login.example.com/token' };
+      },
+    });
+    const res = await post(base, '/api/setup/test-oidc', { oidcIssuerUrl: `${ISSUER}/` });
+    expect(await res.json()).toEqual({ ok: true, outcome: 'issuer-verified' });
+    expect(issuers).toEqual([ISSUER]);
+    expect(idp.asked).toEqual([]);
+  });
+
+  it('refuses an issuer on an internal address before any request (the real outbound-URL check)', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const { base } = listen({});
+    fetchSpy.mockClear();
+    const res = await fetch(`${base}/api/setup/test-oidc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...FULL, oidcIssuerUrl: 'https://169.254.169.254/latest' }),
+    });
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, outcome: 'rejected', field: 'oidcIssuerUrl' });
+    // Only this test's own request went out — nothing to the metadata address.
+    expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([`${base}/api/setup/test-oidc`]);
+    fetchSpy.mockRestore();
+  });
+
+  it('refuses to send the saved secret to a different issuer', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    const res = await post(base, '/api/setup/test-oidc', { oidcIssuerUrl: 'https://attacker.example' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/application secret for that provider/);
+    expect(idp.asked).toEqual([]);
+  });
+
+  it('re-tests the saved configuration with the saved secret, and a pass marks it verified', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save(FULL, null);
+    expect(settings.oidcVerification()).toBe('unverified');
+    const res = await post(base, '/api/setup/test-oidc', {});
+    expect(await res.json()).toMatchObject({ ok: true, outcome: 'verified', oidcVerification: 'verified' });
+    expect(idp.asked[0].clientSecret).toBe('secret-1');
+  });
+
+  it('is admins-only', async () => {
+    const idp = provider({ outcome: 'verified' });
+    const { base } = listen({ checkOidc: idp.check, isAdmin: false });
+    expect((await post(base, '/api/setup/test-oidc', FULL)).status).toBe(403);
+    expect(idp.asked).toEqual([]);
+  });
+});
+
+describe('the verification state', () => {
+  it('is not-configured, then unverified, then verified after a real sign-in', async () => {
+    const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
+    expect(settings.oidcVerification()).toBe('not-configured');
+    await settings.save(FULL, null);
+    expect(settings.oidcVerification()).toBe('unverified');
+
+    // The composition root's wiring: a sign-in through the provider built
+    // from these values records them verified.
+    const credentials = settings.resolveOidcCredentials();
+    const idpFetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/.well-known/openid-configuration')) {
+        return Response.json({
+          authorization_endpoint: `${ISSUER}/authorize`,
+          token_endpoint: `${ISSUER}/token`,
+          userinfo_endpoint: `${ISSUER}/userinfo`,
+        });
+      }
+      if (url === `${ISSUER}/token`) return Response.json({ access_token: 'at' });
+      if (url === `${ISSUER}/userinfo`) return Response.json({ email: 'carol@example.com', name: 'Carol' });
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+    const oidc = new OidcAuthProvider({
+      ...credentials,
+      scopes: 'openid email',
+      label: 'SSO',
+      publicBackendUrl: 'http://localhost:3001',
+      publicFrontendUrl: 'http://localhost:5173',
+      cookieSecure: false,
+      fetchImpl: idpFetch,
+      onSignedIn: () => settings.recordOidcVerification('verified', credentials),
+    });
+    const router = express.Router();
+    oidc.mountRoutes(router, {
+      loginWithSso: async () => ({ token: 'jwt', user: {} }),
+    } as unknown as AuthService);
+    const app = express();
+    app.use('/api', router);
+    server = app.listen(0);
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const start = await fetch(`${base}/api/auth/oidc/login`, { redirect: 'manual' });
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const cookie = start.headers.get('set-cookie')!.split(';')[0];
+    await fetch(`${base}/api/auth/oidc/callback?code=c&state=${state}`, {
+      redirect: 'manual',
+      headers: { cookie },
+    });
+
+    expect(settings.oidcVerification()).toBe('verified');
+  });
+
+  it('speaks only for the values it was made about', async () => {
+    const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
+    await settings.save(FULL, null);
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+    expect(settings.oidcVerification()).toBe('verified');
+    // A different secret — here through the environment — is not the one proven.
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    expect(settings.oidcVerification()).toBe('unverified');
+    delete process.env.OIDC_CLIENT_SECRET;
+    expect(settings.oidcVerification()).toBe('verified');
+  });
+
+  it('survives a reload, and prune keeps it', async () => {
+    const rows: Array<{ key: string; value: string; encrypted: boolean }> = [];
+    const deleted: string[][] = [];
+    const db = {
+      select: () => ({ from: () => Promise.resolve(rows) }),
+      insert: () => ({
+        values: (row: { key: string; value: string; encrypted: boolean }) => ({
+          onConflictDoUpdate: () => {
+            const i = rows.findIndex((r) => r.key === row.key);
+            if (i >= 0) rows.splice(i, 1);
+            rows.push(row);
+            return Promise.resolve();
+          },
+        }),
+      }),
+      delete: () => ({
+        where: () => {
+          deleted.push(rows.map((r) => r.key));
+          return Promise.resolve();
+        },
+      }),
+    } as unknown as Database;
+    const first = new DeploymentSettingsService(db, ENC_KEY);
+    await first.save({ ...FULL, kbDirName: 'kb' }, null);
+    await first.recordOidcVerification('verified', first.resolveOidcCredentials());
+    // Nothing stored under a setting that this build no longer has — so prune
+    // deletes nothing, the record included.
+    await first.prune();
+    expect(deleted).toEqual([]);
+    const second = new DeploymentSettingsService(db, ENC_KEY);
+    await second.load();
+    expect(second.oidcVerification()).toBe('verified');
+    expect(second.describe().some((s) => s.key === 'oidcVerification')).toBe(false);
+  });
+});

@@ -40,6 +40,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -588,7 +589,10 @@ export async function createCoreServer(
       // the same reason: this string is handed to admins to paste elsewhere.
       url: syncUrl.toString(),
       lastSync: () => core.kbSyncService.lastSync(),
-    }),
+    },
+    undefined,
+    undefined,
+    oidcRedirectUri(core.config.publicBackendUrl)),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
     service: core.mcpServerEditService,

@@ -87,6 +87,7 @@ export function DeploymentPage() {
           <SetupScreen
             settings={status.settings}
             sync={status.sync}
+            oidcVerification={status.oidcVerification}
             onSaved={refresh}
             variant="settings"
           />

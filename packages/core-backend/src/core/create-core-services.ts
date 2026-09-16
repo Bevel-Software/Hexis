@@ -895,9 +895,9 @@ export async function createCoreServices(
   // Resolved through settings, so an admin can configure SSO from the setup
   // screen instead of the environment. Env still wins, so a deployment that
   // sets these keeps behaving exactly as it did.
-  const oidcIssuerUrl = settings.resolve('oidcIssuerUrl');
-  const oidcClientId = settings.resolve('oidcClientId');
-  const oidcClientSecret = settings.resolve('oidcClientSecret');
+  const oidcCredentials = settings.resolveOidcCredentials();
+  const { issuerUrl: oidcIssuerUrl, clientId: oidcClientId, clientSecret: oidcClientSecret } =
+    oidcCredentials;
   if (oidcIssuerUrl && oidcClientId && oidcClientSecret) {
     authProviders.push(
       new OidcAuthProvider({
@@ -909,6 +909,13 @@ export async function createCoreServices(
         publicBackendUrl: config.publicBackendUrl,
         publicFrontendUrl: config.publicFrontendUrl,
         cookieSecure: config.publicBackendUrl.startsWith('https'),
+        // A real sign-in proves the configuration this process was built with.
+        // Recorded against those values, so it says nothing about any saved
+        // since that are still waiting for a restart.
+        onSignedIn: async () => {
+          if (settings.oidcVerification() === 'verified') return;
+          await settings.recordOidcVerification('verified', oidcCredentials);
+        },
       }),
     );
   }

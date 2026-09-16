@@ -7,6 +7,7 @@ import {
   validateKbLayout,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
+import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
 
 /**
@@ -225,6 +226,27 @@ export const CORE_SETTINGS: SettingDef[] = [
   },
 ];
 
+/**
+ * Whether the single sign-on configuration in effect is known to work:
+ * `verified` (the provider accepted its credentials, or someone signed in with
+ * it), `unverified` (configured, never proven — sign in once to confirm), or
+ * `not-configured` (no issuer, application id and secret to prove).
+ */
+export type OidcVerificationState = 'verified' | 'unverified' | 'not-configured';
+
+/** The three values a verification is about. Scopes, label and domains are not among them. */
+export interface OidcCredentials {
+  issuerUrl: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+/**
+ * The row holding the verification record. Not a setting — nobody types it —
+ * so it has no catalogue entry, is never described, and `prune` leaves it be.
+ */
+const OIDC_VERIFICATION_KEY = 'oidcVerification';
+
 /** Where a resolved value came from, which is what the UI renders as its status. */
 export type SettingSource = 'env' | 'stored' | 'unset';
 
@@ -272,11 +294,13 @@ export interface ResolvedSetting {
 export class DeploymentSettingsService {
   private readonly defs = new Map<string, SettingDef>();
   private stored = new Map<string, string>();
+  /** The rows that are records rather than settings — see {@link OIDC_VERIFICATION_KEY}. */
+  private records = new Map<string, string>();
   private readonly crypto: TokenCrypto | null;
 
   constructor(
     private readonly db: Database,
-    secretsEncKey: string,
+    private readonly secretsEncKey: string,
     defs: SettingDef[] = CORE_SETTINGS,
   ) {
     for (const def of defs) this.defs.set(def.key, def);
@@ -293,7 +317,12 @@ export class DeploymentSettingsService {
   async load(): Promise<void> {
     const rows = await this.db.select().from(deploymentSettings);
     const next = new Map<string, string>();
+    const records = new Map<string, string>();
     for (const row of rows) {
+      if (row.key === OIDC_VERIFICATION_KEY) {
+        records.set(row.key, row.value);
+        continue;
+      }
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
@@ -315,6 +344,7 @@ export class DeploymentSettingsService {
       next.set(row.key, row.value);
     }
     this.stored = next;
+    this.records = records;
   }
 
   /**
@@ -510,7 +540,9 @@ export class DeploymentSettingsService {
     const known = [...this.defs.keys()];
     if (known.length === 0) return;
     const rows = await this.db.select({ key: deploymentSettings.key }).from(deploymentSettings);
-    const orphans = rows.map((r) => r.key).filter((k) => !known.includes(k));
+    const orphans = rows
+      .map((r) => r.key)
+      .filter((k) => !known.includes(k) && k !== OIDC_VERIFICATION_KEY);
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
@@ -526,6 +558,64 @@ export class DeploymentSettingsService {
     if (this.sourceOf('gitToken') !== 'stored') return;
     const token = this.resolve('gitToken');
     if (token) process.env.GITHUB_TOKEN = token;
+  }
+
+  /** The single sign-on values in effect, issuer normalized the way the provider uses it. */
+  resolveOidcCredentials(): OidcCredentials {
+    return {
+      issuerUrl: this.resolve('oidcIssuerUrl').replace(/\/+$/, ''),
+      clientId: this.resolve('oidcClientId'),
+      clientSecret: this.resolve('oidcClientSecret'),
+    };
+  }
+
+  /**
+   * Whether the single sign-on configuration IN EFFECT is verified.
+   *
+   * The record names the values it was made about by a keyed digest, so it
+   * speaks only for those: a changed issuer, application id or secret —
+   * through a save or through the environment — reads as unverified until it
+   * is proven again, with nothing to remember to reset. The secret itself is
+   * never stored here, and a digest keyed with the secrets key cannot be
+   * checked against a guess without that key.
+   */
+  oidcVerification(): OidcVerificationState {
+    const current = this.resolveOidcCredentials();
+    if (!current.issuerUrl || !current.clientId || !current.clientSecret) return 'not-configured';
+    const raw = this.records.get(OIDC_VERIFICATION_KEY);
+    if (!raw) return 'unverified';
+    try {
+      const record = JSON.parse(raw) as { state?: unknown; fingerprint?: unknown };
+      return record.state === 'verified' && record.fingerprint === this.oidcFingerprint(current)
+        ? 'verified'
+        : 'unverified';
+    } catch {
+      return 'unverified';
+    }
+  }
+
+  /** Record what is known about one set of single sign-on values. */
+  async recordOidcVerification(
+    state: Exclude<OidcVerificationState, 'not-configured'>,
+    credentials: OidcCredentials,
+  ): Promise<void> {
+    const value = JSON.stringify({ state, fingerprint: this.oidcFingerprint(credentials) });
+    await this.db
+      .insert(deploymentSettings)
+      .values({ key: OIDC_VERIFICATION_KEY, value, encrypted: false, updatedBy: null })
+      .onConflictDoUpdate({
+        target: deploymentSettings.key,
+        set: { value, encrypted: false, updatedBy: null, updatedAt: new Date() },
+      });
+    this.records.set(OIDC_VERIFICATION_KEY, value);
+  }
+
+  private oidcFingerprint(credentials: OidcCredentials): string {
+    return createHmac('sha256', `hexis-oidc-verification:${this.secretsEncKey}`)
+      .update(
+        [credentials.issuerUrl.replace(/\/+$/, ''), credentials.clientId, credentials.clientSecret].join('\n'),
+      )
+      .digest('hex');
   }
 
   /** Remove one stored row (used by tests and by `prune`). */

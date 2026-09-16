@@ -32,6 +32,16 @@ export interface OidcAuthProviderOptions {
   cookieSecure: boolean;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /**
+   * Called after someone has signed in through this provider — the proof that
+   * its configuration works. Failures are logged, never fail the sign-in.
+   */
+  onSignedIn?: () => void | Promise<void>;
+}
+
+/** The redirect URI to register with the provider — and the one the configuration check sends. */
+export function oidcRedirectUri(publicBackendUrl: string): string {
+  return `${publicBackendUrl}/api/auth/oidc/callback`;
 }
 
 /** Read one named cookie from the raw header (no cookie-parser dep, matching auth.middleware). */
@@ -102,7 +112,7 @@ export class OidcAuthProvider implements AuthProviderPlugin {
   }
 
   private redirectUri(): string {
-    return `${this.opts.publicBackendUrl}/api/auth/oidc/callback`;
+    return oidcRedirectUri(this.opts.publicBackendUrl);
   }
 
   mountRoutes(router: express.Router, authService: AuthService): void {
@@ -212,6 +222,11 @@ export class OidcAuthProvider implements AuthProviderPlugin {
           '';
 
         const { token } = await authService.loginWithSso(claims.email, name);
+        try {
+          await this.opts.onSignedIn?.();
+        } catch (error) {
+          console.error('OIDC sign-in record failed:', error instanceof Error ? error.message : error);
+        }
         res.cookie(AUTH_COOKIE_NAME, token, {
           httpOnly: true,
           sameSite: 'lax',
