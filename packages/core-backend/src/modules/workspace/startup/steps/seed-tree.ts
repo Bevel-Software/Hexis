@@ -31,12 +31,10 @@ export function buildSeedTree(
   extraRootDirs: readonly string[],
   seedAdminEmails: readonly string[],
 ): (dir: string) => Promise<string[]> {
-  const seeder = new KbSeedTree(
-    disk,
-    new TemplateSource(disk, templateDir),
-    reservedRootDirs(extraRootDirs),
-    seedAdminEmails,
-  );
+  // Validated eagerly; resolved per seed. The core roots are live bindings the
+  // setup-completing save may configure after this builder was composed.
+  reservedRootDirs(extraRootDirs);
+  const seeder = new KbSeedTree(disk, new TemplateSource(disk, templateDir), extraRootDirs, seedAdminEmails);
   return (dir) => seeder.seed(dir);
 }
 
@@ -52,7 +50,7 @@ class KbSeedTree {
   constructor(
     private readonly disk: ITreeWalker & IFsProbe,
     private readonly templates: TemplateSource,
-    private readonly requiredDirs: readonly string[],
+    private readonly extraRootDirs: readonly string[],
     private readonly seedAdminEmails: readonly string[],
   ) {}
 
@@ -66,7 +64,9 @@ class KbSeedTree {
     // the same folders, arriving in a second commit for no reason. Keyed on
     // the DIRECTORY's existence: a template already carrying content under a
     // root never gets a pointless placeholder beside it.
-    for (const rootDir of this.requiredDirs) {
+    // Resolved NOW, not when the builder was composed: a seed that runs on the
+    // save completing first-run setup must lay down the names that save applied.
+    for (const rootDir of reservedRootDirs(this.extraRootDirs)) {
       const abs = path.join(dir, rootDir);
       const found = await this.disk.lstatOrNull(abs);
       if (found) {
