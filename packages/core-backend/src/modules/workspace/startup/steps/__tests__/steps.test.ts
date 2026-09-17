@@ -402,6 +402,25 @@ describe('TemplateFilesStep', () => {
     expect(lines).toContain('AGENTS.md');
   });
 
+  it('never seeds a template entry that links into a git folder', async () => {
+    // A template that IS a working tree (this repo in a Docker build) can hold
+    // a link into its own .git. The name rule cannot see it; the target can.
+    const customTemplate = path.join(root, 'custom-template-gitlink');
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.mkdir(path.join(customTemplate, '.git'), { recursive: true });
+    await fs.writeFile(path.join(customTemplate, '.git', 'config'), '[credential]\n\thelper = store\n');
+    await fs.symlink(path.join('.git', 'config'), path.join(customTemplate, 'notes.md'));
+
+    const dir = path.join(root, 'seeded-gitlink');
+    await fs.mkdir(dir, { recursive: true });
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'])(dir);
+
+    await expect(fs.readFile(path.join(dir, 'notes.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readdir(path.join(dir, '.git'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // The rest of the template still seeded.
+    expect(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')).toContain('#');
+  });
+
   it('seeds a binary template file byte for byte and keeps a script executable — text is what decodes', async () => {
     const customTemplate = path.join(root, 'custom-template-bytes');
     // The packaged template as a base, plus two files it does not ship.

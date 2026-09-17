@@ -488,6 +488,15 @@ export async function createCoreServer(
   ));
   app.use('/api', toolsRouter);
 
+  // The repository's git folder is refused for the WHOLE `/workspace/:id`
+  // prefix, ahead of EVERY router under it — the file routes, the review,
+  // workflow and access ones, and whatever an extension mounts below. Mounted
+  // here, before the extension phase, so an overlay surface added there is
+  // covered by its prefix rather than by remembering this. No auth in front of
+  // it: the lexical rule reads the caller's own string and touches no disk, so
+  // it answers nothing; the resolved half waits for the JWT check below.
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
+
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
@@ -516,11 +525,9 @@ export async function createCoreServer(
   );
 
   // Protected routes
-  // The repository's git folder is refused for the WHOLE `/workspace/:id`
-  // prefix, ahead of every router mounted under it — the file routes, the
-  // review routes, the workflow ones — so a path into it is answered with one
-  // sanitized 403 before any read gate or lock, and a router added later is
-  // covered by its prefix rather than by remembering this.
+  // The same guard again, now BEHIND the JWT check, so an authenticated
+  // request also gets the resolved form judged — a link in the repository that
+  // points into the git folder — before any read gate or lock.
   app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,

@@ -28,6 +28,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
 import { createGitInternalsRouteGuard } from '../git-internals.middleware.js';
+import { hasGitInternalsSegment } from '../../../shared/git-internals.js';
 import { createDiffRoutes } from '../../diff/diff.routes.js';
 import { DiffService } from '../../diff/diff.service.js';
 import { WorkspaceMutex } from '../../kb-fs/mutex.js';
@@ -528,6 +529,73 @@ describe('WorkspaceService refuses the git folder on its own', () => {
   });
 });
 
+describe('the route guard on its own', () => {
+  let server: Server | undefined;
+  let baseUrl = '';
+  let reached: number;
+  let userId: string | undefined;
+
+  beforeEach(async () => {
+    reached = 0;
+    userId = USER.id;
+    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    const app = express();
+    app.use(express.json());
+    app.use('/api', (req, _res, next) => {
+      if (userId !== undefined) (req as unknown as { userId: string }).userId = userId;
+      next();
+    });
+    app.use('/api/workspace/:id', createGitInternalsRouteGuard(service));
+    // Stands in for every router mounted under the prefix — an extension's
+    // overlay surface included. Reaching it at all is the bypass.
+    app.use('/api/workspace/:id', (_req, res) => {
+      reached += 1;
+      res.json({ ok: true });
+    });
+    ({ server, baseUrl } = await listen(app));
+  });
+
+  afterEach(async () => {
+    if (server) await new Promise<void>((r) => server!.close(() => r()));
+    server = undefined;
+  });
+
+  const post = (url: string, body: unknown) =>
+    fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+  it.each([
+    ['path', (p: string) => ({ path: p })],
+    ['oldPath', (p: string) => ({ oldPath: p, newPath: `${KB}/Notes/b.md` })],
+    ['newPath', (p: string) => ({ oldPath: `${KB}/Notes/a.md`, newPath: p })],
+    ['destination', (p: string) => ({ path: `${KB}/archive.zip`, destination: p })],
+    ['paths (access batch)', (p: string) => ({ paths: [`${KB}/Notes/a.md`, p], verb: 'write' })],
+    ['ancestor (remove-from-parent)', (p: string) => ({ mode: 'remove-from-parent', ancestor: p })],
+  ])('refuses the git folder named in the %s field', async (_field, body) => {
+    await expectRefused(await post(`${baseUrl}/api/workspace/${WS}/anything`, body(`${KB}/.git/config`)));
+    expect(reached).toBe(0);
+  });
+
+  it('refuses every spelling before the route runs, even unauthenticated', async () => {
+    userId = undefined;
+    const spellings = Object.values(FILE_FORMS);
+    for (const p of spellings) {
+      const res = await fetch(`${baseUrl}/api/workspace/${WS}/anything?path=${encodeURIComponent(p)}`);
+      // Every spelling that NAMES the folder is refused with no disk touched.
+      // The symlinked ones need the resolved check, which an unauthenticated
+      // request does not get — their route answers them, with its own 401.
+      if (hasGitInternalsSegment(p)) await expectRefused(res);
+      else expect(res.status).toBe(200);
+    }
+    expect(reached).toBe(spellings.filter((p) => !hasGitInternalsSegment(p)).length);
+  });
+
+  it('lets an ordinary path through', async () => {
+    const res = await fetch(`${baseUrl}/api/workspace/${WS}/anything?path=${encodeURIComponent(`${KB}/Notes/a.md`)}`);
+    expect(res.status).toBe(200);
+    expect(reached).toBe(1);
+  });
+});
+
 describe('DiffService refuses the git folder on its own', () => {
   let diffService: DiffService;
 
@@ -546,6 +614,7 @@ describe('DiffService refuses the git folder on its own', () => {
     ['rejectOne', (p) => diffService.rejectOne(WS, p)],
     ['syncFromDisk', (p) => diffService.syncFromDisk(WS, p)],
     ['markUserDeleted', (p) => diffService.markUserDeleted(WS, p)],
+    ['revertPlan', (p) => diffService.revertPlan(WS, [p])],
   ];
 
   for (const [name, run] of ops) {
@@ -553,6 +622,19 @@ describe('DiffService refuses the git folder on its own', () => {
       await expect(run(p)).rejects.toBeInstanceOf(GitInternalsError);
     });
   }
+
+  it('a legacy git entry in the backup ledger is not listed, and its content never comes back', async () => {
+    // A ledger seeded before the rule existed: the backup side holds the git
+    // folder. Listing must not pair it with the workspace path and read it out.
+    const backupKb = join(root, 'backups', WS, KB);
+    await mkdir(join(backupKb, '.GIT'), { recursive: true });
+    await writeFile(join(backupKb, '.GIT', 'config'), '[credential]\n\thelper = store\n');
+    await mkdir(join(backupKb, 'Notes'), { recursive: true });
+    await writeFile(join(backupKb, 'Notes', 'a.md'), '# A\nhelper\n');
+
+    const session = await diffService.currentSession(WS);
+    expect(JSON.stringify(session ?? {})).not.toMatch(/\.GIT|credential/);
+  });
 
   it('an ordinary file still diffs', async () => {
     await expect(diffService.fileDiff(WS, `${KB}/Notes/a.md`)).resolves.toMatchObject({ path: `${KB}/Notes/a.md` });

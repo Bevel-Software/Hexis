@@ -151,8 +151,10 @@ export class DiffService implements IDiffService {
       const writes: { path: string; content: Buffer }[] = [];
       const deletes: string[] = [];
       for (const rel of paths) {
-        if (!isDiffable(rel)) continue;
+        // Resolved BEFORE the diffable test, like accept and reject: the git
+        // folder is refused for every path the caller names.
         const { backupAbs } = await this.resolvePair(workspaceId, rel);
+        if (!isDiffable(rel)) continue;
         try {
           // Backup exists → the revert is a write of the pre-agent baseline
           // bytes (Buffer: pending changes can be binary).
@@ -424,9 +426,15 @@ async function walkDiffable(disk: ITreeWalker, root: string, out: Set<string>): 
   ]);
 }
 
-/** Every file under the backup `root`, as `/`-separated paths relative to it. */
+/**
+ * Every file under the backup `root`, as `/`-separated paths relative to it.
+ * The git folder is skipped here as well as on the workspace side: a ledger
+ * seeded before this rule existed can still hold `.git`/`.GIT` entries, and
+ * listing one would pair it with the workspace path and read the folder back
+ * out through the review session.
+ */
 async function walkAll(disk: ITreeWalker, root: string, out: Set<string>): Promise<void> {
-  await disk.walk(root, {}, [
+  await disk.walk(root, { skip: (e) => hasGitInternalsSegment(e.name) }, [
     {
       onFile(dir, name) {
         // Strip the .tmp suffix from in-flight atomic writes so a crashed write
