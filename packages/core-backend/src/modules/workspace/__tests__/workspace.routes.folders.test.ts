@@ -47,6 +47,7 @@ interface Harness {
   releaseLock: ReturnType<typeof vi.fn>;
   acquireLock: ReturnType<typeof vi.fn>;
   workspaceService: WorkspaceService;
+  emit: ReturnType<typeof vi.fn>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -70,6 +71,7 @@ async function makeHarness(): Promise<Harness> {
     releaseLockNoCommit: vi.fn(async () => undefined as never),
   } as unknown as IWorkflowService;
 
+  const emit = vi.fn();
   const app = express();
   app.use(express.json());
   app.use('/api', (req, _res, next) => {
@@ -82,7 +84,7 @@ async function makeHarness(): Promise<Harness> {
       workspaceService,
       { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
       workflowService,
-      { emit: vi.fn() } as unknown as WorkflowEventBus,
+      { emit } as unknown as WorkflowEventBus,
       allowAll,
       KB,
       stubCreatorAccess,
@@ -102,6 +104,7 @@ async function makeHarness(): Promise<Harness> {
     releaseLock,
     acquireLock,
     workspaceService,
+    emit,
   };
 }
 
@@ -285,6 +288,21 @@ describe('workspace routes — folders never vanish', () => {
     expect(((await res.json()) as { error: string }).error).toBe(
       `"${KB}/busy/only.md" was removed, but its folder "${KB}/busy" could not be kept: "${KB}/busy/.gitkeep" is being edited by Bob. Try again in a moment.`,
     );
+  });
+
+  it('a folder delete whose parent cannot be kept still refreshes the tree', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.kbDir, 'holder/gone'), { recursive: true });
+    await fs.writeFile(path.join(h.kbDir, 'holder/gone/a.md'), 'a');
+    h.acquireLock.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] === `${KB}/holder/.gitkeep`) throw new Error('lock store down');
+      return { acquired: true, lock: {} as never };
+    });
+
+    const res = await call('DELETE', `/file?path=${encodeURIComponent(`${KB}/holder/gone`)}`);
+    expect(res.status).toBe(500);
+    expect(await exists(path.join(h.kbDir, 'holder/gone'))).toBe(false);
+    expect(h.emit).toHaveBeenCalledWith(expect.objectContaining({ kind: 'fs-tree-changed' }));
   });
 
   it('a delete whose folder cannot be kept fails, and says the file itself is gone', async () => {

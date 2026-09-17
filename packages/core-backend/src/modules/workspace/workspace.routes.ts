@@ -873,56 +873,62 @@ export function createWorkspaceRoutes(
         // In the folder's turn: keeping a folder under this one (a file delete
         // racing this one) waits until the sweep is done, and then finds the
         // folder gone instead of writing it back.
-        const filesInDir = await workspaceService.withFolderTurn(id, filePath, async () => {
-          const files = await enumerateFilesUnder(disk, absolute, workspaceDir);
-          for (const relFile of files) {
-            await withLock(
-              id,
-              user,
-              relFile,
-              async () => {
-                await workspaceService.deleteFile(id, relFile);
-              },
-              { skipFsTreeEvent: true },
-            );
-          }
-          // No explicit push here — each per-file release enqueues a
-          // pending-commits row, and the background worker drains them
-          // (commit + push) on its own schedule. The N round-trips that
-          // the old skipPush+pushBranch pattern collapsed into one happen
-          // serially in the worker; user perception is unchanged because
-          // the disk-side delete is what other sessions see via
-          // `fs-tree-changed`.
-          // This is the EXPLICIT folder delete — the one operation that removes
-          // a folder — so the walk above deleted the placeholders too, and the
-          // now-empty directory subtree is swept off disk. Git doesn't track
-          // empty folders, so there's nothing more to commit; this is disk
-          // hygiene so the file tree stops showing the deleted containers.
-          //
-          // This MUST recurse: a folder that held *subfolders* still has those
-          // (now-empty) subdirectory shells on disk after the per-file deletes,
-          // so a single non-recursive `rmdir(absolute)` would see a non-empty
-          // dir and bail — leaving the folder visible in the tree and looking
-          // undeletable (BEVA-132). `removeEmptyDirs` walks bottom-up and only
-          // removes dirs that are *actually empty* at the moment it visits them,
-          // so a concurrent writer's new file (and its parent chain) is
-          // preserved — the same safety property the old non-recursive check had.
-          try {
-            await removeEmptyDirs(absolute);
-          } catch (rmErr) {
-            // Directory already gone (raced delete), or a concurrent writer
-            // repopulated it. Either way, skip removal — the per-file deletes
-            // are what's load-bearing.
-            const reason = rmErr instanceof Error ? rmErr.message : String(rmErr);
-            log.warn(`dir cleanup skipped for ${printable(filePath)}: ${printable(reason)}`);
-          }
-          return files;
-        });
-        // The folder that HELD the deleted one was not asked to go.
-        await keepFolderOf(id, user, filePath);
-        // Single tree-refresh signal for the whole batch (we suppressed
-        // the per-file ones via `skipFsTreeEvent`).
-        eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        let filesInDir: string[];
+        try {
+          filesInDir = await workspaceService.withFolderTurn(id, filePath, async () => {
+            const files = await enumerateFilesUnder(disk, absolute, workspaceDir);
+            for (const relFile of files) {
+              await withLock(
+                id,
+                user,
+                relFile,
+                async () => {
+                  await workspaceService.deleteFile(id, relFile);
+                },
+                { skipFsTreeEvent: true },
+              );
+            }
+            // No explicit push here — each per-file release enqueues a
+            // pending-commits row, and the background worker drains them
+            // (commit + push) on its own schedule. The N round-trips that
+            // the old skipPush+pushBranch pattern collapsed into one happen
+            // serially in the worker; user perception is unchanged because
+            // the disk-side delete is what other sessions see via
+            // `fs-tree-changed`.
+            // This is the EXPLICIT folder delete — the one operation that removes
+            // a folder — so the walk above deleted the placeholders too, and the
+            // now-empty directory subtree is swept off disk. Git doesn't track
+            // empty folders, so there's nothing more to commit; this is disk
+            // hygiene so the file tree stops showing the deleted containers.
+            //
+            // This MUST recurse: a folder that held *subfolders* still has those
+            // (now-empty) subdirectory shells on disk after the per-file deletes,
+            // so a single non-recursive `rmdir(absolute)` would see a non-empty
+            // dir and bail — leaving the folder visible in the tree and looking
+            // undeletable (BEVA-132). `removeEmptyDirs` walks bottom-up and only
+            // removes dirs that are *actually empty* at the moment it visits them,
+            // so a concurrent writer's new file (and its parent chain) is
+            // preserved — the same safety property the old non-recursive check had.
+            try {
+              await removeEmptyDirs(absolute);
+            } catch (rmErr) {
+              // Directory already gone (raced delete), or a concurrent writer
+              // repopulated it. Either way, skip removal — the per-file deletes
+              // are what's load-bearing.
+              const reason = rmErr instanceof Error ? rmErr.message : String(rmErr);
+              log.warn(`dir cleanup skipped for ${printable(filePath)}: ${printable(reason)}`);
+            }
+            return files;
+          });
+          // The folder that HELD the deleted one was not asked to go.
+          await keepFolderOf(id, user, filePath);
+        } finally {
+          // Single tree-refresh signal for the whole batch (we suppressed
+          // the per-file ones via `skipFsTreeEvent`) — sent on failure too:
+          // a batch that stops part way, or a parent that could not be kept,
+          // has still changed the tree.
+          eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
+        }
         res.json({ status: 'deleted', count: filesInDir.length });
         return;
       }

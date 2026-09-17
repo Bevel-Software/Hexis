@@ -1950,23 +1950,6 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
-   * Decline ONE file of an open change request: restore its merge-base
-   * version on the SOURCE branch (commit + push), so the file drops out of
-   * the request's three-dot diff — the same mechanics
-   * `preserveBaseRolesYaml` uses to neutralise roles.yaml, offered as a
-   * reviewer's verb. Accept-or-revert per file is how a reviewer takes the
-   * good half of a proposal without rejecting the whole thing.
-   *
-   * Authority: exactly the approval predicate — an eligible approver for the
-   * file per the access tree on `origin/<base>`. Declining takes the same
-   * permission as accepting.
-   *
-   * When the LAST file is reverted the request proposes nothing: it closes
-   * itself and its source branch is retired, exactly as a merge would have
-   * retired it — a shell of a request pointing at an empty diff serves
-   * nobody (see the zero-files dialog state this replaces).
-   */
-  /**
    * The folder placeholder a file's revert takes along, or null. When a
    * request removed a folder's last file, the placeholder that keeps the
    * folder came with it (git may even pair them as one rename); reverting the
@@ -1989,6 +1972,23 @@ export class WorkflowService implements IWorkflowService {
     return (await this.git.pathExistsAtRef(workspaceId, mergeBase, placeholder)) ? placeholder : null;
   }
 
+  /**
+   * Decline ONE file of an open change request: restore its merge-base
+   * version on the SOURCE branch (commit + push), so the file drops out of
+   * the request's three-dot diff — the same mechanics
+   * `preserveBaseRolesYaml` uses to neutralise roles.yaml, offered as a
+   * reviewer's verb. Accept-or-revert per file is how a reviewer takes the
+   * good half of a proposal without rejecting the whole thing.
+   *
+   * Authority: exactly the approval predicate — an eligible approver for the
+   * file per the access tree on `origin/<base>`. Declining takes the same
+   * permission as accepting.
+   *
+   * When the LAST file is reverted the request proposes nothing: it closes
+   * itself and its source branch is retired, exactly as a merge would have
+   * retired it — a shell of a request pointing at an empty diff serves
+   * nobody (see the zero-files dialog state this replaces).
+   */
   async revertChangeRequestFile(
     number: number,
     user: AuthUser,
