@@ -2430,7 +2430,12 @@ export class GitService implements IGitService {
     });
   }
 
-  /** Whether `repoRelativePath` exists (as a file or tree) at `ref`. */
+  /**
+   * Whether `repoRelativePath` exists (as a file or tree) at `ref`. ONLY
+   * git's own "that path is not at this ref" answer is false; an unresolvable
+   * ref, a timeout, a locked or corrupt repository PROPAGATE — a revert that
+   * read one of those as "absent" would decide wrongly what to restore.
+   */
   async pathExistsAtRef(workspaceId: string, ref: string, repoRelativePath: string): Promise<boolean> {
     assertValidRelativePath(repoRelativePath);
     return this.mutex.run(workspaceId, async () => {
@@ -2438,8 +2443,11 @@ export class GitService implements IGitService {
       try {
         await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
         return true;
-      } catch {
-        return false;
+      } catch (err) {
+        const stderr =
+          (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/does not exist in|exists on disk, but not in/.test(stderr)) return false;
+        throw err;
       }
     });
   }

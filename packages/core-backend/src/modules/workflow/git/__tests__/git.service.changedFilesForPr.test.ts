@@ -314,6 +314,8 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'Docs/.gitkeep')).resolves.toBe(true);
     await expect(git.pathExistsAtRef(workspaceId, 'HEAD~1', 'Docs/.gitkeep')).resolves.toBe(false);
     await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'missing.md')).resolves.toBe(false);
+    // Not an answer about the path at all: the ref does not resolve.
+    await expect(git.pathExistsAtRef(workspaceId, 'deadbeef', 'base.md')).rejects.toThrow();
   });
 
   /**
