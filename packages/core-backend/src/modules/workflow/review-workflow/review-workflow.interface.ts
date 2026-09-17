@@ -16,14 +16,19 @@ export interface MergeGateInput {
 }
 
 export interface MergeGateResult {
-  /** False only on hard blocks (PR closed/merged, zero files). Warnings do NOT flip this false. */
+  /** False while any reason remains — a hard block or a missing approval. */
   mergeable: boolean;
-  /** Hard-block reasons — merge cannot proceed until these resolve. */
+  /**
+   * Blocking reasons: hard blocks (PR closed/merged, zero files) followed by
+   * every missing approval. Merge cannot proceed until these resolve, except
+   * that an admin may bypass the missing approvals.
+   */
   reasons: string[];
   /**
-   * Soft warnings — md files with an owner who hasn't approved (or whose
-   * approval is stale). Merge proceeds only when the caller explicitly opts
-   * into bypass; the frontend surfaces these in a confirm dialog.
+   * The missing approvals alone — files of any type with an eligible approver
+   * who hasn't approved (or whose approval is stale). These are the part of
+   * `reasons` an admin may merge past with bypass; the bypassed list is
+   * recorded in the merge commit body.
    */
   warnings: string[];
 }
@@ -167,8 +172,8 @@ export interface IReviewWorkflowService {
     /** Workspace clone — used for the access-tree lookup that gates bypass. */
     workspaceId: string,
     /**
-     * When true, proceed even if soft warnings (unapproved md-with-owner files)
-     * exist. Hard blocks are refused regardless. The bypassed warnings are
+     * When true, proceed even if missing approvals (files of any type with an
+     * eligible approver who hasn't approved) exist. Hard blocks are refused regardless. The bypassed warnings are
      * recorded in the merge commit body for audit. Bypass requires admin
      * write access at `origin/<baseBranch>` (i.e. write on `roles.yaml`) —
      * non-admins get a 403 even when warnings would otherwise be skippable.
