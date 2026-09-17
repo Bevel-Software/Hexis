@@ -13,6 +13,7 @@ import { FileLockService } from '../file-lock.service.js';
 import { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowService } from '../workflow.service.js';
 import { PullRebaseConflictError } from '../../../shared/domain-errors.js';
+import { DEFAULT_BRANCH, isProtectedBranch } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 
 // `deleteBranch`'s open-request guard is the only DB touch these tests
@@ -764,5 +765,92 @@ describe('WorkflowService — deleteChangeRequest (admin moderation verb)', () =
     await expect(svc.deleteChangeRequest(9, makeUser())).rejects.toMatchObject({ status: 403 });
     expect(sweep).not.toHaveBeenCalled();
     expect(db.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.mergeBranch — an agent merges branches, never an open change request', () => {
+  // One open request, `alice/feat` → the protected default branch;
+  // `alice/other` is an unprotected draft with no request.
+  const PROTECTED = DEFAULT_BRANCH;
+  const OPEN_REQUEST = { number: 12, sourceBranch: 'alice/feat', targetBranch: PROTECTED, state: 'open' };
+
+  function harness(opts: { canWrite?: Map<string, boolean> | null } = {}) {
+    const git = makeGit();
+    (git as unknown as Record<string, unknown>).remoteBranchExists = vi.fn().mockResolvedValue(true);
+    (git as unknown as Record<string, unknown>).hasUnpushedCommits = vi.fn().mockResolvedValue(false);
+    (git.pendingChanges as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (git as unknown as Record<string, unknown>).changedPathsForPr = vi.fn().mockResolvedValue(['Team/Process.md']);
+    (git as unknown as Record<string, unknown>).mergeChangeRequest = vi.fn().mockResolvedValue({ kind: 'merged', sha: 'merge-sha' });
+    const access = makeAccessControl();
+    (access.canWriteBatchAtRef as ReturnType<typeof vi.fn>).mockResolvedValue(opts.canWrite === undefined ? null : opts.canWrite);
+    const workspaceService = makeWorkspaceService();
+    const svc = new WorkflowService(makeDb([OPEN_REQUEST]), git, makePrs(), makeReviewWorkflow(), workspaceService, access, makeFileLockService(), makePendingCommits(), 'knowledge-base');
+    const merge = (git as unknown as { mergeChangeRequest: ReturnType<typeof vi.fn> }).mergeChangeRequest;
+    return { svc, git, access, merge };
+  }
+
+  it('refuses to merge a source into the target of its open change request, naming the request', async () => {
+    const { svc, merge } = harness();
+    const err = await svc.mergeBranch(makeUser(), 'alice/feat', PROTECTED).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, payload: { kind: 'open-change-request-blocks-merge', number: 12 } });
+    expect((err as Error).message).toContain('#12');
+    expect((err as Error).message).toMatch(/ask the user to review #12 in the app/);
+    expect(merge).not.toHaveBeenCalled();
+  });
+
+  it('allows the sync merge — the target into the draft — while that request is open', async () => {
+    const { svc, merge } = harness();
+    const outcome = await svc.mergeBranch(makeUser(), PROTECTED, 'alice/feat');
+    expect(outcome).toEqual({ kind: 'merged', sha: 'merge-sha' });
+    // Runs in the TARGET's workspace, authored as the caller.
+    expect(merge).toHaveBeenCalledWith(
+      'alice%2Ffeat',
+      PROTECTED,
+      'alice/feat',
+      expect.objectContaining({ subject: `Merge ${PROTECTED} into alice/feat` }),
+      expect.objectContaining({ email: 'alice@example.com' }),
+    );
+  });
+
+  it('allows an unrelated merge between drafts with no request', async () => {
+    const { svc, merge, access } = harness();
+    expect(await svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).toEqual({ kind: 'merged', sha: 'merge-sha' });
+    expect(merge).toHaveBeenCalledTimes(1);
+    // An unprotected target needs no direct-write check.
+    expect(access.canWriteBatchAtRef).not.toHaveBeenCalled();
+  });
+
+  it('refuses a protected target when the caller could not commit the changed files directly', async () => {
+    expect(isProtectedBranch(PROTECTED)).toBe(true);
+    const { svc, merge, git } = harness({ canWrite: new Map([['Team/Process.md', false]]) });
+    const err = await svc.mergeBranch(makeUser(), 'alice/other', PROTECTED).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 403, payload: { kind: 'protected-merge-target', deniedPaths: ['Team/Process.md'] } });
+    // roles.yaml is not stripped from this merge, so it must be in the check.
+    expect(git.changedPathsForPr).toHaveBeenCalledWith(PROTECTED, PROTECTED, 'alice/other', { includeRolesYaml: true });
+    expect(merge).not.toHaveBeenCalled();
+  });
+
+  it('merges into a protected target when the caller could commit every changed file directly', async () => {
+    const { svc, merge } = harness({ canWrite: new Map([['Team/Process.md', true]]) });
+    expect(await svc.mergeBranch(makeUser(), 'alice/other', PROTECTED)).toEqual({ kind: 'merged', sha: 'merge-sha' });
+    expect(merge).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns conflicts-need-resolution with the conflicting paths', async () => {
+    const { svc, merge, git } = harness();
+    merge.mockResolvedValue({ kind: 'conflicts', paths: ['A.md', 'B.md'] });
+    expect(await svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).toEqual({
+      kind: 'conflicts-need-resolution',
+      conflictedPaths: ['A.md', 'B.md'],
+    });
+    // Nothing landed, so nothing to pull.
+    expect(git.pull).not.toHaveBeenCalled();
+  });
+
+  it('refuses while the target has edits not yet shared, before touching its clone', async () => {
+    const { svc, merge, git } = harness();
+    (git.pendingChanges as ReturnType<typeof vi.fn>).mockResolvedValue(['knowledge-base/X.md']);
+    await expect(svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).rejects.toMatchObject({ status: 409 });
+    expect(merge).not.toHaveBeenCalled();
   });
 });

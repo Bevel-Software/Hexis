@@ -95,3 +95,33 @@ describe('call_tool_chain image scrub', () => {
     expect(spill.write).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `merge_change_request` is retired from every agent tool set, the in-app
+ * chat's included. A chain still calling it gets who merges now, not the
+ * runtime's "is not a function".
+ */
+describe('call_tool_chain and a retired tool', () => {
+  async function runChain(code: string, error: Error) {
+    const { createCallToolChainTool } = await import('../code-mode.tool.js');
+    const chainClient = { callToolChain: vi.fn(async () => { throw error; }) } as unknown as CodeModeUtcpClient;
+    const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never) as unknown as {
+      execute: (input: { code: string }) => Promise<{ success: boolean; error: string }>;
+    };
+    return tool.execute({ code });
+  }
+
+  it('answers a failed call to merge_change_request with the plain message', async () => {
+    const out = await runChain(
+      'return knowledge_base.merge_change_request({ body: { number: 4 } })',
+      new TypeError('knowledge_base.merge_change_request is not a function'),
+    );
+    expect(out.success).toBe(false);
+    expect(out.error).toMatch(/a change request is merged by a person in the app/);
+  });
+
+  it('leaves an unrelated failure as it was', async () => {
+    const out = await runChain('return knowledge_base.read_file({})', new Error('boom'));
+    expect(out.error).toBe('boom');
+  });
+});

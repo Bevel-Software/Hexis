@@ -7,6 +7,7 @@ import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
+import { RETIRED_TOOL_MESSAGES } from '@bevel-software/platform-mcp-core';
 
 /** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
 function stripKbDir(path: string, kbDirName: string): string {
@@ -116,22 +117,6 @@ const changeRequestDetailSchema: JsonSchema = {
   additionalProperties: true,
 };
 
-const mergeOutcomeSchema: JsonSchema = {
-  type: 'object',
-  description: 'Either a completed merge or a signal that conflicts must be resolved first.',
-  properties: {
-    kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
-    result: {
-      type: 'object',
-      description: 'Present when `kind` is `merged`.',
-      properties: { prNumber: { type: 'integer' }, sha: { type: 'string', description: 'Merge commit SHA.' }, mergedAt: { type: 'string', description: 'ISO timestamp.' } },
-    },
-    conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution` — paths to resolve on the source branch.' },
-  },
-  required: ['kind'],
-  additionalProperties: true,
-};
-
 /**
  * Workflow domain tools, registered into the central catalog and hosted on the
  * shared tools router — the ONE mechanism: build a self-describing UTCP def,
@@ -186,9 +171,9 @@ export function registerWorkflowTools(
     );
   };
 
-  // A workspace for a repo-global op (branch listing, change-request reads /
-  // merges) that doesn't act on any one draft. All clones share one origin, so
-  // any existing one is equivalent — reusing a clone already on disk avoids
+  // A workspace for a repo-global op (branch listing, change-request reads)
+  // that doesn't act on any one draft. All clones share one origin, so any
+  // existing one is equivalent — reusing a clone already on disk avoids
   // cloning a branch (or failing when the default branch isn't on the remote)
   // just to run a global op. Falls back to the default branch on a cold start
   // with no workspaces yet.
@@ -363,7 +348,8 @@ export function registerWorkflowTools(
     description:
       'Open a change request from a draft branch into a target branch. Auto-merges the latest target ' +
       'into the source first, pushes, then creates the CR. On conflicts returns a ' +
-      '`change-request-conflicts` error with affected paths. The author marker is injected server-side.',
+      '`change-request-conflicts` error with affected paths. The author marker is injected server-side. ' +
+      'An agent proposes; a person reviews and merges the request in the app — hand the user its `url`.',
     inputs: {
       type: 'object',
       properties: {
@@ -452,56 +438,59 @@ export function registerWorkflowTools(
   });
 
   mount({
-    name: 'merge_change_request',
+    name: 'merge_branch',
     description:
-      'Merge a change request into its target branch. Returns `merged` or ' +
-      '`conflicts-need-resolution`. Hard blocks (closed, no files, missing approvals) raise an error. ' +
-      '`bypass: true` proceeds despite soft warnings (admin only).',
+      'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
+      'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
+      'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
+      `when \`target\` is protected (${protectedInline()}) unless you could commit every changed file directly to it. ` +
+      'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
+      'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
+      'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths ' +
+      '(nothing is written; resolve them on `source` and merge again).',
+    // Names both branches itself; the merge runs in `target`'s workspace.
+    skipBranch: true,
     inputs: {
       type: 'object',
       properties: {
-        number: { type: 'integer', minimum: 1, description: 'Change request number.' },
-        bypass: { type: 'boolean', description: 'Proceed despite missing owner approvals on .md files (admin only).' },
+        source: { type: 'string', minLength: 1, description: 'The branch whose commits are merged in.' },
+        target: { type: 'string', minLength: 1, description: 'The branch that receives the merge.' },
       },
-      required: ['number'],
+      required: ['source', 'target'],
       additionalProperties: false,
     },
     outputs: {
       type: 'object',
       properties: {
-        outcome: mergeOutcomeSchema,
-        changeRequest: { ...changeRequestLinkSchema, description: 'The change request merged, or awaiting conflict resolution.' },
+        outcome: {
+          type: 'object',
+          description: 'Either a completed merge or a signal that conflicts must be resolved first.',
+          properties: {
+            kind: { type: 'string', enum: ['merged', 'conflicts-need-resolution'] },
+            sha: { type: 'string', description: 'Present when `kind` is `merged` — the tip of `target` after the merge.' },
+            conflictedPaths: { type: 'array', items: { type: 'string' }, description: 'Present when `kind` is `conflicts-need-resolution`.' },
+          },
+          required: ['kind'],
+        },
       },
-      required: ['outcome', 'changeRequest'],
+      required: ['outcome'],
     },
     write: true,
-    // Keyed by change-request number, not a draft — the workspace is only a
-    // scratch clone to run the merge in, so resolve any existing one rather than
-    // requiring a `branch`.
-    skipBranch: true,
     handler: async (args, ctx: ToolContext) => {
-      const number = args.number as number;
-      const workspaceId = await repoGlobalWorkspaceId(ctx);
-      const detail = await ctx.workflowService.getChangeRequestDetail(number, {
-        fresh: true,
-        workspaceId,
-        viewerEmail: ctx.user.email,
-      });
-      if (!detail) {        throw new ToolError(`Change request #${number} not found.`, 404);
+      const source = args.source;
+      const target = args.target;
+      if (typeof source !== 'string' || source.length === 0 || typeof target !== 'string' || target.length === 0) {
+        throw new ToolError('`source` and `target` are required branch names.', 400);
       }
-      const outcome = await ctx.workflowService.mergeChangeRequest(
-        number,
-        ctx.user,
-        detail.headSha,
-        detail.approvals,
-        detail.state,
-        detail.title,
-        detail.base,
-        workspaceId,
-        { bypass: args.bypass === true },
-      );
-      return { outcome, changeRequest: linkOf(detail) };
+      return { outcome: await ctx.workflowService.mergeBranch(ctx.user, source, target) };
     },
+  });
+
+  // `merge_change_request` is retired: a change request is merged by a person
+  // in the app. It is in no catalog, but a caller holding an old manual still
+  // posts to its path — answer with who merges now, not a bare 404.
+  router.post('/agent/tools/merge_change_request', toolAuth, (_req, res) => {
+    res.status(410).json({ error: RETIRED_TOOL_MESSAGES.merge_change_request });
   });
 
   mount({

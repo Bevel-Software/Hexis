@@ -57,6 +57,8 @@ export {
 
 export { registerManual, dispatchToolCall } from './dispatch.js';
 
+export { RETIRED_TOOL_MESSAGES, retiredToolMessage, retiredToolInCode } from './retired-tools.js';
+
 export {
   isSessionLoss,
   installSessionRecovery,

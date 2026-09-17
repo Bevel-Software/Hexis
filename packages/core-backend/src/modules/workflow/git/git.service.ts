@@ -2359,6 +2359,8 @@ export class GitService implements IGitService {
     workspaceId: string,
     baseBranch: string,
     headBranch: string,
+    /** Keep roles.yaml — for a merge that, unlike a change request's, does not strip it. */
+    opts?: { includeRolesYaml?: boolean },
   ): Promise<string[]> {
     assertValidBranchName(baseBranch);
     assertValidBranchName(headBranch);
@@ -2380,7 +2382,7 @@ export class GitService implements IGitService {
           // Same rule as `changedFilesForPr`: a roles.yaml change never
           // survives a merge, so it is not a touched path for routing or
           // summaries either.
-          .filter((p) => p !== 'roles.yaml')
+          .filter((p) => opts?.includeRolesYaml || p !== 'roles.yaml')
       );
     });
   }

@@ -2,7 +2,7 @@ import '@utcp/direct-call';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { omitImagePayloads } from '@bevel-software/platform-mcp-core';
+import { omitImagePayloads, retiredToolInCode } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
@@ -69,7 +69,10 @@ export function createCallToolChainTool(
         // (so non-2xx tool errors aren't reduced to a bare status code), pass
         // them through to the agent — `e.message` already holds the server's
         // reason, and `status` / `data` give it the structured detail.
-        const message = e instanceof Error ? e.message : String(e);
+        const raw = e instanceof Error ? e.message : String(e);
+        // A chain that failed while calling a removed tool gets the reason it
+        // was removed (who does it now, and where), not "is not a function".
+        const message = retiredToolInCode(input.code) ?? raw;
         const status = (e as { status?: unknown })?.status;
         const data = (e as { data?: unknown })?.data;
         return {

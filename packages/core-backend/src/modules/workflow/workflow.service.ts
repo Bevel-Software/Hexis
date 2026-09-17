@@ -47,6 +47,7 @@ import type {
   FileApproval,
   FileLock,
   IWorkflowService,
+  MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -74,6 +75,7 @@ import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
+  OpenChangeRequestBlocksMergeError,
   RolesYamlPreservationError,
   PullRebaseConflictError,
   PushNeedsAgentResolutionError,
@@ -2470,15 +2472,27 @@ export class WorkflowService implements IWorkflowService {
       }
       throw err;
     }
-    // The merge landed on `origin/<baseBranch>`. Pull the
-    // TARGET branch's own workspace so its working tree doesn't fall behind the
-    // remote — the file tools serve the working tree (not origin), so without
-    // this a read right after a merge misses the just-merged change. Best-effort:
-    // the merge already succeeded on origin, so a pull hiccup must not fail the
-    // response (a later fetch/pull reconciles).
+    await this.pullMergeTarget(baseBranch, user);
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-merged', number });
+    // AFTER the event: the applying UI is waiting on `change-request-merged`,
+    // and branch retirement is git IO it must never wait behind.
+    await this.retireMergedSourceBranch(number, baseBranch, user);
+    return { kind: 'merged', result };
+  }
+
+  /**
+   * The merge landed on `origin/<targetBranch>`. Pull the TARGET branch's own
+   * workspace so its working tree doesn't fall behind the remote — the file
+   * tools serve the working tree (not origin), so without this a read right
+   * after a merge misses the just-merged change. Best-effort: the merge already
+   * succeeded on origin, so a pull hiccup must not fail the response (a later
+   * fetch/pull reconciles).
+   */
+  private async pullMergeTarget(targetBranch: string, user: AuthUser): Promise<void> {
     let targetWorkspaceId: string | undefined;
     try {
-      const targetWorkspace = await this.workspaceService.getOrCreateForBranch(baseBranch);
+      const targetWorkspace = await this.workspaceService.getOrCreateForBranch(targetBranch);
       targetWorkspaceId = targetWorkspace.id;
       await this.pullWorkspace(targetWorkspace.id);
     } catch (err) {
@@ -2491,16 +2505,91 @@ export class WorkflowService implements IWorkflowService {
       if (err instanceof PullRebaseConflictError && targetWorkspaceId) {
         await this.queuePullConflictRecovery(targetWorkspaceId, err, user);
       }
-      mergeLog.warn(`post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`, {
+      mergeLog.warn(`post-merge pull of target "${targetBranch}" failed — its workspace may be momentarily behind origin`, {
         err,
       });
     }
-    this.prs.invalidateDetailCache(number);
-    this.events?.emit({ kind: 'change-request-merged', number });
-    // AFTER the event: the applying UI is waiting on `change-request-merged`,
-    // and branch retirement is git IO it must never wait behind.
-    await this.retireMergedSourceBranch(number, baseBranch, user);
-    return { kind: 'merged', result };
+  }
+
+  async mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome> {
+    if (sourceBranch === targetBranch) {
+      throw new WorkflowValidationError(`\`source\` and \`target\` are both "${sourceBranch}" — name two different branches.`);
+    }
+
+    // A person merges a change request. Only the request's OWN direction is
+    // blocked: the target merged into the source is how a draft under review
+    // stays current, and that must keep working while the request is open.
+    const [open] = await this.db
+      .select({ number: changeRequests.number })
+      .from(changeRequests)
+      .where(
+        and(
+          eq(changeRequests.sourceBranch, sourceBranch),
+          eq(changeRequests.targetBranch, targetBranch),
+          eq(changeRequests.state, 'open'),
+        ),
+      )
+      .limit(1);
+    if (open) throw new OpenChangeRequestBlocksMergeError(sourceBranch, targetBranch, open.number);
+
+    // The merge runs in the target's own workspace, like a change request's.
+    const targetWorkspaceId = (await this.workspaceService.getOrCreateForBranch(targetBranch)).id;
+    if (!(await this.git.remoteBranchExists(targetWorkspaceId, sourceBranch))) {
+      throw new WorkflowValidationError(`No branch named "${sourceBranch}" on the shared remote.`);
+    }
+
+    // The merge resets that workspace to the published target tip, which would
+    // throw away edits still on their way out. Refuse until they are shared.
+    if (
+      (await this.git.pendingChanges(targetWorkspaceId)).length > 0 ||
+      (await this.git.hasUnpushedCommits(targetWorkspaceId))
+    ) {
+      throw new WorkflowDomainError(
+        `"${targetBranch}" has edits that are not shared yet. Try the merge again once they are saved.`,
+        409,
+        { kind: 'merge-target-busy', targetBranch },
+      );
+    }
+
+    // Into a protected branch, a merge is a commit of every file it changes:
+    // allowed only for a caller who could commit each of them directly
+    // (the same at-HEAD rule the write lock applies). roles.yaml included —
+    // unlike a change request's merge, nothing strips it here.
+    if (isProtectedBranch(targetBranch)) {
+      const paths = await this.git.changedPathsForPr(targetWorkspaceId, targetBranch, sourceBranch, {
+        includeRolesYaml: true,
+      });
+      const allowed =
+        paths.length === 0
+          ? null
+          : await this.accessControl.canWriteBatchAtRef(targetWorkspaceId, 'HEAD', user.email, paths);
+      const denied = allowed ? paths.filter((p) => !allowed.get(p)) : [];
+      if (denied.length > 0) {
+        throw new WorkflowDomainError(
+          `"${targetBranch}" is protected and you cannot commit directly to it: ` +
+            `${denied.length} changed file(s) are outside your write access (${denied.join(', ')}). ` +
+            `Open a change request from "${sourceBranch}" into "${targetBranch}" and ask the user to review it in the app.`,
+          403,
+          { kind: 'protected-merge-target', targetBranch, deniedPaths: denied },
+        );
+      }
+    }
+
+    const result = await this.git.mergeChangeRequest(
+      targetWorkspaceId,
+      sourceBranch,
+      targetBranch,
+      {
+        subject: `Merge ${sourceBranch} into ${targetBranch}`,
+        body: `Merged via Bevel by ${user.name} <${user.email}>`,
+      },
+      user,
+    );
+    if (result.kind === 'conflicts') {
+      return { kind: 'conflicts-need-resolution', conflictedPaths: result.paths };
+    }
+    await this.pullMergeTarget(targetBranch, user);
+    return { kind: 'merged', sha: result.sha };
   }
 
   /**
