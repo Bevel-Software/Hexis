@@ -33,6 +33,7 @@ import {
 import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
+import { traceFiles } from '../utils/file-trace';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git
@@ -168,14 +169,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const branch = persistenceBranch ?? undefined;
     let cancelled = false;
     (async () => {
+      traceFiles('bootstrap:start', { branch: branch ?? null });
       try {
         const { workspace, fileTree: tree } = await getOrCreateWorkspace(branch);
+        traceFiles('bootstrap:ok', { branch: branch ?? null, workspaceId: workspace.id, cancelled });
         if (cancelled) return;
         setWorkspaceId(workspace.id);
         setKbDirName(workspace.kbDirName);
         setFileTree(tree);
         setBootstrapError(null);
       } catch (err) {
+        traceFiles('bootstrap:failed', {
+          branch: branch ?? null,
+          status: err instanceof WorkspaceApiError ? err.status : null,
+          message: err instanceof Error ? err.message : String(err),
+          cancelled,
+        });
         if (cancelled) return;
         console.error('Failed to bootstrap workspace:', err);
         // Surfaced, not just logged: a bootstrap that fails leaves
