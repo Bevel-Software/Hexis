@@ -225,7 +225,10 @@ export function listedTools(tools: ProxiedTool[]): McpTool[] {
  * (fetched into `~/.hexis/plugins/...`), placeholders are expanded, and the
  * command is containment-checked — then `@utcp/mcp` spawns them like any other
  * server config. A manual whose preparation fails is dropped WITH its reason;
- * the rest of the toolset must not pay for one broken server.
+ * the rest of the toolset must not pay for one broken server. The one
+ * exception is a rejected connection key: that is not one broken server but a
+ * dead credential for all of them, so it propagates and fails startup with
+ * its own sentence.
  */
 async function prepareLocalManuals(
   config: HexisMcpConfig,
