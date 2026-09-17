@@ -2247,39 +2247,6 @@ export class WorkflowService implements IWorkflowService {
         }
       }
     };
-    // What each checkout's HEAD was before this action committed anything.
-    const before = new Map<string, string>();
-    // Undo this action's restores in a checkout that was not pushed: put every
-    // file it touched back as it was at the recorded HEAD, and commit that.
-    // History is never rewritten, so any local work the checkout already had
-    // — unpushed commits, other files — is left exactly as it was.
-    const undo = async (unpushed: typeof toChange) => {
-      for (const group of unpushed) {
-        const at = before.get(group.wsId);
-        if (!at) continue;
-        // Each file gets its own attempt: one that fails must not leave the
-        // files after it reverted.
-        for (const { path: repoRelPath } of group.paths) {
-          try {
-            await this.git.restorePathFromRef(group.wsId, at, repoRelPath);
-            await this.git.commitFile(
-              group.wsId,
-              user,
-              repoRelPath,
-              commitSubject(
-                `Undo revert of ${repoRelPath} (folder removal stopped)`,
-                `Undo revert of ${basenameOf(repoRelPath)} (folder removal stopped)`,
-              ),
-              true, // skipValidator — this puts back the checkout's own version
-            );
-          } catch (err) {
-            log.warn(
-              `undo of ${printable(repoRelPath)} failed on ${printable(group.branch)} after a folder removal stopped: ${printable(sanitizeError(err))}`,
-            );
-          }
-        }
-      }
-    };
     const pushed: typeof toChange = [];
     let pushFailure: { group: (typeof toChange)[number]; err: unknown } | null = null;
     try {
@@ -2296,46 +2263,45 @@ export class WorkflowService implements IWorkflowService {
           held.push({ wsId: group.wsId, branch: group.branch, lockPath });
         }
       }
-      // A HEAD that can't be read stops the action here, before any commit:
-      // without it there is nothing to undo back to.
-      for (const group of toChange) before.set(group.wsId, await this.git.headCommit(group.wsId));
-      // Every checkout's restores are committed locally before anything is
-      // pushed, so a failed restore or commit leaves every request as it was.
-      try {
+      // The git half is ONE operation under one reservation of every checkout
+      // involved: it records each HEAD, commits every revert before pushing
+      // anything, pushes branch by branch, and undoes what didn't publish (see
+      // `GitService.revertPathsAndPush`). A failed restore or commit throws
+      // with every request left as it was. Pushes can't be made atomic, so a
+      // failed push leaves the requests split into "done" and "untouched", and
+      // running the action again finishes the rest.
+      if (toChange.length > 0) {
+        const outcome = await this.git.revertPathsAndPush(
+          user,
+          toChange.map((group) => {
+            const numbers = group.plans.map((plan) => `#${plan.number}`).join(', ');
+            return {
+              workspaceId: group.wsId,
+              paths: group.paths.map(({ path: repoRelPath, mergeBase }) => ({
+                path: repoRelPath,
+                ref: mergeBase,
+                subject: commitSubject(
+                  `Revert ${repoRelPath} (folder deleted; removed from change request ${numbers})`,
+                  `Revert ${basenameOf(repoRelPath)} (folder deleted; removed from ${group.plans.length === 1 ? `change request ${numbers}` : `${group.plans.length} change requests`})`,
+                ),
+                undoSubject: commitSubject(
+                  `Undo revert of ${repoRelPath} (folder removal stopped)`,
+                  `Undo revert of ${basenameOf(repoRelPath)} (folder removal stopped)`,
+                ),
+              })),
+            };
+          }),
+        );
         for (const group of toChange) {
-          const numbers = group.plans.map((plan) => `#${plan.number}`).join(', ');
-          for (const { path: repoRelPath, mergeBase } of group.paths) {
-            await this.git.restorePathFromRef(group.wsId, mergeBase, repoRelPath);
-            await this.git.commitFile(
-              group.wsId,
-              user,
-              repoRelPath,
-              commitSubject(
-                `Revert ${repoRelPath} (folder deleted; removed from change request ${numbers})`,
-                `Revert ${basenameOf(repoRelPath)} (folder deleted; removed from ${group.plans.length === 1 ? `change request ${numbers}` : `${group.plans.length} change requests`})`,
-              ),
-              true, // skipValidator — this restores an already-validated base version
-            );
+          if (outcome.pushed.includes(group.wsId)) {
+            this.noteGitSyncOk(group.wsId, group.branch);
+            pushed.push(group);
+            for (const plan of group.plans) this.prs.invalidateDetailCache(plan.number);
+          } else if (outcome.failed?.workspaceId === group.wsId) {
+            this.noteGitSyncFailed(group.wsId, group.branch, outcome.failed.error);
+            pushFailure = { group, err: outcome.failed.error };
           }
         }
-      } catch (err) {
-        await undo(toChange);
-        throw err;
-      }
-      // Pushes are one per remote branch and cannot be made atomic. A failed
-      // push undoes its own and every later branch's commits, so the requests
-      // split cleanly into "done" and "untouched", and running the action
-      // again finishes the rest.
-      for (const [i, group] of toChange.entries()) {
-        try {
-          await this.trackedPush(group.wsId, user);
-        } catch (err) {
-          await undo(toChange.slice(i));
-          pushFailure = { group, err };
-          break;
-        }
-        pushed.push(group);
-        for (const plan of group.plans) this.prs.invalidateDetailCache(plan.number);
       }
     } finally {
       await releaseAll();

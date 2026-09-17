@@ -18,7 +18,7 @@ import { WorkflowService } from '../workflow.service.js';
  * else does, and a request left empty is withdrawn.
  *
  * The git fake is stateful on purpose: a request's changed paths are what the
- * restore commits change, so "left empty" is observed, not stubbed.
+ * revert changes, so "left empty" is observed, not stubbed.
  */
 
 const ALICE: AuthUser = { id: 'u-alice', email: 'alice@example.com', name: 'Alice' };
@@ -57,18 +57,17 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
 
   const git = {
     pull: vi.fn().mockResolvedValue({ treeChanged: false }),
-    push: vi.fn().mockResolvedValue(undefined),
     changedPathsForPr: vi.fn(async (_ws: string, _base: string, head: string) => [...changed.get(head)!]),
     mergeBaseForPr: vi.fn().mockResolvedValue('mb-sha'),
-    // Restoring from the merge base takes a path out of the request; restoring
-    // from the checkout's own earlier HEAD (an undo) puts it back.
-    restorePathFromRef: vi.fn(async (ws: string, ref: string, p: string) => {
-      if (ref === 'mb-sha') changed.get(decodeURIComponent(ws))!.delete(p);
-      else changed.get(decodeURIComponent(ws))!.add(p);
+    // The git half as it goes when every step succeeds: each reverted path
+    // leaves its request, and every branch is published. Its failure modes
+    // are GitService's own, and tested there against a real git.
+    revertPathsAndPush: vi.fn(async (_user: AuthUser, plans: { workspaceId: string; paths: { path: string }[] }[]) => {
+      for (const plan of plans) {
+        for (const entry of plan.paths) changed.get(decodeURIComponent(plan.workspaceId))!.delete(entry.path);
+      }
+      return { pushed: plans.map((plan) => plan.workspaceId), failed: null };
     }),
-    commitFile: vi.fn().mockResolvedValue({}),
-    headCommit: vi.fn().mockResolvedValue('head-sha'),
-    resetToRemote: vi.fn().mockResolvedValue(undefined),
   } as unknown as GitService;
 
   const prs = {
@@ -230,7 +229,12 @@ describe('WorkflowService.changeRequestsUnderFolder', () => {
 });
 
 describe('WorkflowService.removeFolderFromChangeRequests', () => {
-  it('takes every file under the folder out of every request, keeps the rest, and withdraws a request left empty', async () => {
+  const aliceWs = encodeURIComponent(aliceRequest.branch);
+  const bobWs = encodeURIComponent(bobRequest.branch);
+  type Plans = Parameters<GitService['revertPathsAndPush']>[1];
+  const plansOf = (git: GitService): Plans => vi.mocked(git.revertPathsAndPush).mock.calls[0][1];
+
+  it('takes every file under the folder out of every request in one git operation, keeps the rest, and withdraws a request left empty', async () => {
     const { svc, git, changed, closed, fileLocks } = makeHarness([aliceRequest, bobRequest, elsewhere], {
       admins: [ALICE.email],
     });
@@ -247,16 +251,39 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(closed).toEqual([40]);
     expect([...changed.get(elsewhere.branch)!]).toEqual(['Data/ReportsArchive/old.md']);
 
-    // Each restore is its own commit under the path's lock; one push per request.
-    expect(git.commitFile).toHaveBeenCalledTimes(3);
-    expect(fileLocks.acquire).toHaveBeenCalledWith(
-      encodeURIComponent(aliceRequest.branch),
-      aliceRequest.branch,
-      'knowledge-base/Data/Reports/proposed.md',
-      ALICE,
-    );
+    // Every checkout goes to git in ONE call, each file reverted to its merge base.
+    expect(git.revertPathsAndPush).toHaveBeenCalledTimes(1);
+    expect(plansOf(git)).toEqual([
+      {
+        workspaceId: aliceWs,
+        paths: [
+          expect.objectContaining({ path: 'Data/Reports/proposed.md', ref: 'mb-sha' }),
+          expect.objectContaining({ path: 'Data/Reports/Sub/deep.md', ref: 'mb-sha' }),
+        ],
+      },
+      { workspaceId: bobWs, paths: [expect.objectContaining({ path: 'Data/Reports/q3.md', ref: 'mb-sha' })] },
+    ]);
+    expect(fileLocks.acquire).toHaveBeenCalledWith(aliceWs, aliceRequest.branch, 'knowledge-base/Data/Reports/proposed.md', ALICE);
     expect(fileLocks.release).toHaveBeenCalledTimes(3);
-    expect(git.push).toHaveBeenCalledTimes(2);
+  });
+
+  it('holds every file lock for the whole git operation', async () => {
+    const { svc, git, fileLocks } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
+    const events: string[] = [];
+    vi.mocked(fileLocks.acquire).mockImplementation(async () => {
+      events.push('lock');
+      return { acquired: true } as never;
+    });
+    vi.mocked(fileLocks.release).mockImplementation(async () => {
+      events.push('release');
+    });
+    const revert = vi.mocked(git.revertPathsAndPush).getMockImplementation()!;
+    vi.mocked(git.revertPathsAndPush).mockImplementation(async (user, plans) => {
+      events.push('git');
+      return revert(user, plans);
+    });
+    await svc.removeFolderFromChangeRequests('Data/Reports', ALICE);
+    expect(events).toEqual(['lock', 'lock', 'lock', 'git', 'release', 'release', 'release']);
   });
 
   it('withdraws the author’s own request when the folder held all of it', async () => {
@@ -280,8 +307,7 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
       status: 403,
       message: expect.stringContaining('#40'),
     });
-    expect(git.restorePathFromRef).not.toHaveBeenCalled();
-    expect(git.push).not.toHaveBeenCalled();
+    expect(git.revertPathsAndPush).not.toHaveBeenCalled();
     expect(closed).toEqual([]);
     expect(changed.get(aliceRequest.branch)!.size).toBe(3);
   });
@@ -295,8 +321,7 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
       status: 409,
       message: expect.stringContaining('#40'),
     });
-    expect(git.restorePathFromRef).not.toHaveBeenCalled();
-    expect(git.push).not.toHaveBeenCalled();
+    expect(git.revertPathsAndPush).not.toHaveBeenCalled();
     expect(closed).toEqual([]);
     expect(changed.get(aliceRequest.branch)!.size).toBe(3);
   });
@@ -313,53 +338,46 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
       status: 409,
       message: expect.stringContaining('Bob'),
     });
-    expect(git.restorePathFromRef).not.toHaveBeenCalled();
-    expect(git.push).not.toHaveBeenCalled();
+    expect(git.revertPathsAndPush).not.toHaveBeenCalled();
     expect(closed).toEqual([]);
     expect(changed.get(aliceRequest.branch)!.size).toBe(3);
     expect(fileLocks.release).toHaveBeenCalledTimes(2);
   });
 
-  it('pushes nothing and undoes every restore when a later request’s commit fails', async () => {
+  it('withdraws nothing and lets every lock go when the git operation throws (nothing was pushed)', async () => {
     const { svc, git, changed, closed, fileLocks } = makeHarness([aliceRequest, bobRequest], {
       admins: [ALICE.email],
     });
-    vi.mocked(git.commitFile)
-      .mockResolvedValueOnce({} as never)
-      .mockResolvedValueOnce({} as never)
-      .mockRejectedValueOnce(new Error('disk full'));
+    vi.mocked(git.revertPathsAndPush).mockRejectedValueOnce(new Error('disk full'));
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toThrow('disk full');
-    expect(git.push).not.toHaveBeenCalled();
-    // Undone by restoring from each checkout's own earlier HEAD — never a reset
-    // that would take unrelated local commits with it.
-    expect(git.resetToRemote).not.toHaveBeenCalled();
-    expect(git.restorePathFromRef).toHaveBeenCalledWith(
-      encodeURIComponent(aliceRequest.branch),
-      'head-sha',
-      'Data/Reports/proposed.md',
-    );
-    expect(git.restorePathFromRef).toHaveBeenCalledWith(
-      encodeURIComponent(bobRequest.branch),
-      'head-sha',
-      'Data/Reports/q3.md',
-    );
-    expect([...changed.get(aliceRequest.branch)!].sort()).toEqual([...aliceRequest.touchedNodePaths].sort());
     expect(closed).toEqual([]);
+    expect(changed.get(aliceRequest.branch)!.size).toBe(3);
     expect(fileLocks.release).toHaveBeenCalledTimes(3);
   });
 
-  it('says which requests were finished when a later push fails, and leaves that one as it was', async () => {
-    const { svc, git, changed, closed } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
-    vi.mocked(git.push).mockResolvedValueOnce(undefined as never).mockRejectedValueOnce(new Error('rejected'));
+  it('says which requests were finished when a later push fails, and finishes only those', async () => {
+    const only12 = { ...aliceRequest, touchedNodePaths: ['Data/Reports/proposed.md'] };
+    const { svc, git, changed, closed } = makeHarness([only12, bobRequest], { admins: [ALICE.email] });
+    vi.mocked(git.revertPathsAndPush).mockImplementationOnce(async () => {
+      // #12's branch published; #40's push failed and git undid it.
+      changed.get(aliceRequest.branch)!.clear();
+      return { pushed: [aliceWs], failed: { workspaceId: bobWs, error: new Error('rejected') } };
+    });
     const err = await svc.removeFolderFromChangeRequests('Data/Reports', ALICE).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 500 });
     expect((err as Error).message).toMatch(/removed from #12, but #40 could not be updated/);
-    expect(git.resetToRemote).not.toHaveBeenCalled();
-    const undone = vi.mocked(git.restorePathFromRef).mock.calls.filter(([, ref]) => ref === 'head-sha');
-    expect(undone).toEqual([[encodeURIComponent(bobRequest.branch), 'head-sha', 'Data/Reports/q3.md']]);
+    expect(closed).toEqual([12]);
     expect([...changed.get(bobRequest.branch)!]).toEqual(['Data/Reports/q3.md']);
-    // #12 was pushed, so its bookkeeping still runs; #40 is not closed.
-    expect(closed).not.toContain(40);
+  });
+
+  it('rethrows the push error itself when no branch was published', async () => {
+    const { svc, git, closed } = makeHarness([bobRequest], { admins: [ALICE.email] });
+    vi.mocked(git.revertPathsAndPush).mockResolvedValueOnce({
+      pushed: [],
+      failed: { workspaceId: bobWs, error: new Error('rejected') },
+    });
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toThrow('rejected');
+    expect(closed).toEqual([]);
   });
 
   it('lets every other lock go when one release fails', async () => {
@@ -369,7 +387,7 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(fileLocks.release).toHaveBeenCalledTimes(3);
   });
 
-  it('handles two requests on one source branch proposing the same file with one lock, one restore and one push', async () => {
+  it('handles two requests on one source branch proposing the same file with one lock and one revert', async () => {
     const shared = 'suggestions/alice-u-alice/knowledge';
     const first = summary({
       number: 12,
@@ -389,36 +407,10 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
       { number: 13, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true },
     ]);
     expect(fileLocks.acquire).toHaveBeenCalledTimes(1);
-    expect(git.restorePathFromRef).toHaveBeenCalledTimes(1);
-    expect(git.push).toHaveBeenCalledTimes(1);
+    expect(plansOf(git)).toEqual([
+      { workspaceId: encodeURIComponent(shared), paths: [expect.objectContaining({ path: 'Data/Reports/proposed.md' })] },
+    ]);
     expect(closed).toEqual([12, 13]);
-  });
-
-  it('still undoes the later files in a checkout when undoing an earlier one fails', async () => {
-    const { svc, git, changed } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
-    // #40's commit fails, so every restore is undone.
-    vi.mocked(git.commitFile)
-      .mockResolvedValueOnce({} as never)
-      .mockResolvedValueOnce({} as never)
-      .mockRejectedValueOnce(new Error('disk full'));
-    const restore = vi.mocked(git.restorePathFromRef).getMockImplementation()!;
-    let failedOnce = false;
-    vi.mocked(git.restorePathFromRef).mockImplementation(async (ws, ref, p) => {
-      if (ref === 'head-sha' && p === 'Data/Reports/proposed.md' && !failedOnce) {
-        failedOnce = true;
-        throw new Error('index.lock exists');
-      }
-      return restore(ws, ref, p);
-    });
-    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toThrow('disk full');
-    // The first file of #12 could not be put back; the one after it still was.
-    expect(git.restorePathFromRef).toHaveBeenCalledWith(
-      encodeURIComponent(aliceRequest.branch),
-      'head-sha',
-      'Data/Reports/Sub/deep.md',
-    );
-    expect(changed.get(aliceRequest.branch)!.has('Data/Reports/Sub/deep.md')).toBe(true);
-    expect(changed.get(bobRequest.branch)!.has('Data/Reports/q3.md')).toBe(true);
   });
 
   it('refuses, before locking anything, requests on one branch that revert a shared file to different bases', async () => {
@@ -438,22 +430,8 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
       message: expect.stringContaining('#12'),
     });
     expect(fileLocks.acquire).not.toHaveBeenCalled();
-    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(git.revertPathsAndPush).not.toHaveBeenCalled();
     expect(closed).toEqual([]);
-  });
-
-  it('commits nothing when a checkout’s HEAD cannot be read, and lets its locks go', async () => {
-    const { svc, git, changed, closed, fileLocks } = makeHarness([aliceRequest, bobRequest], {
-      admins: [ALICE.email],
-    });
-    vi.mocked(git.headCommit).mockRejectedValueOnce(new Error('index.lock exists'));
-    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toThrow('index.lock exists');
-    expect(git.restorePathFromRef).not.toHaveBeenCalled();
-    expect(git.commitFile).not.toHaveBeenCalled();
-    expect(git.push).not.toHaveBeenCalled();
-    expect(closed).toEqual([]);
-    expect(changed.get(aliceRequest.branch)!.size).toBe(3);
-    expect(fileLocks.release).toHaveBeenCalledTimes(3);
   });
 
   it('keeps every commit subject within git’s 200 characters, however many requests share a branch or however long the path', async () => {
@@ -469,8 +447,9 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     );
     const { svc, git } = makeHarness(many);
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toHaveLength(40);
-    const subjects = vi.mocked(git.commitFile).mock.calls.map(([, , , subject]) => subject as string);
-    expect(subjects).toHaveLength(2);
+    const [plan] = plansOf(git);
+    const subjects = plan.paths.flatMap((entry) => [entry.subject, entry.undoSubject]);
+    expect(subjects).toHaveLength(4);
     for (const subject of subjects) expect(subject.length).toBeLessThanOrEqual(200);
     expect(subjects).toContain('Revert proposed.md (folder deleted; removed from 40 change requests)');
   });
@@ -478,6 +457,6 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
   it('is a no-op for a folder no request touches', async () => {
     const { svc, git } = makeHarness([elsewhere]);
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([]);
-    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(git.revertPathsAndPush).not.toHaveBeenCalled();
   });
 });

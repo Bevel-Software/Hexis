@@ -44,6 +44,8 @@ import {
   type IGitRunner,
 } from '../../../shared/git.contract.js';
 import { NodeGitRunner } from './node-git-runner.js';
+import { printable } from '../../../shared/printable.js';
+import { sanitizeError } from '../sanitize-error.js';
 
 const log = logger('git');
 const crLog = logger('cr');
@@ -982,8 +984,30 @@ export class GitService implements IGitService {
     assertValidRelativePath(relativePath);
     assertValidAuthor(user);
     const repoRelativePath = this.stripRepoPrefix(relativePath);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      this.commitFileUnlocked(
+        workspaceId,
+        await this.repoDir(workspaceId),
+        user,
+        relativePath,
+        repoRelativePath,
+        summary,
+        skipValidator,
+      ),
+    );
+  }
+
+  /** `commitFile`'s body, for a caller that already holds the workspace's reservation. */
+  private async commitFileUnlocked(
+    workspaceId: string,
+    cwd: string,
+    user: AuthUser,
+    relativePath: string,
+    repoRelativePath: string,
+    summary?: string,
+    skipValidator?: boolean,
+  ): Promise<CommitAttribution | null> {
+    {
       const branch = await this.currentBranch(cwd);
 
       // Path-scoped status — is this specific file dirty? `--porcelain` on
@@ -1054,7 +1078,7 @@ export class GitService implements IGitService {
         subject: subj ?? subject,
         committedAt: committedAt?.trim() ?? new Date().toISOString(),
       };
-    });
+    }
   }
 
   /**
@@ -1211,8 +1235,19 @@ export class GitService implements IGitService {
     user: AuthUser,
     opts?: { systemAuthorized?: boolean },
   ): Promise<void> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      this.pushUnlocked(workspaceId, await this.repoDir(workspaceId), user, opts),
+    );
+  }
+
+  /** `push`'s body, for a caller that already holds the workspace's reservation. */
+  private async pushUnlocked(
+    workspaceId: string,
+    cwd: string,
+    user: AuthUser,
+    opts?: { systemAuthorized?: boolean },
+  ): Promise<void> {
+    {
       const branch = await this.currentBranch(cwd);
 
       // Access gate fires only when pushing to a protected branch. Pushing
@@ -1241,7 +1276,7 @@ export class GitService implements IGitService {
       }
 
       await this.git(cwd, ['push', '-u', 'origin', branch]);
-    });
+    }
   }
 
   // `forcePush` method removed. The workflow layer no longer auto-force-pushes
@@ -1849,18 +1884,106 @@ export class GitService implements IGitService {
   }
 
   /**
-   * The workspace's current HEAD commit. Read under the workspace mutex, so it
-   * never observes a pull-rebase mid-flight. Every failure throws — an unborn
-   * HEAD included: a caller records this to undo back to, and "no answer"
-   * must never pass for "nothing to undo".
+   * Revert paths in several workspaces and publish the result as ONE git
+   * operation. Every workspace involved is reserved together (`runAll`), and
+   * reading each HEAD, restoring and committing every path, pushing each
+   * branch and — when a step fails — undoing, all happen inside that single
+   * reservation: no other git operation on those workspaces can land between
+   * the HEAD an undo returns to and the commits it undoes.
+   *
+   * - Each workspace's HEAD is read first; one that can't be read throws
+   *   before anything changes.
+   * - Every path in every workspace is restored from its `ref` and committed
+   *   (`subject`) before anything is pushed. A failed restore or commit
+   *   undoes all of them and rethrows: nothing is pushed.
+   * - Branches are then pushed in order. A failed push undoes that workspace
+   *   and every later one and is reported in `failed`; the earlier pushes
+   *   stand, since a remote can't be un-pushed.
+   *
+   * An undo never rewrites history: each touched path is restored from the
+   * HEAD recorded at the start and committed (`undoSubject`), so unpushed work
+   * the checkout already had stays exactly as it was. Each path is undone on
+   * its own, so one that fails doesn't leave the rest reverted.
    */
-  async headCommit(workspaceId: string): Promise<string> {
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
-      const { stdout } = await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']);
-      return stdout.trim();
-    });
+  async revertPathsAndPush(
+    user: AuthUser,
+    plans: {
+      workspaceId: string;
+      paths: { path: string; ref: string; subject: string; undoSubject: string }[];
+    }[],
+  ): Promise<{ pushed: string[]; failed: { workspaceId: string; error: unknown } | null }> {
+    assertValidAuthor(user);
+    for (const plan of plans) for (const entry of plan.paths) assertValidRelativePath(entry.path);
+    return this.mutex.runAll(
+      plans.map((plan) => plan.workspaceId),
+      async () => {
+        const steps: {
+          workspaceId: string;
+          cwd: string;
+          head: string;
+          paths: (typeof plans)[number]['paths'];
+        }[] = [];
+        for (const plan of plans) {
+          const cwd = await this.repoDir(plan.workspaceId);
+          const { stdout } = await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']);
+          steps.push({ workspaceId: plan.workspaceId, cwd, head: stdout.trim(), paths: plan.paths });
+        }
+        const undo = async (unpushed: typeof steps) => {
+          for (const step of unpushed) {
+            for (const entry of step.paths) {
+              try {
+                await this.restorePathUnlocked(step.cwd, step.head, entry.path);
+                await this.commitFileUnlocked(
+                  step.workspaceId,
+                  step.cwd,
+                  user,
+                  entry.path,
+                  entry.path,
+                  entry.undoSubject,
+                  true, // skipValidator — this puts back the checkout's own version
+                );
+              } catch (err) {
+                log.warn(
+                  `undo of ${printable(entry.path)} failed in workspace ${printable(step.workspaceId)}: ${printable(sanitizeError(err))}`,
+                );
+              }
+            }
+          }
+        };
+        try {
+          for (const step of steps) {
+            for (const entry of step.paths) {
+              await this.restorePathUnlocked(step.cwd, entry.ref, entry.path);
+              await this.commitFileUnlocked(
+                step.workspaceId,
+                step.cwd,
+                user,
+                entry.path,
+                entry.path,
+                entry.subject,
+                true, // skipValidator — this restores an already-validated version
+              );
+            }
+          }
+        } catch (err) {
+          await undo(steps);
+          throw err;
+        }
+        const pushed: string[] = [];
+        for (const [i, step] of steps.entries()) {
+          try {
+            await this.pushUnlocked(step.workspaceId, step.cwd, user);
+          } catch (error) {
+            await undo(steps.slice(i));
+            return { pushed, failed: { workspaceId: step.workspaceId, error } };
+          }
+          pushed.push(step.workspaceId);
+        }
+        return { pushed, failed: null };
+      },
+    );
   }
+
 
   /**
    * Hard-reset the workspace's checked-out branch to `origin/<branch>`, fetching
@@ -2442,8 +2565,14 @@ export class GitService implements IGitService {
     repoRelativePath: string,
   ): Promise<void> {
     assertValidRelativePath(repoRelativePath);
-    return this.mutex.run(workspaceId, async () => {
-      const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () =>
+      this.restorePathUnlocked(await this.repoDir(workspaceId), ref, repoRelativePath),
+    );
+  }
+
+  /** `restorePathFromRef`'s body, for a caller that already holds the workspace's reservation. */
+  private async restorePathUnlocked(cwd: string, ref: string, repoRelativePath: string): Promise<void> {
+    {
       let existsAtRef = true;
       try {
         await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
@@ -2465,7 +2594,7 @@ export class GitService implements IGitService {
         // missing from disk is exactly what `git add` records as deleted.
         await fs.rm(path.join(cwd, repoRelativePath), { force: true });
       }
-    });
+    }
   }
 
   /** Fetch the two branches a CR spans so origin refs reflect the latest push. */
