@@ -492,6 +492,25 @@ describe('ManageAccessDialog: a file whose folder governs its access', () => {
     expect(screen.getByPlaceholderText(/Add people, groups, roles or plugins/)).toBeInTheDocument();
     expect(screen.queryByText(/access comes from its folder/)).not.toBeInTheDocument();
   });
+
+  it("the server's ruling decides: a binary saved as .md shows the folder pointer", async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: 'Sales' });
+    const fake = { name: 'Fake.md', relativePath: `${KB}/Sales/Fake.md`, type: 'file' } as unknown as FileTreeEntry;
+    render(<ManageAccessDialog entry={fake} onClose={() => {}} onManageAncestor={() => {}} />);
+    expect(
+      await screen.findByText("This file's access comes from its folder. Manage access on Sales instead."),
+    ).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/Add people, groups, roles or plugins/)).not.toBeInTheDocument();
+  });
+
+  it("the server's ruling decides: an overlay-registered kind the server accepts keeps the field", async () => {
+    api.fetchFileAccess.mockResolvedValue({ ...binaryView, governedByFolder: undefined });
+    const flow = { name: 'Flow.pipeline', relativePath: `${KB}/Sales/Flow.pipeline`, type: 'file' } as unknown as FileTreeEntry;
+    render(<ManageAccessDialog entry={flow} onClose={() => {}} onManageAncestor={() => {}} />);
+    expect(await screen.findByRole('heading', { name: /On this file/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Add people, groups, roles or plugins/)).toBeInTheDocument();
+    expect(screen.queryByText(/access comes from its folder/)).not.toBeInTheDocument();
+  });
 });
 
 // ── group principals in the picker ──

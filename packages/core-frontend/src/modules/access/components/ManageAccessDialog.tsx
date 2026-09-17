@@ -786,13 +786,19 @@ export function ManageAccessDialog({
   const governed = repoRelative !== null;
   // A file that cannot carry frontmatter (a PDF, a deck, an image) has no rules
   // of its own: its folder's rules govern it, and the grant / revoke routes
-  // refuse it. Decided by the same shared predicate the routes use.
+  // refuse it. The server's ruling (`governedByFolder`, from the same shared
+  // predicate over the resolver's registered extensions) decides once the view
+  // has loaded; until then the shared predicate's core set stands in, so the
+  // sheet never flashes a field for a PDF.
   const folderGoverns =
-    targetKind === 'file' && repoRelative !== null && !canCarryFrontmatter(repoRelative);
+    targetKind === 'file' &&
+    repoRelative !== null &&
+    (data ? data.governedByFolder !== undefined : !canCarryFrontmatter(repoRelative));
   const governingFolder =
-    repoRelative !== null && repoRelative.includes('/')
+    data?.governedByFolder ??
+    (repoRelative !== null && repoRelative.includes('/')
       ? repoRelative.slice(0, repoRelative.lastIndexOf('/'))
-      : '';
+      : '');
   const governingFolderLabel =
     governingFolder === '' ? WHOLE_WORKSPACE : governingFolder.slice(governingFolder.lastIndexOf('/') + 1);
   // The dialog can mutate only if the current user can write this path's access

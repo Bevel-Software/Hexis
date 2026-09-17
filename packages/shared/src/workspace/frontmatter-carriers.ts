@@ -10,28 +10,36 @@
  *
  * THE ONE predicate for that question: the access routes refuse a file-level
  * mutation on a file it rejects, and the Manage access dialog shows the folder
- * pointer for the same files. The extension list mirrors the backend's
- * file-reader registry — Markdown-like kinds only, each served by a
- * text-editable text reader. The registry's own test pins the two together,
- * so a reader that ever claims one of these extensions as a non-text kind
- * fails there rather than drifting silently. (The registry itself cannot live
- * here: its document readers carry backend-only extraction dependencies.)
+ * pointer for the same files.
  *
- * An extensionless file is NOT a carrier: its content may be anything, and a
- * path alone cannot tell a note from a binary.
+ * The carriers are exactly the files the access resolver reads its own
+ * frontmatter from — the backend's core access-frontmatter extension set:
+ * Markdown notes (`.md`) and `.tool` definitions (whole-document YAML whose
+ * access verbs sit beside the definition). Both are served by the file-reader
+ * registry's text-editable text reader. The registry test pins both facts, so
+ * this list cannot drift from the resolver or the registry silently. (Neither
+ * can live here: the registry's document readers carry backend-only extraction
+ * dependencies, and overlays register further extensions at boot — the backend
+ * passes its full registered set as `extensions`.)
+ *
+ * Matching is case-SENSITIVE, as the resolver's is: `Note.MD` carries no
+ * enforced rule, so a grant written there would never resolve. An extensionless
+ * file is NOT a carrier either: its content may be anything, and a path alone
+ * cannot tell a note from a binary.
  */
-export const FRONTMATTER_CARRIER_EXTENSIONS: readonly string[] = ['.md', '.markdown'];
+export const FRONTMATTER_CARRIER_EXTENSIONS: readonly string[] = ['.md', '.tool'];
 
-/** Lowercased extension of the path's last segment, with the dot; '' when none (dotfiles included). */
-function extensionOf(path: string): string {
+/**
+ * True when the file at `path` can carry its own frontmatter (and so its own
+ * access rules). `extensions` defaults to the core set; the backend passes the
+ * resolver's registered set so an overlay's kinds count too.
+ */
+export function canCarryFrontmatter(
+  path: string,
+  extensions: readonly string[] = FRONTMATTER_CARRIER_EXTENSIONS,
+): boolean {
   const name = path.slice(path.lastIndexOf('/') + 1);
-  const dot = name.lastIndexOf('.');
-  return dot > 0 ? name.slice(dot).toLowerCase() : '';
-}
-
-/** True when the file at `path` can carry its own frontmatter (and so its own access rules). */
-export function canCarryFrontmatter(path: string): boolean {
-  return FRONTMATTER_CARRIER_EXTENSIONS.includes(extensionOf(path));
+  return extensions.some((ext) => name.length > ext.length && name.endsWith(ext));
 }
 
 /** The `kind` a refused file-level access mutation answers with. */

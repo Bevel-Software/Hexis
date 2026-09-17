@@ -7,7 +7,6 @@ const grantLog = logger('access.grant');
 const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
-  canCarryFrontmatter,
   isProtectedBranch,
   DEFAULT_BRANCH,
   pluginManifestName,
@@ -30,6 +29,7 @@ import {
   AccessMutationError,
   accessMdPathForFolder,
   assertFileCarriesAccessRules,
+  fileCarriesAccessRules,
   governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
@@ -651,7 +651,7 @@ export function createAccessRoutes(
     // folder whose rules govern it (repo-relative, `''` for the root), which
     // is where the mutation routes point too.
     const governedByFolder =
-      kind === 'file' && !canCarryFrontmatter(repoRelTarget) ? governingFolderOf(repoRelTarget) : undefined;
+      kind === 'file' && !fileCarriesAccessRules(repoRelTarget) ? governingFolderOf(repoRelTarget) : undefined;
 
     return {
       canRead,

@@ -72,13 +72,14 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     }
     await fs.writeFile(path.join(root, KB, 'Sales/Deal.md'), '---\nnodeType: process\n---\n# Deal\n');
 
-    readFile = vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(root, wsRel), 'utf-8'));
+    readFile = vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(root, wsRel)));
     writeFile = vi.fn(async (_id: string, wsRel: string, content: string) =>
       fs.writeFile(path.join(root, wsRel), content, 'utf-8'),
     );
     const workspaceService = {
       getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
-      readFile,
+      readFile: vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(root, wsRel), 'utf-8')),
+      readFileBinary: readFile,
       writeFile,
     } as unknown as WorkspaceService;
 
@@ -186,6 +187,43 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
         expect(writeFile).not.toHaveBeenCalled();
       });
     }
+  }
+
+  for (const m of MUTATIONS) {
+    it(`${m.name} on binary bytes saved as .md → 422 folder-governs-access, bytes unchanged, never written`, async () => {
+      const abs = path.join(root, KB, 'Sales/Fake.md');
+      await fs.writeFile(abs, BINARIES['Sales/Report.pdf']);
+      const before = sha(await fs.readFile(abs));
+
+      const res = await post(m.route, { path: `${KB}/Sales/Fake.md`, kind: 'file', principal: ALICE, ...m.extra });
+
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({
+        error: "This file's access comes from its folder. Manage access on Sales instead.",
+        kind: 'folder-governs-access',
+        folder: 'Sales',
+      });
+      expect(sha(await fs.readFile(abs))).toBe(before);
+      expect(writeFile).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a .tool definition carries its own rules, as the resolver reads them', async () => {
+    const abs = path.join(root, KB, 'Sales/crm.tool');
+    await fs.writeFile(abs, '---\nname: crm\ndescription: CRM lookup\n---\n');
+    const res = await post('grant', { path: `${KB}/Sales/crm.tool`, kind: 'file', verb: 'read', principal: ALICE });
+    expect(res.status).toBe(200);
+    expect(await fs.readFile(abs, 'utf-8')).toContain('bob@bevel.software');
+  });
+
+  for (const rel of ['Sales/Note.MD', 'Sales/Note.markdown']) {
+    it(`${rel} is refused: the resolver never reads rules from it`, async () => {
+      await fs.writeFile(path.join(root, KB, rel), '# Note\n');
+      const res = await post('grant', { path: `${KB}/${rel}`, kind: 'file', verb: 'read', principal: ALICE });
+      expect(res.status).toBe(422);
+      expect((await res.json()).kind).toBe('folder-governs-access');
+      expect(readFile).not.toHaveBeenCalled();
+    });
   }
 
   it('a file at the repo root names the whole workspace', async () => {

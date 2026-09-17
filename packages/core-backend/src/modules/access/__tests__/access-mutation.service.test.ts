@@ -31,6 +31,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
     getWorkspacePath: async () => workspaceDir,
     getOrCreateForBranch: async () => ({}) as unknown,
     readFile: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel), 'utf-8'),
+    readFileBinary: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel)),
     writeFile: async (_id: string, wsRel: string, content: string) => {
       const abs = resolve(wsRel);
       await fs.mkdir(path.dirname(abs), { recursive: true });

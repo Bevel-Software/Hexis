@@ -94,6 +94,7 @@ describe('access routes on a proposal branch (real git)', () => {
       getWorkspacePath: async (id: string) => dirOf(id),
       getOrCreateForBranch: async (branch: string) => ({ id: workspaceIdForBranch(branch), kbDirName: KB }),
       readFile: async (id: string, wsRel: string) => fs.readFile(path.join(dirOf(id), wsRel), 'utf-8'),
+      readFileBinary: async (id: string, wsRel: string) => fs.readFile(path.join(dirOf(id), wsRel)),
       writeFile: async (id: string, wsRel: string, content: string) => {
         await fs.writeFile(path.join(dirOf(id), wsRel), content, 'utf-8');
       },

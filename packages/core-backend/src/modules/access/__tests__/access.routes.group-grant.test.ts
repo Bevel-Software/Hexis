@@ -62,6 +62,9 @@ async function makeHarness(opts: {
       }
       return v;
     }),
+    readFileBinary: vi.fn(async (_id: string, wsRel: string) =>
+      Buffer.from(await (workspaceService.readFile as (id: string, p: string) => Promise<string>)(_id, wsRel), 'utf-8'),
+    ),
     writeFile: vi.fn(async (_id: string, wsRel: string, content: string) => {
       files.set(wsRel, content);
     }),

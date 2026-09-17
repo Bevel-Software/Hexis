@@ -10,6 +10,7 @@ import { ImageReader } from '../image-reader.js';
 import { BinaryReader, LegacyOfficeReader, TextReader } from '../text-reader.js';
 import { OCTET_STREAM_FALLBACK_NOTE, contentModeOf, fileTypeOf, needsContent } from '../content-mode.js';
 import { FRONTMATTER_CARRIER_EXTENSIONS, canCarryFrontmatter } from '@bevel-software/platform-shared';
+import { accessFrontmatterExtensionList } from '../../../access-model/access-grammar.js';
 
 /**
  * Routing tests for THE file-reader registry: one lookup (`readerFor`) decides
@@ -190,15 +191,27 @@ describe('file-reader registry routing', () => {
  * claims may ever count as a carrier.
  */
 describe('frontmatter carriers follow the registry', () => {
+  it('the carriers are exactly the resolver’s core access-frontmatter set', () => {
+    // Pinned exactly, so an emptied or widened list fails here rather than
+    // letting the loop below pass vacuously. `accessFrontmatterExtensionList`
+    // may hold overlay registrations from other suites; core's are a subset.
+    expect([...FRONTMATTER_CARRIER_EXTENSIONS].sort()).toEqual(['.md', '.tool']);
+    for (const ext of FRONTMATTER_CARRIER_EXTENSIONS) {
+      expect(accessFrontmatterExtensionList(), ext).toContain(ext);
+    }
+  });
+
   it('every carrier extension is claimed by no specialised reader and reads as editable text', () => {
     const owned = new Set(registry.ownedExtensions());
+    expect(FRONTMATTER_CARRIER_EXTENSIONS.length).toBeGreaterThan(0);
     for (const ext of FRONTMATTER_CARRIER_EXTENSIONS) {
       expect(owned.has(ext), ext).toBe(false);
       const reader = registry.readerFor(`Notes/note${ext}`);
       expect(reader.textEditable, ext).toBe(true);
       expect(reader.fileKind, ext).toBe('text');
       expect(canCarryFrontmatter(`Notes/note${ext}`), ext).toBe(true);
-      expect(canCarryFrontmatter(`Notes/NOTE${ext.toUpperCase()}`), ext).toBe(true);
+      // Case-sensitive, as the resolver is: `NOTE.MD` carries no enforced rule.
+      expect(canCarryFrontmatter(`Notes/NOTE${ext.toUpperCase()}`), ext).toBe(false);
     }
   });
 

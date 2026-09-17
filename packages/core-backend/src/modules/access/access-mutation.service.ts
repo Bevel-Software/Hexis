@@ -37,11 +37,13 @@ import path from 'node:path';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { isAbsence } from '../../shared/fs.contract.js';
+import { isTextBytes } from '../workspace/file-readers/text-reader.js';
 import {
   type Verb,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
+  accessFrontmatterExtensionList,
 } from '../access-model/access-grammar.js';
 import {
   spliceRevoke,
@@ -95,9 +97,22 @@ export function targetFileForNode(repoRelFile: string): string {
  * A folder target, or a Markdown note, passes.
  */
 export function assertFileCarriesAccessRules(kind: TargetKind, repoRelTarget: string): void {
-  if (kind !== 'file' || canCarryFrontmatter(repoRelTarget)) return;
+  if (kind !== 'file' || fileCarriesAccessRules(repoRelTarget)) return;
+  throw folderGovernsAccessError(repoRelTarget);
+}
+
+/**
+ * The shared predicate over the resolver's REGISTERED extension set — core's
+ * `.md`/`.tool` plus whatever an overlay added at boot — so a file is refused
+ * exactly when the resolver would never read a rule written into it.
+ */
+export function fileCarriesAccessRules(repoRelFile: string): boolean {
+  return canCarryFrontmatter(repoRelFile, accessFrontmatterExtensionList());
+}
+
+function folderGovernsAccessError(repoRelTarget: string): AccessMutationError {
   const folder = governingFolderOf(repoRelTarget);
-  throw new AccessMutationError(
+  return new AccessMutationError(
     folderGovernsAccessMessage(folder || 'the whole workspace'),
     422,
     { kind: FOLDER_GOVERNS_ACCESS_KIND, folder },
@@ -136,21 +151,32 @@ export class AccessMutationService {
 
   /**
    * Read the to-be-edited file's current text, or '' when it's an expected
-   * missing file. `allowMissing` is true only where an absent file is normal
-   * (a folder that has no `access.md` yet); there we swallow ENOENT/ENOTDIR.
-   * Every other error — a typoed node target, a transient read failure — is
-   * rethrown so we never treat it as empty and write a brand-new access file.
+   * missing file. An absent file is normal only for a folder (no `access.md`
+   * yet); there we swallow ENOENT/ENOTDIR. Every other error — a typoed node
+   * target, a transient read failure — is rethrown so we never treat it as
+   * empty and write a brand-new access file.
+   *
+   * A FILE target must also hold text (`isTextBytes`: no NUL, valid UTF-8 —
+   * the file tools' own test). A path alone cannot tell a note from a binary
+   * saved as `.md`, so binary content is refused with `folder-governs-access`
+   * here, after the read and before any splice or write.
    */
   private async readOrEmpty(
     workspaceId: string,
+    kind: TargetKind,
+    repoRelTarget: string,
     repoRelEditPath: string,
-    allowMissing: boolean,
   ): Promise<string> {
     const wsRelative = this.toWorkspaceRelative(repoRelEditPath);
+    if (kind === 'file') {
+      const bytes = await this.workspaceService.readFileBinary(workspaceId, wsRelative);
+      if (!isTextBytes(bytes)) throw folderGovernsAccessError(repoRelTarget);
+      return bytes.toString('utf-8');
+    }
     try {
       return await this.workspaceService.readFile(workspaceId, wsRelative);
     } catch (err) {
-      if (allowMissing && isAbsence(err)) return '';
+      if (isAbsence(err)) return '';
       throw err;
     }
   }
@@ -214,7 +240,7 @@ export class AccessMutationService {
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal); // injection/shape guard (role-exists is the route's job)
     const { editPath, allowScalar } = this.fileToEdit(kind, repoRelTarget);
-    const current = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    const current = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
     let result;
     try {
       result = spliceGrant(current, verb, principal, { allowScalar, target: kind === 'folder' ? 'folder' : 'node' });
@@ -269,7 +295,7 @@ export class AccessMutationService {
     // Allow a missing target only for a folder (no access.md yet is normal); a
     // missing FILE node is a bad target and should surface, not silently no-op
     // — same rule grant() uses.
-    const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    const original = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
     // Alias-tolerant vs exact-token matching, decided by group shadowing —
     // see revokeTokenMatch — unless the caller pinned it.
     const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
@@ -338,7 +364,7 @@ export class AccessMutationService {
   ): Promise<{ changed: boolean; editPath: string }> {
     this.assertPrincipalSafe(principal);
     const { editPath, allowScalar } = this.fileToEdit(kind, repoRelTarget);
-    const original = await this.readOrEmpty(workspaceId, editPath, kind === 'folder');
+    const original = await this.readOrEmpty(workspaceId, kind, repoRelTarget, editPath);
 
     const verbsToDeny = verb ? [verb] : KNOWN_VERBS;
     // Same shadowing-aware matching as revoke(): the strip must not swallow a
