@@ -18,6 +18,7 @@ import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
+import { isBranchAuthoredBy } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
@@ -74,6 +75,8 @@ let toolRegistry: ToolRegistry;
 async function start(
   scope: 'read' | 'write' = 'write',
   access: IAccessControl = allowAll,
+  /** The signed-in caller's address — only the branch-naming tests vary it. */
+  userEmail = 'e@x',
 ): Promise<string> {
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
@@ -86,7 +89,7 @@ async function start(
   const registry = new ToolRegistry();
   toolRegistry = registry;
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
-    user: { id: 'u', email: 'e@x', name: 'N' },
+    user: { id: 'u', email: userEmail, name: 'N' },
     scope: auth.scope,
     source: auth.source,
     sessionId,
@@ -1498,6 +1501,26 @@ describe('a write refused for permissions says whether and how to propose it', (
     // Nothing was created: no workspace was resolved for a draft, and the context's
     // workflow service is an empty stub, so a create_branch or change request would have 500d.
     expect(workspacePathCalls.length).toBe(workflowCalls);
+  });
+
+  it('the suggested draft is a branch the caller owns, for an address the convention rewrites', async () => {
+    // `john.doe@` is the common corporate shape, and the one that catches a
+    // prefix derived by a second spelling of the rule: the platform judges
+    // authorship on `john-doe/`, so a suggested `john.doe/…` would be a draft
+    // the agent creates, proposes from, and is then refused permission to
+    // delete. Asserted through the platform's own predicate, not the regex.
+    const email = 'John.Doe+kb@example.com';
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac, email);
+    denyWrites();
+
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+
+    const draft = json.proposal.draftBranch as string;
+    expect(isBranchAuthoredBy(draft, email)).toBe(true);
+    expect(draft).toBe('john-doe-kb/propose-deal');
+    // The step the agent actually runs carries that same name.
+    expect(json.proposal.steps[0].args).toEqual({ name: draft, branch: TARGET });
   });
 
   it('without read access the denial says so in one sentence and offers no proposal', async () => {

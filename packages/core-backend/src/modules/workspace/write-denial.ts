@@ -1,4 +1,4 @@
-import { isProtectedBranch } from '@bevel-software/platform-shared';
+import { branchAuthorLocalpart, isProtectedBranch } from '@bevel-software/platform-shared';
 import { ToolError } from '../tool-helpers/tool.contract.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';
@@ -46,9 +46,22 @@ function reasonOf(err: AccessDeniedError): string {
   return err.message.startsWith(lead) ? err.message.slice(lead.length).trim() || err.message : err.message;
 }
 
-/** A suggested draft name on the `<email-localpart>/<kebab-slug>` convention. */
+/**
+ * A suggested draft name on the `<email-localpart>/<kebab-slug>` convention.
+ *
+ * The prefix comes from `branchAuthorLocalpart` — the SAME derivation the
+ * platform judges branch authorship by — and not from a second spelling of
+ * it: `branchSegment` (the `suggestions/…` namespace's) keeps `.` and `_`,
+ * so `john.doe@x` would be suggested `john.doe/…` while authorship expects
+ * `john-doe/`, and the agent could not delete the draft it was told to make.
+ *
+ * A caller whose address yields no usable localpart (the helper answers null
+ * rather than inventing one) gets `agent/…`: a name they cannot own either,
+ * but no derivation could give them one, and the step's note says any unused
+ * name on the convention works.
+ */
 function draftNameFor(email: string, path: string): string {
-  const local = (email.split('@')[0] ?? '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'agent';
+  const local = branchAuthorLocalpart(email) ?? 'agent';
   const base = path.split('/').filter(Boolean).pop() ?? 'change';
   const slug = base.toLowerCase().replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'change';
   return `${local}/propose-${slug}`;
