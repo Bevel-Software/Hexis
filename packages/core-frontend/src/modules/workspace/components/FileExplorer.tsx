@@ -38,7 +38,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
-import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree } from '../utils/fileTree';
+import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree, treeHasVisibleEntries } from '../utils/fileTree';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT, SUGGESTIONS_RETRACTED_EVENT } from '../../../core/events';
@@ -1428,6 +1428,81 @@ export function TreeChrome({
   );
 }
 
+/** Shown when the read filter kept entries out and none are left on screen. */
+export const NOTHING_SHARED_MESSAGE = 'Nothing here is shared with you yet. Ask an admin to grant you access.';
+/** Shown when the knowledge base has nothing in it at all. */
+export const KB_EMPTY_MESSAGE = 'This knowledge base is empty.';
+
+/**
+ * Why a tree has nothing in it, when it has nothing in it. Read is
+ * default-deny, so an empty sidebar has two causes that look identical and
+ * call for different next steps: the caller may read none of what exists
+ * (ask an admin), or nothing exists yet (make something — said only to a
+ * caller who may write at `rootPath`, the surface's root folder).
+ *
+ * Renders nothing while the tree loads and once a single entry is visible.
+ * The Knowledge explorer and the Library's trees both render it, from the
+ * same merged listing, so they give the same answer.
+ */
+export function EmptyTreeNotice({ rootPath }: { rootPath: string | null }) {
+  const { kbDirName } = useWorkspace();
+  const { tree, withheld } = useMergedWorkspaceTree();
+  const empty = tree !== null && !treeHasVisibleEntries(tree, kbDirName);
+  // Asked only when the message would carry the hint: a withheld tree never does.
+  const canWrite = useCanWriteFolder(empty && withheld === 0 ? rootPath : null);
+  if (!empty) return null;
+  if (withheld > 0) {
+    return (
+      <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+        {NOTHING_SHARED_MESSAGE}
+      </div>
+    );
+  }
+  return (
+    <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+      {KB_EMPTY_MESSAGE}
+      {canWrite && (
+        <>
+          {' '}
+          <span data-testid="tree-empty-create-hint">
+            Use New file or New folder on the folder above, or drop files here.
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Whether the caller may write into a workspace-relative folder; false until
+ * known, and on a failed lookup — it decides a hint, never a gate. The same
+ * short-circuits as `useFileAccess`: a path outside the KB and a draft branch
+ * are writable without asking.
+ */
+function useCanWriteFolder(workspacePath: string | null): boolean {
+  const { workspaceId, kbDirName } = useWorkspace();
+  const [answer, setAnswer] = useState<{ key: string; canWrite: boolean } | null>(null);
+  const prefix = kbDirName ? `${kbDirName}/` : null;
+  const key = workspacePath && workspaceId && prefix ? `${workspaceId}|${workspacePath}` : null;
+  // The KB clone's own folder (a tree that predates the split) is the repo
+  // root: inside the KB, and sent as-is — the server reads a bare kbDirName as ''.
+  const isKbRoot = workspacePath !== null && workspacePath === kbDirName;
+  const shortCircuit =
+    key !== null &&
+    ((!isKbRoot && !workspacePath!.startsWith(prefix!)) || !isProtectedBranch(decodeURIComponent(workspaceId!)));
+  useEffect(() => {
+    if (key === null || shortCircuit) return;
+    let cancelled = false;
+    fetchFileAccess(workspaceId!, isKbRoot ? workspacePath! : workspacePath!.slice(prefix!.length), 'folder')
+      .then((res) => { if (!cancelled) setAnswer({ key, canWrite: res.canWrite }); })
+      .catch(() => { if (!cancelled) setAnswer({ key, canWrite: false }); });
+    return () => { cancelled = true; };
+  }, [key, shortCircuit, isKbRoot, workspaceId, workspacePath, prefix]);
+  if (key === null) return false;
+  if (shortCircuit) return true;
+  return answer?.key === key && answer.canWrite;
+}
+
 /**
  * The upload banners: the last upload's error, or the one non-error notice
  * (it landed on the suggestions branch). Rendered by every tree that can
@@ -1494,7 +1569,7 @@ export function UploadNotices() {
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { openFilePath, dispatchUpload } = useWorkspace();
+  const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
@@ -1703,6 +1778,18 @@ export function FileExplorer() {
         ) : (
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
+        {/* Under the (empty) roots, so the hint's "folder above" is on
+            screen: Knowledge's own folder is where a first page goes. A tree
+            that predates the split starts at the KB clone's folder when it
+            wraps one, as `treeHasVisibleEntries` reads it. */}
+        <EmptyTreeNotice
+          rootPath={
+            sections
+              ? sections.knowledge?.relativePath ?? null
+              : (mergedTree?.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ?? mergedTree)
+                  ?.relativePath ?? null
+          }
+        />
       </div>
     </div>
     </TreeChrome>
