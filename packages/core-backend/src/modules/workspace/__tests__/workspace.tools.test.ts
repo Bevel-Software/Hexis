@@ -1165,6 +1165,15 @@ describe('office documents and PDFs', () => {
       expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'Sample file' })).json()).toMatchObject({ content: 'plain words, no extension\n' });
       expect(await stat('Sample file')).toMatchObject({ type: 'file', kind: 'text', mime: 'text/plain', mimeSource: 'sniff', textEditable: true });
       expect(await stat('Sample file')).not.toHaveProperty('mimeNote');
+      // The filesystem's own mimeType (a second extension table: octet-stream
+      // here) is not passed through, so nothing in the answer contradicts `mime`.
+      expect((await fs.stat('Sample file')).mimeType).toBeDefined();
+      await fs.writeFile('notes.md', Buffer.from('# notes\n'));
+      await fs.mkdir('folder', { recursive: true });
+      for (const p of ['Sample file', 'notes.md', 'folder']) {
+        expect(await stat(p), p).not.toHaveProperty('mimeType');
+      }
+      expect(await stat('notes.md')).toMatchObject({ kind: 'text', mime: 'text/plain' });
       await fs.writeFile('plata.pdf', Buffer.from('%PDF-1.4\n'));
       expect(await stat('plata.pdf')).toMatchObject({ kind: 'document', mime: 'application/pdf', textEditable: false });
       await seed();

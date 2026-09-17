@@ -681,7 +681,11 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
+      // The filesystem's own `mimeType` comes from a second extension table
+      // (octet-stream for an extensionless text file) and would contradict
+      // `mime` below, so it is never passed through.
       const stat = await fs.stat(p);
+      delete stat.mimeType;
       if (stat.type !== 'file') return stat;
       // The mode is decided by the same registry the write gates consult, so
       // what stat reports is what write_file will do. Only a reader whose
