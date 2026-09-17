@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
-import { hasOwnApproval } from '../utils/approval';
+import { hasOwnApproval, isGateRelevant } from '../utils/approval';
 
 /**
  * The change request's files as a TREE — the Knowledge sidebar's visual
@@ -201,13 +201,17 @@ function Level({
         const eligible = file.changed && file.approval?.viewerCanApprove === true;
         // The viewer's own state wins the slot when there is one: approved
         // by them, or still waiting on them. Otherwise the general badge.
+        // "Waiting" means the gate needs them: one eligible approval satisfies
+        // a file, so once someone else has confirmed it the file waits on
+        // nobody and reads "Confirmed" — the footer's count agrees. The header
+        // still lets them add their own.
         const viewerMark = !eligible
           ? null
           : hasOwnApproval(file.approval, currentUserEmail)
             ? 'approved'
-            : file.approval?.isApproved
-              ? null
-              : 'waiting';
+            : file.approval && isGateRelevant(file.approval) && !file.approval.isApproved
+              ? 'waiting'
+              : null;
         return (
           <div
             key={file.path}

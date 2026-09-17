@@ -12,3 +12,17 @@ export function hasOwnApproval(approval: FileApprovalState | undefined, viewerEm
     !!approval?.approvedBy.some((a) => a.email.toLowerCase() === email && !a.isStale)
   );
 }
+
+/**
+ * Whether the merge gate binds this file — the backend's `isGateRelevant`,
+ * mirrored: markdown nodes and the access config (`roles.yaml`, any
+ * `access.md`) that someone is eligible to approve. Everything else neither
+ * warns nor blocks, so it must not hold up Apply or name anyone to wait on.
+ */
+export function isGateRelevant(approval: FileApprovalState) {
+  const hasEligible =
+    approval.eligibleApprovers.roles.length > 0 || approval.eligibleApprovers.users.length > 0;
+  return (
+    hasEligible && (approval.path.toLowerCase().endsWith('.md') || approval.path === 'roles.yaml')
+  );
+}

@@ -273,6 +273,62 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(screen.getByRole('img', { name: 'Waiting on your approval' })).toBeInTheDocument();
   });
 
+  it('confirmed by someone else: waits on nobody, but the header still lets the viewer add theirs', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({
+          viewerCanApprove: true,
+          isApproved: true,
+          approvedBy: [
+            { email: 'juan@bevel.software', name: 'Juan', approvedAt: '', isStale: false, isSelfApproval: false },
+          ],
+        }),
+      ]),
+    );
+    render(
+      <AuthContext.Provider
+        value={{ user: { id: 'u1', email: 'olga@bevel.software', name: 'Olga' } } as never}
+      >
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </AuthContext.Provider>,
+    );
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Confirmed by Admin' })).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'Waiting on your approval' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your approval is needed/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve this file' })).toBeInTheDocument();
+  });
+
+  it('files outside the merge gate hold nothing up and name nobody', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', isApproved: true }),
+        // Not markdown: the gate ignores it even with an owner named.
+        approval({ path: 'assets/shot.png', eligibleApprovers: { roles: ['Legal'], users: [] } }),
+      ]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting on/)).not.toBeInTheDocument();
+  });
+
+  it('while applying, the approve controls stand down', async () => {
+    const twoPending = detailWith([
+      approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+      approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+    ]);
+    detailMock.fetchPrDetail.mockResolvedValue(twoPending);
+    approvalsApi.approvePrFile.mockReset();
+    approvalsApi.approvePrFile.mockReturnValue(new Promise(() => {}));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Bypass approval and apply' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Approve this file' })).toBeDisabled(),
+    );
+    expect(screen.getByRole('button', { name: 'Approve all mine' })).toBeDisabled();
+  });
+
   it('right-click reverts, with its own confirm; the last file resolves the dialog', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([approval({ viewerCanApprove: true })]),

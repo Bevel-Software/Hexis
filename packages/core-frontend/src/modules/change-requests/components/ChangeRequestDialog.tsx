@@ -24,7 +24,7 @@ import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderer
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
-import { hasOwnApproval } from '../utils/approval';
+import { hasOwnApproval, isGateRelevant } from '../utils/approval';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -382,12 +382,15 @@ export function ChangeRequestDialog({
    * either already approved or approvable BY THIS VIEWER (they hold write on
    * it, so their click completes the gate). Anything less and Apply was a
    * button that walked into "Waiting on approval for …" — offering a verdict
-   * the viewer cannot actually deliver.
+   * the viewer cannot actually deliver. Only files the merge gate binds can
+   * hold it up; the rest neither warn nor block on the server, but the viewer
+   * still has to hold at least one file of the request to be offered Apply.
    */
   const canApply =
     detail !== null &&
     detail.approvals.length > 0 &&
-    detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
+    detail.approvals.filter(isGateRelevant).every((a) => a.isApproved || a.viewerCanApprove) &&
+    detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
 
   /** Approve / revert verbs — approve from the file header and the footer, revert from the tree. */
   const [verbBusy, setVerbBusy] = useState(false);
@@ -485,19 +488,22 @@ export function ChangeRequestDialog({
   const mine = useMemo(
     () =>
       (detail?.approvals ?? [])
-        .filter((a) => a.viewerCanApprove && !a.isApproved && changedFiles.has(a.path))
+        .filter(
+          (a) =>
+            isGateRelevant(a) && a.viewerCanApprove && !a.isApproved && changedFiles.has(a.path),
+        )
         .map((a) => a.path),
     [detail, changedFiles],
   );
   /**
    * Who the unapproved files wait on, when none of them is the viewer's —
-   * the tree badge's wording, gathered across the request. Files with no
-   * eligible approvers are outside the gate and name nobody.
+   * the tree badge's wording, gathered across the request. Files outside the
+   * merge gate hold nothing up and name nobody.
    */
   const waitingOn = useMemo(() => {
     const names = new Set<string>();
     for (const a of detail?.approvals ?? []) {
-      if (a.isApproved || a.viewerCanApprove) continue;
+      if (!isGateRelevant(a) || a.isApproved || a.viewerCanApprove) continue;
       for (const r of a.eligibleApprovers.roles) names.add(r);
       for (const u of a.eligibleApprovers.users) names.add(u.name || u.email);
     }
@@ -518,7 +524,9 @@ export function ChangeRequestDialog({
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
   const allApproved =
-    detail !== null && detail.approvals.length > 0 && detail.approvals.every((a) => a.isApproved);
+    detail !== null &&
+    detail.approvals.length > 0 &&
+    detail.approvals.filter(isGateRelevant).every((a) => a.isApproved);
 
   /** Admin-only: delete the request and its branch, with an armed confirm. */
   const [deleteArmed, setDeleteArmed] = useState(false);
@@ -709,7 +717,7 @@ export function ChangeRequestDialog({
               currentUserEmail={viewerEmail}
               onSelect={(p) => setSelected(p)}
               onRevert={(p) => void revertFile(p)}
-              busy={verbBusy}
+              busy={verbBusy || applyBusy}
             />
           </Surface>
 
@@ -734,7 +742,7 @@ export function ChangeRequestDialog({
                   variant={headerVerb === 'approve' ? 'primary' : 'outline'}
                   size="tiny"
                   className="ml-auto shrink-0"
-                  disabled={verbBusy}
+                  disabled={verbBusy || applyBusy}
                   onClick={() => void toggleApprove(selected, headerVerb === 'undo')}
                 >
                   {headerVerb === 'approve' ? 'Approve this file' : 'Approved – Undo'}
@@ -880,7 +888,7 @@ export function ChangeRequestDialog({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={verbBusy}
+                  disabled={verbBusy || applyBusy}
                   onClick={() => void approveAllMine(mine)}
                 >
                   Approve all mine
@@ -938,7 +946,7 @@ export function ChangeRequestDialog({
             <Button
               variant="primary"
               size="sm"
-              disabled={applyBusy}
+              disabled={applyBusy || verbBusy}
               onClick={() => applying.apply(cr)}
             >
               {applyBusy ? applyLabel : allApproved ? 'Apply changes' : 'Bypass approval and apply'}
