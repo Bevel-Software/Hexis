@@ -602,7 +602,7 @@ export function createSetupRoutes(
         oidcVerification: await settings.oidcVerification(),
       });
     } catch (err) {
-      console.error('[setup] sign-in check failed:', err instanceof Error ? err.message : String(err));
+      log.error('sign-in check failed:', { err: err instanceof Error ? err.message : String(err) });
       res.status(500).json({ ok: false, error: 'Could not run the sign-in check.' });
     }
   });
