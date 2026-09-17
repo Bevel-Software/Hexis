@@ -443,9 +443,11 @@ export function registerWorkspaceTools(
    * Refuse a file tool call that names the repository's git folder, in any
    * input, before any gate, lock or read runs (see `shared/git-internals.ts`).
    * Every spelling first, then the resolved form against the branch's
-   * workspace, so a link into the folder is refused the same way. A branch
-   * that does not resolve is left for the handler to report; the filesystem
-   * refuses again underneath regardless.
+   * workspace, so a link into the folder is refused the same way. The resolved
+   * check only runs on a branch that is already cloned: bootstrapping a clone
+   * here would happen before the handler's access and ontology gates. A branch
+   * not cloned yet (or that does not resolve) is left to the handler; the
+   * filesystem refuses again underneath regardless.
    */
   const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
     const paths: string[] = [];
@@ -463,6 +465,7 @@ export function registerWorkspaceTools(
     if (onDisk.length === 0 || typeof args.branch !== 'string' || args.branch === '') return;
     let fs: LocalFilesystem;
     try {
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(args.branch)))) return;
       fs = await ctx.getFilesystem(args.branch);
     } catch {
       return;

@@ -1915,7 +1915,9 @@ export class WorkspaceService implements IWorkspaceService {
  */
 function explorerWalk(): TreeWalkOptions {
   return {
-    skip: (e) => (e.name === '.git' && e.isDirectory()) || (e.name === '.gitkeep' && e.isFile()),
+    // Any spelling of the git folder (`.GIT`, `.git.`) — the same rule the path
+    // guards apply, so a download or listing never carries what they refuse.
+    skip: (e) => hasGitInternalsSegment(e.name) || (e.name === '.gitkeep' && e.isFile()),
     ignore: true,
     unreadable: 'throw',
   };

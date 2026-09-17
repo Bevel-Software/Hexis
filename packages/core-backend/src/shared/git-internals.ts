@@ -22,15 +22,18 @@ import { isAbsence } from './fs.contract.js';
  *     in the repository that points into the folder is refused the same way.
  */
 
-/** Percent-decode until the spelling stops changing (`%252e` is `.` twice removed). */
+/**
+ * Percent-decode until the spelling stops changing (`%252e` is `.` twice
+ * removed), however many layers deep. No pass limit is needed: a pass that
+ * changes anything makes the string shorter, so the loop always ends.
+ */
 function percentDecoded(value: string): string {
   let current = value;
-  for (let i = 0; i < 8; i++) {
+  for (;;) {
     const next = current.replace(/%([0-9a-f]{2})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
-    if (next === current) break;
+    if (next === current) return current;
     current = next;
   }
-  return current;
 }
 
 /**
@@ -55,16 +58,32 @@ export function assertNoGitInternalsSegment(inputPath: unknown): void {
   if (hasGitInternalsSegment(inputPath)) throw new GitInternalsError();
 }
 
-/** `realpath` of the deepest existing ancestor of `absolutePath`, with the missing rest joined back on. */
+/** Dangling links followed by hand before the chain counts as a loop (Linux's own limit). */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * `realpath` of the deepest existing ancestor of `absolutePath`, with the
+ * missing rest joined back on. A DANGLING link on the way is followed by hand:
+ * `realpath` refuses it, but a write through it lands at its target, so the
+ * target is what gets judged (`notes.md -> .git/hooks/post-checkout`).
+ */
 async function resolvedRealPath(absolutePath: string): Promise<string | null> {
   let existing = absolutePath;
   const rest: string[] = [];
+  let hops = 0;
   for (;;) {
     const real = await fs.realpath(existing).catch((err: unknown) => {
       if (isAbsence(err) || (err as { code?: unknown })?.code === 'ELOOP') return null;
       throw err;
     });
     if (real !== null) return path.join(real, ...rest);
+    const target = hops < MAX_LINK_HOPS ? await fs.readlink(existing).catch(() => null) : null;
+    if (target !== null) {
+      hops++;
+      const parent = await fs.realpath(path.dirname(existing)).catch(() => path.dirname(existing));
+      existing = path.resolve(parent, target);
+      continue;
+    }
     const up = path.dirname(existing);
     if (up === existing) return null;
     rest.unshift(path.basename(existing));

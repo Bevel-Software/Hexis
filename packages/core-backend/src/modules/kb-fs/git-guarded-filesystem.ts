@@ -72,21 +72,36 @@ export class GitGuardedFilesystem extends LocalFilesystem {
     return super.rmdir(inputPath, options);
   }
 
+  /**
+   * The recursion is done HERE, not in `LocalFilesystem`: its recursive walk
+   * calls back into this override for every child directory, and the git
+   * folder would refuse the whole listing instead of being left out of it.
+   * Same order and naming as the base (each directory followed by its
+   * `dir/child` entries), with the git folder and links into it filtered first.
+   */
   override async readdir(inputPath: string, options?: ListOptions): Promise<FileEntry[]> {
     await this.assertNotGitInternals(inputPath);
-    const entries = await super.readdir(inputPath, options);
+    const { recursive, maxDepth, ...flat } = options ?? {};
+    const entries = await super.readdir(inputPath, flat);
+    const dir = inputPath.replace(/\\/g, '/');
     const visible: FileEntry[] = [];
     for (const entry of entries) {
       if (hasGitInternalsSegment(entry.name)) continue;
+      const childPath = path.posix.join(dir, entry.name);
       if (entry.isSymlink) {
         try {
-          await this.assertNotGitInternals(path.posix.join(inputPath.replace(/\\/g, '/'), entry.name));
+          await this.assertNotGitInternals(childPath);
         } catch (err) {
           if (err instanceof GitInternalsError) continue;
           throw err;
         }
       }
       visible.push(entry);
+      const depth = maxDepth ?? 100;
+      if (recursive && entry.type === 'directory' && depth > 0) {
+        const children = await this.readdir(childPath, { ...options, maxDepth: depth - 1 });
+        visible.push(...children.map((child) => ({ ...child, name: `${entry.name}/${child.name}` })));
+      }
     }
     return visible;
   }

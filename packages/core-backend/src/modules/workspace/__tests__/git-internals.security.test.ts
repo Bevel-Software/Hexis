@@ -155,15 +155,19 @@ describe('workspace tools refuse the git folder', () => {
   let baseUrl = '';
   let workflow: ReturnType<typeof makeWorkflow>;
   let unzipSpy: ReturnType<typeof vi.spyOn>;
+  let bootstrappedSpy: ReturnType<typeof vi.spyOn>;
+  let getFilesystem: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     workflow = makeWorkflow();
     const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
     unzipSpy = vi.spyOn(service, 'unzipFile');
+    bootstrappedSpy = vi.spyOn(service, 'hasBootstrappedWorkspace');
     const lockingFs = new LockingFilesystem(
       { basePath: workspaceDir, contained: true },
       { workflow: workflow as unknown as IWorkflowService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
     );
+    getFilesystem = vi.fn(async () => lockingFs);
     const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
       user: USER,
       scope: auth.scope,
@@ -173,7 +177,7 @@ describe('workspace tools refuse the git folder', () => {
       workspaceService: service,
       workflowService: workflow as never,
       events: {} as never,
-      getFilesystem: async () => lockingFs,
+      getFilesystem,
     });
     const app = express();
     app.use(express.json());
@@ -289,6 +293,17 @@ describe('workspace tools refuse the git folder', () => {
     expect(res.status).toBe(200);
     const paths = ((await res.json()) as { matches: { path: string }[] }).matches.map((m) => m.path);
     expect(paths).toEqual([`${KB}/Notes/a.md`]);
+  });
+
+  it('the link check never clones a branch that is not cloned yet', async () => {
+    bootstrappedSpy.mockResolvedValue(false);
+    const res = await call('file_stat', { path: `${KB}/Notes/a.md` });
+    expect(res.status).toBe(200);
+    // Only the handler asked for the filesystem, after its own gates; the up-front check did not.
+    expect(getFilesystem).toHaveBeenCalledTimes(1);
+    // A plainly spelled git path is still refused without it.
+    await expectRefused(await call('read_file', { path: `${KB}/.git/config` }));
+    expect(getFilesystem).toHaveBeenCalledTimes(1);
   });
 
   it('ordinary paths that merely look alike still work', async () => {
@@ -453,6 +468,17 @@ describe('WorkspaceService refuses the git folder on its own', () => {
     );
   }
 
+  it('a folder download leaves out a git folder spelled in another case', async () => {
+    const upper = join(workspaceDir, KB, 'Notes', '.GIT');
+    await mkdir(upper, { recursive: true });
+    await writeFile(join(upper, 'config'), '[credential]\n');
+    await mkdir(join(workspaceDir, KB, 'Notes', '.git.'), { recursive: true });
+    await writeFile(join(workspaceDir, KB, 'Notes', '.git.', 'HEAD'), 'ref\n');
+
+    const names = new AdmZip(await service.createFolderZip(WS, `${KB}/Notes`)).getEntries().map((e) => e.entryName);
+    expect(names).toEqual(['Notes/a.md']);
+  });
+
   it('unzip skips an archive entry aimed at the git folder, and extracts the rest', async () => {
     const zip = new AdmZip();
     zip.addFile('.git/config', Buffer.from('[core]\n\tfsmonitor = evil\n'));
@@ -503,5 +529,24 @@ describe('agent filesystems refuse the git folder on their own', () => {
     expect(names).not.toContain('.git');
     expect(names).not.toContain('gitlink');
     expect(names).toContain('Notes');
+  });
+
+  it('a recursive listing leaves the git folder out instead of failing on it', async () => {
+    const readOnly = new ReadOnlyFilesystem({ basePath: workspaceDir, contained: true });
+    const names = (await readOnly.readdir(KB, { recursive: true })).map((e) => e.name).sort();
+    expect(names).toEqual(['Notes', 'Notes/a.md', 'archive.zip']);
+    expect((await readOnly.readdir('', { recursive: true, maxDepth: 1 })).map((e) => e.name).sort()).toEqual([KB, `${KB}/Notes`, `${KB}/archive.zip`]);
+  });
+
+  it('a write through a dangling link into the git folder is refused and creates nothing', async () => {
+    await symlink('.git/hooks/post-checkout', join(workspaceDir, KB, 'hook.md'));
+    const workflow = makeWorkflow();
+    const lockingFs = new LockingFilesystem(
+      { basePath: workspaceDir, contained: true },
+      { workflow: workflow as unknown as IWorkflowService, workspaceId: WS, branch: BRANCH, user: USER, kbDirName: KB },
+    );
+    await expect(lockingFs.writeFile(`${KB}/hook.md`, '#!/bin/sh\n')).rejects.toBeInstanceOf(GitInternalsError);
+    expect(workflow.acquireLock).not.toHaveBeenCalled();
+    expect(await snapshotGit()).toBe(gitSnapshot);
   });
 });

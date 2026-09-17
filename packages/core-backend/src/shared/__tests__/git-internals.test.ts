@@ -24,6 +24,8 @@ describe('hasGitInternalsSegment', () => {
     'knowledge-base/.git./config',
     'knowledge-base/.git /config',
     'knowledge-base/sub/.git/config',
+    // Twelve layers of percent-encoding: no fixed number of decoding passes lets one through.
+    `knowledge-base/%${'25'.repeat(12)}2egit/config`,
   ])('names the git folder: %s', (p) => {
     expect(hasGitInternalsSegment(p)).toBe(true);
   });
@@ -52,6 +54,12 @@ describe('assertNotGitInternals — the resolved form', () => {
     await fs.symlink('.git', path.join(root, 'knowledge-base', 'gitlink'));
     await fs.symlink('.git/config', path.join(root, 'knowledge-base', 'cfglink'));
     await fs.symlink('gitlink', path.join(root, 'knowledge-base', 'chained'));
+    // Dangling: nothing at the target yet, so a write through the link would create it inside `.git`.
+    await fs.symlink('.git/hooks/post-checkout', path.join(root, 'knowledge-base', 'dangling'));
+    await fs.symlink('dangling', path.join(root, 'knowledge-base', 'dangling-chained'));
+    await fs.symlink('.git/no-such-dir', path.join(root, 'knowledge-base', 'dangling-dir'));
+    await fs.symlink('loop-b', path.join(root, 'knowledge-base', 'loop-a'));
+    await fs.symlink('loop-a', path.join(root, 'knowledge-base', 'loop-b'));
   });
 
   afterEach(async () => {
@@ -66,6 +74,17 @@ describe('assertNotGitInternals — the resolved form', () => {
       expect(err).toMatchObject({ status: 403, message: GIT_INTERNALS_MESSAGE });
     },
   );
+
+  it.each(['knowledge-base/dangling', 'knowledge-base/dangling-chained', 'knowledge-base/dangling-dir/new-file'])(
+    'refuses a dangling link whose target is inside the git folder: %s',
+    async (p) => {
+      await expect(assertNotGitInternals(root, p)).rejects.toBeInstanceOf(GitInternalsError);
+    },
+  );
+
+  it('a link loop is no refusal of its own, and does not hang', async () => {
+    await expect(assertNotGitInternals(root, 'knowledge-base/loop-a')).resolves.toBeUndefined();
+  });
 
   it('passes an ordinary path, existing or not', async () => {
     await expect(assertNotGitInternals(root, 'knowledge-base/notes.md')).resolves.toBeUndefined();
