@@ -13,6 +13,24 @@ const FETCH_TIMEOUT_MS = 15_000;
 
 export class DeploymentError extends Error {}
 
+/**
+ * A key-mode 401: the deployment refused the connection key itself. Stated
+ * plainly and with no sign-in step — a browser sign-in cannot repair a key, so
+ * a rejected key ends the process, and a fetch that otherwise degrades
+ * quietly (the agent instructions) lets this one through. The trailing
+ * parenthesis exists because Claude Code shows a failed stdio server only as
+ * "failed"; the person needs to know where this text went. `<name>` stays
+ * literal: this process cannot know what the client named it.
+ */
+export class ConnectionKeyRejectedError extends DeploymentError {
+  constructor(deployment: string) {
+    super(
+      `The connection key was rejected by ${deployment}. Mint a new one in External agent access. ` +
+        '(Claude Code hides this message; run `claude mcp get <name>` or start the command in a terminal to see it.)',
+    );
+  }
+}
+
 async function getJson(
   url: string,
   init: RequestInit & { label: string; renew?: () => Promise<string> },
@@ -46,6 +64,13 @@ async function getJson(
     res = await attempt(await renew());
     retried = true;
   }
+  if (res.status === 401 && authed && !renew) {
+    await res.body?.cancel().catch(() => {});
+    // The deployment, not the endpoint label: the key is the deployment's to
+    // reject. Every URL here is `<baseUrl>/api/…`, and nothing after the base
+    // adds another `/api/`.
+    throw new ConnectionKeyRejectedError(url.slice(0, url.lastIndexOf('/api/')));
+  }
   if (res.status === 401 || res.status === 403) {
     // Only a request that actually carried the credential can blame it: the
     // config endpoint is unauthenticated, so its 401/403 is something else
@@ -64,8 +89,10 @@ async function getJson(
                 'The sign-in itself is valid — ask a workspace admin for access; signing in again will not change the answer.'
             : `Your sign-in was rejected by ${label} (HTTP 401)${retried ? ' even after refreshing it' : ''} — ` +
                 'the authorization may have been revoked. Re-authorize by restarting hexis-mcp and signing in through your browser again.'
-          : `The connection key was rejected by ${label} (HTTP ${res.status}). ` +
-              'Mint a fresh one from the profile menu → External agent access.',
+          : // Key mode's 401 was thrown above; what remains is a 403 — a
+            // permission answer about a key that verified.
+            `${label} denied access (HTTP 403) to this connection key. ` +
+            'The key itself is valid — ask a workspace admin for access; minting a new key will not change the answer.',
     );
   }
   if (!res.ok) {
@@ -198,10 +225,13 @@ function mcpUrlFromConfig(config: HexisMcpConfig, body: { mcpUrl?: unknown }): s
  * Passed verbatim as this server's own `instructions`, so a client connected
  * here receives exactly what one connected to the hosted endpoint receives.
  *
- * Never throws. The text is worth having and not worth failing over: a
- * network error, a non-2xx answer or a body without an `instructions` string
- * logs one line and resolves to `undefined`, and the server starts without
- * instructions, as it did before the deployment could send any.
+ * Throws only a {@link ConnectionKeyRejectedError}: a dead key fails startup
+ * anyway (the manual fetches beside this one need it), and it must say so in
+ * its own words rather than as a degraded-instructions notice. Otherwise the
+ * text is worth having and not worth failing over: a network error, a non-2xx
+ * answer or a body without an `instructions` string logs one line and
+ * resolves to `undefined`, and the server starts without instructions, as it
+ * did before the deployment could send any.
  */
 export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<string | undefined> {
   try {
@@ -219,8 +249,9 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
     }
     return body.instructions;
   } catch (err) {
+    if (err instanceof ConnectionKeyRejectedError) throw err;
     console.error(
-      `[hexis-mcp] could not fetch the agent instructions: ${err instanceof Error ? err.message : String(err)}; ` +
+      `[hexis-mcp] could not fetch the agent instructions:${err instanceof Error ? err.message : String(err)}; ` +
         'sessions start without them.',
     );
     return undefined;
