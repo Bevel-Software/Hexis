@@ -43,7 +43,11 @@ import {
   type LoadedSkill,
 } from '@bevel-software/platform-mcp-core';
 import { bevelSecretsLoaderConfig } from '../secrets-vault/index.js';
-import { scopesCovered, type ISecretsVaultService } from '../secrets-vault/secrets-vault.contract.js';
+import {
+  scopesCovered,
+  type ForcedRefreshOutcome,
+  type ISecretsVaultService,
+} from '../secrets-vault/secrets-vault.contract.js';
 import { EXTERNAL_KB_MANUAL_NAME } from '../tool-manuals/tool-manuals.contract.js';
 import type { IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
 import type { SpillStore } from '../workspace/spill-store.js';
@@ -52,6 +56,7 @@ import type { InternalTokenService } from '../tool-auth/internal-token.service.j
 import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';
+import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
 import {
   composeAgentInstructions,
   prefixToolDescription,
@@ -123,6 +128,19 @@ interface RequestSurface {
   tools: ProxiedTool[];
 }
 
+/**
+ * How a pooled manual's calls are served: lease its pooled connection, and —
+ * when a call fails — decide whether a token refresh warrants one retry
+ * ({@link RETRY_WITH_REFRESHED_TOKEN}) or which error the caller gets.
+ */
+interface DownstreamRoute {
+  acquire: () => Promise<Lease<PooledDownstream>>;
+  afterFailure: (err: unknown) => Promise<unknown>;
+}
+
+/** The {@link DownstreamRoute.afterFailure} answer that means "refreshed — retry once". */
+const RETRY_WITH_REFRESHED_TOKEN = Symbol('retry-with-refreshed-token');
+
 /** One pooled downstream connection: a client holding one `mcp` manual, named so it can be deregistered. */
 interface PooledDownstream {
   /** Owns its own `mcp` protocol instance, so its sessions are its alone and `close()` ends exactly them. */
@@ -171,6 +189,8 @@ export class McpService {
   // Retry policy, not session state: it survives the move to statelessness.
   private readonly manualFailures = new ManualFailureMemo();
   private readonly surfaceLog = new SurfaceLogThrottle();
+  // One forced token refresh per (user, manual) per minute — see downstream-token-refresh.
+  private readonly tokenRefreshes: DownstreamRefreshGuard<ForcedRefreshOutcome>;
 
   // The downstream connection pool for `mcp` manuals — see the class doc.
   private readonly downstream: DownstreamPool<PooledDownstream>;
@@ -199,6 +219,8 @@ export class McpService {
       // this entry's MCP sessions and touches no other client's.
       dispose: (entry) => entry.client.close(),
     });
+    // Paced on the pool's clock, so a test that moves one moves both.
+    this.tokenRefreshes = new DownstreamRefreshGuard(undefined, opts.downstreamPool?.now);
   }
 
   /**
@@ -579,7 +601,7 @@ export class McpService {
     manuals: CallTemplate[],
     userId: string,
   ): Promise<ProxiedTool[]> {
-    const routes = new Map<string, () => Promise<Lease<PooledDownstream>>>();
+    const routes = new Map<string, DownstreamRoute>();
     // The shared layer rewrites every manual name (`[^\w]` → `_`) and tools
     // route by the rewritten prefix, so two manuals whose names rewrite to one
     // identifier would silently share it. Sequential registration used to
@@ -675,12 +697,24 @@ export class McpService {
     client: CodeModeUtcpClient,
     template: CallTemplate,
     userId: string,
-    routes: Map<string, () => Promise<Lease<PooledDownstream>>>,
+    routes: Map<string, DownstreamRoute>,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const key = downstreamPoolKey(userId, template);
+    // The catalog name, which is what the manual's per-user variables are keyed by.
+    const catalogName = String(template.name ?? '');
     const acquire = () => this.downstream.acquire(key, () => this.connectDownstream(userId, template));
+    const afterFailure = (err: unknown) => this.afterDownstreamFailure(userId, catalogName, key, err);
     try {
-      const lease = await acquire();
+      let lease: Lease<PooledDownstream>;
+      try {
+        lease = await acquire();
+      } catch (err) {
+        // A connection dialed with a token the server refuses fails right here,
+        // at the handshake — the same refresh-and-retry applies.
+        const next = await afterFailure(err);
+        if (next !== RETRY_WITH_REFRESHED_TOKEN) throw next;
+        lease = await acquire();
+      }
       const manualName = utcpManualName(template);
       try {
         const tools = (await lease.value.client.getTools()).filter((t) => t.name.startsWith(`${manualName}.`));
@@ -691,7 +725,7 @@ export class McpService {
       } finally {
         lease.release();
       }
-      routes.set(manualName, acquire);
+      routes.set(manualName, { acquire, afterFailure });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -735,6 +769,81 @@ export class McpService {
       throw new Error(result.error);
     }
     return { client };
+  }
+
+  /**
+   * A pooled manual's operation failed: may it be retried with a refreshed
+   * token? Answers {@link RETRY_WITH_REFRESHED_TOKEN} when so, otherwise the
+   * error the caller should see.
+   *
+   * Only a token rejection (401 / `invalid_token`) qualifies. Then the
+   * caller's OAuth token for this manual is refreshed once, ignoring its
+   * stored expiry, and:
+   *   - refreshed → the pooled connection (dialed with the dead token) is
+   *     dropped and the operation retried once, on a fresh one;
+   *   - rejected → the grant is gone and the vault has wiped it; the caller is
+   *     told to re-authorize on /connect, where it now shows as not connected;
+   *   - transient, or no refresh allowed / possible → the original error.
+   */
+  private async afterDownstreamFailure(
+    userId: string,
+    manualName: string,
+    poolKey: string,
+    err: unknown,
+  ): Promise<unknown> {
+    if (!isDownstreamTokenRejection(err)) return err;
+    const outcome = await this.refreshDownstreamToken(userId, manualName);
+    if (outcome === 'refreshed') {
+      // The vault's mutation signal evicts this user's connections too; doing it
+      // here as well keeps the retry correct whether or not that is wired.
+      this.downstream.evictWhere((k) => k === poolKey);
+      return RETRY_WITH_REFRESHED_TOKEN;
+    }
+    if (outcome === 'rejected') {
+      return new Error(
+        `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
+          `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
+      );
+    }
+    return err;
+  }
+
+  /**
+   * Force-refresh the caller's OAuth token(s) for `manualName`, at most once per
+   * (user, manual) per minute. Logs ONE line per attempt — manual, user,
+   * outcome, never token material. `undefined` when nothing was attempted: no
+   * vault wired, no OAuth variable on the manual, or the guard said not now.
+   */
+  private async refreshDownstreamToken(userId: string, manualName: string): Promise<ForcedRefreshOutcome | undefined> {
+    const vault = this.secretsVault;
+    if (!vault || !this.toolManuals || !manualName) return undefined;
+    let keys: string[];
+    try {
+      keys = (await this.toolManuals.userScopedKeysForManual(manualName)).filter((v) => v.oauth).map((v) => v.key);
+    } catch (err) {
+      log.warn(`downstream token refresh: could not read the variables of manual=${manualName}:`, { err });
+      return undefined;
+    }
+    if (keys.length === 0) return undefined;
+    const attempt = this.tokenRefreshes.run(`${userId}${POOL_KEY_SEPARATOR}${manualName}`, async () => {
+      const outcomes: ForcedRefreshOutcome[] = [];
+      for (const key of keys) {
+        // A vault fault is not a verdict on the grant: keep the token, try later.
+        outcomes.push(await vault.forceRefresh(userId, key).catch((): ForcedRefreshOutcome => 'transient'));
+      }
+      const outcome: ForcedRefreshOutcome = outcomes.includes('rejected')
+        ? 'rejected'
+        : outcomes.includes('transient')
+          ? 'transient'
+          : outcomes.includes('refreshed')
+            ? 'refreshed'
+            : 'skipped';
+      if (outcome !== 'skipped') {
+        log.info(`downstream token refresh: manual=${manualName} user=${userId} outcome=${outcome}`);
+      }
+      return outcome;
+    });
+    return attempt ? await attempt : undefined;
   }
 
   /**
@@ -909,11 +1018,14 @@ function templateFingerprint(template: CallTemplate): string {
  * Each routed call holds its pool lease until the call ends — for a stream,
  * until the consumer finishes or abandons it (`for await` returns the
  * generator, which runs the `finally`).
+ *
+ * A call the downstream refuses for its token (401 / `invalid_token`) goes to
+ * the route's `afterFailure`, which may refresh the token and ask for ONE retry
+ * on a fresh connection. Retrying is safe for the same reason session recovery
+ * is: authentication is decided before the request reaches a tool, so the
+ * refused attempt ran nothing.
  */
-function routeToDownstream(
-  client: CodeModeUtcpClient,
-  routes: ReadonlyMap<string, () => Promise<Lease<PooledDownstream>>>,
-): void {
+function routeToDownstream(client: CodeModeUtcpClient, routes: ReadonlyMap<string, DownstreamRoute>): void {
   const callTool = client.callTool.bind(client);
   const callToolStreaming = client.callToolStreaming.bind(client);
   const routeOf = (toolName: string) => routes.get(toolName.split('.')[0] ?? '');
@@ -921,11 +1033,21 @@ function routeToDownstream(
   client.callTool = async function routedCallTool(toolName: string, toolArgs: Record<string, unknown>) {
     const route = routeOf(toolName);
     if (!route) return callTool(toolName, toolArgs);
-    const lease = await route();
+    const once = async () => {
+      const lease = await route.acquire();
+      try {
+        return await lease.value.client.callTool(toolName, toolArgs);
+      } finally {
+        lease.release();
+      }
+    };
     try {
-      return await lease.value.client.callTool(toolName, toolArgs);
-    } finally {
-      lease.release();
+      return await once();
+    } catch (err) {
+      const next = await route.afterFailure(err);
+      if (next !== RETRY_WITH_REFRESHED_TOKEN) throw next;
+      // Exactly one retry: whatever it produces is what the caller sees.
+      return await once();
     }
   };
   client.callToolStreaming = async function* routedCallToolStreaming(
@@ -937,12 +1059,29 @@ function routeToDownstream(
       yield* callToolStreaming(toolName, toolArgs);
       return;
     }
-    const lease = await route();
+    const once = async function* () {
+      const lease = await route.acquire();
+      try {
+        yield* lease.value.client.callToolStreaming(toolName, toolArgs);
+      } finally {
+        lease.release();
+      }
+    };
+    let yielded = false;
     try {
-      yield* lease.value.client.callToolStreaming(toolName, toolArgs);
-    } finally {
-      lease.release();
+      for await (const chunk of once()) {
+        yielded = true;
+        yield chunk;
+      }
+      return;
+    } catch (err) {
+      // A stream that already produced output was accepted — a rejection can
+      // only come before the first chunk, and replaying would duplicate output.
+      if (yielded) throw err;
+      const next = await route.afterFailure(err);
+      if (next !== RETRY_WITH_REFRESHED_TOKEN) throw next;
     }
+    yield* once();
   };
 }
 

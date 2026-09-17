@@ -347,3 +347,109 @@ describe('DbSecretsVaultService — dead-grant detection on refresh', () => {
     }
   });
 });
+
+describe('DbSecretsVaultService — forceRefresh (a downstream rejected the token)', () => {
+  // NOT expired by its own account: the stored expiry is an hour away. The
+  // downstream's 401 is what says the token is dead.
+  const liveTokens = () => ({
+    access_token: 'rejected-at',
+    refresh_token: 'rt-1',
+    expires_at: Date.now() + 3_600_000,
+    scope: 'mcp.read',
+  });
+  const userRow = (blob: Record<string, unknown> = { clientSecret: 'client-secret-1', tokens: liveTokens() }) =>
+    sharedRow({ id: 'user-row-1', userId: 'user-1', valueEncrypted: crypto.encrypt(JSON.stringify(blob)) });
+
+  it('refreshes ignoring the stored expiry, persists the fresh tokens and notifies', async () => {
+    const { db, captured } = makeFakeDb([[userRow()], undefined]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    const onMutation = vi.fn();
+    svc.onMutation(onMutation);
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ access_token: 'fresh-at', expires_in: 3600 }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('refreshed');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const stored = JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted));
+    expect(stored.tokens.access_token).toBe('fresh-at');
+    expect(stored.tokens.refresh_token).toBe('rt-1'); // provider omitted it — kept
+    expect(stored.clientSecret).toBe('client-secret-1');
+    expect(onMutation).toHaveBeenCalledWith('user-1');
+  });
+
+  it('a definitive rejection wipes the tokens, keeps the client secret, and the sign-in reads not connected', async () => {
+    for (const status of [400, 401]) {
+      const { db, captured } = makeFakeDb([[userRow()], undefined]);
+      const svc = new DbSecretsVaultService(db, ENC_KEY);
+      const onMutation = vi.fn();
+      svc.onMutation(onMutation);
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status })));
+
+      await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+
+      const wiped = captured.set[0].valueEncrypted;
+      const stored = JSON.parse(crypto.decrypt(wiped));
+      expect(stored).toEqual({ clientSecret: 'client-secret-1' });
+      expect(onMutation).toHaveBeenCalledWith('user-1');
+
+      // What list_tool_setup and /connect read: the row exists, the sign-in does not.
+      const status2 = makeFakeDb([[{ key: KEY, userId: 'user-1', kind: 'oauth', valueEncrypted: wiped }]]);
+      const [row] = await new DbSecretsVaultService(status2.db, ENC_KEY).statusFor('user-1', [KEY]);
+      expect(row).toMatchObject({ userConfigured: true, userAuthorized: false });
+    }
+  });
+
+  it('a transient failure (network / 5xx) keeps the token untouched', async () => {
+    for (const impl of [
+      async () => new Response('bad gateway', { status: 503 }),
+      async () => {
+        throw new TypeError('fetch failed');
+      },
+    ]) {
+      const { db, captured } = makeFakeDb([[userRow()]]);
+      const svc = new DbSecretsVaultService(db, ENC_KEY);
+      vi.stubGlobal('fetch', vi.fn(impl));
+
+      await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('transient');
+      expect(captured.set).toEqual([]);
+    }
+  });
+
+  it('a rejected token with no refresh token to try is a dead grant: wiped', async () => {
+    const { access_token } = liveTokens();
+    const { db, captured } = makeFakeDb([[userRow({ tokens: { access_token } })], undefined]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.parse(crypto.decrypt(captured.set[0].valueEncrypted)).tokens).toBeUndefined();
+  });
+
+  it('a concurrent refresh that already rotated the tokens wins over our stale rejection', async () => {
+    const rotated = crypto.encrypt(JSON.stringify({ tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }));
+    const { db } = makeFakeDb([
+      [userRow()],
+      [], // guarded wipe matched nothing: the row changed underneath us
+      [{ valueEncrypted: rotated }],
+    ]);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 400 })));
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('refreshed');
+  });
+
+  it('nothing to refresh — no row, or never signed in — is skipped without a provider call', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    for (const rows of [[], [userRow({ clientSecret: 'client-secret-1' })]]) {
+      const { db } = makeFakeDb([rows]);
+      await expect(new DbSecretsVaultService(db, ENC_KEY).forceRefresh('user-1', KEY)).resolves.toBe('skipped');
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

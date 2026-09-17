@@ -12,6 +12,7 @@ export type {
   OAuthProviderConfig,
   PutStaticSecretInput,
   CreateOAuthSecretInput,
+  ForcedRefreshOutcome,
 } from './secrets-vault.contract.js';
 export {
   InvalidSecretError,
