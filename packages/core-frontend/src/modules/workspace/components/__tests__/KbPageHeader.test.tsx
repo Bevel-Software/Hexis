@@ -179,6 +179,18 @@ describe('KbPageHeader', () => {
     expect(await screen.findByRole('menuitem', { name: /Copied/ })).toBeInTheDocument();
   });
 
+  it('copies the root-anchored path from the page menu', async () => {
+    const user = userEvent.setup();
+    // After `setup()`, which installs a clipboard stub of its own.
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    renderHeader();
+    await user.click(screen.getByRole('button', { name: 'More sharing options' }));
+    await user.click(screen.getByRole('menuitem', { name: /Copy path/ }));
+    expect(writeText).toHaveBeenCalledWith('/knowledge-base/Knowledge/Invariant.md');
+    expect(await screen.findByRole('menuitem', { name: /Copied/ })).toBeInTheDocument();
+  });
+
   it('says so on the row when copying the link fails', async () => {
     const user = userEvent.setup();
     renderHeader({ onCopyLink: vi.fn(async () => false) });

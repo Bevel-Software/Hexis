@@ -7,6 +7,7 @@ import { KB_ROUTE_PREFIX, kbFileUrl, safeDecode } from '../../workspace/routing/
 import { useMergedWorkspaceTree } from '../../workspace/hooks/useMergedWorkspaceTree';
 import { Puzzle } from 'lucide-react';
 import {
+  EmptyTreeNotice,
   FileTreeNode,
   TreeChrome,
   UploadNotices,
@@ -103,6 +104,9 @@ export function RootFolderTree({
       <div data-testid={testId} onContextMenu={(e) => e.stopPropagation()}>
         <UploadNotices />
         <FileTreeNode entry={root.entry} depth={0} reserved absent={root.absent} collapseChildren />
+        {/* The same listing as Knowledge's explorer, so the same answer when
+            it shows nothing — with this root as where a first one goes. */}
+        <EmptyTreeNotice rootPath={root.entry.relativePath} />
       </div>
     </TreeChrome>
   );

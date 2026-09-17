@@ -44,7 +44,13 @@ export interface PullRequestSummary {
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
   review: PullRequestReviewStatus;
+  /**
+   * Link to the change request: absolute (`<public frontend address>/change-requests/<number>`)
+   * when the deployment has a public address configured, else the in-app relative path.
+   */
   url: string;
+  /** Present when `url` is relative — says how to get absolute links. */
+  urlNote?: string;
   /**
    * The most recent apply attempt that did not land, while the request is
    * still open — so its author and every other viewer see the refusal the
@@ -174,6 +180,13 @@ export interface FileApprovalState {
    * on one of them does not block merge.
    */
   isApproved: boolean;
+  /**
+   * Whether the merge gate binds this file at all — the backend's one
+   * relevance rule, stamped per file so clients read the verdict instead of
+   * re-deriving it. False files neither warn nor block a merge, so no surface
+   * should count them as pending or name anyone to wait on.
+   */
+  inMergeGate: boolean;
   /**
    * Pre-computed for the requesting viewer: would `approveFile` accept their
    * click? True iff their email resolves to `write` on this path under the

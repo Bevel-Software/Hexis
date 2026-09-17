@@ -19,6 +19,7 @@ import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
+import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
 const DETAIL_CACHE_TTL_MS = 30_000;
@@ -100,6 +101,9 @@ export class PullRequestService implements IPullRequestService {
    */
   private detailEnricher: PrDetailEnricher | null = null;
 
+  /** Origin + path prefix change-request links are built on; null when none is configured. */
+  private readonly linkBase: string | null;
+
   /**
    * Bumped by every invalidation. A read captures it before touching the DB and
    * caches its result only if it is unchanged afterwards — otherwise a read that
@@ -112,7 +116,11 @@ export class PullRequestService implements IPullRequestService {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly gitService: IGitService,
-  ) {}
+    /** Configured public frontend address; null keeps `url` relative (with a `urlNote`). */
+    publicFrontendUrl: string | null = null,
+  ) {
+    this.linkBase = changeRequestLinkBase(publicFrontendUrl);
+  }
 
   setDetailEnricher(enricher: PrDetailEnricher): void {
     this.detailEnricher = enricher;
@@ -147,8 +155,9 @@ export class PullRequestService implements IPullRequestService {
       // Provider reviews are gone; the real approval state lives in the detail
       // view (per-file, DB-backed). The summary badge is derived there.
       review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
-      // In-app change-request route; there's no external PR URL to link to.
-      url: `/change-requests/${row.number}`,
+      // The in-app change-request route, absolute when a public address is
+      // configured so an agent can hand it to a person.
+      ...changeRequestLink(row.number, this.linkBase),
       // Only an OPEN request can still be retried, so only it reports a refusal.
       lastApplyFailure:
         row.state === 'open' && row.applyFailureReason && row.applyFailedAt

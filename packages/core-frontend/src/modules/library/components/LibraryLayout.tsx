@@ -7,7 +7,8 @@ import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
 import { libraryFilterForPath, pathForLibraryFilter } from '../routes/library-paths';
-import { filterLibraryItems, pluginsOfItem, type LibraryFilter } from '../utils/status';
+import { EVERYONE_TEAM, filterLibraryItems, pluginsOfItem, type LibraryFilter } from '../utils/status';
+import { pathForGroupMembers } from '../../admin/components/group-members-path';
 import { ownedLensOf, pluginEntriesFor } from '../utils/plugin-entries';
 import { LINK_COPIED_TOAST, LINK_COPY_FAILED_TOAST, copyToClipboard } from '../utils/clipboard';
 import { useLibraryToast } from '../state/toast.context';
@@ -162,6 +163,13 @@ export function LibraryLayout() {
           onClose={() => setMenu(null)}
           onCreatePlugin={() => setNewPlugin({ parent: '' })}
           onCopyLink={menu.filter ? () => void copyLink(menu.filter!) : undefined}
+          // A group's roster is an administrator's to edit, on the Groups &
+          // Members page. Everyone is not a group — it has no roster to open.
+          onManageMembers={
+            isAdmin && menu.filter?.kind === 'team' && menu.filter.group !== EVERYONE_TEAM
+              ? () => navigate(pathForGroupMembers((menu.filter as { group: string }).group))
+              : undefined
+          }
           returnFocusTo={menuRow}
         />
       )}

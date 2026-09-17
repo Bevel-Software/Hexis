@@ -90,3 +90,31 @@ describe('CoreConfig — DOMAIN derives the public shape', () => {
     expect(config.publicFrontendUrl).toBe('https://bevel.example.com');
   });
 });
+
+/**
+ * Change-request links an agent hands a person are built on the public
+ * frontend address only when one is configured — never on a localhost default.
+ */
+describe('CoreConfig — configuredPublicFrontendUrl', () => {
+  it('is the frontend address when PUBLIC_FRONTEND_URL is set', () => {
+    process.env.PUBLIC_FRONTEND_URL = 'https://example.com/hexis/';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBe('https://example.com/hexis');
+  });
+
+  it('is derived from DOMAIN', () => {
+    process.env.DOMAIN = 'bevel.example.com';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBe('https://bevel.example.com');
+  });
+
+  it('follows an explicit backend origin in production', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.PUBLIC_BACKEND_URL = 'https://bevel.example.com';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBe('https://bevel.example.com');
+  });
+
+  it('is null when nothing is configured, in development and production alike', () => {
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBeNull();
+    process.env.NODE_ENV = 'production';
+    expect(new CoreConfig().configuredPublicFrontendUrl).toBeNull();
+  });
+});

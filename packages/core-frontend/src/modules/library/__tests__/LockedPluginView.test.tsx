@@ -60,7 +60,7 @@ function renderLocked(plugin: PluginSummary = finance()) {
   return { ...view, onRequested, onUnlocked, onManage };
 }
 
-const askButton = () => screen.getByRole('button', { name: 'Subscribe to its skills and tools' });
+const askButton = () => screen.getByRole('button', { name: 'Subscribe to this plugin' });
 
 describe('LockedPluginView', () => {
   beforeEach(() => {
@@ -120,7 +120,7 @@ describe('LockedPluginView', () => {
       await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
+      screen.queryByRole('button', { name: 'Subscribe to this plugin' }),
     ).not.toBeInTheDocument();
     expect(onRequested).toHaveBeenCalledTimes(1);
   });
@@ -137,7 +137,7 @@ describe('LockedPluginView', () => {
     renderLocked(finance({ hasRequested: true }));
     expect(screen.getByText('Requested: Olga Ivanova decides who gets access.')).toBeInTheDocument();
     expect(
-      screen.queryByRole('button', { name: 'Subscribe to its skills and tools' }),
+      screen.queryByRole('button', { name: 'Subscribe to this plugin' }),
     ).not.toBeInTheDocument();
   });
 
