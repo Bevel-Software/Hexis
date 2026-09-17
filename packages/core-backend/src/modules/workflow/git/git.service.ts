@@ -1849,11 +1849,17 @@ export class GitService implements IGitService {
   }
 
   /**
-   * The workspace's current HEAD commit, or null on an unborn branch. Read
-   * under the workspace mutex, so it never observes a pull-rebase mid-flight.
+   * The workspace's current HEAD commit. Read under the workspace mutex, so it
+   * never observes a pull-rebase mid-flight. Every failure throws — an unborn
+   * HEAD included: a caller records this to undo back to, and "no answer"
+   * must never pass for "nothing to undo".
    */
-  async headCommit(workspaceId: string): Promise<string | null> {
-    return this.mutex.run(workspaceId, async () => this.revParseOrNull(await this.repoDir(workspaceId), 'HEAD'));
+  async headCommit(workspaceId: string): Promise<string> {
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const { stdout } = await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}']);
+      return stdout.trim();
+    });
   }
 
   /**

@@ -2186,7 +2186,11 @@ export class WorkflowService implements IWorkflowService {
 
     // Requests can share a source branch, and so a workspace and even a file.
     // The work is grouped per workspace: each file is locked, restored and
-    // committed once, and each branch pushed once.
+    // committed once, and each branch pushed once. One restore can only undo a
+    // shared file for requests that agree on what it reverts TO — requests on
+    // one branch aimed at targets with different merge bases do not, and one
+    // of them would be reported emptied while still proposing the file. That
+    // combination is refused here, before anything is locked or changed.
     const byWorkspace = new Map<
       string,
       { wsId: string; branch: string; plans: typeof plans; paths: { path: string; mergeBase: string }[] }
@@ -2199,8 +2203,15 @@ export class WorkflowService implements IWorkflowService {
       }
       group.plans.push(plan);
       for (const repoRelPath of plan.paths) {
-        if (!group.paths.some((p) => p.path === repoRelPath)) {
+        const seen = group.paths.find((p) => p.path === repoRelPath);
+        if (!seen) {
           group.paths.push({ path: repoRelPath, mergeBase: plan.mergeBase! });
+        } else if (seen.mergeBase !== plan.mergeBase) {
+          const sharing = group.plans.map((other) => `#${other.number}`).join(', ');
+          throw new WorkflowDomainError(
+            `${sharing} propose ${repoRelPath} from the same branch against different targets, so it can't be taken out of both at once. Decline it in each request instead.`,
+            422,
+          );
         }
       }
     }
@@ -2220,7 +2231,7 @@ export class WorkflowService implements IWorkflowService {
       }
     };
     // What each checkout's HEAD was before this action committed anything.
-    const before = new Map<string, string | null>();
+    const before = new Map<string, string>();
     // Undo this action's restores in a checkout that was not pushed: put every
     // file it touched back as it was at the recorded HEAD, and commit that.
     // History is never rewritten, so any local work the checkout already had
@@ -2228,8 +2239,8 @@ export class WorkflowService implements IWorkflowService {
     const undo = async (unpushed: typeof toChange) => {
       for (const group of unpushed) {
         const at = before.get(group.wsId);
+        if (!at) continue;
         try {
-          if (!at) continue;
           for (const { path: repoRelPath } of group.paths) {
             await this.git.restorePathFromRef(group.wsId, at, repoRelPath);
             await this.git.commitFile(
@@ -2263,6 +2274,8 @@ export class WorkflowService implements IWorkflowService {
           held.push({ wsId: group.wsId, branch: group.branch, lockPath });
         }
       }
+      // A HEAD that can't be read stops the action here, before any commit:
+      // without it there is nothing to undo back to.
       for (const group of toChange) before.set(group.wsId, await this.git.headCommit(group.wsId));
       // Every checkout's restores are committed locally before anything is
       // pushed, so a failed restore or commit leaves every request as it was.

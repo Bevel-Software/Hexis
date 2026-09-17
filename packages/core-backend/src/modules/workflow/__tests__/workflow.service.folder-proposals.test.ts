@@ -320,7 +320,7 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(fileLocks.release).toHaveBeenCalledTimes(2);
   });
 
-  it('pushes nothing and undoes every restore when a later request’s restore fails', async () => {
+  it('pushes nothing and undoes every restore when a later request’s commit fails', async () => {
     const { svc, git, changed, closed, fileLocks } = makeHarness([aliceRequest, bobRequest], {
       admins: [ALICE.email],
     });
@@ -392,6 +392,41 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(git.restorePathFromRef).toHaveBeenCalledTimes(1);
     expect(git.push).toHaveBeenCalledTimes(1);
     expect(closed).toEqual([12, 13]);
+  });
+
+  it('refuses, before locking anything, requests on one branch that revert a shared file to different bases', async () => {
+    const shared = 'suggestions/alice-u-alice/knowledge';
+    const toMain = summary({ number: 12, branch: shared, authorId: hashEmail(ALICE.email), touchedNodePaths: ['Data/Reports/proposed.md'] });
+    const toRelease = summary({
+      number: 13,
+      branch: shared,
+      base: 'release',
+      authorId: hashEmail(ALICE.email),
+      touchedNodePaths: ['Data/Reports/proposed.md'],
+    });
+    const { svc, git, closed, fileLocks } = makeHarness([toMain, toRelease]);
+    vi.mocked(git.mergeBaseForPr).mockImplementation(async (_ws, base) => (base === 'main' ? 'mb-sha' : 'mb-release'));
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining('#12'),
+    });
+    expect(fileLocks.acquire).not.toHaveBeenCalled();
+    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(closed).toEqual([]);
+  });
+
+  it('commits nothing when a checkout’s HEAD cannot be read, and lets its locks go', async () => {
+    const { svc, git, changed, closed, fileLocks } = makeHarness([aliceRequest, bobRequest], {
+      admins: [ALICE.email],
+    });
+    vi.mocked(git.headCommit).mockRejectedValueOnce(new Error('index.lock exists'));
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toThrow('index.lock exists');
+    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(git.commitFile).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    expect(closed).toEqual([]);
+    expect(changed.get(aliceRequest.branch)!.size).toBe(3);
+    expect(fileLocks.release).toHaveBeenCalledTimes(3);
   });
 
   it('is a no-op for a folder no request touches', async () => {
