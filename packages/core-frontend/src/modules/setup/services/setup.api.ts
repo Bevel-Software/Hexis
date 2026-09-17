@@ -43,9 +43,11 @@ export interface SyncStatus {
 
 /**
  * Whether the single sign-on configuration in effect is known to work: proven
- * against the provider (or by a sign-in), configured but unproven, or absent.
+ * against the provider (or by a sign-in), configured but unproven, absent — or
+ * configured with SECRETS_ENC_KEY unset (`unrecordable`), when no
+ * verification can be kept.
  */
-export type OidcVerification = 'verified' | 'unverified' | 'not-configured';
+export type OidcVerification = 'verified' | 'unverified' | 'not-configured' | 'unrecordable';
 
 /** Why the setup-time knowledge-base initialization failed — mirrors the backend's `GitFailureKind`. */
 export type KbInitFailureKind =

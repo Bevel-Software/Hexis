@@ -501,9 +501,12 @@ export function createSetupRoutes(
     if (!changes) return {};
 
     // THE CONFIGURED SECRET ONLY EVER GOES TO THE CONFIGURED PROVIDER: probing
-    // a new issuer with it would hand it to whoever runs that one.
+    // a new issuer with it would hand it to whoever runs that one. Until an
+    // issuer is configured there is no provider it was set for — the save
+    // that first names one (beside an OIDC_CLIENT_SECRET the form cannot
+    // edit) pairs them.
     const secretSupplied = Boolean(entries.oidcClientSecret?.trim());
-    if (next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
+    if (now.issuerUrl && next.issuerUrl !== now.issuerUrl && next.clientSecret && !secretSupplied) {
       return settings.sourceOf('oidcClientSecret') === 'env'
         ? refuse({
             oidcIssuerUrl:
@@ -551,9 +554,12 @@ export function createSetupRoutes(
     const clientId = supplied('oidcClientId') ?? current.clientId;
     const suppliedSecret = supplied('oidcClientSecret');
     // The stored secret is sent only to the issuer it was saved for; testing
-    // another one brings its own. Without it, only the issuer is checked.
-    const clientSecret = suppliedSecret ?? (issuerUrl === current.issuerUrl ? current.clientSecret : '');
-    if (!suppliedSecret && issuerUrl !== current.issuerUrl && current.clientSecret && clientId) {
+    // another one brings its own. With no issuer configured yet it was set for
+    // none, so it may be tried with the first. Without a secret, only the
+    // issuer is checked.
+    const forAnotherIssuer = Boolean(current.issuerUrl) && issuerUrl !== current.issuerUrl;
+    const clientSecret = suppliedSecret ?? (forAnotherIssuer ? '' : current.clientSecret);
+    if (!suppliedSecret && forAnotherIssuer && current.clientSecret && clientId) {
       res.status(400).json({
         ok: false,
         outcome: 'rejected',

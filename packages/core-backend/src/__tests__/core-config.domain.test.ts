@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { CoreConfig } from '../core-config.js';
+import { CoreConfig, withoutUserinfo } from '../core-config.js';
 
 /**
  * The public-shape derivation from `DOMAIN`.
@@ -116,5 +116,22 @@ describe('CoreConfig — configuredPublicFrontendUrl', () => {
     expect(new CoreConfig().configuredPublicFrontendUrl).toBeNull();
     process.env.NODE_ENV = 'production';
     expect(new CoreConfig().configuredPublicFrontendUrl).toBeNull();
+  });
+});
+
+describe('CoreConfig — PUBLIC_BACKEND_URL never carries credentials', () => {
+  it('strips a proxy user:pass@ once, at parse time, and keeps every other byte', () => {
+    process.env.PUBLIC_BACKEND_URL = 'https://proxy:hunter2@Hexis.Example.com:443/base/';
+    expect(new CoreConfig().publicBackendUrl).toBe('https://Hexis.Example.com:443/base');
+  });
+
+  it.each([
+    ['https://user@host.example.com', 'https://host.example.com'],
+    ['http://u:p%40ss@localhost:3001', 'http://localhost:3001'],
+    ['https://host.example.com/path@not-userinfo', 'https://host.example.com/path@not-userinfo'],
+    ['https://host.example.com?next=a@b', 'https://host.example.com?next=a@b'],
+    ['https://host.example.com', 'https://host.example.com'],
+  ])('withoutUserinfo(%s) is %s', (input, expected) => {
+    expect(withoutUserinfo(input)).toBe(expected);
   });
 });

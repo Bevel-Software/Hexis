@@ -154,6 +154,11 @@ describe('SetupScreen — single sign-on check', () => {
     expect(screen.getByRole('button', { name: 'Test sign-in configuration' })).toBeInTheDocument();
   });
 
+  it('says when verification cannot be kept because SECRETS_ENC_KEY is unset', () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={() => {}} variant="settings" oidcVerification="unrecordable" />);
+    expect(screen.getByTestId('oidc-verification')).toHaveTextContent('Not recorded — set SECRETS_ENC_KEY to keep verification');
+  });
+
   it('the setup screen shows the state from the status', async () => {
     api.fetchSetupStatus.mockResolvedValue({
       complete: false,

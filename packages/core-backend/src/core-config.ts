@@ -41,6 +41,16 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /**
+ * `url` with any `user:pass@` removed and EVERY OTHER BYTE KEPT. Not a
+ * `new URL(...).toString()` round-trip: that drops a default port, lowercases
+ * the host and re-encodes, and a provider comparing redirect URIs as exact
+ * strings (Entra, Okta) would refuse the one an admin registered.
+ */
+export function withoutUserinfo(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/?#]*@/i, '$1');
+}
+
+/**
  * Configuration for the CORE platform: the git-backed workspace/workflow,
  * skills, tools, secrets vault, access control, and the MCP surface. Contains
  * NO LLM, connector, or SSO-provider settings — those live on the enterprise
@@ -402,12 +412,15 @@ export class CoreConfig {
       Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS
         ? gitTimeout
         : DEFAULT_GIT_TIMEOUT_MS;
-    this.publicBackendUrl = (
-      process.env.PUBLIC_BACKEND_URL ||
-      (domain ? `https://${domain}` : `http://localhost:${this.port}`)
-    )
-      .trim()
-      .replace(/\/+$/, '');
+    // Userinfo stripped HERE, once, so no consumer can hand it on: a
+    // `PUBLIC_BACKEND_URL` spelled with `user:pass@` (a basic-auth proxy in
+    // front of the deployment) must not reach an identity provider in a
+    // redirect URI, a third-party OAuth provider, or `/api/config`.
+    this.publicBackendUrl = withoutUserinfo(
+      (process.env.PUBLIC_BACKEND_URL || (domain ? `https://${domain}` : `http://localhost:${this.port}`))
+        .trim()
+        .replace(/\/+$/, ''),
+    );
     // Unset, the frontend origin is the backend's own in production (the
     // backend serves the built SPA — under docker compose this is what makes
     // a bare `up -d` bounce logins back to the right place), and Vite's dev

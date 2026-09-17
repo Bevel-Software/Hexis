@@ -12,6 +12,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
+import { normalizeIssuerUrl } from './oidc-check.js';
 
 /**
  * A setting an admin may set from the setup screen instead of the environment.
@@ -229,9 +230,14 @@ export const CORE_SETTINGS: SettingDef[] = [
  * Whether the single sign-on configuration in effect is known to work:
  * `verified` (the provider accepted its credentials, or someone signed in with
  * it), `unverified` (configured, never proven — sign in once to confirm), or
- * `not-configured` (no issuer, application id and secret to prove).
+ * `not-configured` (no issuer, application id and secret to prove), or
+ * `unrecordable` (configured, but SECRETS_ENC_KEY is unset — see
+ * {@link DeploymentSettingsService.oidcVerification}).
  */
-export type OidcVerificationState = 'verified' | 'unverified' | 'not-configured';
+export type OidcVerificationState = 'verified' | 'unverified' | 'not-configured' | 'unrecordable';
+
+/** What a record can say about one set of values. */
+export type OidcRecordState = 'verified' | 'unverified';
 
 /** The three values a verification is about. Scopes, label and domains are not among them. */
 export interface OidcCredentials {
@@ -563,7 +569,7 @@ export class DeploymentSettingsService {
   /** The single sign-on values in effect, issuer normalized the way the provider uses it. */
   resolveOidcCredentials(): OidcCredentials {
     return {
-      issuerUrl: this.resolve('oidcIssuerUrl').replace(/\/+$/, ''),
+      issuerUrl: normalizeIssuerUrl(this.resolve('oidcIssuerUrl')),
       clientId: this.resolve('oidcClientId'),
       clientSecret: this.resolve('oidcClientSecret'),
     };
@@ -579,6 +585,13 @@ export class DeploymentSettingsService {
    * never stored here, and a digest keyed with the secrets key cannot be
    * checked against a guess without that key.
    *
+   * WHICH IS WHY THERE IS NO RECORD WITHOUT THAT KEY: keyed with a public
+   * constant, the digest of a public issuer and application id would let
+   * anyone who can read `deployment_settings` (a backup, a replica, a dump)
+   * confirm guesses of the secret offline. A salt stored beside it would be
+   * read along with it. So with SECRETS_ENC_KEY unset nothing is recorded and
+   * a configured deployment reads `unrecordable`.
+   *
    * Read from the database, not the in-memory cache: unlike the settings, this
    * changes on a live deployment (every first sign-in), and a sign-in on one
    * replica must show as Verified on the others.
@@ -586,11 +599,13 @@ export class DeploymentSettingsService {
   async oidcVerification(): Promise<OidcVerificationState> {
     const current = this.resolveOidcCredentials();
     if (!current.issuerUrl || !current.clientId || !current.clientSecret) return 'not-configured';
+    if (!this.secretsEncKey) return 'unrecordable';
     return this.oidcVerificationOf(current);
   }
 
   /** What is recorded about one set of single sign-on values — `unverified` when nothing is. */
-  async oidcVerificationOf(credentials: OidcCredentials): Promise<Exclude<OidcVerificationState, 'not-configured'>> {
+  async oidcVerificationOf(credentials: OidcCredentials): Promise<OidcRecordState> {
+    if (!this.secretsEncKey) return 'unverified';
     const key = this.oidcVerificationKey(credentials);
     const rows = await this.db
       .select({ key: deploymentSettings.key, value: deploymentSettings.value })
@@ -612,10 +627,9 @@ export class DeploymentSettingsService {
    * to), and a sweep racing a save on another replica could delete the record
    * of the values that end up in effect.
    */
-  async recordOidcVerification(
-    state: Exclude<OidcVerificationState, 'not-configured'>,
-    credentials: OidcCredentials,
-  ): Promise<void> {
+  async recordOidcVerification(state: OidcRecordState, credentials: OidcCredentials): Promise<void> {
+    // No secrets key, no record: see oidcVerification().
+    if (!this.secretsEncKey) return;
     const key = this.oidcVerificationKey(credentials);
     const insert = this.db
       .insert(deploymentSettings)
@@ -634,7 +648,7 @@ export class DeploymentSettingsService {
     // JSON-encoded, so no issuer, id or secret containing the separator can
     // make two different tuples hash alike.
     const tuple = JSON.stringify([
-      credentials.issuerUrl.replace(/\/+$/, ''),
+      normalizeIssuerUrl(credentials.issuerUrl),
       credentials.clientId,
       credentials.clientSecret,
     ]);

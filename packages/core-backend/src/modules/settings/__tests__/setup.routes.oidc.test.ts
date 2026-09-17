@@ -102,8 +102,9 @@ function listen(opts: {
   checkOidc?: (config: OidcConfiguration) => Promise<OidcCheck>;
   checkIssuer?: (issuerUrl: string) => Promise<IssuerCheck>;
   isAdmin?: boolean;
+  encKey?: string;
 }) {
-  const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
+  const settings = new DeploymentSettingsService(fakeDb(), opts.encKey ?? ENC_KEY);
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -267,6 +268,35 @@ describe('POST /setup/settings — a sign-in configuration is checked before it 
     expect(idp.asked).toEqual([]);
     expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
   });
+
+  it('pairs an OIDC_CLIENT_SECRET with the first issuer saved — there was no provider it was set for yet', async () => {
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/settings', {
+      settings: { oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' },
+    });
+    expect(res.status).toBe(200);
+    expect(idp.asked).toEqual([
+      { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'from-env', redirectUri: REDIRECT },
+    ]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+    expect((await res.json()).oidcVerification).toBe('verified');
+  });
+
+  it('still refuses a different issuer later, when the OIDC_CLIENT_SECRET was set for the first', async () => {
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check });
+    await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' }, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { oidcIssuerUrl: 'https://attacker.example/issuer' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.oidcIssuerUrl).toMatch(/OIDC_CLIENT_SECRET environment variable/);
+    expect(idp.asked).toEqual([]);
+    expect(settings.resolve('oidcIssuerUrl')).toBe(ISSUER);
+  });
 });
 
 describe('POST /setup/test-oidc', () => {
@@ -327,20 +357,31 @@ describe('POST /setup/test-oidc', () => {
     expect(idp.asked).toEqual([]);
   });
 
-  it('refuses an issuer on an internal address before any request (the real outbound-URL check)', async () => {
+  it('refuses an issuer that is not https before any request (the real check)', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { base } = listen({});
     fetchSpy.mockClear();
     const res = await fetch(`${base}/api/setup/test-oidc`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...FULL, oidcIssuerUrl: 'https://169.254.169.254/latest' }),
+      body: JSON.stringify({ ...FULL, oidcIssuerUrl: 'http://login.example.com' }),
     });
     const body = await res.json();
     expect(body).toMatchObject({ ok: false, outcome: 'rejected', field: 'oidcIssuerUrl' });
-    // Only this test's own request went out — nothing to the metadata address.
+    // Only this test's own request went out — nothing to the provider.
     expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([`${base}/api/setup/test-oidc`]);
     fetchSpy.mockRestore();
+  });
+
+  it('tries an OIDC_CLIENT_SECRET with the first issuer typed, before any issuer is saved', async () => {
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const idp = provider({ outcome: 'verified' });
+    const { base } = listen({ checkOidc: idp.check });
+    const res = await post(base, '/api/setup/test-oidc', { oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' });
+    expect(await res.json()).toMatchObject({ ok: true, outcome: 'verified' });
+    expect(idp.asked).toEqual([
+      { issuerUrl: ISSUER, clientId: 'app-id', clientSecret: 'from-env', redirectUri: REDIRECT },
+    ]);
   });
 
   it('refuses to send the saved secret to a different issuer', async () => {
@@ -372,6 +413,27 @@ describe('POST /setup/test-oidc', () => {
 });
 
 describe('the verification state', () => {
+  it('is never recorded without SECRETS_ENC_KEY — the digest would be an offline oracle on the secret', async () => {
+    process.env.OIDC_ISSUER_URL = ISSUER;
+    process.env.OIDC_CLIENT_ID = 'app-id';
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const rows: Row[] = [];
+    const settings = new DeploymentSettingsService(memoryDb(rows), '');
+    expect(await settings.oidcVerification()).toBe('unrecordable');
+    await settings.recordOidcVerification('verified', settings.resolveOidcCredentials());
+    expect(rows).toEqual([]);
+    expect(await settings.oidcVerification()).toBe('unrecordable');
+  });
+
+  it('the check still runs without SECRETS_ENC_KEY, and the state says it cannot be recorded', async () => {
+    process.env.OIDC_CLIENT_SECRET = 'from-env';
+    const idp = provider({ outcome: 'verified' });
+    const { base, settings } = listen({ checkOidc: idp.check, encKey: '' });
+    await settings.save({ oidcIssuerUrl: ISSUER, oidcClientId: 'app-id' }, null);
+    const res = await post(base, '/api/setup/test-oidc', {});
+    expect(await res.json()).toMatchObject({ outcome: 'verified', oidcVerification: 'unrecordable' });
+  });
+
   it('is not-configured, then unverified, then verified after a real sign-in', async () => {
     const settings = new DeploymentSettingsService(fakeDb(), ENC_KEY);
     expect(await settings.oidcVerification()).toBe('not-configured');

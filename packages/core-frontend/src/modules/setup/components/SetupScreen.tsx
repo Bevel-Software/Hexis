@@ -199,6 +199,7 @@ const OIDC_VERIFICATION_LABEL: Record<OidcVerification, string> = {
   verified: 'Verified',
   unverified: 'Unverified — sign in once to confirm',
   'not-configured': 'Not configured',
+  unrecordable: 'Not recorded — set SECRETS_ENC_KEY to keep verification',
 };
 
 /** The three root folder fields, checked against the repository's listing. */

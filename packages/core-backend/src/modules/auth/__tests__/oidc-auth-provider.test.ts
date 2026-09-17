@@ -236,9 +236,10 @@ describe('OidcAuthProvider', () => {
     );
   });
 
-  it('never puts proxy credentials from PUBLIC_BACKEND_URL into the redirect URI', () => {
-    expect(oidcRedirectUri('https://proxy:hunter2@hexis.example.com/base/')).toBe(
-      'https://hexis.example.com/base/api/auth/oidc/callback',
+  it('keeps the configured address byte for byte, so a registered redirect URI still matches', () => {
+    // Providers compare redirect URIs as exact strings: no port dropped, no case changed.
+    expect(oidcRedirectUri('https://Hexis.Example.com:443/base')).toBe(
+      'https://Hexis.Example.com:443/base/api/auth/oidc/callback',
     );
   });
 });

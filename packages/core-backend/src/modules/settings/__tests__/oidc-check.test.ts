@@ -39,9 +39,9 @@ describe('checkOidcIssuer — discovery', () => {
   it('verifies an issuer whose document names all three endpoints', async () => {
     const fetchImpl = provider(() => json(200, DISCOVERY));
     expect(await checkOidcIssuer(`${ISSUER}/`, fetchImpl)).toEqual({ outcome: 'verified', tokenEndpoint: TOKEN_URL });
-    // Trailing slash normalized, redirects refused.
+    // Trailing slash normalized; redirects followed, as the sign-in's own discovery does.
     expect(fetchImpl.mock.calls[0][0]).toBe(DISCOVERY_URL);
-    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: 'error' });
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).redirect).toBeUndefined();
   });
 
   it('reports a network failure as not reachable', async () => {
@@ -73,44 +73,26 @@ describe('checkOidcIssuer — discovery', () => {
     expect(await checkOidcIssuer(ISSUER, fetchImpl)).toMatchObject({ outcome: 'not-oidc' });
   });
 
-  it.each([
-    'https://127.0.0.1/realms/x',
-    'https://169.254.169.254/latest',
-    'https://localhost:8443',
-    'https://[::1]/issuer',
-    // Non-global IPv6: unspecified-range, documentation, unique-local, link-local, mapped private.
-    'https://[::2]/issuer',
-    'https://[2001:db8::1]/issuer',
-    'https://[fd00::1]/issuer',
-    'https://[fe80::1]/issuer',
-    'https://[::ffff:10.0.0.1]/issuer',
-    'http://login.example.com',
-  ])('refuses %s before any request is made (outbound-URL check)', async (issuer) => {
+  it.each(['http://login.example.com', 'not a url'])('refuses %s before any request is made (https only)', async (issuer) => {
     const fetchImpl = provider(() => json(200, DISCOVERY));
     expect(await checkOidcIssuer(issuer, fetchImpl)).toMatchObject({ outcome: 'unreachable', field: 'oidcIssuerUrl' });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('accepts an issuer on a public global-unicast IPv6 address', async () => {
-    const issuer = 'https://[2606:4700::1111]/tenant';
-    const fetchImpl = vi.fn(async () => json(200, DISCOVERY)) as unknown as typeof fetch;
-    expect(await checkOidcIssuer(issuer, fetchImpl)).toEqual({ outcome: 'verified', tokenEndpoint: TOKEN_URL });
+  it.each([
+    'https://10.0.0.5/realms/x',
+    'https://sso.corp.internal',
+    'https://[fd00::1]/issuer',
+  ])('checks an issuer on a private network, %s, like any other — as the sign-in itself does', async (issuer) => {
+    const fetchImpl = vi.fn(async () =>
+      json(200, { ...DISCOVERY, token_endpoint: 'https://10.0.0.5/token', userinfo_endpoint: 'https://10.0.0.5/userinfo' }),
+    ) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
+    expect(await checkOidcIssuer(issuer, fetchImpl)).toEqual({ outcome: 'verified', tokenEndpoint: 'https://10.0.0.5/token' });
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${issuer}/.well-known/openid-configuration`);
   });
 
-  it('refuses a userinfo endpoint on an internal or plain-http address, where sign-in would send the access token', async () => {
-    for (const userinfo of ['https://169.254.169.254/userinfo', 'http://login.example.com/userinfo']) {
-      const fetchImpl = provider(() => json(200, { ...DISCOVERY, userinfo_endpoint: userinfo }), () => json(400, { error: 'invalid_grant' }));
-      expect(await checkOidcConfiguration(CONFIG, fetchImpl)).toMatchObject({
-        outcome: 'rejected',
-        reason: 'not-oidc',
-        field: 'oidcIssuerUrl',
-      });
-      expect(fetchImpl).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  it('refuses a token endpoint on an internal address, so the secret is never sent there', async () => {
-    const fetchImpl = provider(() => json(200, { ...DISCOVERY, token_endpoint: 'https://10.0.0.5/token' }));
+  it('refuses a token endpoint that is not https, so the secret is never sent in the clear', async () => {
+    const fetchImpl = provider(() => json(200, { ...DISCOVERY, token_endpoint: 'http://tokens.example.com/token' }));
     const result = await checkOidcConfiguration(CONFIG, fetchImpl);
     expect(result).toMatchObject({ outcome: 'rejected', reason: 'not-oidc', field: 'oidcIssuerUrl' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);

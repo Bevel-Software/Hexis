@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 
 /** The single sign-on configuration a deployment would sign people in with. */
 export interface OidcConfiguration {
@@ -19,7 +18,7 @@ export type OidcField = 'oidcIssuerUrl' | 'oidcClientSecret';
  *  - `verified`: an OIDC issuer — it published the authorization, token and
  *    userinfo endpoints the sign-in flow uses;
  *  - `unreachable`: no discovery document came back — a refused or failed
- *    request, a non-2xx answer, or an address the outbound-URL check refuses;
+ *    request, a non-2xx answer, or an address that is not https;
  *  - `not-oidc`: a document came back, but not one this flow can sign in with.
  */
 export type IssuerCheck =
@@ -76,14 +75,28 @@ export function normalizeIssuerUrl(issuerUrl: string): string {
   return issuerUrl.trim().replace(/\/+$/, '');
 }
 
+function isHttps(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 const UNREACHABLE = 'The provider address could not be reached — check it and try again.';
 const NOT_OIDC =
   'That address is not a single sign-on provider — its discovery document is missing the authorization, token or userinfo endpoint.';
 
 /**
- * Fetch `<issuer>/.well-known/openid-configuration` — after the deployment's
- * outbound-URL safety check — and say whether it describes an issuer the
- * sign-in flow can use. Never throws.
+ * Fetch `<issuer>/.well-known/openid-configuration` and say whether it
+ * describes an issuer the sign-in flow can use. Never throws.
+ *
+ * The SAME RULES AS THE SIGN-IN ITSELF (`OidcAuthProvider.discover()`), which
+ * is the point of checking at all: https, redirects followed, and no
+ * address-range guard. The issuer is deployment configuration an admin types,
+ * not a URL anyone else can author, and an identity provider on a private
+ * network (`https://10.0.0.5/…`, `https://sso.corp.internal`) is a first-class
+ * case that signs people in today.
  */
 export async function checkOidcIssuer(
   issuerUrl: string,
@@ -95,17 +108,11 @@ export async function checkOidcIssuer(
     field: 'oidcIssuerUrl',
     error,
   });
-  try {
-    assertSafeFetchUrl(url, { requireHttps: true, label: 'issuer' });
-  } catch {
-    return unreachable('The provider address must be a public https:// address.');
-  }
+  if (!isHttps(url)) return unreachable('The provider address must start with https://.');
   let doc: Record<string, unknown>;
   try {
     const res = await fetchImpl(url, {
       headers: { Accept: 'application/json' },
-      // A redirect would take the request past the safety check above.
-      redirect: 'error',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!res.ok) return unreachable();
@@ -121,20 +128,13 @@ export async function checkOidcIssuer(
   if (!endpoint('authorization_endpoint') || !endpoint('token_endpoint') || !endpoint('userinfo_endpoint')) {
     return { outcome: 'not-oidc', field: 'oidcIssuerUrl', error: NOT_OIDC };
   }
-  // The secret is about to be sent to the token endpoint, and every sign-in
-  // sends its access token to the userinfo endpoint from the server — so both
-  // addresses the issuer names pass the same check the issuer did.
-  for (const key of ['token_endpoint', 'userinfo_endpoint'] as const) {
-    try {
-      assertSafeFetchUrl(endpoint(key), { requireHttps: true, label: key });
-    } catch {
-      const name = key === 'token_endpoint' ? 'token' : 'userinfo';
-      return {
-        outcome: 'not-oidc',
-        field: 'oidcIssuerUrl',
-        error: `The provider names a ${name} endpoint that is not a public https:// address.`,
-      };
-    }
+  // The secret is about to be sent to the token endpoint: never in the clear.
+  if (!isHttps(endpoint('token_endpoint'))) {
+    return {
+      outcome: 'not-oidc',
+      field: 'oidcIssuerUrl',
+      error: 'The provider names a token endpoint that does not use https://.',
+    };
   }
   return { outcome: 'verified', tokenEndpoint: endpoint('token_endpoint') };
 }
@@ -150,10 +150,11 @@ export async function checkOidcIssuer(
  * `invalid_grant` is the code (and so the credentials passed). Nothing else is
  * read as an answer either way.
  *
- * THE SECRET GOES ONLY TO THE TOKEN ENDPOINT THIS ISSUER PUBLISHES, over https,
- * with redirects refused — and never into a log line or a returned message:
- * every message here is fixed text, and the provider's response body is read
- * for its `error` code alone.
+ * THE SECRET GOES ONLY TO THE TOKEN ENDPOINT THIS ISSUER PUBLISHES, over
+ * https, with redirects refused so it is never re-sent to a redirect target —
+ * and never into a log line or a returned message: every message here is
+ * fixed text, and the provider's response body is read for its `error` code
+ * alone.
  *
  * The ONE function both "Test sign-in configuration" and the settings save
  * call, so the button can never say "verified" about values the save refuses.
