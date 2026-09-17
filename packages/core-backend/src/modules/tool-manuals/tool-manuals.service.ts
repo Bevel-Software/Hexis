@@ -200,6 +200,35 @@ export class ToolManualService implements IToolManualService {
     return manuals.filter((m) => m.remote === false).map((m) => ({ slug: m.slug, name: m.name, path: m.path }));
   }
 
+  async listDeclaredOnlyOnBranch(
+    userEmail: string,
+    branch: string,
+  ): Promise<{ name: string; path: string; type: ToolManualType }[]> {
+    if (!branch || branch === DEFAULT_BRANCH) return [];
+    // Names and paths only — `scanDisk` never probes a server, so asking about
+    // a draft costs no network and registers no OAuth client for a declaration
+    // that may never be merged.
+    const onBranch = await this.scanDisk(branch);
+    if (onBranch.length === 0) return [];
+    // Compared by NAMESPACE, the catalog's own identity (see the dedupe in
+    // `scanDisk`): a draft entry whose namespace the default branch already
+    // serves is an edit of a live tool, not a tool missing from the catalog.
+    const released = new Set((await this.scan()).map((m) => utcpNamespacePrefix(m.name)));
+    const pending = onBranch.filter((m) => !released.has(utcpNamespacePrefix(m.name)));
+    if (pending.length === 0) return [];
+    // Read-gated on the BRANCH's workspace, where the declaration lives — the
+    // same default-deny rule as the catalog, so this can't reveal a draft file
+    // the caller could not open with `read_file`.
+    const allowed = await this.accessControl.canReadBatch(
+      workspaceIdForBranch(branch),
+      userEmail,
+      pending.map((m) => m.path),
+    );
+    return pending
+      .filter((m) => allowed.get(m.path) === true)
+      .map((m) => ({ name: m.name, path: m.path, type: m.type }));
+  }
+
   async userScopedKeysForManual(
     manualName: string,
   ): Promise<
@@ -635,10 +664,15 @@ export class ToolManualService implements IToolManualService {
     }
   }
 
-  private async scanDisk(): Promise<ToolManualDescriptor[]> {
+  /**
+   * Parse every declaration on `branch`'s workspace — the default branch for
+   * the catalog, a draft for `listDeclaredOnlyOnBranch`. Pure disk: no
+   * discovery, no access filter; callers add what their surface needs.
+   */
+  private async scanDisk(branch: string = DEFAULT_BRANCH): Promise<ToolManualDescriptor[]> {
     let wsId: string;
     try {
-      wsId = (await this.workspaceService.getOrCreateForBranch(DEFAULT_BRANCH)).id;
+      wsId = (await this.workspaceService.getOrCreateForBranch(branch)).id;
     } catch {
       return [];
     }
