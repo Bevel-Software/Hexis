@@ -40,6 +40,7 @@ const TREE: Record<string, string> = {
 };
 
 let root = '';
+let docCache = '';
 let base = '';
 let server: HttpServer;
 let service: AccessControlService;
@@ -70,7 +71,7 @@ beforeAll(async () => {
   const app = express();
   app.use(express.json());
   const router = express.Router();
-  const docCache = await mkdtemp(join(tmpdir(), 'file-stat-access-doc-'));
+  docCache = await mkdtemp(join(tmpdir(), 'file-stat-access-doc-'));
   registerWorkspaceTools(
     new ToolRegistry(),
     router,
@@ -97,6 +98,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
   await rm(root, { recursive: true, force: true });
+  await rm(docCache, { recursive: true, force: true });
 });
 
 type Source = { kind: 'folder' | 'frontmatter'; path: string; inherited: boolean } | null;
