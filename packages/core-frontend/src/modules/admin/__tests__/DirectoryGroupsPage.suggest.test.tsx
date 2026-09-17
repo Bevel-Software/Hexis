@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 import { DirectoryGroupsPage } from '../components/DirectoryGroupsPage';
 import { SUGGEST_DEBOUNCE_MS } from '../components/AddMemberInput';
 import { AdminContext } from '../state/admin.context';
@@ -67,7 +68,9 @@ function renderPage() {
           runRolesRecovery: async () => {},
         }}
       >
-        <DirectoryGroupsPage />
+        <MemoryRouter initialEntries={['/directory-groups']}>
+          <DirectoryGroupsPage />
+        </MemoryRouter>
       </AdminContext.Provider>
     </AppRegistryContext.Provider>,
   );
