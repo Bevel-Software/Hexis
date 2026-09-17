@@ -1833,6 +1833,9 @@ export class WorkflowService implements IWorkflowService {
         { kind: 'change-request-not-open', state: detail.state },
       );
     }
+    // Taken BEFORE the head moves: only a refusal recorded earlier describes
+    // the revision this replaces (see `clearApplyFailure`).
+    const headMovedAfter = new Date();
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,
@@ -1847,7 +1850,7 @@ export class WorkflowService implements IWorkflowService {
     if (!outcome.alreadyUpToDate) {
       await this.trackedPush(workspaceId, user);
       // The source head moved: the refusal described a revision that is gone.
-      await this.clearApplyFailure(number);
+      await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -1904,6 +1907,8 @@ export class WorkflowService implements IWorkflowService {
     authorIdHash: string | null,
     workspaceId: string,
   ): Promise<FileApproval[]> {
+    // Taken BEFORE the approval lands (see `clearApplyFailure`).
+    const approvedAfter = new Date();
     const approvals = await this.reviewWorkflow.approveFile(
       number,
       path,
@@ -1916,7 +1921,7 @@ export class WorkflowService implements IWorkflowService {
     );
     // A recorded approval answers a GATE refusal only: the one waiting on it no
     // longer describes the request, but a conflict or a git error still does.
-    await this.clearApplyFailure(number, ['gate']);
+    await this.clearApplyFailure(number, { kinds: ['gate'], recordedBefore: approvedAfter });
     this.prs.invalidateDetailCache(number);
     this.events?.emit({
       kind: 'approval-changed',
@@ -1988,6 +1993,8 @@ export class WorkflowService implements IWorkflowService {
     }
     const baseBranch = summary.base;
     const headBranch = summary.branch;
+    // Taken BEFORE the head moves (see `clearApplyFailure`).
+    const headMovedAfter = new Date();
 
     const ws = await this.workspaceService.getOrCreateForBranch(headBranch);
     // Best-effort freshen of the source checkout: the diff below reads origin
@@ -2046,7 +2053,7 @@ export class WorkflowService implements IWorkflowService {
       await this.fileLocks.release(ws.id, headBranch, lockPath, user);
     }
     // The source head moved: the refusal described a revision that is gone.
-    await this.clearApplyFailure(number);
+    await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2601,14 +2608,16 @@ export class WorkflowService implements IWorkflowService {
    * the gate — a conflict or a git error is untouched by it and must keep
    * saying so — while a moved source head replaces the revision every kind of
    * refusal described (omit `kinds` to clear any). A row with no recorded kind
-   * is only cleared by the latter. Announced on the same event a new refusal
+   * is only cleared by the latter. `recordedBefore` is taken before the change
+   * starts: a refusal recorded after it is newer than the change and stays. Announced on the same event a new refusal
    * uses — every list and open dialog re-reads the request. Best-effort: the
    * mutation that triggered it already happened and must not fail on this.
    */
   private async clearApplyFailure(
     number: number,
-    kinds?: readonly ChangeRequestApplyFailureKind[],
+    scope: { kinds?: readonly ChangeRequestApplyFailureKind[]; recordedBefore: Date },
   ): Promise<void> {
+    const { kinds, recordedBefore } = scope;
     try {
       const cleared = await this.db
         .update(changeRequests)
@@ -2623,6 +2632,10 @@ export class WorkflowService implements IWorkflowService {
           and(
             eq(changeRequests.number, number),
             isNotNull(changeRequests.applyFailedAt),
+            // Only a refusal that PREDATES the change: one an apply recorded
+            // while the change was landing may already have seen it, and is
+            // the newer verdict — never erase it.
+            lt(changeRequests.applyFailedAt, recordedBefore),
             kinds ? inArray(changeRequests.applyFailureKind, [...kinds]) : undefined,
           ),
         )

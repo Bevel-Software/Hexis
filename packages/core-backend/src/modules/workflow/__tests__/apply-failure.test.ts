@@ -16,6 +16,7 @@ import type { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
+import { changeRequests } from '../../database/schema.js';
 import { WorkflowService } from '../workflow.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createWorkflowRoutes } from '../workflow.routes.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../../shared/domain-errors.js';
@@ -265,24 +266,100 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
 
 function updateDb(openRows = 1) {
   const sets: Record<string, unknown>[] = [];
-  const wheres: SQL[] = [];
   const chain = {
     update: vi.fn(() => chain),
     set: vi.fn((values: Record<string, unknown>) => {
       sets.push(values);
       return chain;
     }),
-    where: vi.fn((condition: SQL) => {
-      wheres.push(condition);
-      return chain;
-    }),
+    where: vi.fn(() => chain),
     returning: vi.fn(async () => Array.from({ length: openRows }, () => ({ number: 7 }))),
   };
-  return { db: chain as unknown as Database, sets, wheres };
+  return { db: chain as unknown as Database, sets };
 }
 
 /** The SQL a drizzle condition renders to, so a test can read what the write is conditioned on. */
-const renderSql = (condition: SQL) => new PgDialect().sqlToQuery(condition).sql;
+type Row = Record<string, unknown>;
+
+/**
+ * Whether a drizzle condition holds for `row` (keyed by column name), by
+ * evaluating the SQL it renders to. Covers exactly the operators these writes
+ * use — `=`, `<`, `is [not] null`, `in (…)`, `and`, `or` — and throws on
+ * anything else, so a predicate this cannot read fails the test instead of
+ * silently matching.
+ */
+function holds(condition: SQL, row: Row): boolean {
+  const { sql, params, typings } = new PgDialect().sqlToQuery(condition);
+  const value = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const param = (i: number) =>
+    typings?.[i] === 'timestamp' ? Date.parse(String(params[i])) : value(params[i]);
+  const cols: unknown[] = [];
+  let expr = sql
+    .replace(/"change_requests"\."(\w+)"/g, (_m, col: string) => `c[${cols.push(value(row[col])) - 1}]`)
+    .replace(/\$(\d+)/g, (_m, n: string) => `p[${Number(n) - 1}]`)
+    .replace(/(c\[\d+\]) is not null/g, '($1 != null)')
+    .replace(/(c\[\d+\]) is null/g, '($1 == null)')
+    .replace(/(c\[\d+\]) in \(([^)]*)\)/g, '[$2].includes($1)')
+    .replace(/ = /g, ' === ')
+    .replace(/ and /g, ' && ')
+    .replace(/ or /g, ' || ');
+  if (!/^[\s()\[\]cp\d=!<&|,.a-z]*$/.test(expr.replace(/includes/g, ''))) {
+    throw new Error(`holds(): unsupported predicate: ${sql}`);
+  }
+  const p = params.map((_v, i) => param(i));
+  return new Function('c', 'p', `return ${expr};`)(cols, p) as boolean;
+}
+
+/**
+ * A one-row `change_requests` that honours the WHERE of every UPDATE — the
+ * row changes only when the condition holds for it, and `returning()` answers
+ * as the database would. A double that ignored the predicate could not tell a
+ * kind- or time-scoped clear from one that wipes everything.
+ */
+function rowDb(seed: Partial<Row> = {}) {
+  const row: Row = {
+    number: 7,
+    state: 'open',
+    apply_failure_reason: null,
+    apply_failure_conflicts: null,
+    apply_failed_at: null,
+    apply_failed_by_name: null,
+    apply_failure_kind: null,
+    ...seed,
+  };
+  const writes: Row[] = [];
+  let pendingSet: Row = {};
+  let pendingWhere: SQL | undefined;
+  const chain = {
+    update: () => chain,
+    set: (values: Row) => {
+      pendingSet = values;
+      return chain;
+    },
+    where: (condition: SQL) => {
+      pendingWhere = condition;
+      return chain;
+    },
+    returning: async () => {
+      if (!pendingWhere || !holds(pendingWhere, row)) return [];
+      for (const [key, v] of Object.entries(pendingSet)) {
+        row[(changeRequests as unknown as Record<string, { name: string }>)[key]!.name] = v;
+      }
+      writes.push(pendingSet);
+      return [{ number: row.number }];
+    },
+  };
+  return { db: chain as unknown as Database, row, writes };
+}
+
+/** A stored refusal of `kind`, recorded at `at`. */
+const refusal = (kind: 'gate' | 'conflicts' | 'error', at: Date): Partial<Row> => ({
+  apply_failure_reason: `${kind} reason`,
+  apply_failure_conflicts: kind === 'conflicts',
+  apply_failed_at: at,
+  apply_failed_by_name: 'Ada Admin',
+  apply_failure_kind: kind,
+});
 
 function service(
   db: Database,
@@ -383,13 +460,39 @@ describe('WorkflowService — the persisted apply refusal', () => {
   });
 
   it('the write itself never replaces a newer refusal — an older instant loses even past the in-process guard', async () => {
-    const { db, wheres } = updateDb();
-    const { svc } = service(db, () => {});
-    const at = new Date('2026-09-16T10:00:00Z');
-    await svc.recordApplyFailure(7, { reason: 'r', kind: 'error', at }, ADMIN, svc.beginApplyAttempt(7));
-    const sql = renderSql(wheres[0]!);
-    expect(sql).toContain('"state" = $');
-    expect(sql).toMatch(/"apply_failed_at" is null or "change_requests"\."apply_failed_at" < \$\d/);
+    // A newer refusal is already stored (another replica, or an UPDATE that
+    // landed first). The in-process guard passes this attempt; the row must not.
+    const newer = new Date('2026-09-16T10:05:00Z');
+    const store = rowDb(refusal('gate', newer));
+    const emitted: unknown[] = [];
+    const { svc } = service(store.db, (e) => emitted.push(e));
+    const older = new Date('2026-09-16T10:00:00Z');
+    const recorded = await svc.recordApplyFailure(
+      7,
+      { reason: 'older', kind: 'error', at: older },
+      ADMIN,
+      svc.beginApplyAttempt(7),
+    );
+    expect(recorded).toBe(false);
+    expect(store.row).toMatchObject({ apply_failure_reason: 'gate reason', apply_failed_at: newer });
+    expect(emitted).toEqual([]);
+
+    // …while a newer instant does replace it, and a closed request takes none.
+    const later = new Date('2026-09-16T10:10:00Z');
+    expect(
+      await svc.recordApplyFailure(7, { reason: 'later', kind: 'error', at: later }, ADMIN, svc.beginApplyAttempt(7)),
+    ).toBe(true);
+    expect(store.row.apply_failure_reason).toBe('later');
+    store.row.state = 'merged';
+    expect(
+      await svc.recordApplyFailure(
+        7,
+        { reason: 'after merge', kind: 'error', at: new Date('2026-09-16T10:20:00Z') },
+        ADMIN,
+        svc.beginApplyAttempt(7),
+      ),
+    ).toBe(false);
+    expect(store.row.apply_failure_reason).toBe('later');
   });
 
   it('a request a concurrent apply already landed announces no failure', async () => {
@@ -434,85 +537,97 @@ describe('change-request-apply-failed on the bus', () => {
 
 // ── Read back through the summary ───────────────────────────────────────────
 
-describe('WorkflowService — a refusal clears when a gate input changes', () => {
+describe('WorkflowService — a refusal clears when a change makes it obsolete', () => {
   const approveArgs = [7, 'Plugins/x/SKILL.md', ADMIN, [], 'h', 'main', null, 'ws'] as const;
+  const EARLIER = new Date(Date.now() - 60_000);
 
-  it('an approval recorded after a GATE refusal clears it and tells every viewer to re-read', async () => {
-    const { db, sets, wheres } = updateDb();
+  function approving(seed: Partial<Row>, onApprove: (row: Row) => void = () => {}) {
+    const store = rowDb(seed);
     const emitted: { kind: string }[] = [];
-    const { svc, prs } = service(db, (e) => emitted.push(e as { kind: string }), {
-      approveFile: vi.fn(async () => []),
+    const { svc, prs } = service(store.db, (e) => emitted.push(e as { kind: string }), {
+      approveFile: vi.fn(async () => {
+        onApprove(store.row);
+        return [];
+      }),
     });
+    return { ...store, svc, prs, emitted };
+  }
 
-    await svc.approveFile(...approveArgs);
-
-    expect(sets).toEqual([
-      {
-        applyFailureReason: null,
-        applyFailureConflicts: null,
-        applyFailedAt: null,
-        applyFailedByName: null,
-        applyFailureKind: null,
-      },
-    ]);
-    const sql = renderSql(wheres[0]!);
-    expect(sql).toContain('"apply_failed_at" is not null');
-    // Only a gate refusal: a conflict or a git error is not answered by an approval.
-    expect(sql).toContain('"apply_failure_kind" in (');
-    expect(new PgDialect().sqlToQuery(wheres[0]!).params).toContain('gate');
-    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
-    expect(emitted.map((e) => e.kind)).toEqual(['change-request-apply-failed', 'approval-changed']);
-  });
-
-  it('an approval leaves a conflict or a git error standing: nothing matches, nothing is announced', async () => {
-    // The kind filter matches no row, exactly as the database answers for a
-    // request whose recorded refusal is a conflict or an error.
-    const { db, wheres } = updateDb(0);
+  function movingHead(seed: Partial<Row>, onMerge: (row: Row) => void = () => {}) {
+    const store = rowDb(seed);
     const emitted: { kind: string }[] = [];
-    const { svc, prs } = service(db, (e) => emitted.push(e as { kind: string }), {
-      approveFile: vi.fn(async () => []),
-    });
-    await svc.approveFile(...approveArgs);
-    const params = new PgDialect().sqlToQuery(wheres[0]!).params;
-    expect(params).not.toContain('conflicts');
-    expect(params).not.toContain('error');
-    expect(emitted.map((e) => e.kind)).toEqual(['approval-changed']);
-    // Only the approval's own invalidation ran, none for a cleared refusal.
-    expect(prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
-  });
-
-  it('a moved source head clears a refusal of ANY kind', async () => {
-    const { db, sets, wheres } = updateDb();
-    const emitted: { kind: string }[] = [];
-    const detail = { state: 'open', branch: 'bo/suggestions', base: 'main' };
     const { svc } = service(
-      db,
+      store.db,
       (e) => emitted.push(e as { kind: string }),
       {},
       {
         git: {
-          mergeFromOrigin: vi.fn(async () => ({ kind: 'merged', alreadyUpToDate: false })),
+          mergeFromOrigin: vi.fn(async () => {
+            onMerge(store.row);
+            return { kind: 'merged', alreadyUpToDate: false };
+          }),
           push: vi.fn(async () => undefined),
         } as unknown as Partial<GitService>,
-        prs: { getPrDetail: vi.fn(async () => detail) },
+        prs: { getPrDetail: vi.fn(async () => ({ state: 'open', branch: 'bo/suggestions', base: 'main' })) },
       },
     );
+    return { ...store, svc, emitted };
+  }
 
-    await svc.updateFromTarget('bo%2Fsuggestions', ADMIN, 7);
+  it('an approval clears a GATE refusal recorded before it and tells every viewer to re-read', async () => {
+    const t = approving(refusal('gate', EARLIER));
+    await t.svc.approveFile(...approveArgs);
+    expect(t.row).toMatchObject({
+      apply_failure_reason: null,
+      apply_failure_conflicts: null,
+      apply_failed_at: null,
+      apply_failed_by_name: null,
+      apply_failure_kind: null,
+    });
+    expect(t.prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+    expect(t.emitted.map((e) => e.kind)).toEqual(['change-request-apply-failed', 'approval-changed']);
+  });
 
-    expect(sets).toHaveLength(1);
-    expect(renderSql(wheres[0]!)).not.toContain('"apply_failure_kind"');
-    expect(emitted.map((e) => e.kind)).toContain('change-request-apply-failed');
+  it.each(['conflicts', 'error'] as const)(
+    'an approval leaves a %s refusal stored, and announces only itself',
+    async (kind) => {
+      const t = approving(refusal(kind, EARLIER));
+      await t.svc.approveFile(...approveArgs);
+      expect(t.row).toMatchObject({ apply_failure_kind: kind, apply_failure_reason: `${kind} reason` });
+      expect(t.writes).toEqual([]);
+      expect(t.emitted.map((e) => e.kind)).toEqual(['approval-changed']);
+      // Only the approval's own invalidation ran, none for a cleared refusal.
+      expect(t.prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('a gate refusal recorded WHILE the approval was landing is newer than it and stays', async () => {
+    const t = approving({}, (row) => Object.assign(row, refusal('gate', new Date(Date.now() + 1_000))));
+    await t.svc.approveFile(...approveArgs);
+    expect(t.row.apply_failure_reason).toBe('gate reason');
+    expect(t.emitted.map((e) => e.kind)).toEqual(['approval-changed']);
+  });
+
+  it('a moved source head clears a refusal of ANY kind recorded before it', async () => {
+    const t = movingHead(refusal('conflicts', EARLIER));
+    await t.svc.updateFromTarget('bo%2Fsuggestions', ADMIN, 7);
+    expect(t.row.apply_failure_reason).toBeNull();
+    expect(t.row.apply_failure_kind).toBeNull();
+    expect(t.emitted.map((e) => e.kind)).toContain('change-request-apply-failed');
+  });
+
+  it('a refusal recorded while the head was moving is newer than the move and stays', async () => {
+    const t = movingHead({}, (row) => Object.assign(row, refusal('error', new Date(Date.now() + 1_000))));
+    await t.svc.updateFromTarget('bo%2Fsuggestions', ADMIN, 7);
+    expect(t.row.apply_failure_reason).toBe('error reason');
+    expect(t.emitted.map((e) => e.kind)).not.toContain('change-request-apply-failed');
   });
 
   it('with no refusal recorded, an approval announces only itself', async () => {
-    const { db } = updateDb(0);
-    const emitted: { kind: string }[] = [];
-    const { svc } = service(db, (e) => emitted.push(e as { kind: string }), {
-      approveFile: vi.fn(async () => []),
-    });
-    await svc.approveFile(...approveArgs);
-    expect(emitted.map((e) => e.kind)).toEqual(['approval-changed']);
+    const t = approving({});
+    await t.svc.approveFile(...approveArgs);
+    expect(t.writes).toEqual([]);
+    expect(t.emitted.map((e) => e.kind)).toEqual(['approval-changed']);
   });
 
   it('a failed clear never fails the approval that triggered it', async () => {
