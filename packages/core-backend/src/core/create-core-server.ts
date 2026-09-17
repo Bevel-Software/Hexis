@@ -172,6 +172,14 @@ export async function createCoreServer(
   // which a parsed-and-reserialised body cannot reproduce.
   const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
   const globalJson = express.json({ limit: '10mb' });
+  // The git folder is refused BEFORE the body parser: a request naming it in
+  // the query with a malformed body would otherwise be answered 400 by the
+  // parser, and the promise is one sanitized 403 for such a path whatever else
+  // is wrong with the request. Only the query can be judged this early — a
+  // body that does not parse names nothing anyone can read — so the same guard
+  // is mounted again below, once the body is parsed and once the caller is
+  // known (see the two mounts under `/api/workspace/:id`).
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
   app.use((req, res, next) => {
     if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
@@ -488,13 +496,13 @@ export async function createCoreServer(
   ));
   app.use('/api', toolsRouter);
 
-  // The repository's git folder is refused for the WHOLE `/workspace/:id`
-  // prefix, ahead of EVERY router under it — the file routes, the review,
-  // workflow and access ones, and whatever an extension mounts below. Mounted
-  // here, before the extension phase, so an overlay surface added there is
-  // covered by its prefix rather than by remembering this. No auth in front of
-  // it: the lexical rule reads the caller's own string and touches no disk, so
-  // it answers nothing; the resolved half waits for the JWT check below.
+  // The same guard on the PARSED body, for the WHOLE `/workspace/:id` prefix
+  // and ahead of EVERY router under it — the file routes, the review, workflow
+  // and access ones, and whatever an extension mounts below. Mounted here,
+  // before the extension phase, so an overlay surface added there is covered
+  // by its prefix rather than by remembering this. No auth in front of it: the
+  // lexical rule reads the caller's own string and touches no disk, so it
+  // answers nothing; the resolved half waits for the JWT check below.
   app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
 
   // Non-JWT overlay surfaces that sit between the tools router and the

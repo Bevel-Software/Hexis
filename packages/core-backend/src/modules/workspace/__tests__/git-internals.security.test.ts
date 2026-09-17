@@ -540,7 +540,11 @@ describe('the route guard on its own', () => {
     userId = USER.id;
     const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
     const app = express();
+    // The server's own order: the guard ahead of the body parser, then again
+    // on the parsed body, then again once the caller is known.
+    app.use('/api/workspace/:id', createGitInternalsRouteGuard(service));
     app.use(express.json());
+    app.use('/api/workspace/:id', createGitInternalsRouteGuard(service));
     app.use('/api', (req, _res, next) => {
       if (userId !== undefined) (req as unknown as { userId: string }).userId = userId;
       next();
@@ -587,6 +591,26 @@ describe('the route guard on its own', () => {
       else expect(res.status).toBe(200);
     }
     expect(reached).toBe(spellings.filter((p) => !hasGitInternalsSegment(p)).length);
+  });
+
+  it('refuses a git path even when the body does not parse, where the parser would answer 400', async () => {
+    const res = await fetch(`${baseUrl}/api/workspace/${WS}/anything?path=${encodeURIComponent(`${KB}/.git/config`)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{ this is not json',
+    });
+    await expectRefused(res);
+    expect(reached).toBe(0);
+  });
+
+  it('still answers a malformed body on an ordinary path the parser way', async () => {
+    const res = await fetch(`${baseUrl}/api/workspace/${WS}/anything?path=${encodeURIComponent(`${KB}/Notes/a.md`)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{ this is not json',
+    });
+    expect(res.status).toBe(400);
+    expect(reached).toBe(0);
   });
 
   it('lets an ordinary path through', async () => {
