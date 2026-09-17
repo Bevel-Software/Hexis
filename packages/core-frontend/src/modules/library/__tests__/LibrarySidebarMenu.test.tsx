@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import {
   WorkspaceContext,
@@ -112,9 +112,9 @@ const PLUGINS: PluginSummary[] = [
   summary({ name: 'Finance', folders: ['Plugins/Finance'], canRead: false, canWrite: false }),
 ];
 
-function wrap(children: ReactNode) {
+function wrap(children: ReactNode, isAdmin = false) {
   const adminValue = {
-    isAdmin: false,
+    isAdmin,
     unreadCount: 0,
     lastSeen: null,
     markSeen: vi.fn(),
@@ -137,13 +137,21 @@ function wrap(children: ReactNode) {
   );
 }
 
-function renderLibrary(path = '/skills-and-tools') {
+/** Stands in for the Groups & Members page: shows where "Manage members" landed. */
+function LandedOn() {
+  const { pathname, search } = useLocation();
+  return <div data-testid="landed">{`${pathname}${search}`}</div>;
+}
+
+function renderLibrary(path = '/skills-and-tools', { isAdmin = false } = {}) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       {wrap(
         <Routes>
           <Route path="/skills-and-tools/*" element={<LibraryRoutes />} />
+          <Route path="/directory-groups" element={<LandedOn />} />
         </Routes>,
+        isAdmin,
       )}
     </MemoryRouter>,
   );
@@ -282,5 +290,62 @@ describe('Library sidebar: right-click, end to end', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     expect(document.activeElement).toBe(row);
+  });
+});
+
+/**
+ * "Manage members" — an administrator's way from a group row to that group's
+ * roster. Everyone is not a group and has no roster; a non-admin cannot edit
+ * one, so neither sees the item.
+ */
+describe('Library sidebar: Manage members', () => {
+  beforeEach(() => {
+    dataMock.useLibraryData.mockReturnValue(CATALOG);
+    pluginsMock.listPlugins.mockResolvedValue(PLUGINS);
+    pluginsMock.listJoinRequests.mockResolvedValue([]);
+    teamsMock.listTeams.mockResolvedValue([
+      { name: 'Everyone', plugins: [], skills: [], tools: [] },
+      { name: 'GTM Team', plugins: ['GTM'], skills: ['outreach'], tools: [] },
+    ]);
+  });
+
+  it("gives an admin's group row Manage members, below the items it already had", async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^GTM Team/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link', 'Manage members']);
+  });
+
+  it("opens the group's card on the Groups page, the group carried in the URL", async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^GTM Team/);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage members' }));
+    expect(await screen.findByTestId('landed')).toHaveTextContent(
+      '/directory-groups?group=GTM+Team',
+    );
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('gives the Everyone row no Manage members, even for an admin', async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^Everyone/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
+  });
+
+  it('gives no Manage members on a lens or the empty nav space', async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: true });
+    await openMenuOn(/^Owned by me/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+
+    fireEvent.contextMenu(nav(), { clientX: 40, clientY: 400 });
+    await screen.findByRole('menu');
+    expect(menuItems()).toEqual(['New plugin']);
+  });
+
+  it("leaves a non-admin's group menu unchanged", async () => {
+    renderLibrary('/skills-and-tools', { isAdmin: false });
+    await openMenuOn(/^GTM Team/);
+    expect(menuItems()).toEqual(['New plugin', 'Copy link']);
   });
 });
