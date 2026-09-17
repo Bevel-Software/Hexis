@@ -133,6 +133,21 @@ describe('file-reader registry routing', () => {
     expect(typeOf('logo.png', bytes)).not.toHaveProperty('mimeNote');
   });
 
+  it('every extension a reader claims names its mime — only the fallback reader falls back to octet-stream', () => {
+    const owned = registry.ownedExtensions();
+    expect(owned).toEqual(expect.arrayContaining(['.pdf', '.png', '.doc', '.tiff', '.tgz', '.ogg']));
+    for (const ext of owned) {
+      const p = `file${ext}`;
+      const reader = registry.readerFor(p);
+      const type = fileTypeOf(reader, p, needsContent(reader) ? Buffer.from([0x00, 0xff]) : undefined);
+      expect(type.mimeSource, ext).toBe('extension');
+      expect(type, ext).not.toHaveProperty('mimeNote');
+    }
+    expect(fileTypeOf(registry.readerFor('scan.tiff'), 'scan.tiff', undefined)).toMatchObject({ kind: 'image', mime: 'image/tiff' });
+    expect(fileTypeOf(registry.readerFor('a.tgz'), 'a.tgz', undefined)).toMatchObject({ kind: 'binary', mime: 'application/gzip' });
+    expect(fileTypeOf(registry.readerFor('song.ogg'), 'song.ogg', undefined)).toMatchObject({ kind: 'binary', mime: 'audio/ogg' });
+  });
+
   it('contentModeOf answers text | document | binary from the same registry the write gates use', () => {
     const text = Buffer.from('# hello\n');
     const bytes = Buffer.from([0x00, 0x01, 0xff]);

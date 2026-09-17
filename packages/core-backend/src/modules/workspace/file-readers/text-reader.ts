@@ -4,7 +4,9 @@ import { displayPath, type FileKind, type FileReader, type ReadResult } from './
 
 /**
  * Extension→mime for the binary-read notice and for the `mime` `file_stat`
- * reports (fallback: octet-stream, or text/plain for sniffed text).
+ * reports (fallback: octet-stream, or text/plain for sniffed text). Every
+ * extension a reader registers must name its mime here or in that reader's
+ * own `mimeFor` — the registry test enforces it.
  */
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
@@ -14,8 +16,13 @@ const MIME_BY_EXT: Record<string, string> = {
   '.webp': 'image/webp',
   '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.heic': 'image/heic',
+  '.avif': 'image/avif',
   '.zip': 'application/zip',
   '.gz': 'application/gzip',
+  '.tgz': 'application/gzip',
   '.tar': 'application/x-tar',
   '.7z': 'application/x-7z-compressed',
   '.rar': 'application/vnd.rar',
@@ -24,11 +31,15 @@ const MIME_BY_EXT: Record<string, string> = {
   '.xls': 'application/vnd.ms-excel',
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
   '.pdf': 'application/pdf',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -40,6 +51,10 @@ const MIME_BY_EXT: Record<string, string> = {
   '.msg': 'application/vnd.ms-outlook',
   '.wasm': 'application/wasm',
   '.exe': 'application/vnd.microsoft.portable-executable',
+  '.dll': 'application/vnd.microsoft.portable-executable',
+  '.so': 'application/x-sharedlib',
+  // `.bin` itself names raw bytes: an extension-given type, not the fallback.
+  '.bin': 'application/octet-stream',
 };
 
 /** The mime `path`'s extension names, or undefined when the table has none. */

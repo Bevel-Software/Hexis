@@ -112,6 +112,11 @@ export class FileReaderRegistry {
     }
   }
 
+  /** Every extension some reader claims (lowercase, with the dot); the fallback owns the rest. */
+  ownedExtensions(): string[] {
+    return [...this.byExtension.keys()];
+  }
+
   /** The reader owning `path`'s extension (lowercased by `fileExtension`), or the fallback. */
   readerFor(path: string): FileReader {
     return this.byExtension.get(fileExtension(path)) ?? this.fallback;
