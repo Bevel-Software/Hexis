@@ -75,7 +75,7 @@ The MCP endpoint itself is not a setting: the server asks the deployment for it 
 
 Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surface them as server logs.
 
-- *"The connection key was rejected"* — the key was revoked or belongs to another workspace. Mint a new one in External agent access. The process exits instead of offering a browser sign-in. Claude Code shows only that the server failed; `claude mcp get <name>` or running the command in a terminal shows the message.
+- *"The connection key was rejected"* — the key is invalid or revoked, or belongs to another workspace. Mint a new one in External agent access. The process exits instead of offering a browser sign-in. Claude Code shows only that the server failed; `claude mcp get <name>` or running the command in a terminal shows the message.
 - *"Your sign-in was rejected"* / *"could not be refreshed"* — the workspace revoked the sign-in, or it expired. Restart the command to sign in through your browser again.
 - *"This deployment is too old for browser sign-in"* — the workspace predates the sign-in exchange. Upgrade it, or pass a connection key.
 - **A local tool is missing from the list** — it registered but failed; the log names it and why. A tool whose local server is not running is the usual cause.

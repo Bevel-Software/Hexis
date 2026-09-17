@@ -74,11 +74,11 @@ afterEach(async () => {
   server = undefined;
 });
 
-async function start(): Promise<string> {
+async function start(keys: IExternalApiKeyService = externalApiKeys): Promise<string> {
   const internalTokens = new InternalTokenService({ secret: 'test-secret-32-bytes-long-enough!!' });
-  const mcpAuth = createMcpAuthMiddleware(authService, externalApiKeys, oauthProvider, RESOURCE_METADATA_URL, internalTokens);
-  const toolAuth = createToolAuthMiddleware(externalApiKeys, internalTokens);
-  const manualAuth = createManualAuthMiddleware(externalApiKeys, internalTokens, authService);
+  const mcpAuth = createMcpAuthMiddleware(authService, keys, oauthProvider, RESOURCE_METADATA_URL, internalTokens);
+  const toolAuth = createToolAuthMiddleware(keys, internalTokens);
+  const manualAuth = createManualAuthMiddleware(keys, internalTokens, authService);
   const ok: RequestHandler = (_req, res) => {
     res.json({ ok: true });
   };
@@ -131,6 +131,32 @@ describe('an invalid connection key is rejected plainly', () => {
       expect(everyHeader).not.toContain(BAD_KEY);
       expect(text).not.toContain(BAD_KEY);
       expect(logged.join('\n')).not.toContain(BAD_KEY);
+    });
+  }
+});
+
+describe('a key whose verification fails is a 500 that still logs no key', () => {
+  // The one branch that logs: the key store itself failed (a database error),
+  // so the caller's key may be fine and the answer is 500, not 401. What is
+  // logged is the store's error — never the bearer that was being checked.
+  const brokenStore = {
+    looksLikeExternalApiKey: (t: string) => t.startsWith('bevel_'),
+    verifyAndLoadToken: async () => {
+      throw new Error('connection pool exhausted');
+    },
+  } as unknown as IExternalApiKeyService;
+
+  for (const endpoint of KEY_ENDPOINTS) {
+    it(`${endpoint.name}: 500, the error logged, and no key anywhere`, async () => {
+      const base = await start(brokenStore);
+      const res = await call(base, endpoint.method, endpoint.path, BAD_KEY);
+      const text = await res.text();
+
+      expect(res.status).toBe(500);
+      expect(JSON.parse(text)).toEqual({ error: 'Authentication backend unavailable' });
+      expect(logged.join('\n')).toContain('connection pool exhausted');
+      expect(logged.join('\n')).not.toContain(BAD_KEY);
+      expect(text).not.toContain(BAD_KEY);
     });
   }
 });

@@ -251,7 +251,7 @@ export async function fetchAgentInstructions(config: HexisMcpConfig): Promise<st
   } catch (err) {
     if (err instanceof ConnectionKeyRejectedError) throw err;
     console.error(
-      `[hexis-mcp] could not fetch the agent instructions:${err instanceof Error ? err.message : String(err)}; ` +
+      `[hexis-mcp] could not fetch the agent instructions: ${err instanceof Error ? err.message : String(err)}; ` +
         'sessions start without them.',
     );
     return undefined;
@@ -363,7 +363,8 @@ export interface LocalToolVariables {
  * scoped to one manual's namespace and goes straight into that manual's tool
  * invocations — see `localVariableLoader`.
  *
- * A failure is NOT fatal. A manual may declare variables that are simply unset,
+ * A failure is NOT fatal — except a rejected connection key, which is thrown
+ * so the tool call reports it plainly instead of running without secrets. A manual may declare variables that are simply unset,
  * the deployment may be an older build without the route, and either way the
  * tool should still be offered and fail with its own error message rather than
  * being absent from the toolset. So the caller gets `ok: false` and an empty
@@ -413,6 +414,9 @@ export async function fetchLocalToolVariables(
     }
     return { ok: true, values: out };
   } catch (err) {
+    // A dead key is not a missing secret: the call fails with the plain
+    // sentence instead of running without its credentials.
+    if (err instanceof ConnectionKeyRejectedError) throw err;
     console.error(
       `[hexis-mcp] could not resolve variables for local tool "${slug}": ` +
         `${err instanceof Error ? err.message : String(err)}`,

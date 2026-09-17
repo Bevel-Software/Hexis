@@ -39,6 +39,7 @@ import {
 import type { HexisMcpConfig } from './config.js';
 import {
   callKbTool,
+  ConnectionKeyRejectedError,
   fetchAllManuals,
   fetchLocalOnlyManuals,
   resolveDeployment,
@@ -259,6 +260,8 @@ async function prepareLocalManuals(
       }
       out.push(template);
     } catch (err) {
+      // A dead key is not one broken server: it fails startup in its own words.
+      if (err instanceof ConnectionKeyRejectedError) throw err;
       console.error(
         `[hexis-mcp] skipping local server "${String(template.name)}": ${err instanceof Error ? err.message : String(err)}`,
       );

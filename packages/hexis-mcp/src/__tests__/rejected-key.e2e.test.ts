@@ -51,6 +51,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // A CLI that regressed into hanging holds a keep-alive socket to the stub;
+  // close() alone would wait on it forever and stall the whole suite.
+  stub.closeAllConnections?.();
   await new Promise<void>((resolve) => stub.close(() => resolve()));
   await fs.rm(home, { recursive: true, force: true });
 });
@@ -68,7 +71,14 @@ describe('a rejected connection key', () => {
     let stderr = '';
     cli.stdout!.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
     cli.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
-    const code = await new Promise<number | null>((resolve) => cli.once('exit', (c) => resolve(c)));
+    let code: number | null;
+    try {
+      code = await new Promise<number | null>((resolve) => cli.once('exit', (c) => resolve(c)));
+    } finally {
+      // Reaps a CLI that hangs instead of exiting, so the timeout fails this
+      // test rather than leaving an orphan behind the suite.
+      if (cli.exitCode === null && cli.signalCode === null) cli.kill('SIGKILL');
+    }
 
     const sentence =
       `The connection key was rejected by ${base}. Mint a new one in External agent access. ` +
