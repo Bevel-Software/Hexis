@@ -103,7 +103,6 @@ beforeEach(() => {
         // An owned markdown file: the merge gate binds it, so Apply approves it.
         inMergeGate: true,
         viewerCanApprove: true,
-        inMergeGate: true,
       },
     ],
   });
