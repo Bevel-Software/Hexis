@@ -121,6 +121,7 @@ function recordingAccessControl(opts: {
       return opts.canWriteBatchAtRef?.(ref, userEmail, paths) ?? new Map(paths.map((p) => [p, true]));
     },
     eligibleWritersAtRef: async () => opts.eligible?.() ?? { roles: ['Admin'], users: [] },
+    holdsAdminRootWrite: async () => false,
     eligibleWritersForPathsAtRef: async (_w, _ref, paths) =>
       new Map(paths.map((p) => [p, { roles: [], users: [], emails: new Set<string>() }])),
     findEmailByHash: async () => null,
