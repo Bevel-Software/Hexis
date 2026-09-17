@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 
 /**
@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({ readFileOnBranch: vi.fn(), readFileAtForkPoint: 
 vi.mock('../services/change-requests.api', () => api);
 
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 
 const PATH = 'Sales/deal.yaml';
@@ -37,6 +38,26 @@ describe('useCrFileDiffs', () => {
     expect(lines(d, 'removed')).toEqual(['price: 100']);
     expect(lines(d, 'added')).toEqual(['price: 120']);
     expect(api.readFileAtForkPoint).toHaveBeenCalledWith(21, null, PATH);
+  });
+
+  it('re-reads the fork point when a request moves, not on every revision bump', async () => {
+    const { result, rerender } = renderHook(({ rev }: { rev: number }) => useCrFileDiffs([CR], PATH, MAIN_NOW, rev), {
+      initialProps: { rev: 0 },
+    });
+    await waitFor(() => expect(result.current.get(21)).not.toBeNull());
+    expect(api.readFileAtForkPoint).toHaveBeenCalledTimes(1);
+
+    // A tab switch or an apply elsewhere on the page re-reads the branch copy,
+    // which can have changed — the fork point cannot have.
+    rerender({ rev: 1 });
+    await waitFor(() => expect(api.readFileOnBranch).toHaveBeenCalledTimes(2));
+    expect(api.readFileAtForkPoint).toHaveBeenCalledTimes(1);
+
+    // An Update does move it, and says so.
+    await act(async () => {
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
+    });
+    await waitFor(() => expect(api.readFileAtForkPoint).toHaveBeenCalledTimes(2));
   });
 
   it('a file the fork point lacks (the request adds it) diffs from empty', async () => {

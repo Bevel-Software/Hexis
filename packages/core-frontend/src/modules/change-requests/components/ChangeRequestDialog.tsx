@@ -9,6 +9,7 @@ import '../change-requests.css';
 import { Banner, Button, Surface } from '../../../shared/components';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
@@ -625,6 +626,10 @@ export function ChangeRequestDialog({
     setError(null);
     try {
       await refreshChangeRequestFromTarget(cr.number);
+      // The branch moved, so every list and every change box behind this
+      // dialog is out of date — including their fork points, which this is
+      // the only thing that moves.
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
       // The branch has moved: every copy read so far predates the merge.
       // Forget them now, before anything else can fail, so the dialog never
       // goes on showing the pre-update text for a branch the server merged.

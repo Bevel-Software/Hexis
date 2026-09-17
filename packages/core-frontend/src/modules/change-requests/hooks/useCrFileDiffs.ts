@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { readFileAtForkPoint, readFileOnBranch, type ForkPointFile } from '../services/change-requests.api';
+import { PR_STALE_EVENT } from '../../../core/events';
 import { isBinaryFile } from '../../workspace/components/renderers';
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
@@ -20,10 +21,13 @@ import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
  * `mainRaw` is still the "before" in exactly one case: branches with no shared
  * history have no fork point to read, and the tip is the only text left.
  *
- * Keyed by CR number + path + revision so a tab switch or a reload can never
- * show the previous file's diff under this file's heading. The fork read is
- * keyed by revision too: Update moves a request's fork point, and a revision
- * bump is the only refresh signal this hook gets.
+ * Branch reads are keyed by CR number + path + revision so a tab switch or a
+ * reload can never show the previous file's diff under this file's heading.
+ * Fork reads are keyed by number + path alone: resolving a fork point costs
+ * the server two branch fetches and a `merge-base` per box, and a revision
+ * bump (a tab switch, an apply elsewhere on the page) does not move any
+ * request's fork point. The one thing that does — an Update — announces
+ * itself with {@link PR_STALE_EVENT}, which re-reads them.
  *
  * Per request: the diff; `[]` when the proposal has been overtaken; `null`
  * while a read is in flight; `'unreadable'` when a read failed, so the box
@@ -43,6 +47,20 @@ export function useCrFileDiffs(
   const [failed, setFailed] = useState<Set<string>>(new Set());
   /** Requests already made, so a failed read is not retried on every render. */
   const asked = useRef<Set<string>>(new Set());
+  const forkAsked = useRef<Set<string>>(new Set());
+  /**
+   * Bumped when something moved a request — an apply, a cancel, an Update —
+   * which is the only way a fork point changes under an open page.
+   */
+  const [forkEpoch, setForkEpoch] = useState(0);
+  useEffect(() => {
+    const onStale = () => {
+      forkAsked.current.clear();
+      setForkEpoch((e) => e + 1);
+    };
+    window.addEventListener(PR_STALE_EVENT, onStale);
+    return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+  }, []);
 
   // Only the change requests that actually touch this file have anything to show.
   const relevant = useMemo(
@@ -50,6 +68,7 @@ export function useCrFileDiffs(
     [crs, repoRelativePath],
   );
   const key = (n: number) => `${n}::${repoRelativePath}::${revision}`;
+  const forkKey = (n: number) => `${n}::${repoRelativePath}`;
   const wanted = relevant.map((c) => `${c.number}|${c.branch}`).join(',');
 
   /**
@@ -81,29 +100,36 @@ export function useCrFileDiffs(
           // the box says it couldn't read.
           setFailed((s) => new Set(s).add(k));
         });
+    }
+    for (const cr of relevant) {
+      const fk = forkKey(cr.number);
+      if (forkAsked.current.has(fk)) continue;
+      forkAsked.current.add(fk);
       readFileAtForkPoint(cr.number, null, repoRelativePath)
-        .then((read) => setForkReads((m) => new Map(m).set(k, read)))
+        .then((read) =>
+          setForkReads((m) => new Map(m).set(fk, read)),
+        )
         .catch(() => {
           // Same rule for the before side: an unreadable fork point is no
           // claim, and falling back to main would bring back the very
           // "deletions" this reads the fork point to avoid.
-          setFailed((s) => new Set(s).add(k));
+          setFailed((s) => new Set(s).add(fk));
         });
     }
     // `contents` is intentionally out: it changes on every arrival, and the
     // `asked` guard already makes each (cr, file, revision) fetch once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, repoRelativePath, revision]);
+  }, [wanted, repoRelativePath, revision, forkEpoch]);
 
   return useMemo(() => {
     const out = new Map<number, CrFileDiff>();
     for (const cr of relevant) {
-      if (failed.has(key(cr.number))) {
+      if (failed.has(key(cr.number)) || failed.has(forkKey(cr.number))) {
         out.set(cr.number, 'unreadable');
         continue;
       }
       const branchRaw = contents.get(key(cr.number));
-      const fork = forkReads.get(key(cr.number));
+      const fork = forkReads.get(forkKey(cr.number));
       // The before side: the fork point's text; '' when the request ADDS the
       // file (absent at the fork point); main only when there is no fork point.
       const before =

@@ -60,6 +60,7 @@ const approval: FileApprovalState = {
   path: 'Sales/deal.yaml',
   eligibleApprovers: { roles: ['Admin'], users: [] },
   approvedBy: [],
+  inMergeGate: false,
   isApproved: false,
   viewerCanApprove: false,
 };

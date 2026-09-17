@@ -142,6 +142,7 @@ describe('PullRequestService — change request link', () => {
     const git = {
       resolvePrShas: async () => ({ baseSha: BASE, headSha: HEAD }),
       changedFilesForPr: async () => [],
+      forkPointForPr: async () => ({ mergeBaseSha: FORK, behind: false }),
     } as unknown as GitService;
     const workspace = {
       findAnyWorkspaceId: async () => 'ws-main',
