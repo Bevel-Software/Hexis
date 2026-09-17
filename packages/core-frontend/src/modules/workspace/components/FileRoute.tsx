@@ -87,6 +87,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
 
   const {
     workspaceId,
+    workspaceBranch,
     openFilePath,
     addTab,
     hydrateTabs,
@@ -158,6 +159,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       gitAvailability: git.availability,
       gitLastError: git.lastError,
       workspaceId,
+      workspaceBranch,
       bootstrapError: workspace.bootstrapError,
       hydrationKey: `${workspaceId}.${branchFromUrl}`,
       lastHydratedKey: lastHydratedKeyRef.current,
@@ -184,7 +186,23 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
 
     let cancelled = false;
     const branchKnown = currentBranch !== null;
-    const branchMatches = branchKnown && currentBranch === branchFromUrl;
+    // BOTH the workspace and the status it reported have to be on the URL's
+    // branch. They are two different facts:
+    //   - `workspaceBranch` is what `workspaceId` IS (decoded straight off the
+    //     id, so it moves in the same tick as the workspace).
+    //   - `currentBranch` is what the last status refresh said, which is
+    //     fetched against a workspace and lags a switch — and `useGitState`
+    //     RETAINS the previous branch when a refresh fails.
+    // A retained status can therefore name the URL's branch while
+    // `workspaceId` already serves a different one: switch main → alice/draft,
+    // the status refresh against alice/draft's workspace fails and keeps
+    // saying `main`, then the user goes back to /workspace/main/... On the
+    // status alone that reads as a match, and the hydrate below would read
+    // main's paths out of alice/draft's workspace. Requiring the workspace
+    // itself to agree makes that impossible; the mismatch falls through to the
+    // re-bootstrap below, which is the recovery.
+    const branchMatches =
+      branchKnown && currentBranch === branchFromUrl && workspaceBranch === branchFromUrl;
 
     // Nothing is read until we know which branch `workspaceId` is serving.
     // Before, an unknown status (`gitStatusBranch=null` — every fresh browser
@@ -254,7 +272,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
         const hydrateSeq = ++hydrateSeqRef.current;
         trace('hydrate:start', { hydrateSeq, paths, activePath });
         try {
-          const { surviving, dropped, denied } = await hydrateTabs(paths, activePath);
+          const { surviving, dropped, denied, superseded } = await hydrateTabs(paths, activePath);
           // The shared `openTabs`/`openFilePath` are this render's, from before
           // the hydration; log what it left open, picking the active tab the
           // way `hydrateTabs` does.
@@ -271,6 +289,17 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
                 : (surviving[surviving.length - 1] ?? null),
           });
           if (cancelled) return;
+          // A hydration that never reached the tab strip — the workspace moved
+          // to another branch, or a newer restore overtook it — is not a
+          // hydration of this key. Recording it would mark the branch done
+          // while its tabs were never opened, and (`hydratedKeyRef` unset on
+          // the hook's side) never persisted again either. Leave the marker
+          // alone so the next run redoes it, and classify nothing: these
+          // results describe a strip that isn't on screen.
+          if (superseded) {
+            trace('hydrate:superseded', { hydrateSeq });
+            return;
+          }
           lastHydratedKeyRef.current = hydrationKey;
           // If the URL deeplinked to a path that 404'd or 403'd, say why
           // nothing is showing. Persisted (non-deeplinked) tabs that fell in
@@ -350,6 +379,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     branchFromUrl,
     pathFromUrl,
     workspaceId,
+    workspaceBranch,
     currentBranch,
     hasUnsavedEdits,
   ]);
@@ -448,8 +478,40 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // start reading." whenever there is no active tab carrying content — which,
   // while the URL names a file, is the blank page this ticket is about.
   const viewerIsBlank = !openFilePath || workspace.activeTab?.content == null;
+
+  /**
+   * The viewer is showing the file the URL names, read from the branch the URL
+   * names. Blankness alone is not the question: navigating from one open file
+   * to another (or to the same path on another branch) leaves the PREVIOUS
+   * tab's content on screen for the whole read, so a blank-only test called
+   * that "ready" and showed the old file with no sign that a new one was
+   * coming. Anything short of "the target, on the target's branch, with bytes
+   * in hand" is still loading.
+   */
+  const viewerShowsTarget =
+    !viewerIsBlank &&
+    openFilePath === pathFromUrl &&
+    currentBranch === branchFromUrl &&
+    workspaceBranch === branchFromUrl;
+
+  /**
+   * An id segment whose path we haven't resolved yet: `pathFromUrl` is empty,
+   * so there is no path to compare and `viewerShowsTarget` is false by
+   * construction. Canonicalizing an open file (path URL → its id URL) passes
+   * through exactly this state with the file already on screen and nothing at
+   * all in flight — treating it as "not the target" would flash a loading
+   * screen over a page the user is reading, on every single file open. So
+   * while an id resolves, only true blankness counts as loading.
+   */
+  const resolvingId = segmentIsId && pathFromUrl === '';
+
   const loadingFile =
-    !error && !goneBranch && !bootstrapFailure && !statusUnknown && segment !== '' && viewerIsBlank
+    !error &&
+    !goneBranch &&
+    !bootstrapFailure &&
+    !statusUnknown &&
+    segment !== '' &&
+    (resolvingId ? viewerIsBlank : !viewerShowsTarget)
       ? pathFromUrl || segment
       : null;
 

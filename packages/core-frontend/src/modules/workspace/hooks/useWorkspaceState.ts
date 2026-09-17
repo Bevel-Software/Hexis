@@ -10,6 +10,7 @@ import {
 } from '../../change-requests/services/propose.api';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
+  HydrateResult,
   OpenTab,
   PendingEntry,
   UploadError,
@@ -152,6 +153,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // Monotonic token so a slow `addTab` whose response arrives after a newer add
   // doesn't clobber the newer state.
   const addRequestIdRef = useRef(0);
+  // A SECOND token, for hydrations only. "Which file should be active" and
+  // "which restore owns the tab strip" are different questions, and sharing one
+  // counter conflated them: an ordinary `addTab` starting mid-hydration made
+  // the hydration look superseded, so it dropped the branch's whole restored
+  // tab list on the floor AND left `hydratedKeyRef` unset, which silently
+  // disables persistence for that branch until the next switch. Only a NEWER
+  // hydration (or the workspace moving) may retire a hydration's claim on the
+  // strip; a newer open only outranks it for activation.
+  const hydrateRequestIdRef = useRef(0);
   // Tracks the (workspaceId, persistenceBranch) key we've successfully hydrated
   // for. Auto-persist effect won't write until hydrate has run for the current
   // key — avoids overwriting localStorage with `[]` before the restore lands.
@@ -432,8 +442,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const hydrateTabs = useCallback(async (
     paths: string[],
     activePath: string | null,
-  ): Promise<{ surviving: string[]; dropped: string[]; denied: string[] }> => {
-    if (!workspaceId) return { surviving: [], dropped: paths.slice(), denied: [] };
+  ): Promise<HydrateResult> => {
+    // No workspace, nothing read, nothing owned: `superseded` so the caller
+    // doesn't record a restore that never happened.
+    if (!workspaceId) {
+      return { surviving: [], dropped: paths.slice(), denied: [], superseded: true };
+    }
     // The key these tabs belong to, pinned from THIS render's (workspaceId,
     // workspaceBranch) pair — the two always move together, so the key can
     // never cross one branch's workspace with another branch's name. It used
@@ -444,16 +458,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // Deduplicate while preserving order.
     const uniqPaths = paths.filter((p, i) => paths.indexOf(p) === i);
 
-    // Same token as `addTab`: a hydration and an open are both "what the user
-    // wants active now", and whichever started last wins when they settle out
-    // of order.
+    // Two claims, two tokens. `addRequestIdRef` says "this is the newest thing
+    // the user asked to have ACTIVE" — a hydration and an open compete for
+    // that, and whichever started last wins when they settle out of order.
+    // `hydrateRequestIdRef` says "this restore owns the tab strip", which only
+    // another restore can take away.
     const requestId = ++addRequestIdRef.current;
+    const hydrateId = ++hydrateRequestIdRef.current;
 
     if (uniqPaths.length === 0) {
       setOpenTabs([]);
       setActiveTabPath(null);
       hydratedKeyRef.current = hydratedKey;
-      return { surviving: [], dropped: [], denied: [] };
+      return { surviving: [], dropped: [], denied: [], superseded: false };
     }
 
     // Fetch every path in parallel. 404s are silently dropped (file no longer
@@ -463,12 +480,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // access message instead of "file not found". Other errors throw so the
     // caller can show "file-load-failed".
     const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
-    // Whoever the tabs belong to now, it is not this hydration: the workspace
-    // moved to another branch, or a newer open/hydrate started while these
-    // reads were in flight. Report what we read so the caller can still
-    // classify its deeplink, but do not touch the strip.
+    // The strip is no longer this hydration's to write: the workspace moved to
+    // another branch, or a newer restore started while these reads were in
+    // flight. Report what we read so the caller can still classify its
+    // deeplink, but touch nothing — and tell the caller, so it doesn't record
+    // a hydration that never landed.
     const superseded =
-      workspaceIdRef.current !== workspaceId || requestId !== addRequestIdRef.current;
+      workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
+    // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
+    // strip: its file still has to sit alongside the restored ones.
+    const outranked = requestId !== addRequestIdRef.current;
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
     const dropped: string[] = [];
@@ -501,7 +522,23 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
     if (superseded) {
       traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
-      return { surviving, dropped, denied };
+      return { surviving, dropped, denied, superseded: true };
+    }
+
+    if (outranked) {
+      // Merge instead of replace: the newer open's tab stays (it may not even
+      // be in `prev` yet — `addTab` appends with its own race-safe setter, so
+      // it lands on top of this list), and the restored tabs join it in their
+      // persisted order. Activation is left alone; the newer open is the
+      // user's latest intent and has already claimed it.
+      traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
+      const restored = new Set(surviving);
+      setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path))]);
+      // Still a completed restore for this key: the strip now holds this
+      // branch's tabs, so persistence may resume. Leaving the marker unset was
+      // what stopped this branch's tabs from ever being written again.
+      hydratedKeyRef.current = hydratedKey;
+      return { surviving, dropped, denied, superseded: false };
     }
 
     setOpenTabs(survivors);
@@ -511,7 +548,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       : (survivors[survivors.length - 1]?.path ?? null);
     setActiveTabPath(requested);
     hydratedKeyRef.current = hydratedKey;
-    return { surviving, dropped, denied };
+    return { surviving, dropped, denied, superseded: false };
   }, [workspaceId, workspaceBranch]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────

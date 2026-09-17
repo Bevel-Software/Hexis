@@ -40,7 +40,7 @@ export function makeWorkspaceFixture(
     activateTab: () => {},
     reorderTab: () => {},
     closeAllTabs: () => {},
-    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [] }),
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
     createFile: async () => {},
     createDirectory: async () => {},
     unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),

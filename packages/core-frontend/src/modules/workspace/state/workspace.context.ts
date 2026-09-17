@@ -48,6 +48,25 @@ export interface OpenTab {
   pendingFileContent: string | null;
 }
 
+/** What a `hydrateTabs` call read, and whether its result reached the strip. */
+export interface HydrateResult {
+  /** Paths that were read successfully. */
+  surviving: string[];
+  /** Paths that 404'd — no longer on this branch. */
+  dropped: string[];
+  /** Paths that 403'd — the user may not read them. */
+  denied: string[];
+  /**
+   * True when this restore never took ownership of the tab strip: the
+   * workspace moved to another branch, or a newer restore started, while its
+   * reads were in flight. The paths above still describe what was read (so a
+   * deeplink can be classified), but nothing was applied — a caller tracking
+   * "this (workspace, branch) has been hydrated" must NOT record this one, or
+   * the branch's tabs are never restored and never persisted again.
+   */
+  superseded: boolean;
+}
+
 export interface WorkspaceContextValue {
   workspaceId: string | null;
   /**
@@ -204,7 +223,7 @@ export interface WorkspaceContextValue {
   hydrateTabs: (
     paths: string[],
     activePath: string | null,
-  ) => Promise<{ surviving: string[]; dropped: string[]; denied: string[] }>;
+  ) => Promise<HydrateResult>;
 
   createFile: (relativePath: string, content?: string) => Promise<void>;
   createDirectory: (relativePath: string) => Promise<void>;

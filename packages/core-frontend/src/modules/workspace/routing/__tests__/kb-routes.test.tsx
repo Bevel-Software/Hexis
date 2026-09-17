@@ -369,10 +369,13 @@ describe('useFileNav: which branch a click lands on', () => {
 
   it('decodes the URL branch exactly once — the pathname is still encoded', () => {
     navigateMock.mockClear();
-    const { result } = renderNav('main', 'knowledge-base', '/workspace/alice%2Fdraft/Knowledge/Old.md');
+    // `alice%2Fdraft` would prove nothing: decoding it twice gives the same
+    // `alice/draft` as decoding it once. This segment survives a second decode
+    // visibly — once gives `alice%25`, which re-encodes to the URL below;
+    // twice gives `alice%`, which re-encodes to `/workspace/alice%25/…`.
+    const { result } = renderNav('main', 'knowledge-base', '/workspace/alice%2525/Knowledge/Old.md');
     result.current.openFile('Knowledge/New.md');
-    // Decoded to `alice/draft`, then re-encoded canonically by kbFileUrl.
-    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/New.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2525/Knowledge/New.md');
   });
 
   it('a relative link during the same switch also follows the URL branch', () => {

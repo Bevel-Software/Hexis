@@ -5,16 +5,28 @@ import type { ReactNode } from 'react';
 
 // The node-id lookup behind the canonical-URL redirect, so a test can say a
 // file HAS an id without a backend.
-const routesMock = vi.hoisted(() => ({ fetchNodeId: vi.fn() }));
+const routesMock = vi.hoisted(() => ({
+  fetchNodeId: vi.fn(),
+  fetchNodeWorkspacePath: vi.fn(),
+}));
 vi.mock('../../routing/kb-routes', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../routing/kb-routes')>();
-  return { ...actual, fetchNodeId: routesMock.fetchNodeId };
+  return {
+    ...actual,
+    fetchNodeId: routesMock.fetchNodeId,
+    fetchNodeWorkspacePath: routesMock.fetchNodeWorkspacePath,
+  };
 });
 import type { WorkingTreeStatus } from '@bevel-software/platform-shared';
 import { FileRoute } from '../FileRoute';
 import { WorkspaceApiError } from '../../services/workspace.api';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
-import { WorkspaceContext, type WorkspaceContextValue, type OpenTab } from '../../state/workspace.context';
+import {
+  WorkspaceContext,
+  type WorkspaceContextValue,
+  type OpenTab,
+  type HydrateResult,
+} from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { ReviewContext, type ReviewContextValue } from '../../../review/state/review.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
@@ -65,6 +77,11 @@ function makeWorkspace(overrides: Partial<WorkspaceContextValue> = {}): Workspac
     });
   const hasUnsavedFileChanges = overrides.hasUnsavedFileChanges ?? dirtyTabFilenames.length > 0;
   return makeWorkspaceFixture({
+    // Left unset on purpose: `renderAt` fills it from the git status branch,
+    // because in production "the branch this workspace IS" and "the branch its
+    // status reports" are one fact seen twice. A test that means them to
+    // disagree — a branch switch caught in flight — names it explicitly.
+    workspaceBranch: overrides.workspaceBranch ?? null,
     openTabs,
     activeTab,
     dirtyTabFilenames,
@@ -78,10 +95,8 @@ function makeWorkspace(overrides: Partial<WorkspaceContextValue> = {}): Workspac
 }
 
 /** One place owns the hydrateTabs result shape, so contract changes touch one line. */
-function makeHydrateResult(
-  overrides: Partial<{ surviving: string[]; dropped: string[]; denied: string[] }> = {},
-): { surviving: string[]; dropped: string[]; denied: string[] } {
-  return { surviving: [], dropped: [], denied: [], ...overrides };
+function makeHydrateResult(overrides: Partial<HydrateResult> = {}): HydrateResult {
+  return { surviving: [], dropped: [], denied: [], superseded: false, ...overrides };
 }
 
 function LocationProbe() {
@@ -125,8 +140,20 @@ function renderAt(
   rerenderWorkspace: (next: WorkspaceContextValue) => void;
   rerenderGit: (next: GitContextValue) => void;
 } {
-  let workspace = opts.workspace ?? makeWorkspace();
   let git = opts.git ?? makeGit();
+  /**
+   * A workspace that hasn't said which branch it is, is on the branch its
+   * status reports — the two only differ while a switch is in flight, and a
+   * test that means that says so. Without this, every fixture would silently
+   * describe a state the app cannot be in (a workspace on `main` whose status
+   * reports `alice/draft`), which `FileRoute` now correctly refuses to read
+   * from.
+   */
+  const onStatusBranch = (ws: WorkspaceContextValue): WorkspaceContextValue =>
+    ws.workspaceBranch === null && ws.workspaceId !== null
+      ? { ...ws, workspaceBranch: git.status?.branch ?? null }
+      : ws;
+  let workspace = onStatusBranch(opts.workspace ?? makeWorkspace());
   const review: ReviewContextValue = {
     session: null,
     selectedPath: null,
@@ -182,7 +209,7 @@ function renderAt(
     workspace,
     git,
     rerenderWorkspace: (next) => {
-      workspace = next;
+      workspace = onStatusBranch(next);
       rerender(tree());
     },
     rerenderGit: (next) => {
@@ -197,6 +224,7 @@ const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 30
 
 beforeEach(() => {
   routesMock.fetchNodeId.mockReset().mockResolvedValue(null);
+  routesMock.fetchNodeWorkspacePath.mockReset().mockResolvedValue(null);
 });
 
 describe('FileRoute: the canonical id URL', () => {
@@ -538,7 +566,10 @@ describe('FileRoute: nothing waits silently', () => {
       refreshStatus,
     });
 
-    renderAt('/workspace/main/Knowledge/Foo.md', { git, workspace: makeWorkspace({ hydrateTabs }) });
+    const { rerenderGit, rerenderWorkspace } = renderAt('/workspace/main/Knowledge/Foo.md', {
+      git,
+      workspace: makeWorkspace({ hydrateTabs, workspaceBranch: 'alice/draft' }),
+    });
 
     expect(
       await screen.findByText(/Couldn't check which branch this workspace is on/i),
@@ -549,6 +580,17 @@ describe('FileRoute: nothing waits silently', () => {
     await waitFor(() => expect(refreshStatus).toHaveBeenCalledTimes(1));
     // Still no read against a workspace whose branch is unconfirmed.
     expect(hydrateTabs).not.toHaveBeenCalled();
+
+    // The retry succeeds: the status answers `main`, the workspace bootstraps
+    // onto it, and the route does what it was holding off on — it reads. A
+    // dead button or an error screen that never clears would stop right here,
+    // which is what the assertions above alone could not tell apart.
+    rerenderWorkspace(makeWorkspace({ hydrateTabs, workspaceBranch: 'main' }));
+    rerenderGit(makeGit({ status: makeStatus('main'), availability: 'ready' }));
+    await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/Couldn't check which branch this workspace is on/i),
+    ).not.toBeInTheDocument();
   });
 
   it('a failed status refresh on the branch we are ALREADY on is not an error screen', async () => {
@@ -599,6 +641,90 @@ describe('FileRoute: nothing waits silently', () => {
     expect(screen.queryByText(/Open a page to start reading/i)).not.toBeInTheDocument();
   });
 
+  it('names the file it is opening even while the PREVIOUS file is still on screen', async () => {
+    // Blankness is not the question. Clicking from one open file to another
+    // leaves the old tab's content rendered for the whole read, so a
+    // blank-only test called that "ready" and the page sat on the wrong file
+    // with nothing to say a new one was coming.
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(() => new Promise(() => {}));
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const foo = makeTab({ path: 'Knowledge/Foo.md' });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
+      git,
+      workspace: makeWorkspace({ openTabs: [foo], activeTab: foo, hydrateTabs, addTab }),
+    });
+    await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
+    expect(screen.queryByText(/Opening/)).not.toBeInTheDocument();
+
+    // A click on another file on the same branch: its read never lands.
+    fireEvent.click(screen.getByLabelText('click-baz'));
+    expect(await screen.findByText(/Opening Baz\.md/)).toBeInTheDocument();
+    expect(screen.getByText('Knowledge/Baz.md')).toBeInTheDocument();
+  });
+
+  it('does not flash a loading screen over the open file while its id URL resolves', async () => {
+    // Canonicalising a path URL to the node's id URL passes through "the URL
+    // names an id we have not resolved yet" with the file already on screen
+    // and nothing in flight. Reading that as "not the target" would flash the
+    // loading screen on every single file open.
+    const PATH = 'Plugins/GTM/web-search.tool';
+    routesMock.fetchNodeId.mockResolvedValue('web_search');
+    let releaseResolve: ((path: string | null) => void) | undefined;
+    routesMock.fetchNodeWorkspacePath.mockImplementation(
+      () => new Promise((resolve) => { releaseResolve = resolve; }),
+    );
+    const tab = makeTab({ path: PATH });
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: [PATH] }),
+    );
+
+    renderAt(`/workspace/main/${PATH}`, {
+      git: makeGit({ status: makeStatus('main') }),
+      workspace: makeWorkspace({ openTabs: [tab], activeTab: tab, hydrateTabs }),
+    });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('pathname')).toHaveTextContent('/workspace/main/web_search'),
+    );
+    await settle();
+    // The id is still resolving — and the file it names is the one already up.
+    expect(routesMock.fetchNodeWorkspacePath).toHaveBeenCalled();
+    expect(screen.queryByText(/Opening/)).not.toBeInTheDocument();
+    releaseResolve?.(PATH);
+  });
+
+  it('never reads from a workspace on another branch even when a RETAINED status says it matches', async () => {
+    // `useGitState` keeps the previous branch when a refresh fails, so after
+    // switching away and back the status can name the URL's branch while
+    // `workspaceId` still serves the branch we switched to. The status alone
+    // reads as a match; the workspace itself says otherwise, and it is the one
+    // the read would go to.
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
+    const setPersistenceBranch = vi.fn();
+
+    renderAt('/workspace/main/Knowledge/Foo.md', {
+      git: makeGit({ status: makeStatus('main') }),
+      workspace: makeWorkspace({
+        hydrateTabs,
+        addTab,
+        setPersistenceBranch,
+        workspaceBranch: 'alice/draft',
+      }),
+    });
+
+    await settle();
+    expect(hydrateTabs).not.toHaveBeenCalled();
+    expect(addTab).not.toHaveBeenCalled();
+    // It re-bootstraps onto the URL's branch instead, and says what it is doing.
+    expect(setPersistenceBranch).toHaveBeenCalledWith('main');
+    expect(screen.getByText(/Opening Foo\.md/)).toBeInTheDocument();
+  });
+
   it('keeps the generic empty state for a URL that names no file', async () => {
     localStorage.clear();
     const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
@@ -618,7 +744,10 @@ describe('FileRoute: nothing waits silently', () => {
       async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
     );
     const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
-    const workspace = makeWorkspace({ hydrateTabs, addTab });
+    // The workspace knows its own branch the moment it exists (it is decoded
+    // off the workspace id); it is the STATUS that hasn't answered yet, and
+    // the status is what says the clone on disk is really on that branch.
+    const workspace = makeWorkspace({ hydrateTabs, addTab, workspaceBranch: 'alice/draft' });
     const { rerenderGit } = renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
       git: makeGit({ status: null, availability: 'loading' }),
       workspace,

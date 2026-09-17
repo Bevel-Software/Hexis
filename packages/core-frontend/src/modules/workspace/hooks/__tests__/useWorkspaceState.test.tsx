@@ -356,6 +356,87 @@ describe('useWorkspaceState multi-tab', () => {
   });
 
   /**
+   * A restore and an open are different claims. The open says "this file is
+   * what I want ACTIVE"; the restore says "these tabs are this branch's".
+   * Sharing one token made an ordinary click mid-restore look like it had
+   * retired the restore: the branch's whole tab list was dropped on the floor,
+   * and — the marker for "this key has been hydrated" never being set —
+   * persistence for that branch stayed off, so the list was never written
+   * again either. The click wins the focus; it does not empty the strip.
+   */
+  it('an open during a hydration keeps the focus without discarding the restored tabs', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+
+    // The restore's reads hang; the click's read answers at once.
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => {
+      if (path === 'c.md') return 'content:c.md';
+      return new Promise<string>((resolve) => { pendingReads.push(resolve); });
+    });
+
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
+    await act(async () => { await result.current.addTab('c.md'); });
+    expect(result.current.activeTab?.path).toBe('c.md');
+
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:restored');
+      await hydration;
+    });
+
+    // Every restored tab is there, alongside the one the user clicked, and the
+    // click keeps the focus it claimed.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['a.md', 'b.md', 'c.md']);
+    expect(result.current.activeTab?.path).toBe('c.md');
+
+    // And persistence is live for this branch: the restore counted.
+    await waitFor(() => {
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).paths).toEqual(['a.md', 'b.md', 'c.md']);
+    });
+  });
+
+  /**
+   * The other half of the same split: a NEWER RESTORE does retire an older
+   * one, and the older one has to say so. A caller that recorded it as done
+   * would mark the branch hydrated on the strength of a result that never
+   * reached the screen.
+   */
+  it('reports a hydration overtaken by a newer hydration as superseded', async () => {
+    const { result } = await (async () => {
+      const r = renderHook(() => useWorkspaceState());
+      await waitFor(() => expect(r.result.current.workspaceId).toBe('ws-1'));
+      return r;
+    })();
+
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { pendingReads.push(resolve); }),
+    );
+    let first: Promise<{ superseded: boolean }> | undefined;
+    act(() => { first = result.current.hydrateTabs(['a.md'], 'a.md'); });
+
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => `content:${path}`);
+    await act(async () => { await result.current.hydrateTabs(['b.md'], 'b.md'); });
+
+    let firstResult: { superseded: boolean } | undefined;
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:a.md');
+      firstResult = await first;
+    });
+    expect(firstResult?.superseded).toBe(true);
+    // The newer restore's strip stands, untouched by the older one.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['b.md']);
+  });
+
+  /**
    * The crossed key from the reproduction: `bevel.tabs.main.someone/draft` —
    * one branch's workspace under another branch's name. It was written
    * mid-switch, because the persistence key took its branch from
