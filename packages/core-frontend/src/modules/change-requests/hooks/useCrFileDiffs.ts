@@ -23,11 +23,19 @@ import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
  *
  * Branch reads are keyed by CR number + path + revision so a tab switch or a
  * reload can never show the previous file's diff under this file's heading.
- * Fork reads are keyed by number + path alone: resolving a fork point costs
- * the server two branch fetches and a `merge-base` per box, and a revision
- * bump (a tab switch, an apply elsewhere on the page) does not move any
- * request's fork point. The one thing that does — an Update — announces
- * itself with {@link PR_STALE_EVENT}, which re-reads them.
+ * Fork reads carry no revision: resolving a fork point costs the server two
+ * branch fetches and a `merge-base` per box, and a revision bump (a tab
+ * switch, an apply elsewhere on the page) does not move any request's fork
+ * point. The one thing that does — an Update — announces itself with
+ * {@link PR_STALE_EVENT}.
+ *
+ * BOTH keys carry that event's epoch, because the two sides of one diff have
+ * to describe the same moment. Re-reading only the fork point after an Update
+ * paired the merged target's text with the branch copy cached from before the
+ * merge, and the target's own newer lines rendered as deletions inside the
+ * request — the exact reading this hook exists to prevent, arriving seconds
+ * after the Update that was supposed to settle it. Under a new epoch neither
+ * side is cached, so a box waits rather than mixing two moments.
  *
  * Per request: the diff; `[]` when the proposal has been overtaken; `null`
  * while a read is in flight; `'unreadable'` when a read failed, so the box
@@ -49,14 +57,16 @@ export function useCrFileDiffs(
   const asked = useRef<Set<string>>(new Set());
   const forkAsked = useRef<Set<string>>(new Set());
   /**
-   * Bumped when something moved a request — an apply, a cancel, an Update —
-   * which is the only way a fork point changes under an open page.
+   * Bumped when something moved a request — an apply, a cancel, an Update.
+   * Both sides are re-read: a request that moved has a new head as well as a
+   * new fork point, and half a re-read is a diff between two moments.
    */
-  const [forkEpoch, setForkEpoch] = useState(0);
+  const [staleEpoch, setStaleEpoch] = useState(0);
   useEffect(() => {
     const onStale = () => {
+      asked.current.clear();
       forkAsked.current.clear();
-      setForkEpoch((e) => e + 1);
+      setStaleEpoch((e) => e + 1);
     };
     window.addEventListener(PR_STALE_EVENT, onStale);
     return () => window.removeEventListener(PR_STALE_EVENT, onStale);
@@ -67,8 +77,8 @@ export function useCrFileDiffs(
     () => crs.filter((c) => c.touchedNodePaths.includes(repoRelativePath)),
     [crs, repoRelativePath],
   );
-  const key = (n: number) => `${n}::${repoRelativePath}::${revision}`;
-  const forkKey = (n: number) => `${n}::${repoRelativePath}`;
+  const key = (n: number) => `${n}::${repoRelativePath}::${revision}::${staleEpoch}`;
+  const forkKey = (n: number) => `${n}::${repoRelativePath}::${staleEpoch}`;
   const wanted = relevant.map((c) => `${c.number}|${c.branch}`).join(',');
 
   /**
@@ -119,7 +129,7 @@ export function useCrFileDiffs(
     // `contents` is intentionally out: it changes on every arrival, and the
     // `asked` guard already makes each (cr, file, revision) fetch once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, repoRelativePath, revision, forkEpoch]);
+  }, [wanted, repoRelativePath, revision, staleEpoch]);
 
   return useMemo(() => {
     const out = new Map<number, CrFileDiff>();
@@ -145,5 +155,5 @@ export function useCrFileDiffs(
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [relevant, contents, forkReads, failed, mainRaw, repoRelativePath, revision]);
+  }, [relevant, contents, forkReads, failed, mainRaw, repoRelativePath, revision, staleEpoch]);
 }

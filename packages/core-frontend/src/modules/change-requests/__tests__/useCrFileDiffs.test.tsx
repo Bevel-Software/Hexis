@@ -40,6 +40,35 @@ describe('useCrFileDiffs', () => {
     expect(api.readFileAtForkPoint).toHaveBeenCalledWith(21, null, PATH);
   });
 
+  it('after an Update both sides move together — the target\'s own newer line is never a deletion', async () => {
+    // Exactly what a successful Update leaves behind: the proposal branch now
+    // carries the target's line too, and the fork point is the target it was
+    // merged from. Re-reading only the fork point put THAT text opposite the
+    // branch copy cached from before the merge, and the box struck through the
+    // target's own edit — the failure this test exists for.
+    const MERGED_BRANCH = 'price: 120\nstatus: signed\n';
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    await waitFor(() => expect(result.current.get(21)).not.toBeNull());
+    expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100']);
+
+    api.readFileOnBranch.mockResolvedValue(MERGED_BRANCH);
+    api.readFileAtForkPoint.mockResolvedValue({ content: MAIN_NOW, forkSha: 'e'.repeat(40) });
+    await act(async () => {
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
+    });
+
+    // Both sides are read again — the branch copy as well as the fork point.
+    await waitFor(() => expect(api.readFileOnBranch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.readFileAtForkPoint).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(lines(result.current.get(21), 'added')).toEqual(['price: 120']),
+    );
+    const d = result.current.get(21);
+    expect(lines(d, 'removed')).toEqual(['price: 100']);
+    // Never the target's own line, at any moment after the event.
+    expect(lines(d, 'removed')).not.toContain('status: signed');
+  });
+
   it('re-reads the fork point when a request moves, not on every revision bump', async () => {
     const { result, rerender } = renderHook(({ rev }: { rev: number }) => useCrFileDiffs([CR], PATH, MAIN_NOW, rev), {
       initialProps: { rev: 0 },
