@@ -1378,6 +1378,33 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
+  /**
+   * Write the empty-folder placeholder into `relativeDir` when that folder
+   * exists and holds nothing; true when it wrote one. Unlike
+   * {@link createDirectory} it never creates the folder: one that is gone was
+   * deleted explicitly and stays gone. A folder reached through a link is
+   * refused like any write through one, so the placeholder cannot land
+   * outside the workspace.
+   */
+  async writeFolderPlaceholder(workspaceId: string, relativeDir: string): Promise<boolean> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const placeholder = path.join(absoluteDir, FOLDER_PLACEHOLDER);
+    await this.assertNotThroughLink(placeholder, workspaceDir);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(absoluteDir);
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
+    if (entries.length > 0) return false;
+    await fs.writeFile(placeholder, '', { flag: 'wx' });
+    return true;
+  }
+
   async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);

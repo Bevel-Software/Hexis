@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
@@ -1634,12 +1634,17 @@ describe('folders never vanish', () => {
     const base = await start();
     await fs.writeFile(KB('unkeepable/only.md'), 'x');
     const write = fs.writeFile.bind(fs);
-    fs.writeFile = (async (p: string, ...rest: unknown[]) => {
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation(async (p, ...rest) => {
       if (p.endsWith('.gitkeep')) throw new Error('disk full');
-      return (write as (...a: unknown[]) => Promise<void>)(p, ...rest);
-    }) as typeof fs.writeFile;
+      return write(p, ...rest);
+    });
 
-    const res = await tool(base, 'delete_file', { path: KB('unkeepable/only.md') });
+    let res: Awaited<ReturnType<typeof tool>>;
+    try {
+      res = await tool(base, 'delete_file', { path: KB('unkeepable/only.md') });
+    } finally {
+      spy.mockRestore();
+    }
     expect(res.status).toBe(500);
     expect(res.body.error).toBe(
       `"${KB('unkeepable/only.md')}" was removed, but its folder "${KB('unkeepable')}" could not be kept: disk full`,

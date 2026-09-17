@@ -12,7 +12,6 @@ import {
   DEFAULT_BRANCH,
   KNOWLEDGE_DIR,
   canonicalRelativePath,
-  FOLDER_PLACEHOLDER,
   folderPlaceholderPath,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
@@ -259,7 +258,8 @@ export function createWorkspaceRoutes(
    * It runs in the folder's turn, which an explicit folder delete also takes,
    * and looks again inside it: a folder that is gone by then was deleted
    * explicitly and stays gone, and one that gained an entry needs nothing.
-   * The placeholder is only ever written into a folder that exists.
+   * The placeholder is only ever written into a folder that exists, and never
+   * through a link (see `writeFolderPlaceholder`).
    *
    * A failure is the request's failure: the removal landed, but a request
    * that answers success would leave a folder that vanishes on the next
@@ -282,10 +282,7 @@ export function createWorkspaceRoutes(
           workspaceId,
           user,
           folderPlaceholderPath(dir),
-          async () => {
-            if (!(await isEmptyFolder(absolute))) return;
-            await fs.writeFile(path.join(absolute, FOLDER_PLACEHOLDER), '', { flag: 'wx' });
-          },
+          () => workspaceService.writeFolderPlaceholder(workspaceId, dir),
           { skipFsTreeEvent: true },
         );
       });

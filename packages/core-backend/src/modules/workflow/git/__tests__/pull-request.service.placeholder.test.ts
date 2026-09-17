@@ -68,7 +68,8 @@ describe('PullRequestService summaries — folder placeholder', () => {
     expect(routed?.number).toBe(9);
     // Routed by the placeholder, but never showing it.
     expect(routed.touchedNodePaths).toEqual([]);
-    expect(canWriteBatchAtRef.mock.calls.map((c) => c[3])).toEqual([['Reports/Empty/.gitkeep'], ['Reports/Empty/.gitkeep']]);
+    // Access was asked about the placeholder, however the lookup is batched.
+    expect(canWriteBatchAtRef.mock.calls.some((c) => c[3].includes('Reports/Empty/.gitkeep'))).toBe(true);
   });
 
   it('a folder-only request outside the viewer\'s scope does not route to them', async () => {

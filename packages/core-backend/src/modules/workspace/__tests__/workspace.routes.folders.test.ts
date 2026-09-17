@@ -288,6 +288,50 @@ describe('workspace routes — folders never vanish', () => {
   });
 });
 
+describe('WorkspaceService.writeFolderPlaceholder', () => {
+  let root: string | null = null;
+  afterEach(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
+    root = null;
+  });
+
+  async function service() {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-placeholder-'));
+    const workspaceId = workspaceIdForBranch('placeholders');
+    const kbDir = path.join(root, workspaceId, KB);
+    await fs.mkdir(path.join(kbDir, '.git'), { recursive: true });
+    return { svc: new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs()), workspaceId, kbDir };
+  }
+
+  it('writes into an empty folder, and leaves a full or a vanished one alone', async () => {
+    const { svc, workspaceId, kbDir } = await service();
+    await fs.mkdir(path.join(kbDir, 'empty'));
+    await fs.mkdir(path.join(kbDir, 'full'));
+    await fs.writeFile(path.join(kbDir, 'full/a.md'), 'a');
+
+    await expect(svc.writeFolderPlaceholder(workspaceId, `${KB}/empty`)).resolves.toBe(true);
+    await expect(svc.writeFolderPlaceholder(workspaceId, `${KB}/full`)).resolves.toBe(false);
+    await expect(svc.writeFolderPlaceholder(workspaceId, `${KB}/gone`)).resolves.toBe(false);
+
+    expect(await fs.readdir(path.join(kbDir, 'empty'))).toEqual(['.gitkeep']);
+    expect(await fs.readdir(path.join(kbDir, 'full'))).toEqual(['a.md']);
+    expect(await exists(path.join(kbDir, 'gone'))).toBe(false);
+  });
+
+  it('never writes through a folder that is a link out of the workspace', async () => {
+    const { svc, workspaceId, kbDir } = await service();
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-placeholder-outside-'));
+    try {
+      await fs.symlink(outside, path.join(kbDir, 'linked'), 'dir');
+
+      await expect(svc.writeFolderPlaceholder(workspaceId, `${KB}/linked`)).rejects.toThrow();
+      expect(await fs.readdir(outside)).toEqual([]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('WorkspaceService.withFolderTurn', () => {
   let root: string | null = null;
   afterEach(async () => {
