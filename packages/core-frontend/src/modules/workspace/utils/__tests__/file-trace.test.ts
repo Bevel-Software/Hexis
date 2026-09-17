@@ -39,6 +39,26 @@ describe('file trace flag', () => {
     expect(syncFileTraceFlag('?trace=everything')).toBe(false);
   });
 
+  it('stays on for the page load and still logs when sessionStorage is unavailable', () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const unavailable = () => {
+      throw new DOMException('denied', 'SecurityError');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(unavailable);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(unavailable);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(unavailable);
+    try {
+      expect(syncFileTraceFlag('?trace=files')).toBe(true);
+      expect(syncFileTraceFlag('')).toBe(true);
+      traceFiles('hydrate:start', { branchFromUrl: 'main' });
+      expect(info).toHaveBeenCalledTimes(1);
+      expect(syncFileTraceFlag('?trace=off')).toBe(false);
+    } finally {
+      // The in-memory flag outlives the spies; clear it for the next test.
+      syncFileTraceFlag('?trace=off');
+    }
+  });
+
   it('logs the event and its fields under one prefix when on', () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     syncFileTraceFlag('?trace=files');

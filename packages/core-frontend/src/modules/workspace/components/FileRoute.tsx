@@ -145,34 +145,39 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 
-  useEffect(() => {
-    // Everything the decision below reads, so one console line says which
-    // gate held the page. A no-op unless the trace is on.
-    const trace = (decision: string, extra: Record<string, unknown> = {}) => {
-      if (!traceOn) return;
-      traceFiles(decision, {
-        url: location.pathname,
-        branchFromUrl,
-        pathFromUrl,
-        segment,
-        gitStatusBranch: currentBranch,
-        gitAvailability: git.availability,
-        gitLastError: git.lastError,
-        workspaceId,
-        bootstrapError: workspace.bootstrapError,
-        hydrationKey: `${workspaceId}.${branchFromUrl}`,
-        lastHydratedKey: lastHydratedKeyRef.current,
-        openTabs: workspace.openTabs.map((t) => t.path),
-        openFilePath,
-        hasUnsavedEdits,
-        ...extra,
-      });
-    };
+  // Everything the decisions below read, so one console line says which gate
+  // held the page. A no-op unless the trace is on.
+  const trace = (decision: string, extra: Record<string, unknown> = {}) => {
+    if (!traceOn) return;
+    traceFiles(decision, {
+      url: location.pathname,
+      branchFromUrl,
+      pathFromUrl,
+      segment,
+      gitStatusBranch: currentBranch,
+      gitAvailability: git.availability,
+      gitLastError: git.lastError,
+      workspaceId,
+      bootstrapError: workspace.bootstrapError,
+      hydrationKey: `${workspaceId}.${branchFromUrl}`,
+      lastHydratedKey: lastHydratedKeyRef.current,
+      openTabs: workspace.openTabs.map((t) => t.path),
+      openFilePath,
+      hasUnsavedEdits,
+      ...extra,
+    });
+  };
 
-    if (!workspaceId) {
-      trace('wait:no-workspace');
-      return;
-    }
+  // Trace only: a failed first bootstrap leaves `workspaceId` null and changes
+  // only `bootstrapError`, which the effect below does not re-run on (and must
+  // not: a re-run cancels an in-flight hydration). Log that wait from here.
+  useEffect(() => {
+    if (!workspaceId) trace('wait:no-workspace');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, workspace.bootstrapError, traceOn]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
     if (!branchFromUrl) return;
 
     let cancelled = false;
@@ -235,7 +240,21 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
         trace('hydrate:start', { hydrateSeq, paths, activePath });
         try {
           const { surviving, dropped, denied } = await hydrateTabs(paths, activePath);
-          trace('hydrate:settled', { hydrateSeq, cancelled, surviving, dropped, denied });
+          // The shared `openTabs`/`openFilePath` are this render's, from before
+          // the hydration; log what it left open, picking the active tab the
+          // way `hydrateTabs` does.
+          trace('hydrate:settled', {
+            hydrateSeq,
+            cancelled,
+            surviving,
+            dropped,
+            denied,
+            openTabs: surviving,
+            openFilePath:
+              activePath && surviving.includes(activePath)
+                ? activePath
+                : (surviving[surviving.length - 1] ?? null),
+          });
           if (cancelled) return;
           lastHydratedKeyRef.current = hydrationKey;
           // If the URL deeplinked to a path that 404'd or 403'd, say why

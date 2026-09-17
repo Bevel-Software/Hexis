@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -92,8 +92,12 @@ function LocationProbe() {
 function renderAt(
   url: string,
   opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
-): { workspace: WorkspaceContextValue; git: GitContextValue } {
-  const workspace = opts.workspace ?? makeWorkspace();
+): {
+  workspace: WorkspaceContextValue;
+  git: GitContextValue;
+  rerenderWorkspace: (next: WorkspaceContextValue) => void;
+} {
+  let workspace = opts.workspace ?? makeWorkspace();
   const git = opts.git ?? makeGit();
   const review: ReviewContextValue = {
     session: null,
@@ -132,7 +136,7 @@ function renderAt(
     );
   }
 
-  render(
+  const tree = () => (
     <MemoryRouter initialEntries={[url]}>
       <Tree>
         <Routes>
@@ -140,10 +144,18 @@ function renderAt(
         </Routes>
         <LocationProbe />
       </Tree>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const { rerender } = render(tree());
 
-  return { workspace, git };
+  return {
+    workspace,
+    git,
+    rerenderWorkspace: (next) => {
+      workspace = next;
+      rerender(tree());
+    },
+  };
 }
 
 beforeEach(() => {
@@ -432,6 +444,10 @@ describe('FileRoute: ?trace=files diagnostics', () => {
     localStorage.clear();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   function traceCalls(info: ReturnType<typeof vi.spyOn>) {
     return info.mock.calls
       .filter((c: unknown[]) => c[0] === '[trace:files]')
@@ -464,7 +480,6 @@ describe('FileRoute: ?trace=files diagnostics', () => {
     });
     // Behaviour unchanged: still waiting, still nothing on screen to say why.
     expect(hydrateTabs).not.toHaveBeenCalled();
-    info.mockRestore();
   });
 
   it('numbers each hydration so a start and its settle can be paired in the console', async () => {
@@ -484,9 +499,14 @@ describe('FileRoute: ?trace=files diagnostics', () => {
     const start = calls.find((c) => c.event === 'hydrate:start');
     const settled = calls.find((c) => c.event === 'hydrate:settled');
     expect(start?.fields).toMatchObject({ paths: ['Knowledge/Foo.md'], activePath: 'Knowledge/Foo.md' });
-    expect(settled?.fields).toMatchObject({ surviving: ['Knowledge/Foo.md'], cancelled: false });
+    expect(settled?.fields).toMatchObject({
+      surviving: ['Knowledge/Foo.md'],
+      cancelled: false,
+      // What the hydration left open, not this render's pre-hydration tabs.
+      openTabs: ['Knowledge/Foo.md'],
+      openFilePath: 'Knowledge/Foo.md',
+    });
     expect(settled?.fields.hydrateSeq).toBe(start?.fields.hydrateSeq);
-    info.mockRestore();
   });
 
   it('logs the failed status of a hydration before the error screen it already had', async () => {
@@ -504,7 +524,25 @@ describe('FileRoute: ?trace=files diagnostics', () => {
       status: 500,
       cancelled: false,
     });
-    info.mockRestore();
+  });
+
+  it('logs a bootstrap failure that arrives while the page waits for its workspace', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const git = makeGit({ status: null });
+    const { rerenderWorkspace } = renderAt('/workspace/main/Knowledge/Foo.md?trace=files', {
+      git,
+      workspace: makeWorkspace({ workspaceId: null }),
+    });
+
+    await waitFor(() => {
+      expect(traceCalls(info).some((c) => c.event === 'wait:no-workspace')).toBe(true);
+    });
+    rerenderWorkspace(makeWorkspace({ workspaceId: null, bootstrapError: { branch: 'main', status: 500 } }));
+
+    await waitFor(() => {
+      const waits = traceCalls(info).filter((c) => c.event === 'wait:no-workspace');
+      expect(waits.at(-1)?.fields).toMatchObject({ bootstrapError: { branch: 'main', status: 500 } });
+    });
   });
 
   it('logs nothing without the flag', async () => {
@@ -519,6 +557,5 @@ describe('FileRoute: ?trace=files diagnostics', () => {
 
     await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
     expect(traceCalls(info)).toHaveLength(0);
-    info.mockRestore();
   });
 });

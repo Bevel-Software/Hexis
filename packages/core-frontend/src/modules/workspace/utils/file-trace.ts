@@ -17,25 +17,29 @@
 export const FILE_TRACE_STORAGE_KEY = 'hexis.trace.files';
 const PREFIX = '[trace:files]';
 
+// Stands in for `sessionStorage` when it is unavailable (private mode quotas,
+// sandboxed frames), so the flag still holds for this page load.
+let memoryFlag = false;
+
 /** Reads `?trace=` from `search`, remembering or forgetting the flag for the session. */
 export function syncFileTraceFlag(search: string): boolean {
+  const value = new URLSearchParams(search).get('trace');
+  if (value === 'off') memoryFlag = false;
   try {
-    const value = new URLSearchParams(search).get('trace');
     if (value === 'files') sessionStorage.setItem(FILE_TRACE_STORAGE_KEY, '1');
     else if (value === 'off') sessionStorage.removeItem(FILE_TRACE_STORAGE_KEY);
-    return sessionStorage.getItem(FILE_TRACE_STORAGE_KEY) === '1';
   } catch {
-    // Storage unavailable (private mode quotas, sandboxed frames): the query
-    // string alone decides, for this render only.
-    return new URLSearchParams(search).get('trace') === 'files';
+    // Storage unavailable: `memoryFlag` carries it.
+    if (value === 'files') memoryFlag = true;
   }
+  return isFileTraceEnabled();
 }
 
 export function isFileTraceEnabled(): boolean {
   try {
-    return sessionStorage.getItem(FILE_TRACE_STORAGE_KEY) === '1';
+    return sessionStorage.getItem(FILE_TRACE_STORAGE_KEY) === '1' || memoryFlag;
   } catch {
-    return false;
+    return memoryFlag;
   }
 }
 
