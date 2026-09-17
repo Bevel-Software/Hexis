@@ -22,6 +22,7 @@ import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-err
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
+import type { SkillSaveCheck } from './workspace.tools.js';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -70,6 +71,8 @@ export function createWorkspaceRoutes(
   creatorAccess: ICreatorAccess,
   adminAccess: IAdminAccessService,
   disk: ITreeWalker,
+  /** Save-time skill check: `PUT /file` on a SKILL.md answers with `warnings` (advisory, never a refusal). */
+  skillSaveCheck?: SkillSaveCheck,
 ): express.Router {
   const router = express.Router();
 
@@ -1002,7 +1005,10 @@ export function createWorkspaceRoutes(
           }),
         );
       });
-      res.json({ status: 'written' });
+      // After the write, and only ever advisory: the check reports what the
+      // saved skill names, it has no say in whether it saved.
+      const warnings = skillSaveCheck ? await skillSaveCheck.checkSave(user.email, filePath, content) : [];
+      res.json({ status: 'written', ...(warnings.length > 0 ? { warnings } : {}) });
     } catch (err) {
       sendError(res, err);
     }

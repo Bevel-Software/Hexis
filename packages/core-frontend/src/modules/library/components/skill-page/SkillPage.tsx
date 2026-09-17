@@ -9,6 +9,7 @@ import {
 import '../../library.css';
 import {
   Badge,
+  Banner,
   Button,
   IconButton,
   Surface,
@@ -28,7 +29,11 @@ import { useWorkspaceImageResolver } from '../../../workspace/hooks/useWorkspace
 import { cancelPullRequest } from '../../../pr/services/pr-cancel.api';
 import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
-import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
+import {
+  getOrCreateWorkspace,
+  writeFile,
+  type SkillToolWarning,
+} from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
 import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
@@ -284,6 +289,13 @@ export function SkillPage({
     Boolean((location.state as { startEditing?: boolean } | null)?.startEditing),
   );
   const [busyCr, setBusyCr] = useState<number | null>(null);
+  /**
+   * What the last save said about the skill's `allowed-tools`: entries that
+   * look like platform tools but name none the saver can see. Advisory — the
+   * save has already landed — so it sits in the status area until the next
+   * save answers again.
+   */
+  const [toolWarnings, setToolWarnings] = useState<SkillToolWarning[]>([]);
 
   /**
    * The file on screen as a workspace path, `<kbDirName>/<skill>/<file>`: the
@@ -516,7 +528,8 @@ export function SkillPage({
    */
   async function saveDirect(content: string) {
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
-    await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
+    setToolWarnings(saved?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast('Saved: the skill now reads with your change.');
@@ -525,7 +538,7 @@ export function SkillPage({
 
   async function submitProposal(content: string) {
     if (!user) throw new Error('Sign in to propose a change.');
-    await proposeChange({
+    const proposed = await proposeChange({
       skillName: name,
       repoRelativePath: fileRepoPath,
       content,
@@ -533,6 +546,7 @@ export function SkillPage({
       userName: user.name,
       existingCr: ownCr,
     });
+    setToolWarnings(proposed?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast(`Sent to ${ownerName}: nothing changes until they approve it.`);
@@ -662,6 +676,8 @@ export function SkillPage({
             Repeating it above the pane said the same sentence twice on the
             first screenful. */}
       </header>
+
+      <ToolWarningsBanner warnings={toolWarnings} />
 
       {/* Not before the folder is known: Accept grants ON the folder and
           Manage access opens it, and both are no-ops against ''. */}
@@ -1010,6 +1026,26 @@ function IntegrationsSection({
         })}
       </div>
     </section>
+  );
+}
+
+/**
+ * The skill page's status line for `allowed-tools` entries the platform could
+ * not resolve. A warning, never a block: the list also names the client's own
+ * tools, which the server cannot know, so it only speaks about names that look
+ * like its own.
+ */
+function ToolWarningsBanner({ warnings }: { warnings: SkillToolWarning[] }) {
+  if (warnings.length === 0) return null;
+  return (
+    <Banner tone="wait" role="status" className="mt-4">
+      <p className="font-semibold">Some tools this skill lists are not available</p>
+      <ul className="mt-1 list-disc pl-5">
+        {warnings.map((w) => (
+          <li key={w.entry}>{w.message}</li>
+        ))}
+      </ul>
+    </Banner>
   );
 }
 

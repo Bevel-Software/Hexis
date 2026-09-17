@@ -4,6 +4,7 @@ import type { ToolContext } from '../tool-helpers/tool.contract.js';
 import { toolDef } from '../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../tool-helpers/tool-handler.js';
 import type { ISkillService } from './skills.contract.js';
+import type { IAllowedToolsChecker } from './allowed-tools-check.js';
 
 /**
  * Registers the two skill tools (both surfaces) and hosts their endpoints.
@@ -20,6 +21,8 @@ export function registerSkillsTools(
   toolAuth: RequestHandler,
   toolHandler: ToolHandlerFactory,
   skillService: ISkillService,
+  /** When given, a loaded skill carries `warnings` for `allowed-tools` entries that name no visible tool. */
+  allowedTools?: IAllowedToolsChecker,
 ): void {
   registry.registerExternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
   registry.registerInternalTool((ctx) => buildListSkillsDef(skillService, ctx.userEmail));
@@ -41,7 +44,9 @@ export function registerSkillsTools(
       const name = typeof args.name === 'string' ? args.name : '';
       const file = typeof args.file === 'string' ? args.file : undefined;
       if (!name) return { error: 'missing_name' };
-      return skillService.getSkill(ctx.user.email, name, file);
+      const result = await skillService.getSkill(ctx.user.email, name, file);
+      if (!allowedTools || !result.ok || result.kind !== 'skill') return result;
+      return { ...result, warnings: await allowedTools.check(ctx.user.email, result.skill.allowedTools) };
     }),
   );
 }
@@ -113,6 +118,13 @@ async function buildGetSkillDef(skillService: ISkillService, userEmail?: string)
       properties: {
         skill: { type: 'object', description: 'The loaded skill: name, description, body, files, ….' },
         file: { type: 'object', description: 'A bundled file: name, file, path, content.' },
+        warnings: {
+          type: 'array',
+          description:
+            'With `skill`: `allowed-tools` entries that look like platform tools but name none you can use — ' +
+            'each `{ entry, message, suggestion? }`. Do not rely on such a tool.',
+          items: { type: 'object' },
+        },
         error: { type: 'string', description: 'Error code: `not_found`, `forbidden`, `invalid_file`, `missing_name`.' },
       },
     },

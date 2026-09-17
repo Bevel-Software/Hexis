@@ -6,7 +6,7 @@ vi.mock('../../../../lib/api', () => ({
   authFetch: vi.fn(),
 }));
 
-import { uploadFile, createDirectory, rawFileUrl, WorkspaceApiError } from '../workspace.api';
+import { uploadFile, createDirectory, rawFileUrl, writeFile, WorkspaceApiError } from '../workspace.api';
 import { authFetch } from '../../../../lib/api';
 
 const mockedFetch = vi.mocked(authFetch);
@@ -92,5 +92,28 @@ describe('rawFileUrl', () => {
   it('adds a version only once there is one, so an unchanged file keeps a cacheable URL', () => {
     expect(rawFileUrl('ws-1', 'a.png', { version: 0 })).toBe('/api/workspace/ws-1/file/raw?path=a.png');
     expect(rawFileUrl('ws-1', 'a.png', { version: 3 })).toBe('/api/workspace/ws-1/file/raw?path=a.png&v=3');
+  });
+});
+
+describe('writeFile', () => {
+  beforeEach(() => mockedFetch.mockReset());
+
+  it('hands back the save-time skill warnings, and nothing when there are none', async () => {
+    const warning = { entry: 'hubspot.serch', message: 'not a tool', suggestion: 'hubspot.search' };
+    mockedFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'written', warnings: [warning] }),
+    } as unknown as Response);
+    await expect(writeFile('ws', 'kb/Plugins/a/SKILL.md', 'x')).resolves.toEqual({ warnings: [warning] });
+
+    mockedFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('no body');
+      },
+    } as unknown as Response);
+    await expect(writeFile('ws', 'kb/notes.md', 'x')).resolves.toEqual({});
   });
 });

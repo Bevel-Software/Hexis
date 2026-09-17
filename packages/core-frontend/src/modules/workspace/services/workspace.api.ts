@@ -89,12 +89,28 @@ export async function readFile(workspaceId: string, relativePath: string): Promi
   return data.content;
 }
 
+/**
+ * An `allowed-tools` entry in a saved SKILL.md that looks like a platform tool
+ * but names none the saver can see. Advisory: the save already happened.
+ */
+export interface SkillToolWarning {
+  entry: string;
+  message: string;
+  /** The closest tool name, in the entry's own spelling, when one is near. */
+  suggestion?: string;
+}
+
+export interface WriteFileResult {
+  /** Present only for a skill file whose `allowed-tools` names unknown platform tools. */
+  warnings?: SkillToolWarning[];
+}
+
 export async function writeFile(
   workspaceId: string,
   relativePath: string,
   content: string,
   options?: { ifAbsent?: boolean; ifMatch?: string },
-): Promise<void> {
+): Promise<WriteFileResult> {
   const res = await authFetch(`/api/workspace/${workspaceId}/file?path=${encodeURIComponent(relativePath)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -109,6 +125,10 @@ export async function writeFile(
     }),
   });
   if (!res.ok) throw await toApiError(res);
+  // The write succeeded whatever the body says; an unreadable body only
+  // means there is nothing to add to it.
+  const body = (await res.json().catch(() => null)) as { warnings?: unknown } | null;
+  return Array.isArray(body?.warnings) ? { warnings: body.warnings as SkillToolWarning[] } : {};
 }
 
 /**
