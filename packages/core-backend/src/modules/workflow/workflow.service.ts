@@ -2240,8 +2240,10 @@ export class WorkflowService implements IWorkflowService {
       for (const group of unpushed) {
         const at = before.get(group.wsId);
         if (!at) continue;
-        try {
-          for (const { path: repoRelPath } of group.paths) {
+        // Each file gets its own attempt: one that fails must not leave the
+        // files after it reverted.
+        for (const { path: repoRelPath } of group.paths) {
+          try {
             await this.git.restorePathFromRef(group.wsId, at, repoRelPath);
             await this.git.commitFile(
               group.wsId,
@@ -2250,11 +2252,11 @@ export class WorkflowService implements IWorkflowService {
               `Undo revert of ${repoRelPath} (folder removal stopped)`,
               true, // skipValidator — this puts back the checkout's own version
             );
+          } catch (err) {
+            log.warn(
+              `undo of ${printable(repoRelPath)} failed on ${printable(group.branch)} after a folder removal stopped: ${printable(sanitizeError(err))}`,
+            );
           }
-        } catch (err) {
-          log.warn(
-            `undo failed on ${printable(group.branch)} after a folder removal stopped: ${printable(sanitizeError(err))}`,
-          );
         }
       }
     };

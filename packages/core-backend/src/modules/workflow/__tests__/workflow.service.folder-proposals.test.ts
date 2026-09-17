@@ -394,6 +394,33 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(closed).toEqual([12, 13]);
   });
 
+  it('still undoes the later files in a checkout when undoing an earlier one fails', async () => {
+    const { svc, git, changed } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
+    // #40's commit fails, so every restore is undone.
+    vi.mocked(git.commitFile)
+      .mockResolvedValueOnce({} as never)
+      .mockResolvedValueOnce({} as never)
+      .mockRejectedValueOnce(new Error('disk full'));
+    const restore = vi.mocked(git.restorePathFromRef).getMockImplementation()!;
+    let failedOnce = false;
+    vi.mocked(git.restorePathFromRef).mockImplementation(async (ws, ref, p) => {
+      if (ref === 'head-sha' && p === 'Data/Reports/proposed.md' && !failedOnce) {
+        failedOnce = true;
+        throw new Error('index.lock exists');
+      }
+      return restore(ws, ref, p);
+    });
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toThrow('disk full');
+    // The first file of #12 could not be put back; the one after it still was.
+    expect(git.restorePathFromRef).toHaveBeenCalledWith(
+      encodeURIComponent(aliceRequest.branch),
+      'head-sha',
+      'Data/Reports/Sub/deep.md',
+    );
+    expect(changed.get(aliceRequest.branch)!.has('Data/Reports/Sub/deep.md')).toBe(true);
+    expect(changed.get(bobRequest.branch)!.has('Data/Reports/q3.md')).toBe(true);
+  });
+
   it('refuses, before locking anything, requests on one branch that revert a shared file to different bases', async () => {
     const shared = 'suggestions/alice-u-alice/knowledge';
     const toMain = summary({ number: 12, branch: shared, authorId: hashEmail(ALICE.email), touchedNodePaths: ['Data/Reports/proposed.md'] });
