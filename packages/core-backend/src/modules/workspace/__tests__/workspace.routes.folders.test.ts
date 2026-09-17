@@ -45,6 +45,8 @@ interface Harness {
   workspaceId: string;
   kbDir: string;
   releaseLock: ReturnType<typeof vi.fn>;
+  acquireLock: ReturnType<typeof vi.fn>;
+  workspaceService: WorkspaceService;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -56,10 +58,14 @@ async function makeHarness(): Promise<Harness> {
   const workspaceService = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
   await workspaceService.getWorkspacePath(workspaceId);
 
-  const releaseLock = vi.fn(async () => undefined as never);
+  const releaseLock = vi.fn<(...args: unknown[]) => Promise<never>>(async () => undefined as never);
+  const acquireLock = vi.fn<(...args: unknown[]) => Promise<{ acquired: boolean; lock: never }>>(async () => ({
+    acquired: true,
+    lock: {} as never,
+  }));
   const workflowService = {
     getLock: vi.fn(async () => null),
-    acquireLock: vi.fn(async () => ({ acquired: true, lock: {} as never })),
+    acquireLock,
     releaseLock,
     releaseLockNoCommit: vi.fn(async () => undefined as never),
   } as unknown as IWorkflowService;
@@ -94,6 +100,8 @@ async function makeHarness(): Promise<Harness> {
     workspaceId,
     kbDir: path.join(workspaceDir, KB),
     releaseLock,
+    acquireLock,
+    workspaceService,
   };
 }
 
@@ -221,5 +229,99 @@ describe('workspace routes — folders never vanish', () => {
     t = await tree();
     expect(nodeAt(t, `${KB}/Nested/Inner`)).toEqual({ ...nodeAt(t, `${KB}/Reports`), name: 'Inner', relativePath: `${KB}/Nested/Inner` });
     expect(await fs.readdir(path.join(h.kbDir, 'Reports'))).toEqual(await fs.readdir(path.join(h.kbDir, 'Nested/Inner')));
+  });
+
+  it('a file delete racing an explicit delete of its folder does not bring the folder back', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.kbDir, 'doomed/sub'), { recursive: true });
+    await fs.writeFile(path.join(h.kbDir, 'doomed/first.md'), 'f');
+
+    // Hold the folder delete inside its turn, right after it deleted the one
+    // file it enumerated.
+    let reached!: () => void;
+    const atGate = new Promise<void>((r) => (reached = r));
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    h.releaseLock.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] === `${KB}/doomed/first.md`) {
+        reached();
+        await gate;
+      }
+      return undefined as never;
+    });
+    const folderDelete = call('DELETE', `/file?path=${encodeURIComponent(`${KB}/doomed`)}`);
+    await atGate;
+
+    // A file that landed after the enumeration is deleted meanwhile: its
+    // folder is empty, and keeping it must wait for the folder delete.
+    await fs.writeFile(path.join(h.kbDir, 'doomed/sub/late.md'), 'l');
+    const fileDelete = call('DELETE', `/file?path=${encodeURIComponent(`${KB}/doomed/sub/late.md`)}`);
+    for (let i = 0; i < 200 && (await exists(path.join(h.kbDir, 'doomed/sub/late.md'))); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    const keptTooEarly = await exists(path.join(h.kbDir, 'doomed/sub/.gitkeep'));
+
+    open();
+    expect(keptTooEarly).toBe(false);
+    expect((await folderDelete).status).toBe(200);
+    expect((await fileDelete).status).toBe(200);
+    expect(await exists(path.join(h.kbDir, 'doomed'))).toBe(false);
+    expect(committed(`${KB}/doomed/sub/.gitkeep`)).toBe(false);
+  });
+
+  it('a delete whose folder cannot be kept fails, and says the file itself is gone', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.kbDir, 'kept'), { recursive: true });
+    await fs.writeFile(path.join(h.kbDir, 'kept/only.md'), 'x');
+    h.acquireLock.mockImplementation(async (...args: unknown[]) => {
+      if (args[2] === `${KB}/kept/.gitkeep`) throw new Error('lock store down');
+      return { acquired: true, lock: {} as never };
+    });
+
+    const res = await call('DELETE', `/file?path=${encodeURIComponent(`${KB}/kept/only.md`)}`);
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `"${KB}/kept/only.md" was removed, but its folder "${KB}/kept" could not be kept: lock store down`,
+    );
+    expect(await exists(path.join(h.kbDir, 'kept/only.md'))).toBe(false);
+  });
+});
+
+describe('WorkspaceService.withFolderTurn', () => {
+  let root: string | null = null;
+  afterEach(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
+    root = null;
+  });
+
+  it('serializes a folder with the folders inside it, and never folders side by side', async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-turn-'));
+    const workspaceId = workspaceIdForBranch('turns');
+    await fs.mkdir(path.join(root, workspaceId, KB, '.git'), { recursive: true });
+    const svc = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+
+    const events: string[] = [];
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const outer = svc.withFolderTurn(workspaceId, `${KB}/A`, async () => {
+      events.push('A start');
+      await gate;
+      events.push('A end');
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const inner = svc.withFolderTurn(workspaceId, `${KB}/A/B`, async () => {
+      events.push('A/B');
+    });
+    const sibling = svc.withFolderTurn(workspaceId, `${KB}/AB`, async () => {
+      events.push('AB');
+    });
+    await sibling;
+    await new Promise((r) => setTimeout(r, 5));
+    expect(events).toEqual(['A start', 'AB']);
+
+    open();
+    await Promise.all([outer, inner]);
+    expect(events).toEqual(['A start', 'AB', 'A end', 'A/B']);
   });
 });

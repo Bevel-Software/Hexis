@@ -29,7 +29,7 @@ const ROW = {
  * is the authoritative empty-request check, and is not what a list shows.
  */
 describe('PullRequestService summaries — folder placeholder', () => {
-  function harness() {
+  function harness(paths: string[] = ['Reports/.gitkeep', 'Reports/Empty/.gitkeep', 'Reports/q3.md']) {
     const db = {
       select: () => ({
         from: () => ({
@@ -40,15 +40,19 @@ describe('PullRequestService summaries — folder placeholder', () => {
         }),
       }),
     } as unknown as Database;
-    const changedPathsForPr = vi.fn(async () => [
-      'Reports/.gitkeep',
-      'Reports/Empty/.gitkeep',
-      'Reports/q3.md',
-    ]);
+    const changedPathsForPr = vi.fn(async () => paths);
     const git = { changedPathsForPr } as unknown as GitService;
-    const workspace = { findAnyWorkspaceId: async () => 'ws-main' } as unknown as WorkspaceService;
-    const svc = new PullRequestService(db, workspace, {} as IAccessControl, git);
-    return { svc, changedPathsForPr };
+    const workspace = {
+      findAnyWorkspaceId: async () => 'ws-main',
+      ensureRemotesFetched: async () => undefined,
+    } as unknown as WorkspaceService;
+    // Bob may write under `Reports/` and nowhere else.
+    const canWriteBatchAtRef = vi.fn(async (_ws: string, _ref: string, _email: string, asked: string[]) =>
+      new Map(asked.map((p) => [p, p.startsWith('Reports/')])),
+    );
+    const access = { canWriteBatchAtRef } as unknown as IAccessControl;
+    const svc = new PullRequestService(db, workspace, access, git);
+    return { svc, changedPathsForPr, canWriteBatchAtRef };
   }
 
   it('listOpenPrs reports only real files as touched paths', async () => {
@@ -56,5 +60,19 @@ describe('PullRequestService summaries — folder placeholder', () => {
     const [summary] = await svc.listOpenPrs({ fresh: true });
     expect(changedPathsForPr).toHaveBeenCalledTimes(1);
     expect(summary.touchedNodePaths).toEqual(['Reports/q3.md']);
+  });
+
+  it('a request that only creates a folder still routes to the folder\'s owners', async () => {
+    const { svc, canWriteBatchAtRef } = harness(['Reports/Empty/.gitkeep']);
+    const [routed] = await svc.listPrsForOwnerEmail('ws-main', 'bob@bevel.software', { fresh: true });
+    expect(routed?.number).toBe(9);
+    // Routed by the placeholder, but never showing it.
+    expect(routed.touchedNodePaths).toEqual([]);
+    expect(canWriteBatchAtRef.mock.calls.map((c) => c[3])).toEqual([['Reports/Empty/.gitkeep'], ['Reports/Empty/.gitkeep']]);
+  });
+
+  it('a folder-only request outside the viewer\'s scope does not route to them', async () => {
+    const { svc } = harness(['Elsewhere/.gitkeep']);
+    expect(await svc.listPrsForOwnerEmail('ws-main', 'bob@bevel.software', { fresh: true })).toEqual([]);
   });
 });

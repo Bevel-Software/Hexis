@@ -35,6 +35,7 @@ import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import { folderPlaceholderPath, isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
 
 const log = logger('workspace-tools');
 
@@ -113,20 +114,39 @@ function withoutPlaceholder(entries: DirEntry[]): DirEntry[] {
  * explicitly, so when deleting or moving out its last entry leaves it empty it
  * gets the placeholder, written through the same filesystem (the agent's
  * lock-aware one commits it) within the same tool call. Only folders inside
- * the repository qualify, never the clone folder itself. The removal already
- * landed and is what the caller asked for, so a failure here is logged rather
- * than reported as a failed delete.
+ * the repository qualify, never the clone folder itself.
+ *
+ * It runs in the folder's turn, which the explicit folder delete also takes,
+ * and looks inside it: a folder that is gone by then was deleted explicitly
+ * and stays gone. A failure fails the call — the removal landed, but the
+ * folder would vanish on the next clone, and the agent must hear that.
  */
-async function keepFolderOf(fs: LocalFilesystem, removedPath: string, kbDirName: string): Promise<void> {
+async function keepFolderOf(
+  fs: LocalFilesystem,
+  ctx: ToolContext,
+  branch: string,
+  removedPath: string,
+  kbDirName: string,
+): Promise<void> {
   const trimmed = removedPath.replace(/^\/+/, '').replace(/\/+$/, '');
   const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
   if (!dir.startsWith(`${kbDirName}/`)) return;
   try {
-    if ((await fs.readdir(dir)).length > 0) return;
-    await fs.writeFile(folderPlaceholderPath(dir), '');
+    await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), dir, async () => {
+      let entries: unknown[];
+      try {
+        entries = await fs.readdir(dir);
+      } catch (err) {
+        if (isAbsence(err)) return;
+        throw err;
+      }
+      if (entries.length > 0) return;
+      await fs.writeFile(folderPlaceholderPath(dir), '');
+    });
   } catch (err) {
-    if (isAbsence(err)) return;
-    log.warn(`could not keep the folder "${dir}" after removing "${removedPath}":`, { err });
+    const reason = err instanceof Error ? err.message : String(err);
+    log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
+    throw new ToolError(`"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`, 500);
   }
 }
 
@@ -1039,7 +1059,7 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       await fs.deleteFile(a.path as string);
       // Deleting content is not deleting structure: an emptied folder stays.
-      await keepFolderOf(fs, a.path as string, kbDirName);
+      await keepFolderOf(fs, ctx, a.branch as string, a.path as string, kbDirName);
       return { path: a.path, deleted: true };
     },
   });
@@ -1103,7 +1123,7 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       await fs.moveFile(a.src as string, a.dest as string);
       // Moving the last file out leaves its folder in place, like a delete.
-      await keepFolderOf(fs, a.src as string, kbDirName);
+      await keepFolderOf(fs, ctx, a.branch as string, a.src as string, kbDirName);
       return { src: a.src, dest: a.dest, moved: true };
     },
   });

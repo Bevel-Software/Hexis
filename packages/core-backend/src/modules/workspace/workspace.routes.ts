@@ -12,6 +12,7 @@ import {
   DEFAULT_BRANCH,
   KNOWLEDGE_DIR,
   canonicalRelativePath,
+  FOLDER_PLACEHOLDER,
   folderPlaceholderPath,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
@@ -253,33 +254,45 @@ export function createWorkspaceRoutes(
    * one out, leaves its parent empty, the parent gets the placeholder in its
    * own lock cycle — committed like any other save, within the same request.
    * Only folders inside the repository qualify, never the clone folder
-   * itself. The removal already landed and is what the caller asked for, so a
-   * failure here is logged rather than turned into a failed delete.
+   * itself.
+   *
+   * It runs in the folder's turn, which an explicit folder delete also takes,
+   * and looks again inside it: a folder that is gone by then was deleted
+   * explicitly and stays gone, and one that gained an entry needs nothing.
+   * The placeholder is only ever written into a folder that exists.
+   *
+   * A failure is the request's failure: the removal landed, but a request
+   * that answers success would leave a folder that vanishes on the next
+   * clone, which is exactly what this rule forbids.
    */
   async function keepFolderOf(
     workspaceId: string,
     user: AuthUser,
     removedPath: string,
-    options?: { skipFsTreeEvent?: boolean },
   ): Promise<void> {
     const trimmed = removedPath.replace(/\/+$/, '');
     const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
     if (!dir.startsWith(`${kbDirName}/`)) return;
     try {
       const absolute = path.resolve(await workspaceService.getWorkspacePath(workspaceId), dir);
-      if ((await fs.readdir(absolute)).length > 0) return;
-      // `createDirectory` drops the placeholder into a folder that is empty
-      // at the moment it looks, so a file landing in between wins.
-      await withLock(
-        workspaceId,
-        user,
-        folderPlaceholderPath(dir),
-        () => workspaceService.createDirectory(workspaceId, dir),
-        options,
-      );
+      await workspaceService.withFolderTurn(workspaceId, dir, async () => {
+        if (!(await isEmptyFolder(absolute))) return;
+        // One tree refresh per request: the removal already announced it.
+        await withLock(
+          workspaceId,
+          user,
+          folderPlaceholderPath(dir),
+          async () => {
+            if (!(await isEmptyFolder(absolute))) return;
+            await fs.writeFile(path.join(absolute, FOLDER_PLACEHOLDER), '', { flag: 'wx' });
+          },
+          { skipFsTreeEvent: true },
+        );
+      });
     } catch (err) {
-      if (isAbsence(err)) return;
-      log.warn(`could not keep the folder "${dir}" after removing "${removedPath}":`, { err });
+      const reason = err instanceof Error ? err.message : String(err);
+      log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
+      throw new Error(`"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`);
     }
   }
 
@@ -858,50 +871,57 @@ export function createWorkspaceRoutes(
         // Not on disk — let workspaceService.deleteFile return its own 404.
       }
       if (stat?.isDirectory()) {
-        const filesInDir = await enumerateFilesUnder(disk, absolute, workspaceDir);
         const branch = branchForWorkspaceId(id);
-        for (const relFile of filesInDir) {
-          await withLock(
-            id,
-            user,
-            relFile,
-            async () => {
-              await workspaceService.deleteFile(id, relFile);
-            },
-            { skipFsTreeEvent: true },
-          );
-        }
-        // No explicit push here — each per-file release enqueues a
-        // pending-commits row, and the background worker drains them
-        // (commit + push) on its own schedule. The N round-trips that
-        // the old skipPush+pushBranch pattern collapsed into one happen
-        // serially in the worker; user perception is unchanged because
-        // the disk-side delete is what other sessions see via
-        // `fs-tree-changed`.
-        // This is the EXPLICIT folder delete — the one operation that removes
-        // a folder — so the walk above deleted the placeholders too, and the
-        // now-empty directory subtree is swept off disk. Git doesn't track
-        // empty folders, so there's nothing more to commit; this is disk
-        // hygiene so the file tree stops showing the deleted containers.
-        //
-        // This MUST recurse: a folder that held *subfolders* still has those
-        // (now-empty) subdirectory shells on disk after the per-file deletes,
-        // so a single non-recursive `rmdir(absolute)` would see a non-empty
-        // dir and bail — leaving the folder visible in the tree and looking
-        // undeletable (BEVA-132). `removeEmptyDirs` walks bottom-up and only
-        // removes dirs that are *actually empty* at the moment it visits them,
-        // so a concurrent writer's new file (and its parent chain) is
-        // preserved — the same safety property the old non-recursive check had.
-        try {
-          await removeEmptyDirs(absolute);
-        } catch (rmErr) {
-          // Directory already gone (raced delete), or a concurrent writer
-          // repopulated it. Either way, skip removal — the per-file deletes
-          // are what's load-bearing.
-          log.warn(`dir cleanup skipped for "${filePath}":`, { err: rmErr });
-        }
+        // In the folder's turn: keeping a folder under this one (a file delete
+        // racing this one) waits until the sweep is done, and then finds the
+        // folder gone instead of writing it back.
+        const filesInDir = await workspaceService.withFolderTurn(id, filePath, async () => {
+          const files = await enumerateFilesUnder(disk, absolute, workspaceDir);
+          for (const relFile of files) {
+            await withLock(
+              id,
+              user,
+              relFile,
+              async () => {
+                await workspaceService.deleteFile(id, relFile);
+              },
+              { skipFsTreeEvent: true },
+            );
+          }
+          // No explicit push here — each per-file release enqueues a
+          // pending-commits row, and the background worker drains them
+          // (commit + push) on its own schedule. The N round-trips that
+          // the old skipPush+pushBranch pattern collapsed into one happen
+          // serially in the worker; user perception is unchanged because
+          // the disk-side delete is what other sessions see via
+          // `fs-tree-changed`.
+          // This is the EXPLICIT folder delete — the one operation that removes
+          // a folder — so the walk above deleted the placeholders too, and the
+          // now-empty directory subtree is swept off disk. Git doesn't track
+          // empty folders, so there's nothing more to commit; this is disk
+          // hygiene so the file tree stops showing the deleted containers.
+          //
+          // This MUST recurse: a folder that held *subfolders* still has those
+          // (now-empty) subdirectory shells on disk after the per-file deletes,
+          // so a single non-recursive `rmdir(absolute)` would see a non-empty
+          // dir and bail — leaving the folder visible in the tree and looking
+          // undeletable (BEVA-132). `removeEmptyDirs` walks bottom-up and only
+          // removes dirs that are *actually empty* at the moment it visits them,
+          // so a concurrent writer's new file (and its parent chain) is
+          // preserved — the same safety property the old non-recursive check had.
+          try {
+            await removeEmptyDirs(absolute);
+          } catch (rmErr) {
+            // Directory already gone (raced delete), or a concurrent writer
+            // repopulated it. Either way, skip removal — the per-file deletes
+            // are what's load-bearing.
+            const reason = rmErr instanceof Error ? rmErr.message : String(rmErr);
+            log.warn(`dir cleanup skipped for ${printable(filePath)}: ${printable(reason)}`);
+          }
+          return files;
+        });
         // The folder that HELD the deleted one was not asked to go.
-        await keepFolderOf(id, user, filePath, { skipFsTreeEvent: true });
+        await keepFolderOf(id, user, filePath);
         // Single tree-refresh signal for the whole batch (we suppressed
         // the per-file ones via `skipFsTreeEvent`).
         eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
@@ -1273,6 +1293,19 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
     });
   }
   return out;
+}
+
+/**
+ * Whether a folder exists and holds nothing. A folder that is gone answers
+ * false: it was deleted explicitly, and keeping it would bring it back.
+ */
+async function isEmptyFolder(absoluteDir: string): Promise<boolean> {
+  try {
+    return (await fs.readdir(absoluteDir)).length === 0;
+  } catch (err) {
+    if (isAbsence(err)) return false;
+    throw err;
+  }
 }
 
 /**

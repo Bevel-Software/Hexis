@@ -2309,6 +2309,11 @@ export class GitService implements IGitService {
       // content, so it is not a file to review or approve. It still merges
       // with the rest, and `changedPathsForPr` keeps it, so a request that
       // only creates a folder is not mistaken for an empty one and closed.
+      // An empty file deleted as its folder gets the (equally empty)
+      // placeholder reads to `-M` as a RENAME onto it; the real side of such
+      // a pair is first made the plain removal (or addition) it is, so
+      // dropping the placeholder never drops the file with it.
+      statuses = statuses.map(withoutPlaceholderRename);
       if (statuses.some((s) => s.path === 'roles.yaml' || isFolderPlaceholder(s.path))) {
         const keep = statuses.map((s) => s.path !== 'roles.yaml' && !isFolderPlaceholder(s.path));
         statuses = statuses.filter((_, i) => keep[i]);
@@ -2375,13 +2380,18 @@ export class GitService implements IGitService {
       const baseRef = await this.resolveBranchRef(cwd, baseBranch);
       const headRef = await this.resolveBranchRef(cwd, headBranch);
       const { stdout } = await this.git(cwd, [
-        'diff', '-M', '--name-only', `${baseRef}...${headRef}`,
+        'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
       ]);
       return (
-        stdout
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)
+        parseNameStatusZ(stdout)
+          // A rename onto or off the placeholder is a real file removed or
+          // added (see `withoutPlaceholderRename`): both of its paths are
+          // touched, or filtering the placeholder would lose the file.
+          .flatMap((s) =>
+            s.previousPath && (isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
+              ? [s.previousPath, s.path]
+              : [s.path],
+          )
           // Same rule as `changedFilesForPr`: a roles.yaml change never
           // survives a merge, so it is not a touched path for routing or
           // summaries either.
@@ -2853,6 +2863,23 @@ export function parseNameStatusZ(out: string): NameStatusEntry[] {
     }
   }
   return entries;
+}
+
+/**
+ * Undo a rename git detected between a real file and the empty-folder
+ * placeholder. Deleting a folder's last file writes the placeholder, and
+ * when that file was empty too, `-M` pairs the two as a 100% rename. The
+ * pair is really a removal (or, the other way round, an addition) plus the
+ * placeholder, which is never reviewed — so the entry becomes the real side
+ * alone, and the caller's placeholder filter has nothing of it to drop.
+ */
+export function withoutPlaceholderRename(entry: NameStatusEntry): NameStatusEntry {
+  const { previousPath } = entry;
+  if (!previousPath || entry.status !== 'renamed') return entry;
+  const toPlaceholder = isFolderPlaceholder(entry.path);
+  const fromPlaceholder = isFolderPlaceholder(previousPath);
+  if (toPlaceholder === fromPlaceholder) return entry;
+  return toPlaceholder ? { status: 'removed', path: previousPath } : { status: 'added', path: entry.path };
 }
 
 interface NumstatEntry {

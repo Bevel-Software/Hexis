@@ -216,6 +216,11 @@ export class WorkspaceService implements IWorkspaceService {
    */
   private readonly writeTurns = new Map<string, Promise<void>>();
   /**
+   * The folder structure changes in flight, keyed by RESOLVED absolute folder
+   * path — see {@link withFolderTurn}.
+   */
+  private readonly folderTurns = new Map<string, Promise<void>>();
+  /**
    * The turns the CURRENT async context already holds. Taking one it holds
    * runs straight through instead of waiting for itself, which is what lets a
    * caller wrap a whole read-decide-write sequence in a turn and still call
@@ -1217,6 +1222,41 @@ export class WorkspaceService implements IWorkspaceService {
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     return this.withResolvedPathTurn(absolutePath, op);
+  }
+
+  /**
+   * One folder structure change at a time per SUBTREE: an explicit folder
+   * delete and the placeholder that keeps an emptied folder. Two turns wait
+   * for each other when one folder is, or sits inside, the other, so keeping
+   * a folder can never run in the middle of deleting it (and write the
+   * placeholder back into a folder whose delete already enumerated its
+   * files), and a delete never starts while a folder under it is being kept.
+   * Not re-entrant: take it once, and never around another folder's turn.
+   */
+  async withFolderTurn<T>(workspaceId: string, relativeDir: string, op: () => Promise<T>): Promise<T> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const overlaps = (held: string) =>
+      held === absoluteDir ||
+      held.startsWith(absoluteDir + path.sep) ||
+      absoluteDir.startsWith(held + path.sep);
+    // Check-and-claim with no await in between, so two callers cannot both
+    // find the subtree free.
+    for (;;) {
+      const waiting = [...this.folderTurns].filter(([held]) => overlaps(held)).map(([, turn]) => turn);
+      if (waiting.length === 0) break;
+      await Promise.all(waiting);
+    }
+    let release!: () => void;
+    this.folderTurns.set(absoluteDir, new Promise<void>((resolve) => (release = resolve)));
+    try {
+      return await op();
+    } finally {
+      this.folderTurns.delete(absoluteDir);
+      release();
+    }
   }
 
   /**

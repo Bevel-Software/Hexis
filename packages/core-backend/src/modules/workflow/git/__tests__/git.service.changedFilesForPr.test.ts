@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
-import { GitService, parseNameStatusZ, parseNumstatZ } from '../git.service.js';
+import { GitService, parseNameStatusZ, parseNumstatZ, withoutPlaceholderRename } from '../git.service.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +57,26 @@ function stubWorkspaceService(workspaceId: string, repo: string): WorkspaceServi
     },
   } as unknown as WorkspaceService;
 }
+
+describe('withoutPlaceholderRename', () => {
+  it('turns a rename onto the placeholder into a removal, and off it into an addition', () => {
+    expect(withoutPlaceholderRename({ status: 'renamed', previousPath: 'A/x.md', path: 'A/.gitkeep' })).toEqual({
+      status: 'removed',
+      path: 'A/x.md',
+    });
+    expect(withoutPlaceholderRename({ status: 'renamed', previousPath: 'A/.gitkeep', path: 'A/x.md' })).toEqual({
+      status: 'added',
+      path: 'A/x.md',
+    });
+  });
+
+  it('leaves every other entry as it is', () => {
+    const plain = { status: 'renamed' as const, previousPath: 'A/x.md', path: 'B/x.md' };
+    const moved = { status: 'renamed' as const, previousPath: 'A/.gitkeep', path: 'B/.gitkeep' };
+    const added = { status: 'added' as const, path: 'A/.gitkeep' };
+    expect([plain, moved, added].map(withoutPlaceholderRename)).toEqual([plain, moved, added]);
+  });
+});
 
 describe('parseNameStatusZ', () => {
   it('parses adds/mods/deletes and rename pairs', () => {
@@ -250,6 +270,36 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
 
     const paths = await git.changedPathsForPr(workspaceId, 'current-company-state', 'alice/new-folders');
     expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/Empty/.gitkeep', 'Reports/q3.md']);
+  });
+
+  /**
+   * Deleting a folder's last file writes the placeholder; when that file was
+   * empty too, `-M` sees an identical blob move and pairs them as a rename.
+   * The review surface must still show the file's removal.
+   */
+  it('an empty file replaced by the placeholder is reviewed as a removal, not dropped with it', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await fs.mkdir(path.join(repo, 'Reports'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Reports/empty.md'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'empty file']);
+    await runGit(repo, ['push', 'origin', 'current-company-state']);
+    await runGit(repo, ['checkout', '-b', 'alice/emptied']);
+    await fs.rm(path.join(repo, 'Reports/empty.md'));
+    await fs.writeFile(path.join(repo, 'Reports/.gitkeep'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'emptied']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/emptied']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+
+    const files = await git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/emptied');
+    expect(files.map((f) => ({ path: f.path, status: f.status, previousPath: f.previousPath }))).toEqual([
+      { path: 'Reports/empty.md', status: 'removed', previousPath: undefined },
+    ]);
+
+    const paths = await git.changedPathsForPr(workspaceId, 'current-company-state', 'alice/emptied');
+    expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/empty.md']);
   });
 
   /**

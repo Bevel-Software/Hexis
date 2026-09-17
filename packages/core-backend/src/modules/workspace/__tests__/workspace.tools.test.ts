@@ -59,6 +59,8 @@ let fs: LocalFilesystem;
  * named "undefined" is attempted.
  */
 let workspacePathCalls: string[] = [];
+/** Every folder turn a tool took, as `workspaceId:dir`. */
+let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
 /**
@@ -79,6 +81,7 @@ async function start(
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
+  folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
 
@@ -101,6 +104,10 @@ async function start(
       getWorkspacePath: async (id: string) => {
         workspacePathCalls.push(id);
         return tempDir;
+      },
+      withFolderTurn: async <T>(id: string, dir: string, op: () => Promise<T>) => {
+        folderTurns.push(`${id}:${dir}`);
+        return op();
       },
     } as never,
     workflowService: {} as never,
@@ -1605,14 +1612,39 @@ describe('folders never vanish', () => {
     await fs.writeFile(KB('full/b.md'), 'b');
     await fs.writeFile(KB('top.md'), 't');
 
-    await tool(base, 'delete_file', { path: KB('full/a.md') });
-    await tool(base, 'delete_file', { path: KB('top.md') });
-    await tool(base, 'delete_file', { path: 'a.md' });
+    expect((await tool(base, 'delete_file', { path: KB('full/a.md') })).status).toBe(200);
+    expect((await tool(base, 'delete_file', { path: KB('top.md') })).status).toBe(200);
+    expect((await tool(base, 'delete_file', { path: 'a.md' })).status).toBe(200);
 
     expect(await names(base, KB('full'))).toEqual(['b.md:file']);
     await expect(fs.exists(KB('full/.gitkeep'))).resolves.toBe(false);
     await expect(fs.exists(KB('.gitkeep'))).resolves.toBe(false);
     await expect(fs.exists('.gitkeep')).resolves.toBe(false);
+  });
+
+  it('delete_file keeps the folder in its folder turn, on the branch it was given', async () => {
+    const base = await start();
+    await fs.writeFile(KB('turned/only.md'), 'x');
+
+    expect((await tool(base, 'delete_file', { path: KB('turned/only.md'), branch: 'alice/draft' })).status).toBe(200);
+    expect(folderTurns).toEqual([`alice%2Fdraft:${KB('turned')}`]);
+  });
+
+  it('delete_file fails when the emptied folder cannot be kept, and says the file is gone', async () => {
+    const base = await start();
+    await fs.writeFile(KB('unkeepable/only.md'), 'x');
+    const write = fs.writeFile.bind(fs);
+    fs.writeFile = (async (p: string, ...rest: unknown[]) => {
+      if (p.endsWith('.gitkeep')) throw new Error('disk full');
+      return (write as (...a: unknown[]) => Promise<void>)(p, ...rest);
+    }) as typeof fs.writeFile;
+
+    const res = await tool(base, 'delete_file', { path: KB('unkeepable/only.md') });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(
+      `"${KB('unkeepable/only.md')}" was removed, but its folder "${KB('unkeepable')}" could not be kept: disk full`,
+    );
+    await expect(fs.exists(KB('unkeepable/only.md'))).resolves.toBe(false);
   });
 
   it('move_file of the last file keeps the source folder', async () => {
