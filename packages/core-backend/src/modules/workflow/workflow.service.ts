@@ -217,6 +217,23 @@ export function formatAffectedOwnersBlock(
   return out.join('\n');
 }
 
+/** Git commit subjects are capped at 200 characters (`GitService.commitFile`). */
+const MAX_COMMIT_SUBJECT = 200;
+
+/**
+ * A commit subject that always fits: `full` when it does, else `short` (the
+ * file's name instead of its path, a count instead of every request), cut to
+ * the cap as a last resort. A long path or many requests on one branch must
+ * never fail the commit — and with it the whole folder removal.
+ */
+function commitSubject(full: string, short: string): string {
+  if (full.length <= MAX_COMMIT_SUBJECT) return full;
+  if (short.length <= MAX_COMMIT_SUBJECT) return short;
+  return `${short.slice(0, MAX_COMMIT_SUBJECT - 1)}…`;
+}
+
+const basenameOf = (repoRelPath: string): string => repoRelPath.split('/').pop() ?? repoRelPath;
+
 /** `Docs/Sub` and `Docs/Sub/` both → `Docs/Sub/`: a prefix that cannot match `Docs/Subway`. */
 function folderPrefix(folder: string): string {
   return `${folder.replace(/\/+$/, '')}/`;
@@ -2249,7 +2266,10 @@ export class WorkflowService implements IWorkflowService {
               group.wsId,
               user,
               repoRelPath,
-              `Undo revert of ${repoRelPath} (folder removal stopped)`,
+              commitSubject(
+                `Undo revert of ${repoRelPath} (folder removal stopped)`,
+                `Undo revert of ${basenameOf(repoRelPath)} (folder removal stopped)`,
+              ),
               true, // skipValidator — this puts back the checkout's own version
             );
           } catch (err) {
@@ -2290,7 +2310,10 @@ export class WorkflowService implements IWorkflowService {
               group.wsId,
               user,
               repoRelPath,
-              `Revert ${repoRelPath} (folder deleted; removed from change request ${numbers})`,
+              commitSubject(
+                `Revert ${repoRelPath} (folder deleted; removed from change request ${numbers})`,
+                `Revert ${basenameOf(repoRelPath)} (folder deleted; removed from ${group.plans.length === 1 ? `change request ${numbers}` : `${group.plans.length} change requests`})`,
+              ),
               true, // skipValidator — this restores an already-validated base version
             );
           }

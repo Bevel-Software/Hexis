@@ -456,6 +456,25 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(fileLocks.release).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps every commit subject within git’s 200 characters, however many requests share a branch or however long the path', async () => {
+    const shared = 'suggestions/alice-u-alice/knowledge';
+    const deep = `Data/Reports/${'nested-folder-name/'.repeat(12)}proposed.md`;
+    const many = Array.from({ length: 40 }, (_, i) =>
+      summary({
+        number: 1000 + i,
+        branch: shared,
+        authorId: hashEmail(ALICE.email),
+        touchedNodePaths: ['Data/Reports/proposed.md', deep],
+      }),
+    );
+    const { svc, git } = makeHarness(many);
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toHaveLength(40);
+    const subjects = vi.mocked(git.commitFile).mock.calls.map(([, , , subject]) => subject as string);
+    expect(subjects).toHaveLength(2);
+    for (const subject of subjects) expect(subject.length).toBeLessThanOrEqual(200);
+    expect(subjects).toContain('Revert proposed.md (folder deleted; removed from 40 change requests)');
+  });
+
   it('is a no-op for a folder no request touches', async () => {
     const { svc, git } = makeHarness([elsewhere]);
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([]);
