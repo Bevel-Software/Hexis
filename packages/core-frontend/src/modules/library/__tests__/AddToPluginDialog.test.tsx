@@ -311,3 +311,120 @@ describe('AddToPluginDialog for a non-admin', () => {
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });
+
+// ── the Tools tab ──
+// The dialog is titled "Add a skill or tool", and people looking for the tool
+// half found only skills. The Tools tab explains rather than creates, so what
+// is worth asserting is its prompt (verbatim, per plugin and per role), the
+// two declaration surfaces it names, and that it carries no form.
+describe('AddToPluginDialog: Skills and Tools tabs', () => {
+  beforeEach(() => {
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    apiMock.createEmptySkill.mockReset();
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  const TOOL_PROMPT_WRITER =
+    'Help me build a new tool and add it to the GTM plugin at Bevel. ' +
+    'I run it, so it goes in directly. No review step.';
+  const TOOL_PROMPT_NON_OWNER =
+    'Help me build a new tool and add it to the GTM plugin at Bevel. ' +
+    'I am not an owner, so send it to the plugin as a change request for review.';
+
+  it('opens on Skills, with the two tabs named Skills and Tools', () => {
+    renderDialog();
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs.map((t) => t.textContent)).toEqual(['Skills', 'Tools']);
+    expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel')).toHaveAccessibleName('Skills');
+    expect(screen.getByText(ADD_PROMPT)).toBeInTheDocument();
+    expect(screen.queryByText(TOOL_PROMPT_WRITER)).not.toBeInTheDocument();
+  });
+
+  it('shows the tool prompt, the MCP and .tool sentences, and no form', () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+
+    expect(screen.getByRole('tab', { name: 'Tools' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel')).toHaveAccessibleName('Tools');
+    expect(screen.getByText(TOOL_PROMPT_WRITER)).toBeInTheDocument();
+    expect(
+      screen.getByText('To connect an MCP server, add it to the mcp.json in the GTM plugin folder.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'To call an API without an MCP server, add a .tool manual describing it to the GTM plugin folder.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/it joins GTM\. Everyone in the plugin gets it/)).toBeInTheDocument();
+    expect(screen.queryByText(ADD_PROMPT)).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Add a skill or tool to GTM' })).toBeInTheDocument();
+  });
+
+  it('copies the prompt of the tab that is showing', async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(TOOL_PROMPT_WRITER));
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(ADD_PROMPT));
+  });
+
+  it('carries the change-request note and clause for a non-owner', () => {
+    renderDialog('knowledge-base', false, [], false);
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    expect(screen.getByText(TOOL_PROMPT_NON_OWNER)).toBeInTheDocument();
+    expect(
+      screen.getByText(/goes to GTM as a change request, and an owner reviews it before it joins/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No review step/)).not.toBeInTheDocument();
+  });
+
+  it('names whichever plugin it was opened on', () => {
+    render(
+      <MemoryRouter>
+        <AdminContext.Provider value={admin(false)}>
+          <WorkspaceContext.Provider value={workspace('knowledge-base')}>
+            <LibraryToastProvider>
+              {withAuth(
+                <AddToPluginDialog
+                  name="Finance"
+                  primaryPath="Plugins/Finance"
+                  canWrite
+                  existingSkills={[]}
+                  onClose={vi.fn()}
+                />,
+              )}
+            </LibraryToastProvider>
+          </WorkspaceContext.Provider>
+        </AdminContext.Provider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    expect(
+      screen.getByText(
+        'Help me build a new tool and add it to the Finance plugin at Bevel. I run it, so it goes in directly. No review step.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/mcp\.json in the Finance plugin folder/)).toBeInTheDocument();
+  });
+
+  it('moves between tabs with the arrow keys, focus following', () => {
+    renderDialog();
+    const skills = screen.getByRole('tab', { name: 'Skills' });
+    fireEvent.keyDown(skills, { key: 'ArrowRight' });
+    const tools = screen.getByRole('tab', { name: 'Tools' });
+    expect(tools).toHaveAttribute('aria-selected', 'true');
+    expect(tools).toHaveFocus();
+    fireEvent.keyDown(tools, { key: 'Home' });
+    expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true');
+  });
+});

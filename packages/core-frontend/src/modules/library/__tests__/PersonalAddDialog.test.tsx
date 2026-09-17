@@ -175,3 +175,51 @@ describe('PersonalAddDialog', () => {
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });
+
+describe('PersonalAddDialog: Skills and Tools tabs', () => {
+  const SKILL_PROMPT =
+    'Help me build a new skill or tool at Bevel. Keep it to myself for now. It goes in my own list, not a plugin.';
+  const TOOL_PROMPT =
+    'Help me build a new tool at Bevel. Keep it to myself for now. It goes in my own list, not a plugin.';
+  const writeText = vi.fn<(text: string) => Promise<void>>();
+
+  beforeEach(() => {
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  it('opens on an unchanged Skills tab', () => {
+    renderDialog();
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Skills', 'Tools']);
+    expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText(SKILL_PROMPT)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Add a skill or tool' })).toBeInTheDocument();
+  });
+
+  it('explains tools without a form, and copies the tool prompt', async () => {
+    renderDialog();
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+
+    expect(screen.getByText(TOOL_PROMPT)).toBeInTheDocument();
+    expect(screen.queryByText(SKILL_PROMPT)).not.toBeInTheDocument();
+    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
+    expect(
+      screen.getByText('To connect an MCP server, add it to the mcp.json in your own folder.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'To call an API without an MCP server, add a .tool manual describing it to your own folder.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(TOOL_PROMPT));
+    expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
+  });
+});
