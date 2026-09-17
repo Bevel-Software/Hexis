@@ -883,7 +883,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const dirty = toClose.filter((t) => t.isDirty);
     if (dirty.length > 0) {
       const confirmed = window.confirm(UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))));
-      if (!confirmed) return;
+      if (!confirmed) return false;
     }
     // Optimistic tree removal. A folder delete on the server takes 2-3s
     // (N per-file commits batched into one push) — without optimism the

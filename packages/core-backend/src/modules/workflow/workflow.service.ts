@@ -46,6 +46,8 @@ import type {
   ChangedFile,
   FileApproval,
   FileLock,
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
   IWorkflowService,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
@@ -212,6 +214,11 @@ export function formatAffectedOwnersBlock(
     );
   }
   return out.join('\n');
+}
+
+/** `Docs/Sub` and `Docs/Sub/` both → `Docs/Sub/`: a prefix that cannot match `Docs/Subway`. */
+function folderPrefix(folder: string): string {
+  return `${folder.replace(/\/+$/, '')}/`;
 }
 
 export class WorkflowService implements IWorkflowService {
@@ -2036,6 +2043,134 @@ export class WorkflowService implements IWorkflowService {
     // Every change declined → the request proposes nothing.
     await this.closeEmptyChangeRequest(number, user);
     return { closed: true, remainingPaths: [] };
+  }
+
+  /**
+   * The open change requests that propose files under a KB folder, and
+   * whether the caller may take those files out of each — what a folder
+   * delete asks before it offers "Delete folder and its proposed changes".
+   *
+   * The caller may act on a request they authored, on any request as an
+   * admin, or on any request as a writer of the folder — the last two judged
+   * on `origin/<base>`, like every other request verb. An access answer that
+   * cannot be resolved (null) is a no.
+   */
+  async changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]> {
+    const prefix = folderPrefix(folder);
+    const open = await this.prs.listOpenPrs({ fresh: true });
+    const touching = open
+      .map((cr) => ({ cr, paths: cr.touchedNodePaths.filter((p) => p.startsWith(prefix)) }))
+      .filter((t) => t.paths.length > 0);
+    if (touching.length === 0) return [];
+
+    const callerHash = hashEmail(user.email);
+    // One access answer per base branch; the requests almost always share one.
+    const rightsByBase = new Map<string, Promise<boolean>>();
+    const adminOrWriterOn = (base: string): Promise<boolean> => {
+      let rights = rightsByBase.get(base);
+      if (!rights) {
+        rights = (async () => {
+          const ws = await this.workspaceService.getOrCreateForBranch(base);
+          const ref = `origin/${base}`;
+          // A folder's write gate is its access.md — the same key Manage
+          // access checks a folder write against.
+          const [admin, writer] = await Promise.all([
+            this.accessControl.canWriteAtRef(ws.id, ref, user.email, 'roles.yaml'),
+            this.accessControl.canWriteAtRef(ws.id, ref, user.email, `${prefix}access.md`),
+          ]);
+          return admin === true || writer === true;
+        })();
+        rightsByBase.set(base, rights);
+      }
+      return rights;
+    };
+
+    return Promise.all(
+      touching.map(async ({ cr, paths }): Promise<FolderChangeRequest> => {
+        const mine = !!cr.authorId && cr.authorId === callerHash;
+        const mayRemove = mine || (await adminOrWriterOn(cr.base));
+        return {
+          number: cr.number,
+          title: cr.title,
+          authorName: cr.appAuthor?.name ?? cr.author.name ?? null,
+          mine,
+          paths,
+          mayRemove,
+          ...(mayRemove
+            ? {}
+            : {
+                reason: `#${cr.number} was proposed by ${cr.appAuthor?.name ?? 'someone else'}; only its author, an admin or a writer of this folder can change it.`,
+              }),
+        };
+      }),
+    );
+  }
+
+  /**
+   * Take every file under `folder` out of every open change request that
+   * proposes one — the request half of "Delete folder and its proposed
+   * changes". All-or-nothing on permission: when the caller may not act on
+   * even one of the requests, nothing is touched. A request left proposing
+   * nothing is withdrawn (closed, its branch retired), exactly as declining
+   * its last file would.
+   */
+  async removeFolderFromChangeRequests(
+    folder: string,
+    user: AuthUser,
+  ): Promise<FolderChangeRequestRemoval[]> {
+    const requests = await this.changeRequestsUnderFolder(folder, user);
+    const refused = requests.filter((r) => !r.mayRemove);
+    if (refused.length > 0) {
+      throw new WorkflowDomainError(
+        `You can't remove proposed changes from ${refused.map((r) => `#${r.number}`).join(', ')} — only the author, an admin or a writer of this folder can.`,
+        403,
+      );
+    }
+    const prefix = folderPrefix(folder);
+    const results: FolderChangeRequestRemoval[] = [];
+    for (const request of requests) {
+      const summary = await this.prs.getPr(request.number);
+      if (!summary || summary.state !== 'open') continue;
+      const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
+      await this.pullWorkspace(ws.id).catch(() => undefined);
+      // The request as it is NOW, not as the list saw it.
+      const paths = (await this.git.changedPathsForPr(ws.id, summary.base, summary.branch)).filter((p) =>
+        p.startsWith(prefix),
+      );
+      if (paths.length > 0) {
+        const mergeBase = await this.git.mergeBaseForPr(ws.id, summary.base, summary.branch);
+        if (!mergeBase) {
+          throw new WorkflowDomainError(`#${summary.number} shares no history with its target to revert to.`, 422);
+        }
+        for (const repoRelPath of paths) {
+          const lockPath = `${this.kbDirName}/${repoRelPath}`;
+          const lock = await this.fileLocks.acquire(ws.id, summary.branch, lockPath, user);
+          if (!lock.acquired) {
+            throw new WorkflowDomainError(
+              `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
+              409,
+            );
+          }
+          try {
+            await this.git.restorePathFromRef(ws.id, mergeBase, repoRelPath);
+            await this.git.commitFile(
+              ws.id,
+              user,
+              repoRelPath,
+              `Revert ${repoRelPath} (folder deleted; removed from change request #${summary.number})`,
+              true, // skipValidator — this restores an already-validated base version
+            );
+          } finally {
+            await this.fileLocks.release(ws.id, summary.branch, lockPath, user);
+          }
+        }
+        await this.trackedPush(ws.id, user);
+        this.prs.invalidateDetailCache(summary.number);
+      }
+      const withdrawn = await this.closeEmptyChangeRequest(summary.number, user);
+      results.push({ number: summary.number, removedPaths: paths, withdrawn });
+    }
+    return results;
   }
 
   /**

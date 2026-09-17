@@ -133,6 +133,29 @@ export type CancelChangeRequestResult = CancelPrResult;
 export type ChangeRequestComment = PrReviewComment;
 export type PostChangeRequestCommentInput = PostPrCommentInput;
 
+/** One open change request proposing files under a folder, as a folder delete lists it. */
+export interface FolderChangeRequest {
+  number: number;
+  title: string;
+  authorName: string | null;
+  /** The caller authored it. */
+  mine: boolean;
+  /** KB-repo-relative paths it proposes under the folder. */
+  paths: string[];
+  /** The caller may take those files out of it: their own, or they are an admin or a writer of the folder. */
+  mayRemove: boolean;
+  /** Why not, when `mayRemove` is false. */
+  reason?: string;
+}
+
+/** What removing a folder's files did to one change request. */
+export interface FolderChangeRequestRemoval {
+  number: number;
+  removedPaths: string[];
+  /** The request proposed nothing else, so it was withdrawn. */
+  withdrawn: boolean;
+}
+
 /**
  * Input for opening a new change request. The workflow auto-merges
  * `targetBranch` into `sourceBranch` as part of opening, so callers don't

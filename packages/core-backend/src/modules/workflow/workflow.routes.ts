@@ -572,6 +572,55 @@ export function createWorkflowRoutes(
     }
   });
 
+  /**
+   * A KB-repo-relative folder from the request, or null (400 sent) when it is
+   * missing or could step outside the repository.
+   */
+  function folderParam(raw: unknown, res: express.Response): string | null {
+    const folder = typeof raw === 'string' ? raw.replace(/\/+$/, '') : '';
+    if (!folder || folder.startsWith('/') || folder.split('/').some((s) => s === '' || s === '.' || s === '..')) {
+      res.status(400).json({ error: 'path must be a folder inside the knowledge base' });
+      return null;
+    }
+    return folder;
+  }
+
+  /**
+   * Before a folder delete: the open change requests proposing files under
+   * the folder, and whether the caller may take those files out of each.
+   * Registered before `/:number`, which would otherwise claim the segment.
+   */
+  router.get('/workflow/change-requests/under-folder', async (req, res) => {
+    const folder = folderParam(req.query.path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ requests: await workflow.changeRequestsUnderFolder(folder, user) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * "Delete folder and its proposed changes", the request half: every file
+   * under the folder leaves every open request proposing it, and a request
+   * left empty is withdrawn. All or nothing on permission (403).
+   */
+  router.post('/workflow/change-requests/under-folder/remove', async (req, res) => {
+    const folder = folderParam((req.body ?? {}).path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ results: await workflow.removeFolderFromChangeRequests(folder, user) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
   router.get('/workflow/change-requests/:number', async (req, res) => {
     const num = parsePrNumber(req.params.number);
     if (num === null) {

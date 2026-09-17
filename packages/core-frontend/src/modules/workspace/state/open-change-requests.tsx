@@ -5,7 +5,11 @@ import {
   listOpenChangeRequests,
 } from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
-import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
+import {
+  PR_STALE_EVENT,
+  SUGGESTIONS_OPTIMISTIC_EVENT,
+  SUGGESTIONS_RETRACTED_EVENT,
+} from '../../../core/events';
 import {
   NO_CHANGE_REQUESTS,
   OpenChangeRequestsContext,
@@ -62,6 +66,14 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
    * moment it exists.
    */
   const [announced, setAnnounced] = useState<{ cr: PullRequestSummary; at: number }[]>([]);
+  /**
+   * The other direction: folders whose proposed files the client just took
+   * out of every request (a folder delete). Paths under one are hidden until
+   * BOTH lists have answered from a fetch that started after the retraction —
+   * `answeredFrom` holds each list's latest answered start time.
+   */
+  const [retracted, setRetracted] = useState<{ prefix: string; at: number }[]>([]);
+  const [answeredFrom, setAnsweredFrom] = useState({ all: 0, mine: 0 });
 
   useEffect(() => {
     let cancelled = false;
@@ -74,7 +86,9 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       const startedAt = Date.now();
       listOpenChangeRequests(opts)
         .then((data) => {
-          if (!cancelled) setRequests(data);
+          if (cancelled) return;
+          setRequests(data);
+          setAnsweredFrom((prev) => ({ ...prev, all: Math.max(prev.all, startedAt) }));
         })
         .catch((err) => {
           // A queue that cannot load is not an error state on a page about a
@@ -87,6 +101,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
           if (cancelled) return;
           const open = data.filter((c) => c.state === 'open');
           setMine(open);
+          setAnsweredFrom((prev) => ({ ...prev, mine: Math.max(prev.mine, startedAt) }));
           // Reconcile: an announced entry whose every path the real list now
           // carries has been overtaken; one whose request is GONE (declined,
           // merged, withdrawn elsewhere) must not haunt the tree either — but
@@ -125,18 +140,41 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       ]);
     };
     window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
+    const onRetract = (e: Event) => {
+      const folder = (e as CustomEvent<{ folder?: unknown }>).detail?.folder;
+      if (typeof folder !== 'string' || !folder) return;
+      const prefix = `${folder.replace(/\/+$/, '')}/`;
+      setRetracted((prev) => [...prev.filter((r) => r.prefix !== prefix), { prefix, at: Date.now() }]);
+      // An announced proposal under the folder is gone too.
+      setAnnounced((prev) =>
+        prev.map((a) => ({
+          ...a,
+          cr: { ...a.cr, touchedNodePaths: a.cr.touchedNodePaths.filter((p) => !p.startsWith(prefix)) },
+        })),
+      );
+      load({ fresh: true });
+    };
+    window.addEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);
     return () => {
       cancelled = true;
       window.removeEventListener(PR_STALE_EVENT, onStale);
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
+      window.removeEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);
     };
   }, []);
 
   const value = useMemo<OpenChangeRequests>(() => {
     if (!kbDirName) return NO_CHANGE_REQUESTS;
+    // A retraction stays in force until both lists answered from after it.
+    const answered = Math.min(answeredFrom.all, answeredFrom.mine);
+    const hidden = retracted.filter((r) => r.at > answered).map((r) => r.prefix);
+    const touched = (pr: PullRequestSummary) =>
+      hidden.length === 0
+        ? pr.touchedNodePaths
+        : pr.touchedNodePaths.filter((p) => !hidden.some((prefix) => p.startsWith(prefix)));
     const byPath = new Map<string, PullRequestSummary[]>();
     for (const pr of requests) {
-      for (const repoRelative of pr.touchedNodePaths) {
+      for (const repoRelative of touched(pr)) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         const list = byPath.get(workspaceRelative);
         if (list) list.push(pr);
@@ -151,7 +189,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // fetch) would otherwise produce a row whose click does nothing.
     const announcedCrs = announced.map((a) => a.cr);
     for (const pr of [...mine, ...announcedCrs]) {
-      for (const repoRelative of pr.touchedNodePaths) {
+      for (const repoRelative of touched(pr)) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         const list = byPath.get(workspaceRelative);
         if (!list) byPath.set(workspaceRelative, [pr]);
@@ -164,7 +202,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // untangle, so the row just links to the older one.
     const minePaths = new Map<string, number>();
     for (const pr of [...mine, ...announcedCrs]) {
-      for (const repoRelative of pr.touchedNodePaths) {
+      for (const repoRelative of touched(pr)) {
         const workspaceRelative = `${kbDirName}/${repoRelative}`;
         if (!minePaths.has(workspaceRelative)) minePaths.set(workspaceRelative, pr.number);
       }
@@ -175,7 +213,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       minePaths,
       mineNumbers: new Set([...mine, ...announcedCrs].map((pr) => pr.number)),
     };
-  }, [requests, mine, announced, kbDirName]);
+  }, [requests, mine, announced, retracted, answeredFrom, kbDirName]);
 
   return (
     <OpenChangeRequestsContext.Provider value={value}>

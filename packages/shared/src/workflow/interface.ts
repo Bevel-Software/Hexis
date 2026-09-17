@@ -33,6 +33,8 @@ import type {
   ChangedFile,
   FileApproval,
   FileLock,
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -461,6 +463,20 @@ export interface IWorkflowService {
    * Returns true when this call closed it.
    */
   closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
+
+  /**
+   * The open change requests proposing files under a KB-repo-relative
+   * folder, each with whether the caller may take those files out of it
+   * (their own request, or they are an admin or a writer of the folder).
+   */
+  changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]>;
+
+  /**
+   * Take every file under the folder out of every open change request
+   * proposing one; a request left empty is withdrawn. Refused (403) as a
+   * whole when the caller may not act on any one of them.
+   */
+  removeFolderFromChangeRequests(folder: string, user: AuthUser): Promise<FolderChangeRequestRemoval[]>;
 
   /**
    * Close every open change request either of whose branches no longer exists

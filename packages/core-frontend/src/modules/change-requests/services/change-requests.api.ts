@@ -1,4 +1,8 @@
-import type { PullRequestSummary } from '@bevel-software/platform-shared';
+import type {
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
+  PullRequestSummary,
+} from '@bevel-software/platform-shared';
 import { authFetch } from '../../../lib/api';
 import { handleApiResponse } from '../../git/services/git.api';
 import { getOrCreateWorkspace, readFile } from '../../workspace/services/workspace.api';
@@ -36,6 +40,34 @@ export async function listMyChangeRequests(
   return handleApiResponse<PullRequestSummary[]>(
     await authFetch(`/api/workflow/change-requests/mine${opts.fresh ? '?fresh=1' : ''}`),
   );
+}
+
+/**
+ * The open change requests proposing files under a KB-repo-relative folder,
+ * each with whether the caller may take those files out of it — what a folder
+ * delete asks before it offers to remove the proposals too.
+ */
+export async function listChangeRequestsUnderFolder(folder: string): Promise<FolderChangeRequest[]> {
+  const data = await handleApiResponse<{ requests: FolderChangeRequest[] }>(
+    await authFetch(`/api/workflow/change-requests/under-folder?path=${encodeURIComponent(folder)}`),
+  );
+  return data.requests;
+}
+
+/**
+ * Take every file under the folder out of every open change request proposing
+ * one. A request left empty is withdrawn. Refused as a whole (403) when the
+ * caller may not act on one of them.
+ */
+export async function removeFolderFromChangeRequests(folder: string): Promise<FolderChangeRequestRemoval[]> {
+  const data = await handleApiResponse<{ results: FolderChangeRequestRemoval[] }>(
+    await authFetch('/api/workflow/change-requests/under-folder/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: folder }),
+    }),
+  );
+  return data.results;
 }
 
 /** Read a file from a branch's shared workspace (bootstraps the clone if needed). */

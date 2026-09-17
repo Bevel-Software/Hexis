@@ -38,10 +38,14 @@ import {
 } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
-import { findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree } from '../utils/fileTree';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
-import { PR_STALE_EVENT } from '../../../core/events';
+import { PR_STALE_EVENT, SUGGESTIONS_RETRACTED_EVENT } from '../../../core/events';
+import {
+  listChangeRequestsUnderFolder,
+  removeFolderFromChangeRequests,
+} from '../../change-requests/services/change-requests.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useFileNav } from '../routing/kb-routes';
 import { rawFileUrl } from '../services/workspace.api';
@@ -54,7 +58,12 @@ import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
 import { fetchFileAccess } from '../../access/api';
-import { TreeActionConfirmDialog, type TreeConfirmRequest } from './TreeActionConfirm';
+import {
+  TreeActionConfirmDialog,
+  type DeleteMode,
+  type FolderProposals,
+  type TreeConfirmRequest,
+} from './TreeActionConfirm';
 import { moveWarnings } from '../utils/treeConfirm';
 
 /**
@@ -298,7 +307,8 @@ function ContextMenu({
   /** The row this menu was opened from — Escape hands focus back to it. */
   returnFocusTo?: React.RefObject<HTMLElement | null>;
 }) {
-  const { deleteEntry, unzipHere } = useWorkspace();
+  const { deleteEntry, unzipHere, kbDirName, fileTree } = useWorkspace();
+  const suggestions = useSuggestions();
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
   const confirm = useTreeConfirm();
@@ -341,23 +351,57 @@ function ContextMenu({
   };
 
   // Delete asks first; Confirm runs the delete exactly as the menu used to.
+  // A KB folder can also hold proposed files — the dialog then offers to take
+  // them out of their change requests as well (`runWithProposals`).
+  const repoFolder =
+    entry.type === 'directory' && kbDirName && entry.relativePath.startsWith(`${kbDirName}/`)
+      ? entry.relativePath.slice(kbDirName.length + 1)
+      : null;
   const handleDelete = () => {
     onClose();
+    const deleteOnBranch = async (): Promise<boolean> => {
+      // A folder only proposed files put in the tree is not on this branch:
+      // nothing to delete here, and asking the server would only queue a
+      // commit for a path that does not exist.
+      if (fileTree && !pathExistsInTree(fileTree, entry.relativePath)) return true;
+      try {
+        return (await deleteEntry(entry.relativePath)) !== false;
+      } catch (err) {
+        console.error('Failed to delete entry:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        alert(`Failed to delete ${entry.relativePath}:\n${msg}`);
+        return false;
+      }
+    };
     confirm({
       kind: 'delete',
       entry,
       returnFocusTo: () => returnFocusTo?.current ?? null,
       // The folder it was in — the row itself is gone once the delete lands.
       focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
+      isProposed: (path) => suggestions.crFor(path) !== null,
       run: async () => {
-        try {
-          await deleteEntry(entry.relativePath);
-        } catch (err) {
-          console.error('Failed to delete entry:', err);
-          const msg = err instanceof Error ? err.message : String(err);
-          alert(`Failed to delete ${entry.relativePath}:\n${msg}`);
-        }
+        await deleteOnBranch();
       },
+      ...(repoFolder !== null && {
+        runWithProposals: async () => {
+          // The branch first: a delete that failed (or was called off over
+          // unsaved tabs) must not have already emptied the proposals.
+          if (!(await deleteOnBranch())) return;
+          try {
+            await removeFolderFromChangeRequests(repoFolder);
+          } catch (err) {
+            console.error('Failed to remove proposed changes:', err);
+            const msg = err instanceof Error ? err.message : String(err);
+            alert(`Deleted ${entry.name}, but couldn't remove its proposed changes:\n${msg}`);
+            window.dispatchEvent(new Event(PR_STALE_EVENT));
+            return;
+          }
+          // The rows and dots go now; the refetch confirms it.
+          window.dispatchEvent(new CustomEvent(SUGGESTIONS_RETRACTED_EVENT, { detail: { folder: repoFolder } }));
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+        },
+      }),
     });
   };
 
@@ -1273,11 +1317,51 @@ export function TreeChrome({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [confirmRequest, workspaceId, kbDirName]);
-  const closeConfirm = (andRun: boolean) => {
+  // A folder delete asks which open change requests propose files in the
+  // folder — only when the loaded list says there are any, so a plain folder
+  // opens its dialog exactly as before. Keyed by the request it answers.
+  const [proposalsAnswer, setProposalsAnswer] = useState<
+    { request: TreeConfirmRequest; proposals: FolderProposals } | null
+  >(null);
+  const deleteFolder =
+    confirmRequest?.kind === 'delete' && confirmRequest.entry.type === 'directory' && kbDirName
+    && confirmRequest.entry.relativePath.startsWith(`${kbDirName}/`)
+      ? confirmRequest
+      : null;
+  const folderHasProposals =
+    deleteFolder !== null
+    && [...openChangeRequests.paths].some((p) => p.startsWith(`${deleteFolder.entry.relativePath}/`));
+  const folderProposals: FolderProposals = !folderHasProposals
+    ? { status: 'none' }
+    : proposalsAnswer && proposalsAnswer.request === confirmRequest
+      ? proposalsAnswer.proposals
+      : { status: 'loading' };
+  useEffect(() => {
+    if (!deleteFolder || !folderHasProposals || !kbDirName) return;
+    let cancelled = false;
+    listChangeRequestsUnderFolder(deleteFolder.entry.relativePath.slice(kbDirName.length + 1))
+      .then((requests) => {
+        if (!cancelled) setProposalsAnswer({ request: deleteFolder, proposals: { status: 'ready', requests } });
+      })
+      .catch((err) => {
+        console.warn('[FileExplorer] change requests under folder:', err);
+        if (!cancelled) setProposalsAnswer({ request: deleteFolder, proposals: { status: 'failed' } });
+      });
+    return () => { cancelled = true; };
+    // `folderHasProposals` is derived from the list; asking again on every
+    // list refresh would flicker the dialog back to "Checking…".
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleteFolder, kbDirName]);
+  const closeConfirm = (andRun: boolean, mode: DeleteMode = 'folder-only') => {
     if (!confirmRequest) return;
     focusAfterConfirm.current = andRun ? confirmRequest.focusAfterRun : confirmRequest.returnFocusTo;
     setOpenConfirm(null);
-    if (andRun) void confirmRequest.run();
+    if (!andRun) return;
+    if (mode === 'with-proposals' && confirmRequest.kind === 'delete' && confirmRequest.runWithProposals) {
+      void confirmRequest.runWithProposals();
+    } else {
+      void confirmRequest.run();
+    }
   };
   // Focus goes back to the row once the dialog has unmounted — after the
   // Dialog's own restore, which would otherwise hand it to the (gone) menu.
@@ -1308,8 +1392,9 @@ export function TreeChrome({
               ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
               : []
           }
+          proposals={folderProposals}
           onCancel={() => closeConfirm(false)}
-          onConfirm={() => closeConfirm(true)}
+          onConfirm={(mode) => closeConfirm(true, mode)}
         />
       )}
       {openSuggestionCr && (
