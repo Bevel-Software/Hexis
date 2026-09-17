@@ -1919,9 +1919,14 @@ export class WorkflowService implements IWorkflowService {
       authorIdHash,
       workspaceId,
     );
-    // A recorded approval answers a GATE refusal only: the one waiting on it no
-    // longer describes the request, but a conflict or a git error still does.
-    await this.clearApplyFailure(number, { kinds: ['gate'], recordedBefore: approvedAfter });
+    // A recorded approval can answer a GATE refusal only — a conflict or a git
+    // error still describes the request — and only once the gate that refused
+    // would now pass: approving one file of several leaves the rest waiting,
+    // and the refusal naming them still stands. Warnings count too, since an
+    // apply without bypass is refused on them.
+    if (this.gateWouldPass(number, approvals)) {
+      await this.clearApplyFailure(number, { kinds: ['gate'], recordedBefore: approvedAfter });
+    }
     this.prs.invalidateDetailCache(number);
     this.events?.emit({
       kind: 'approval-changed',
@@ -2613,6 +2618,21 @@ export class WorkflowService implements IWorkflowService {
    * uses — every list and open dialog re-reads the request. Best-effort: the
    * mutation that triggered it already happened and must not fail on this.
    */
+  /**
+   * Whether the merge gate would now let an apply through without bypass — no
+   * hard reason, no warning. Part of the best-effort clear: an evaluation that
+   * fails answers "no" (the refusal stays) instead of failing the approval.
+   */
+  private gateWouldPass(number: number, approvals: FileApproval[]): boolean {
+    try {
+      const gate = this.reviewWorkflow.evaluateMergeGate({ prNumber: number, state: 'open', approvals });
+      return gate?.mergeable === true && gate.warnings.length === 0;
+    } catch (err) {
+      crLog.warn(`could not re-evaluate the merge gate of change request #${number}; keeping its refusal:`, { err });
+      return false;
+    }
+  }
+
   private async clearApplyFailure(
     number: number,
     scope: { kinds?: readonly ChangeRequestApplyFailureKind[]; recordedBefore: Date },

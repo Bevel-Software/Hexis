@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { AuthUser, IWorkflowService, WorkflowEvent } from '@bevel-software/platform-shared';
+import type { AuthUser, FileApprovalState, IWorkflowService, WorkflowEvent } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -13,6 +13,7 @@ import type { GitService } from '../git/git.service.js';
 import type { PullRequestService } from '../git/pull-request.service.js';
 import { PullRequestService as RealPullRequestService } from '../git/pull-request.service.js';
 import type { IReviewWorkflowService } from '../review-workflow/review-workflow.interface.js';
+import { ReviewWorkflowService } from '../review-workflow/review-workflow.service.js';
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
@@ -544,14 +545,30 @@ describe('WorkflowService — a refusal clears when a change makes it obsolete',
   const approveArgs = [7, 'Plugins/x/SKILL.md', ADMIN, [], 'h', 'main', null, 'ws'] as const;
   const EARLIER = new Date(Date.now() - 60_000);
 
-  function approving(seed: Partial<Row>, onApprove: (row: Row) => void = () => {}) {
+  /** A gate-bound markdown file's approval state, as the review workflow returns it. */
+  const fileState = (path: string, isApproved: boolean): FileApprovalState => ({
+    path,
+    eligibleApprovers: { roles: ['Plugin owners'], users: [] },
+    approvedBy: [],
+    isApproved,
+    inMergeGate: true,
+  } as unknown as FileApprovalState);
+  const ALL_APPROVED = [fileState('Plugins/x/SKILL.md', true), fileState('Plugins/x/notes.md', true)];
+
+  function approving(
+    seed: Partial<Row>,
+    onApprove: (row: Row) => void = () => {},
+    approvalsAfter: FileApprovalState[] = ALL_APPROVED,
+  ) {
     const store = rowDb(seed);
     const emitted: { kind: string }[] = [];
     const { svc, prs } = service(store.db, (e) => emitted.push(e as { kind: string }), {
       approveFile: vi.fn(async () => {
         onApprove(store.row);
-        return [];
+        return approvalsAfter;
       }),
+      // The real gate: whether an approval answers the refusal is its verdict.
+      evaluateMergeGate: (input) => ReviewWorkflowService.prototype.evaluateMergeGate.call({}, input),
     });
     return { ...store, svc, prs, emitted };
   }
@@ -577,7 +594,18 @@ describe('WorkflowService — a refusal clears when a change makes it obsolete',
     return { ...store, svc, emitted };
   }
 
-  it('an approval clears a GATE refusal recorded before it and tells every viewer to re-read', async () => {
+  it('approving ONE of several waiting files leaves the gate refusal naming the others', async () => {
+    const t = approving(refusal('gate', EARLIER), () => {}, [
+      fileState('Plugins/x/SKILL.md', true),
+      fileState('Plugins/x/notes.md', false),
+    ]);
+    await t.svc.approveFile(...approveArgs);
+    expect(t.row).toMatchObject({ apply_failure_kind: 'gate', apply_failure_reason: 'gate reason' });
+    expect(t.writes).toEqual([]);
+    expect(t.emitted.map((e) => e.kind)).toEqual(['approval-changed']);
+  });
+
+  it('an approval clears a GATE refusal recorded before it, once the gate would pass, and tells every viewer to re-read', async () => {
     const t = approving(refusal('gate', EARLIER));
     await t.svc.approveFile(...approveArgs);
     expect(t.row).toMatchObject({
@@ -633,14 +661,29 @@ describe('WorkflowService — a refusal clears when a change makes it obsolete',
     expect(t.emitted.map((e) => e.kind)).toEqual(['approval-changed']);
   });
 
+  it('a gate that cannot be re-evaluated keeps the refusal and never fails the approval', async () => {
+    const store = rowDb(refusal('gate', EARLIER));
+    const { svc } = service(store.db, () => {}, {
+      approveFile: vi.fn(async () => ALL_APPROVED),
+      evaluateMergeGate: () => {
+        throw new Error('gate unavailable');
+      },
+    });
+    await expect(svc.approveFile(...approveArgs)).resolves.toEqual(ALL_APPROVED);
+    expect(store.row.apply_failure_reason).toBe('gate reason');
+  });
+
   it('a failed clear never fails the approval that triggered it', async () => {
     const db = {
       update: () => {
         throw new Error('db down');
       },
     } as unknown as Database;
-    const { svc } = service(db, () => {}, { approveFile: vi.fn(async () => []) });
-    await expect(svc.approveFile(...approveArgs)).resolves.toEqual([]);
+    const { svc } = service(db, () => {}, {
+      approveFile: vi.fn(async () => ALL_APPROVED),
+      evaluateMergeGate: (input) => ReviewWorkflowService.prototype.evaluateMergeGate.call({}, input),
+    });
+    await expect(svc.approveFile(...approveArgs)).resolves.toEqual(ALL_APPROVED);
   });
 });
 
