@@ -1829,12 +1829,40 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
     expect(alertSpy).not.toHaveBeenCalled();
   });
 
-  it('asks nothing about requests for a folder no request touches', async () => {
+  it('opens the plain delete at once for a folder no request touches, and keeps it when the check agrees', async () => {
+    answer([]);
     renderExplorer({ fileTree: TREE });
     await chooseDelete('Reports');
     expect(screen.getByRole('dialog')).toHaveTextContent('Delete Reports and its 1 file?');
     expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
-    expect(mockAuthFetch).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports'),
+    );
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Delete folder only' })).not.toBeInTheDocument();
+  });
+
+  it('still asks about proposals when the shared request list has not shown any (loading or failed)', async () => {
+    answer([request()]);
+    // No proposed paths in the shared list, yet the server knows of #12.
+    renderExplorer({ fileTree: TREE });
+    await chooseDelete('Reports');
+    expect(await screen.findByRole('button', { name: 'Delete folder and its proposed changes' })).toBeEnabled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('#12 “Quarterly numbers” by you (1 proposed file)');
+  });
+
+  it('says nothing about a failed check for a folder the shared list shows no proposals under', async () => {
+    mockAuthFetch.mockResolvedValue(json({ error: 'boom' }, 500));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      renderExplorer({ fileTree: TREE });
+      await chooseDelete('Reports');
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      expect(screen.queryByText(/Couldn't check which change requests/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('still offers the plain delete, with a note, when the requests cannot be checked', async () => {

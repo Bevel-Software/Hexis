@@ -133,8 +133,12 @@ export type CancelChangeRequestResult = CancelPrResult;
 export type ChangeRequestComment = PrReviewComment;
 export type PostChangeRequestCommentInput = PostPrCommentInput;
 
-/** One open change request proposing files under a folder, as a folder delete lists it. */
-export interface FolderChangeRequest {
+/**
+ * One open change request proposing files under a folder, as a folder delete
+ * lists it. `mayRemove`: the caller may take those files out of it (their own,
+ * or they are an admin or a writer of the folder); a refusal always says why.
+ */
+export type FolderChangeRequest = {
   number: number;
   title: string;
   authorName: string | null;
@@ -142,11 +146,7 @@ export interface FolderChangeRequest {
   mine: boolean;
   /** KB-repo-relative paths it proposes under the folder. */
   paths: string[];
-  /** The caller may take those files out of it: their own, or they are an admin or a writer of the folder. */
-  mayRemove: boolean;
-  /** Why not, when `mayRemove` is false. */
-  reason?: string;
-}
+} & ({ mayRemove: true } | { mayRemove: false; reason: string });
 
 /** What removing a folder's files did to one change request. */
 export interface FolderChangeRequestRemoval {

@@ -1318,8 +1318,11 @@ export function TreeChrome({
     return () => { cancelled = true; };
   }, [confirmRequest, workspaceId, kbDirName]);
   // A folder delete asks which open change requests propose files in the
-  // folder — only when the loaded list says there are any, so a plain folder
-  // opens its dialog exactly as before. Keyed by the request it answers.
+  // folder. It asks for EVERY knowledge-base folder: the shared list may still
+  // be loading, or have failed, and its silence is not "no proposals". A
+  // folder the list shows no proposals under opens the plain dialog at once
+  // (its Delete is "Delete folder only") and switches to the three-way one
+  // if the answer names requests. Keyed by the request it answers.
   const [proposalsAnswer, setProposalsAnswer] = useState<
     { request: TreeConfirmRequest; proposals: FolderProposals } | null
   >(null);
@@ -1331,13 +1334,16 @@ export function TreeChrome({
   const folderHasProposals =
     deleteFolder !== null
     && [...openChangeRequests.paths].some((p) => p.startsWith(`${deleteFolder.entry.relativePath}/`));
-  const folderProposals: FolderProposals = !folderHasProposals
-    ? { status: 'none' }
-    : proposalsAnswer && proposalsAnswer.request === confirmRequest
-      ? proposalsAnswer.proposals
-      : { status: 'loading' };
+  const answered = proposalsAnswer && proposalsAnswer.request === confirmRequest ? proposalsAnswer.proposals : null;
+  const folderProposals: FolderProposals = folderHasProposals
+    ? (answered ?? { status: 'loading' })
+    // With no proposals in the list, only an answer that names requests
+    // changes the dialog; a failed check has nothing to warn about.
+    : answered?.status === 'ready' && answered.requests.length > 0
+      ? answered
+      : { status: 'none' };
   useEffect(() => {
-    if (!deleteFolder || !folderHasProposals || !kbDirName) return;
+    if (!deleteFolder || !kbDirName) return;
     let cancelled = false;
     listChangeRequestsUnderFolder(deleteFolder.entry.relativePath.slice(kbDirName.length + 1))
       .then((requests) => {
@@ -1348,9 +1354,6 @@ export function TreeChrome({
         if (!cancelled) setProposalsAnswer({ request: deleteFolder, proposals: { status: 'failed' } });
       });
     return () => { cancelled = true; };
-    // `folderHasProposals` is derived from the list; asking again on every
-    // list refresh would flicker the dialog back to "Checking…".
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deleteFolder, kbDirName]);
   const closeConfirm = (andRun: boolean, mode: DeleteMode = 'folder-only') => {
     if (!confirmRequest) return;

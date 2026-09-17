@@ -113,17 +113,18 @@ export function TreeActionConfirmDialog({
   if (isDelete && requests.length > 0) {
     // The three-way question: this branch only, or its proposals too. The
     // second verb needs the caller to be allowed on EVERY listed request.
-    const refused = requests.filter((r) => !r.mayRemove);
+    const refused = requests.flatMap((r) => (r.mayRemove ? [] : [r]));
     return (
       <Dialog
         open
-        // Three unwrappable actions side by side: at `md` the footer ran wider
-        // than the dialog and pushed Cancel past its left edge.
+        // Three actions: at `md` the footer ran wider than the dialog and
+        // pushed Cancel past its left edge. They also wrap, so a narrow
+        // viewport stacks them instead of cutting one off.
         size="lg"
         onClose={onCancel}
         title="Delete folder"
         footer={
-          <>
+          <div className="flex flex-wrap justify-end gap-2">
             <Button size="sm" onClick={onCancel}>
               Cancel
             </Button>
@@ -139,7 +140,7 @@ export function TreeActionConfirmDialog({
             >
               Delete folder and its proposed changes
             </Button>
-          </>
+          </div>
         }
       >
         <p className="text-detail text-ink">{deleteSentence(request.entry, request.isProposed)}</p>
@@ -162,7 +163,7 @@ export function TreeActionConfirmDialog({
           <ul id="delete-proposals-refused" className="mt-2 space-y-1">
             {refused.map((r) => (
               <li key={r.number} role="note" className="text-detail text-danger">
-                {r.reason ?? `You can't change #${r.number}.`}
+                {r.reason}
               </li>
             ))}
           </ul>

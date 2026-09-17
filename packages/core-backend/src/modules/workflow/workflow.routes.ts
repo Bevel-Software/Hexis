@@ -574,11 +574,23 @@ export function createWorkflowRoutes(
 
   /**
    * A KB-repo-relative folder from the request, or null (400 sent) when it is
-   * missing or could step outside the repository.
+   * missing, could step outside the repository, or is not a path git could
+   * hold: the same contract as every other path handed to git (no backslash,
+   * no control character, at most 1024 characters, no leading `-`). A
+   * malformed spelling matches no request, so letting it through would
+   * answer "nothing to remove" instead of saying the path is wrong.
    */
   function folderParam(raw: unknown, res: express.Response): string | null {
     const folder = typeof raw === 'string' ? raw.replace(/\/+$/, '') : '';
-    if (!folder || folder.startsWith('/') || folder.split('/').some((s) => s === '' || s === '.' || s === '..')) {
+    if (
+      !folder
+      || folder.length > 1024
+      || folder.startsWith('/')
+      || folder.startsWith('-')
+      || folder.includes('\\')
+      || [...folder].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)
+      || folder.split('/').some((s) => s === '' || s === '.' || s === '..')
+    ) {
       res.status(400).json({ error: 'path must be a folder inside the knowledge base' });
       return null;
     }

@@ -74,7 +74,10 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
    * counter, not the clock: the retraction and its refetch happen in the same
    * tick, and two equal `Date.now()` stamps would keep the folder hidden
    * after the refetch answered. (The server has finished removing the files
-   * before the event fires, so any fetch that starts later is the truth.)
+   * before the event fires, so any fetch that starts later is the truth.) A
+   * failed fetch answers too: it empties its list, so nothing stale is left
+   * to hide, and a token that outlived its refetch would hide proposals made
+   * under the folder later.
    */
   const [retracted, setRetracted] = useState<{ prefix: string; at: number }[]>([]);
   const [answeredFrom, setAnsweredFrom] = useState({ all: 0, mine: 0 });
@@ -83,6 +86,20 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     let cancelled = false;
     /** Strictly increasing order of retractions and fetch starts. */
     let order = 0;
+    /**
+     * The latest fetch start each list has applied. An answer from an older
+     * fetch that lands after a newer one is dropped: it can predate a
+     * retraction whose hide token the newer answer already lifted, and would
+     * bring the removed proposals back.
+     */
+    const applied = { all: 0, mine: 0 };
+    const supersedes = (list: 'all' | 'mine', startedOrder: number) => {
+      if (cancelled || startedOrder < applied[list]) return false;
+      applied[list] = startedOrder;
+      return true;
+    };
+    const answer = (list: 'all' | 'mine', startedOrder: number) =>
+      setAnsweredFrom((prev) => ({ ...prev, [list]: Math.max(prev[list], startedOrder) }));
     const load = (opts: { fresh?: boolean } = {}) => {
       const startedOrder = ++order;
       // When THIS fetch left the building — only a fetch that STARTED after
@@ -93,22 +110,24 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       const startedAt = Date.now();
       listOpenChangeRequests(opts)
         .then((data) => {
-          if (cancelled) return;
+          if (!supersedes('all', startedOrder)) return;
           setRequests(data);
-          setAnsweredFrom((prev) => ({ ...prev, all: Math.max(prev.all, startedOrder) }));
+          answer('all', startedOrder);
         })
         .catch((err) => {
           // A queue that cannot load is not an error state on a page about a
           // document. The dots and the banner simply do not appear.
           console.warn('[OpenChangeRequests] load failed:', err);
-          if (!cancelled) setRequests([]);
+          if (!supersedes('all', startedOrder)) return;
+          setRequests([]);
+          answer('all', startedOrder);
         });
       listMyChangeRequests(opts)
         .then((data) => {
-          if (cancelled) return;
+          if (!supersedes('mine', startedOrder)) return;
           const open = data.filter((c) => c.state === 'open');
           setMine(open);
-          setAnsweredFrom((prev) => ({ ...prev, mine: Math.max(prev.mine, startedOrder) }));
+          answer('mine', startedOrder);
           // Reconcile: an announced entry whose every path the real list now
           // carries has been overtaken; one whose request is GONE (declined,
           // merged, withdrawn elsewhere) must not haunt the tree either — but
@@ -126,7 +145,9 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         .catch((err) => {
           // Same degradation contract: no suggestion rows, not an error page.
           console.warn('[OpenChangeRequests] mine load failed:', err);
-          if (!cancelled) setMine([]);
+          if (!supersedes('mine', startedOrder)) return;
+          setMine([]);
+          answer('mine', startedOrder);
         });
     };
     load();

@@ -473,8 +473,9 @@ export interface IWorkflowService {
 
   /**
    * Take every file under the folder out of every open change request
-   * proposing one; a request left empty is withdrawn. Refused (403) as a
-   * whole when the caller may not act on any one of them.
+   * proposing one; a request left empty is withdrawn. All or nothing: refused
+   * (403), with nothing touched, when the caller may not act on even one of
+   * them.
    */
   removeFolderFromChangeRequests(folder: string, user: AuthUser): Promise<FolderChangeRequestRemoval[]>;
 

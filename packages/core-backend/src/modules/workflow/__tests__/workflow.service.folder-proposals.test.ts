@@ -137,7 +137,7 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
       updating = null;
     }
   });
-  return { svc, git, changed, closed, fileLocks };
+  return { svc, git, prs, changed, closed, fileLocks };
 }
 
 const aliceRequest = summary({
@@ -180,8 +180,11 @@ describe('WorkflowService.changeRequestsUnderFolder', () => {
     const { svc } = makeHarness([aliceRequest, bobRequest]);
     const [own, other] = await svc.changeRequestsUnderFolder('Data/Reports/', ALICE);
     expect(own).toMatchObject({ number: 12, mayRemove: true });
-    expect(other).toMatchObject({ number: 40, mayRemove: false });
-    expect(other.reason).toMatch(/#40 was proposed by Bob; only its author, an admin or a writer of this folder/);
+    expect(other).toMatchObject({
+      number: 40,
+      mayRemove: false,
+      reason: expect.stringMatching(/#40 was proposed by Bob; only its author, an admin or a writer of this folder/),
+    });
   });
 
   it('lets an admin act on any request', async () => {
@@ -189,6 +192,28 @@ describe('WorkflowService.changeRequestsUnderFolder', () => {
     const carol = { id: 'u-carol', email: 'carol@example.com', name: 'Carol' };
     const requests = await svc.changeRequestsUnderFolder('Data/Reports', carol);
     expect(requests.every((r) => r.mayRemove)).toBe(true);
+  });
+
+  it('reads a request listed with no paths again, since the list reports an unreadable diff as empty', async () => {
+    const { svc, prs, git } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
+    vi.mocked(prs.listOpenPrs).mockResolvedValueOnce([aliceRequest, { ...bobRequest, touchedNodePaths: [] }]);
+    const requests = await svc.changeRequestsUnderFolder('Data/Reports', ALICE);
+    expect(requests.map((r) => r.number)).toEqual([12, 40]);
+    expect(git.changedPathsForPr).toHaveBeenCalledWith(
+      encodeURIComponent(bobRequest.branch),
+      'main',
+      bobRequest.branch,
+    );
+  });
+
+  it('fails the question when a request’s diff cannot be read, rather than leaving it out', async () => {
+    const { svc, prs, git } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
+    vi.mocked(prs.listOpenPrs).mockResolvedValueOnce([aliceRequest, { ...bobRequest, touchedNodePaths: [] }]);
+    vi.mocked(git.changedPathsForPr).mockRejectedValueOnce(new Error('unknown revision'));
+    await expect(svc.changeRequestsUnderFolder('Data/Reports', ALICE)).rejects.toMatchObject({
+      message: expect.stringContaining('#40'),
+    });
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toHaveLength(2);
   });
 
   it('lets a writer of the folder act on any request', async () => {
@@ -254,6 +279,40 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     expect(git.push).not.toHaveBeenCalled();
     expect(closed).toEqual([]);
     expect(changed.get(aliceRequest.branch)!.size).toBe(3);
+  });
+
+  it('removes nothing from any request when one cannot be brought up to date', async () => {
+    const { svc, git, changed, closed } = makeHarness([aliceRequest, bobRequest], { admins: [ALICE.email] });
+    vi.mocked(git.pull)
+      .mockResolvedValueOnce({ treeChanged: false } as never)
+      .mockRejectedValueOnce(new Error('rebase conflict'));
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('#40'),
+    });
+    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    expect(closed).toEqual([]);
+    expect(changed.get(aliceRequest.branch)!.size).toBe(3);
+  });
+
+  it('removes nothing from any request when a later request’s file is locked, and lets every lock go', async () => {
+    const { svc, git, changed, closed, fileLocks } = makeHarness([aliceRequest, bobRequest], {
+      admins: [ALICE.email],
+    });
+    vi.mocked(fileLocks.acquire)
+      .mockResolvedValueOnce({ acquired: true } as never)
+      .mockResolvedValueOnce({ acquired: true } as never)
+      .mockResolvedValueOnce({ acquired: false, lock: { holderName: 'Bob' } } as never);
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('Bob'),
+    });
+    expect(git.restorePathFromRef).not.toHaveBeenCalled();
+    expect(git.push).not.toHaveBeenCalled();
+    expect(closed).toEqual([]);
+    expect(changed.get(aliceRequest.branch)!.size).toBe(3);
+    expect(fileLocks.release).toHaveBeenCalledTimes(2);
   });
 
   it('is a no-op for a folder no request touches', async () => {

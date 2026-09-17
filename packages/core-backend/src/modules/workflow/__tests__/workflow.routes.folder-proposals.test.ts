@@ -80,16 +80,36 @@ describe('folder change-request routes', () => {
     expect(workflow.removeFolderFromChangeRequests).toHaveBeenCalledWith('Data/Reports', ALICE);
   });
 
-  it.each(['', '../Data', 'Data/../roles.yaml', '/Data', 'Data//Reports'])(
-    'refuses the folder %j before the service sees it',
-    async (folder) => {
-      const res = await fetch(
-        `${baseUrl}/api/workflow/change-requests/under-folder?path=${encodeURIComponent(folder)}`,
-      );
-      expect(res.status).toBe(400);
-      expect(workflow.changeRequestsUnderFolder).not.toHaveBeenCalled();
-    },
-  );
+  const MALFORMED = [
+    '',
+    '../Data',
+    'Data/../roles.yaml',
+    '/Data',
+    'Data//Reports',
+    'Data\\Reports',
+    'Data/Rep\u0000orts',
+    'Data/Rep\norts',
+    '-Data',
+    `Data/${'x'.repeat(1030)}`,
+  ];
+
+  it.each(MALFORMED)('refuses the folder %j before the service sees it', async (folder) => {
+    const res = await fetch(
+      `${baseUrl}/api/workflow/change-requests/under-folder?path=${encodeURIComponent(folder)}`,
+    );
+    expect(res.status).toBe(400);
+    expect(workflow.changeRequestsUnderFolder).not.toHaveBeenCalled();
+  });
+
+  it.each(MALFORMED)('refuses to remove the folder %j before the service sees it', async (folder) => {
+    const res = await fetch(`${baseUrl}/api/workflow/change-requests/under-folder/remove`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: folder }),
+    });
+    expect(res.status).toBe(400);
+    expect(workflow.removeFolderFromChangeRequests).not.toHaveBeenCalled();
+  });
 
   it('keeps the service’s refusal status', async () => {
     workflow.removeFolderFromChangeRequests.mockRejectedValue(

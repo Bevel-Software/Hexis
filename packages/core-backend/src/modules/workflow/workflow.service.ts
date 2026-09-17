@@ -2058,11 +2058,30 @@ export class WorkflowService implements IWorkflowService {
   async changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]> {
     const prefix = folderPrefix(folder);
     const open = await this.prs.listOpenPrs({ fresh: true });
-    const touching = open
-      .map((cr) => ({ cr, paths: cr.touchedNodePaths.filter((p) => p.startsWith(prefix)) }))
+    // The list's touched paths are best-effort: a diff it could not read comes
+    // back EMPTY, indistinguishable from a request proposing nothing. This
+    // answer gates a destructive action, so a request listed empty is read
+    // again here, and one whose diff still cannot be read fails the question
+    // rather than dropping out of it.
+    const resolved = await Promise.all(
+      open.map(async (cr) => {
+        if (cr.touchedNodePaths.length > 0) return { cr, touched: cr.touchedNodePaths };
+        try {
+          const ws = await this.workspaceService.getOrCreateForBranch(cr.branch);
+          return { cr, touched: await this.git.changedPathsForPr(ws.id, cr.base, cr.branch) };
+        } catch (err) {
+          log.warn(`changedPathsForPr failed for #${cr.number} under folder ${folder}:`, { err });
+          throw new WorkflowDomainError(
+            `Couldn't read what change request #${cr.number} proposes — try again in a moment.`,
+            500,
+          );
+        }
+      }),
+    );
+    const touching = resolved
+      .map(({ cr, touched }) => ({ cr, paths: touched.filter((p) => p.startsWith(prefix)) }))
       .filter((t) => t.paths.length > 0);
     if (touching.length === 0) return [];
-
     const callerHash = hashEmail(user.email);
     // One access answer per base branch; the requests almost always share one.
     const rightsByBase = new Map<string, Promise<boolean>>();
@@ -2088,19 +2107,18 @@ export class WorkflowService implements IWorkflowService {
     return Promise.all(
       touching.map(async ({ cr, paths }): Promise<FolderChangeRequest> => {
         const mine = !!cr.authorId && cr.authorId === callerHash;
-        const mayRemove = mine || (await adminOrWriterOn(cr.base));
-        return {
+        const listed = {
           number: cr.number,
           title: cr.title,
           authorName: cr.appAuthor?.name ?? cr.author.name ?? null,
           mine,
           paths,
-          mayRemove,
-          ...(mayRemove
-            ? {}
-            : {
-                reason: `#${cr.number} was proposed by ${cr.appAuthor?.name ?? 'someone else'}; only its author, an admin or a writer of this folder can change it.`,
-              }),
+        };
+        if (mine || (await adminOrWriterOn(cr.base))) return { ...listed, mayRemove: true };
+        return {
+          ...listed,
+          mayRemove: false,
+          reason: `#${cr.number} was proposed by ${cr.appAuthor?.name ?? 'someone else'}; only its author, an admin or a writer of this folder can change it.`,
         };
       }),
     );
@@ -2127,48 +2145,81 @@ export class WorkflowService implements IWorkflowService {
       );
     }
     const prefix = folderPrefix(folder);
-    const results: FolderChangeRequestRemoval[] = [];
+
+    // Everything that can refuse happens before the first commit, so a
+    // refusal leaves every request as it was: each request's source checkout
+    // brought up to date (a failed pull stops here — restoring into a stale
+    // or conflicted tree could commit the wrong content), its paths read as
+    // they are NOW rather than as the list saw them, its merge base found,
+    // and every file's lock held.
+    const plans: { number: number; branch: string; wsId: string; paths: string[]; mergeBase: string | null }[] = [];
     for (const request of requests) {
       const summary = await this.prs.getPr(request.number);
       if (!summary || summary.state !== 'open') continue;
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
-      await this.pullWorkspace(ws.id).catch(() => undefined);
-      // The request as it is NOW, not as the list saw it.
+      try {
+        await this.pullWorkspace(ws.id);
+      } catch (err) {
+        log.warn(`pull failed for #${summary.number} before removing folder ${folder}:`, { err });
+        throw new WorkflowDomainError(
+          `#${summary.number} could not be brought up to date, so nothing was removed — try again in a moment.`,
+          409,
+        );
+      }
       const paths = (await this.git.changedPathsForPr(ws.id, summary.base, summary.branch)).filter((p) =>
         p.startsWith(prefix),
       );
+      let mergeBase: string | null = null;
       if (paths.length > 0) {
-        const mergeBase = await this.git.mergeBaseForPr(ws.id, summary.base, summary.branch);
+        mergeBase = await this.git.mergeBaseForPr(ws.id, summary.base, summary.branch);
         if (!mergeBase) {
           throw new WorkflowDomainError(`#${summary.number} shares no history with its target to revert to.`, 422);
         }
-        for (const repoRelPath of paths) {
+      }
+      plans.push({ number: summary.number, branch: summary.branch, wsId: ws.id, paths, mergeBase });
+    }
+
+    const held: { wsId: string; branch: string; lockPath: string }[] = [];
+    const releaseAll = async () => {
+      for (const h of held.splice(0)) await this.fileLocks.release(h.wsId, h.branch, h.lockPath, user);
+    };
+    try {
+      for (const plan of plans) {
+        for (const repoRelPath of plan.paths) {
           const lockPath = `${this.kbDirName}/${repoRelPath}`;
-          const lock = await this.fileLocks.acquire(ws.id, summary.branch, lockPath, user);
+          const lock = await this.fileLocks.acquire(plan.wsId, plan.branch, lockPath, user);
           if (!lock.acquired) {
             throw new WorkflowDomainError(
               `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
               409,
             );
           }
-          try {
-            await this.git.restorePathFromRef(ws.id, mergeBase, repoRelPath);
-            await this.git.commitFile(
-              ws.id,
-              user,
-              repoRelPath,
-              `Revert ${repoRelPath} (folder deleted; removed from change request #${summary.number})`,
-              true, // skipValidator — this restores an already-validated base version
-            );
-          } finally {
-            await this.fileLocks.release(ws.id, summary.branch, lockPath, user);
-          }
+          held.push({ wsId: plan.wsId, branch: plan.branch, lockPath });
         }
-        await this.trackedPush(ws.id, user);
-        this.prs.invalidateDetailCache(summary.number);
       }
-      const withdrawn = await this.closeEmptyChangeRequest(summary.number, user);
-      results.push({ number: summary.number, removedPaths: paths, withdrawn });
+      for (const plan of plans) {
+        if (plan.paths.length === 0 || !plan.mergeBase) continue;
+        for (const repoRelPath of plan.paths) {
+          await this.git.restorePathFromRef(plan.wsId, plan.mergeBase, repoRelPath);
+          await this.git.commitFile(
+            plan.wsId,
+            user,
+            repoRelPath,
+            `Revert ${repoRelPath} (folder deleted; removed from change request #${plan.number})`,
+            true, // skipValidator — this restores an already-validated base version
+          );
+        }
+        await this.trackedPush(plan.wsId, user);
+        this.prs.invalidateDetailCache(plan.number);
+      }
+    } finally {
+      await releaseAll();
+    }
+
+    const results: FolderChangeRequestRemoval[] = [];
+    for (const plan of plans) {
+      const withdrawn = await this.closeEmptyChangeRequest(plan.number, user);
+      results.push({ number: plan.number, removedPaths: plan.paths, withdrawn });
     }
     return results;
   }
