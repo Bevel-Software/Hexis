@@ -443,7 +443,7 @@ export function registerWorkflowTools(
       'Merge branch `source` into branch `target` as you, and publish `target`. An agent proposes and syncs; ' +
       'a person merges: this tool never lands a change request. It refuses when a change request from `source` ' +
       'into `target` is open (naming it) — ask the user to review that request in the app instead. It refuses ' +
-      `when \`target\` is protected (${protectedInline()}) unless you could commit every changed file directly to it. ` +
+      'when `target` is a protected branch unless you could commit every changed file directly to it. ' +
       'SYNC: merging the target into your draft (`source` = the change request\'s target, `target` = your draft) ' +
       'is always allowed, even with that draft\'s request open — use it to bring a draft up to date. ' +
       'Returns `merged` with the merge commit, or `conflicts-need-resolution` with the conflicting paths ' +

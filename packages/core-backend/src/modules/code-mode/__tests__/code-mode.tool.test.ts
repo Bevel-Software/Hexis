@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CodeModeUtcpClient } from '@utcp/code-mode';
+import { CodeModeUtcpClient } from '@utcp/code-mode';
 
 /**
  * `tools_info` containment of a THROWING name lookup. `findToolByName`
@@ -102,26 +102,52 @@ describe('call_tool_chain image scrub', () => {
  * runtime's "is not a function".
  */
 describe('call_tool_chain and a retired tool', () => {
-  async function runChain(code: string, error: Error) {
+  const RETIRED_CALL = 'return KNOWLEDGE_BASE.merge_change_request({ body: { number: 4 } })';
+
+  async function runWith(chainClient: CodeModeUtcpClient, code: string) {
     const { createCallToolChainTool } = await import('../code-mode.tool.js');
-    const chainClient = { callToolChain: vi.fn(async () => { throw error; }) } as unknown as CodeModeUtcpClient;
     const tool = createCallToolChainTool(chainClient, { write: vi.fn() } as never) as unknown as {
-      execute: (input: { code: string }) => Promise<{ success: boolean; error: string }>;
+      execute: (input: { code: string }) => Promise<{ success: boolean; error?: string; result?: unknown }>;
     };
     return tool.execute({ code });
   }
 
-  it('answers a failed call to merge_change_request with the plain message', async () => {
-    const out = await runChain(
-      'return knowledge_base.merge_change_request({ body: { number: 4 } })',
-      new TypeError('knowledge_base.merge_change_request is not a function'),
-    );
+  // The runner resolves a failed chain as `{ result: null, logs: ['[ERROR] Code
+  // execution failed: …'] }` — it does not throw.
+  it('answers a failed call to merge_change_request with the plain message, as the runner reports it', async () => {
+    const chainClient = {
+      callToolChain: vi.fn(async () => ({
+        result: null,
+        logs: ['[ERROR] Code execution failed: TypeError: KNOWLEDGE_BASE.merge_change_request is not a function'],
+      })),
+    } as unknown as CodeModeUtcpClient;
+    const out = await runWith(chainClient, RETIRED_CALL);
     expect(out.success).toBe(false);
     expect(out.error).toMatch(/a change request is merged by a person in the app/);
   });
 
+  it('answers it through a real code-mode runner, not a mock', async () => {
+    const client = await CodeModeUtcpClient.create(process.cwd(), null);
+    try {
+      const out = await runWith(client, RETIRED_CALL);
+      expect(out.success).toBe(false);
+      expect(out.error).toMatch(/a change request is merged by a person in the app/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('answers a thrown failure the same way', async () => {
+    const chainClient = {
+      callToolChain: vi.fn(async () => {
+        throw new TypeError('KNOWLEDGE_BASE.merge_change_request is not a function');
+      }),
+    } as unknown as CodeModeUtcpClient;
+    expect((await runWith(chainClient, RETIRED_CALL)).error).toMatch(/merged by a person in the app/);
+  });
+
   it('leaves an unrelated failure as it was', async () => {
-    const out = await runChain('return knowledge_base.read_file({})', new Error('boom'));
-    expect(out.error).toBe('boom');
+    const chainClient = { callToolChain: vi.fn(async () => { throw new Error('boom'); }) } as unknown as CodeModeUtcpClient;
+    expect((await runWith(chainClient, 'return KNOWLEDGE_BASE.read_file({})')).error).toBe('boom');
   });
 });

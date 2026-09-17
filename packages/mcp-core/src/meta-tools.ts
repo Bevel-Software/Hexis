@@ -2,7 +2,7 @@ import type { Tool as McpTool, CallToolResult } from '@modelcontextprotocol/sdk/
 import type { CodeModeUtcpClient } from '@utcp/code-mode';
 import { utcpNameToTsInterfaceName, findToolsByNames } from './code-mode-names.js';
 import { toCallToolResult, toolError, describeToolFailure, omitImagePayloads } from './results.js';
-import { retiredToolInCode } from './retired-tools.js';
+import { retiredToolInCode, retiredToolChainFailure } from './retired-tools.js';
 
 /**
  * Code-mode meta-tools exposed ALONGSIDE the direct tools. They let an external
@@ -158,6 +158,10 @@ export async function dispatchMetaTool(
         ? Math.min(1_000_000, Math.max(1_000, Math.trunc(args.max_output_size)))
         : CALL_TOOL_CHAIN_MAX_OUTPUT;
     const { result: rawResult, logs } = await client.callToolChain(code, timeout);
+    // The runner reports a failed chain in `logs` rather than throwing, so a
+    // chain that died calling a removed tool is recognised here, not in the catch.
+    const retired = retiredToolChainFailure(code, { result: rawResult, logs });
+    if (retired) return toolError(retired);
     // Images never ride a chain result: the chain's value is stringified JSON,
     // where base64 is context flood, not a picture. A chained `read_file` of an
     // image comes back as an omitted-image note instead (see omitImagePayloads);

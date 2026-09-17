@@ -2,7 +2,7 @@ import '@utcp/direct-call';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { CodeModeUtcpClient } from '@utcp/code-mode';
-import { omitImagePayloads, retiredToolInCode } from '@bevel-software/platform-mcp-core';
+import { omitImagePayloads, retiredToolInCode, retiredToolChainFailure } from '@bevel-software/platform-mcp-core';
 import type { SpillStore } from '../workspace/spill-store.js';
 import { utcpNameToTsInterfaceName, findToolByName, AmbiguousToolNameError } from './code-mode-names.js';
 
@@ -45,6 +45,11 @@ export function createCallToolChainTool(
       const maxOutputSize = input.max_output_size ?? 200_000;
       try {
         const { result: rawResult, logs } = await client.callToolChain(input.code, timeout);
+        // The runner reports a failed chain in `logs` rather than throwing, so
+        // a chain that died calling a removed tool is recognised here: the agent
+        // gets who does it now, not "is not a function".
+        const retired = retiredToolChainFailure(input.code, { result: rawResult, logs });
+        if (retired) return { success: false, error: retired, logs };
         // Same policy as the MCP surfaces' `call_tool_chain` (see
         // `omitImagePayloads`): a chain result is stringified JSON, so an image
         // read inside it comes back as an omitted-image note instead of a

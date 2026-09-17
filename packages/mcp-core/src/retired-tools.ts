@@ -43,3 +43,21 @@ export function retiredToolInCode(code: string): string | undefined {
   }
   return undefined;
 }
+
+/** The log line `@utcp/code-mode` records when a chain's code fails. */
+const CHAIN_FAILURE_LOG = '[ERROR] Code execution failed';
+
+/**
+ * The retired-tool message for a chain that FAILED on a retired tool, read
+ * from what `callToolChain` returned. The runner does not throw when the code
+ * fails — it resolves `{ result: null, logs }` with a `[ERROR] Code execution
+ * failed: …` line (e.g. `KNOWLEDGE_BASE.merge_change_request is not a
+ * function`) — so a caller's catch never sees it. Undefined for a chain that
+ * succeeded or failed without referencing a retired tool.
+ */
+export function retiredToolChainFailure(code: string, outcome: { result: unknown; logs?: unknown }): string | undefined {
+  if (outcome.result !== null && outcome.result !== undefined) return undefined;
+  const logs = Array.isArray(outcome.logs) ? outcome.logs : [];
+  if (!logs.some((l) => typeof l === 'string' && l.startsWith(CHAIN_FAILURE_LOG))) return undefined;
+  return retiredToolInCode(code);
+}

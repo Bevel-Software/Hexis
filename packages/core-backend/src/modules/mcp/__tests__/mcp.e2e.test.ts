@@ -409,6 +409,14 @@ describe('per-request identity: catalog, metering and continuity', () => {
     const res = await client.callTool({ name: 'merge_change_request', arguments: { body: { number: 4 } } });
     expect(res.isError).toBe(true);
     expect(toolText(res)).toMatch(/a change request is merged by a person in the app/);
+    // And from inside a code-mode chain, where the runner reports the failure
+    // in its logs instead of throwing.
+    const chained = await client.callTool({
+      name: 'call_tool_chain',
+      arguments: { code: 'return KNOWLEDGE_BASE.merge_change_request({ body: { number: 4 } })' },
+    });
+    expect(chained.isError).toBe(true);
+    expect(toolText(chained)).toMatch(/a change request is merged by a person in the app/);
   });
 
   it('metering: every loopback call carries THAT request\'s connection key', async () => {
