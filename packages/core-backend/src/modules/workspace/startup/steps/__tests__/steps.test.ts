@@ -13,6 +13,7 @@ import { PluginManifestsStep } from '../plugin-manifests.step.js';
 import { PersonalSpacesStep } from '../personal-spaces.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
 import { renderRolesYaml } from '../../../../access-model/render-roles-yaml.js';
+import { mergeGroupsIntoRoles, parseRolesYaml } from '../../../../access-model/access-grammar.js';
 import { TemplateFilesStep } from '../template-files.step.js';
 import { buildSeedTree } from '../seed-tree.js';
 import { defaultKbTemplateDir } from '../../../../../assets.js';
@@ -248,6 +249,39 @@ describe('TemplateFilesStep', () => {
 
     const dir = await checkout(DEFAULT_BRANCH);
     expect(norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'))).toContain('**Agents never create roles.**');
+  });
+
+  it('documents giving a role to a group, with a valid example, in the guide the step writes', async () => {
+    const guide = await template('AGENTS.md');
+    const section = guide.split(/\n(?=#{2,3} )/).find((s) => s.startsWith('### Giving a role to a group')) ?? '';
+    const prose = section.replace(/\s+/g, ' ');
+    expect(prose).toContain('`- group:<Name>`');
+    expect(prose).toContain('case- and whitespace-insensitively against the active group source');
+    expect(prose).toContain('validation error');
+    expect(prose).toContain('names the entry');
+    expect(prose).toContain("removes the role's contribution for everyone in the group");
+    expect(prose).toContain('A direct grant to a person (`Name <email>`) is unaffected');
+    expect(prose).toContain('change request');
+    for (const tool of ['create_branch', 'edit_file', 'commit_change', 'open_change_request']) {
+      expect(prose).toContain(`\`${tool}\``);
+    }
+
+    // The example parses as a roles.yaml whose group entry names a real group.
+    const example = /```yaml\n([\s\S]*?)```/.exec(section)?.[1] ?? '';
+    expect(example).toContain('- group:Platform Team');
+    const parsed = parseRolesYaml(example);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const groups = new Map([['platform team', { displayName: 'Platform Team', emails: new Set(['pat@example.com']) }]]);
+    expect(mergeGroupsIntoRoles(parsed.index, groups, 'groups.yaml')).toEqual([]);
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('admin')).toBe(true);
+
+    // What the step writes — the file agents read through the MCP server — carries it.
+    await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+    const written = norm(await fs.readFile(path.join(await checkout(DEFAULT_BRANCH), 'AGENTS.md'), 'utf8'));
+    expect(written).toContain('### Giving a role to a group');
+    expect(written).toContain(example);
   });
 
   it('rejects .git — any case — as a reserved root name', async () => {

@@ -174,7 +174,9 @@ Access to any path — reading it as much as writing it — is governed by
 `roles.yaml` (who has which role), `groups.yaml` (who is in which group) and
 `access.md` files (who may do what, where).
 
-- **Roles** in `roles.yaml` map a role name to a list of emails. Role names are
+- **Roles** in `roles.yaml` map a role name to a list of members: emails, and
+  `group:<Name>` entries that give the role to a whole group (see *Giving a
+  role to a group* below). Role names are
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
   = `product team`). The reserved name `deny` cannot be used, and neither can
   names starting with `role/` or `plugin/` — those spellings are tokens in
@@ -255,6 +257,63 @@ role.
    `access.md` of the folders it should reach.
 3. If your user still needs a role the platform does not have, that is not an
    edit you can make — say so, and leave the decision to an admin.
+
+### Giving a role to a group
+
+A role's member list takes a group as well as individual emails. Write the
+entry as `- group:<Name>`, where `<Name>` is a group in the active group
+source — `synced-groups.yaml` when the deployment syncs groups from an
+identity provider, `groups.yaml` otherwise:
+
+```yaml
+roles:
+  Admin:
+    - dana@example.com
+    - group:Platform Team
+```
+
+- **Matching.** The name is matched case- and whitespace-insensitively against
+  the active group source, like role names: `group:platform team` and
+  `group:Platform  Team` are the same entry as `group:Platform Team`.
+- **Unknown groups are refused.** An entry naming a group the active source
+  does not declare is a validation error: the write is refused with a 422
+  that names the entry and its role (`'- group:Platfrom Team' under role
+  'Admin'`), and nothing is saved. Create the group first, or fix the name.
+- **Admin keeps a person.** `Admin` must always keep at least one direct email
+  member; a group entry alone is not enough, so a broken directory can never
+  leave the deployment without an admin.
+- **With direct emails.** Group entries and emails add up: the role's members
+  are everyone listed by email plus everyone currently in each listed group.
+  A person in both is simply a member; adding or removing someone from the
+  group changes the role with no edit to `roles.yaml`.
+- **With denials.** Group members hold the role's grants exactly as if they
+  were listed by email. A denial of the role in an `access.md`
+  (`deny Admin`) therefore removes the role's contribution for everyone in
+  the group, as it does for the emails. A direct grant to a person
+  (`Name <email>`) is unaffected: user-level entries trump role-level ones, so
+  that person keeps the access granted to them by name.
+
+**Editing `roles.yaml` goes through a change request** unless your user is an
+Admin: only admins may write the file on the default branch. Draft the edit
+on a branch and open a change request for an admin to approve:
+
+1. `create_branch` with `name: dana/platform-team-admin` and `branch` set to
+   the default branch.
+2. On that draft, `edit_file` `roles.yaml`, adding the entry under the
+   existing role:
+
+   ```yaml
+   roles:
+     Admin:
+       - dana@example.com
+       - group:Platform Team   # added
+   ```
+
+3. `commit_change` with `summary: "Give the Admin role to the Platform Team group"`.
+4. `open_change_request` with `sourceBranch: dana/platform-team-admin`, the
+   default branch as `targetBranch`, and a title such as `Give Admin to the
+   Platform Team group`. Tell your user an admin must approve it before the
+   role takes effect.
 
 ### Direct writes vs change requests
 
