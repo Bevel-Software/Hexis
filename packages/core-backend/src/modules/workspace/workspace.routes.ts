@@ -467,7 +467,7 @@ export function createWorkspaceRoutes(
    */
   function buildTreeReadFilter(workspaceId: string, userEmail: string): ReadTreeFilter {
     return async (wsRelPaths) => {
-      const verdict = await resolveReadableMap(
+      const verdict: Map<string, boolean | 'unlisted'> = await resolveReadableMap(
         (w, e, rels) => accessControl.canReadBatch(w, e, rels),
         workspaceId,
         userEmail,
@@ -505,9 +505,13 @@ export function createWorkspaceRoutes(
       // on the default branch precisely so that editing `roles.yaml` on your
       // own branch cannot promote you, and the same reasoning applies to
       // anything gated on being an admin.
+      //
+      // `'unlisted'`, not `false`: hiding it withholds no content, so a
+      // non-admin in an empty knowledge base (every one ships this file) is
+      // told it is empty, not that something is being kept from them.
       const ignoreFiles = wsRelPaths.filter((wp) => path.basename(wp) === IGNORE_FILENAME);
       if (ignoreFiles.length > 0 && !(await adminAccess.isAdmin(userEmail))) {
-        for (const wp of ignoreFiles) verdict.set(wp, false);
+        for (const wp of ignoreFiles) verdict.set(wp, 'unlisted');
       }
       return verdict;
     };
