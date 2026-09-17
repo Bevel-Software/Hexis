@@ -23,6 +23,7 @@ export class DocumentReader implements FileReader {
    * uploading a new version).
    */
   readonly textEditable = false;
+  readonly fileKind = 'document' as const;
 
   constructor(
     extension: string,

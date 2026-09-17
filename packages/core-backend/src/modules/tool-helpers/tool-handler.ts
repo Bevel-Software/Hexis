@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('tools');
-import { hasHttpStatus, type ToolHandler } from './tool.contract.js';
+import { hasHttpStatus, ToolError, type ToolHandler } from './tool.contract.js';
 import type { ResolveToolContext } from './tool-context.js';
 import '../tool-auth/tool-auth.middleware.js'; // Express Request.toolAuth augmentation
 
@@ -80,7 +80,9 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
           return;
         }
         if (hasHttpStatus(err)) {
-          res.status(err.status).json({ error: err.message });
+          // Structured details ride beside `error`, never over it.
+          const details = err instanceof ToolError ? err.details : undefined;
+          res.status(err.status).json({ ...details, error: err.message });
           return;
         }
         const msg = err instanceof Error ? err.message : 'Unknown error';

@@ -7,7 +7,8 @@ import { EmailReader } from '../email-reader.js';
 import { FileReaderRegistry, type FileReader, type ReadResult } from '../file-reader.js';
 import { createFileReaderRegistry } from '../file-reader.registry.js';
 import { ImageReader } from '../image-reader.js';
-import { LegacyOfficeReader, TextReader } from '../text-reader.js';
+import { BinaryReader, LegacyOfficeReader, TextReader } from '../text-reader.js';
+import { contentModeOf } from '../content-mode.js';
 
 /**
  * Routing tests for THE file-reader registry: one lookup (`readerFor`) decides
@@ -56,6 +57,9 @@ describe('file-reader registry routing', () => {
       const reader = registry.readerFor(p);
       expect(reader, p).toBeInstanceOf(ImageReader);
       expect(reader.greppableText, p).toBeUndefined();
+      // A picture is bytes: the text tools refuse it by name.
+      expect(reader.textEditable, p).toBe(false);
+      expect(reader.fileKind, p).toBe('image');
     }
     for (const p of ['a.doc', 'b.ppt', 'c.xls']) {
       const reader = registry.readerFor(p);
@@ -69,13 +73,39 @@ describe('file-reader registry routing', () => {
   });
 
   it('falls back to the plain TextReader for unknown extensions, no extension and dot-files', () => {
-    // `.svg` is markup and `.zip`/`.mp3` are binary-notice cases — all the
-    // text reader's business; `.docx` as a bare dot-file has no extension.
-    for (const p of ['notes.md', 'icon.svg', 'bundle.zip', 'song.mp3', 'noext', 'dir/.gitignore', '.docx']) {
+    // `.svg` is markup — the text reader's business; `.docx` as a bare
+    // dot-file has no extension.
+    for (const p of ['notes.md', 'icon.svg', 'noext', 'dir/.gitignore', '.docx']) {
       const reader = registry.readerFor(p);
       expect(reader, p).toBeInstanceOf(TextReader);
       expect(reader, p).not.toBeInstanceOf(LegacyOfficeReader);
+      expect(reader, p).not.toBeInstanceOf(BinaryReader);
       expect(reader.textEditable, p).toBe(true);
+      expect(reader.fileKind, p).toBe('text');
+    }
+  });
+
+  it('routes archives and media to a BinaryReader: read like the text reader, never text-editable', () => {
+    for (const [p, kind] of [['bundle.zip', 'archive'], ['a/b.tar', 'archive'], ['song.mp3', 'binary'], ['font.woff2', 'binary'], ['fav.ico', 'image']] as const) {
+      const reader = registry.readerFor(p);
+      expect(reader, p).toBeInstanceOf(BinaryReader);
+      expect(reader.textEditable, p).toBe(false);
+      expect(reader.fileKind, p).toBe(kind);
+    }
+  });
+
+  it('contentModeOf answers text | document | binary from the same registry the write gates use', () => {
+    const text = Buffer.from('# hello\n');
+    const bytes = Buffer.from([0x00, 0x01, 0xff]);
+    expect(contentModeOf(registry.readerFor('notes.md'), text)).toBe('text');
+    expect(contentModeOf(registry.readerFor('notes.md'), undefined)).toBe('text');
+    // Binary content under a text name is binary: the write gate refuses it.
+    expect(contentModeOf(registry.readerFor('blob.dat'), bytes)).toBe('binary');
+    for (const p of ['deck.pptx', 'report.pdf', 'Inbox/offer.eml']) {
+      expect(contentModeOf(registry.readerFor(p), bytes), p).toBe('document');
+    }
+    for (const p of ['logo.png', 'bundle.zip', 'old.doc', 'song.mp3']) {
+      expect(contentModeOf(registry.readerFor(p), text), p).toBe('binary');
     }
   });
 
@@ -83,6 +113,7 @@ describe('file-reader registry routing', () => {
     const fake: FileReader = {
       extensions: ['.foo'],
       textEditable: false,
+      fileKind: 'binary',
       read: async (): Promise<ReadResult> => ({ kind: 'text', text: 'from the fake reader' }),
     };
     const custom = new FileReaderRegistry([fake, new ImageReader()], new TextReader());
