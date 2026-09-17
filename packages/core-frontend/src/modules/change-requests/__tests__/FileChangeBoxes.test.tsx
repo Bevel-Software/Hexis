@@ -101,6 +101,7 @@ beforeEach(() => {
         approvedBy: [],
         isApproved: false,
         viewerCanApprove: true,
+        inMergeGate: true,
       },
     ],
   });
