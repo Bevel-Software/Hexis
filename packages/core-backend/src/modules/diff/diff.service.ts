@@ -7,6 +7,7 @@ import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { countLineChanges } from './line-diff.js';
 
 /**
@@ -282,8 +283,10 @@ export class DiffService implements IDiffService {
   }
 
   private async acceptOneUnlocked(workspaceId: string, relativePath: string): Promise<void> {
-    if (!isDiffable(relativePath)) return;
+    // Resolved BEFORE the diffable test, so the git folder is refused for
+    // every path rather than left to the fact that nothing in it is markdown.
     const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
+    if (!isDiffable(relativePath)) return;
     let diskExists = true;
     try {
       await fs.access(fileAbs);
@@ -300,8 +303,9 @@ export class DiffService implements IDiffService {
   }
 
   private async rejectOneUnlocked(workspaceId: string, relativePath: string): Promise<void> {
-    if (!isDiffable(relativePath)) return;
+    // Resolved first, like `acceptOneUnlocked` — same reason.
     const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
+    if (!isDiffable(relativePath)) return;
     let backupExists = true;
     try {
       await fs.access(backupAbs);
@@ -336,6 +340,11 @@ export class DiffService implements IDiffService {
     const backupDir = await this.getBackupDir(workspaceId);
     const fileAbs = path.resolve(workspaceDir, relativePath);
     const backupAbs = path.resolve(backupDir, relativePath);
+    // Every review operation resolves its pair here — the file diff, accept,
+    // reject, the ledger sync — so the git folder is refused for all of them
+    // in one place, links into it included. FIRST, so a path into the folder
+    // gets the one sanitized refusal rather than a containment error.
+    await assertNotGitInternals(workspaceDir, relativePath, fileAbs);
     assertWithinDirectory(fileAbs, workspaceDir);
     assertWithinDirectory(backupAbs, backupDir);
     return { workspaceDir, backupDir, fileAbs, backupAbs };
@@ -401,7 +410,7 @@ function looksBinary(buf: Buffer): boolean {
  * that cannot be listed is left out — the ledger shows what it can.
  */
 function diffableWalk(): TreeWalkOptions {
-  return { skip: (e) => e.name === '.git' || e.name === '.workspace.json', ignore: true };
+  return { skip: (e) => hasGitInternalsSegment(e.name) || e.name === '.workspace.json', ignore: true };
 }
 
 /** Every diffable file under `root`, as `/`-separated paths relative to it. */

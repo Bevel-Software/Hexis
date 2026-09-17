@@ -27,6 +27,10 @@ import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
+import { createGitInternalsRouteGuard } from '../git-internals.middleware.js';
+import { createDiffRoutes } from '../../diff/diff.routes.js';
+import { DiffService } from '../../diff/diff.service.js';
+import { WorkspaceMutex } from '../../kb-fs/mutex.js';
 import { WorkspaceService } from '../workspace.service.js';
 
 /**
@@ -330,6 +334,11 @@ describe('workspace routes refuse the git folder', () => {
       (req as unknown as { userId: string }).userId = USER.id;
       next();
     });
+    const diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, new NodeFs());
+    // Exactly the production mounting: ONE guard for the whole prefix, ahead
+    // of every router under it — so the review routes are covered by the fact
+    // of their path, not by their own guard.
+    app.use('/api/workspace/:id', createGitInternalsRouteGuard(service));
     app.use(
       '/api',
       createWorkspaceRoutes(
@@ -342,6 +351,16 @@ describe('workspace routes refuse the git folder', () => {
         stubCreatorAccess,
         { isAdmin: async () => true } as unknown as IAdminAccessService,
         new NodeFs(),
+      ),
+    );
+    app.use(
+      '/api',
+      createDiffRoutes(
+        diffService,
+        { getUserById: vi.fn(async () => USER) } as unknown as AuthService,
+        workflow as unknown as IWorkflowService,
+        allowAll,
+        KB,
       ),
     );
     ({ server, baseUrl } = await listen(app));
@@ -373,6 +392,9 @@ describe('workspace routes refuse the git folder', () => {
         body: Buffer.from('payload'),
       })],
     ['unzip archive (POST /unzip)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/unzip`, { path: zipForm(p) })],
+    ['review diff (GET /review/file)', (p) => fetch(`${baseUrl}/api/workspace/${WS}/review/file?path=${q(p)}`)],
+    ['review accept (POST /review/accept)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/review/accept`, { path: p })],
+    ['review reject (POST /review/reject)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/review/reject`, { path: p })],
   ];
   const dirRoutes: Array<[string, (p: string) => Promise<Response>]> = [
     ['mkdir (POST /directory)', (p) => json('POST', `${baseUrl}/api/workspace/${WS}/directory`, { path: `${p}/new-dir` })],
@@ -503,6 +525,37 @@ describe('WorkspaceService refuses the git folder on its own', () => {
     const result = await service.unzipFile(WS, `${KB}/evil.zip`);
     expect(result.extracted).toEqual([`${KB}/fine.md`]);
     expect(result.skipped.map((s) => s.reason)).toEqual([GIT_INTERNALS_MESSAGE, GIT_INTERNALS_MESSAGE, GIT_INTERNALS_MESSAGE]);
+  });
+});
+
+describe('DiffService refuses the git folder on its own', () => {
+  let diffService: DiffService;
+
+  beforeEach(() => {
+    const service = new WorkspaceService(root, 'https://example.invalid/kb.git', KB, new NodeFs());
+    diffService = new DiffService(service, new WorkspaceMutex(), root, join(root, 'backups'), KB, new NodeFs());
+  });
+
+  afterEach(async () => {
+    expect(await snapshotGit()).toBe(gitSnapshot);
+  });
+
+  const ops: Array<[string, (p: string) => Promise<unknown>]> = [
+    ['fileDiff', (p) => diffService.fileDiff(WS, p)],
+    ['acceptOne', (p) => diffService.acceptOne(WS, p)],
+    ['rejectOne', (p) => diffService.rejectOne(WS, p)],
+    ['syncFromDisk', (p) => diffService.syncFromDisk(WS, p)],
+    ['markUserDeleted', (p) => diffService.markUserDeleted(WS, p)],
+  ];
+
+  for (const [name, run] of ops) {
+    it.each(Object.entries(FILE_FORMS))(`${name} — %s form`, async (_form, p) => {
+      await expect(run(p)).rejects.toBeInstanceOf(GitInternalsError);
+    });
+  }
+
+  it('an ordinary file still diffs', async () => {
+    await expect(diffService.fileDiff(WS, `${KB}/Notes/a.md`)).resolves.toMatchObject({ path: `${KB}/Notes/a.md` });
   });
 });
 

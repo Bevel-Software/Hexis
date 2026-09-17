@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
@@ -515,6 +516,12 @@ export async function createCoreServer(
   );
 
   // Protected routes
+  // The repository's git folder is refused for the WHOLE `/workspace/:id`
+  // prefix, ahead of every router mounted under it — the file routes, the
+  // review routes, the workflow ones — so a path into it is answered with one
+  // sanitized 403 before any read gate or lock, and a router added later is
+  // covered by its prefix rather than by remembering this.
+  app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,

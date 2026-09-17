@@ -5,6 +5,7 @@ import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { reservedRootDirs } from './template-files.step.js';
 import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource } from './template-source.js';
+import { hasGitInternalsSegment } from '../../../../shared/git-internals.js';
 
 /**
  * The empty-remote seed builder the runner takes as `buildSeedTree`: the full
@@ -96,7 +97,7 @@ class KbSeedTree {
     // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
     // (this repo in a Docker build) must not seed its history into the KB.
     // Every other entry is template content, dot-files included.
-    await this.disk.walk(this.templates.root, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+    await this.disk.walk(this.templates.root, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
       {
         onFile: (relDir, name) => this.seedFile(relDir, name, dest),
         onOther: async (relDir, entry) => {

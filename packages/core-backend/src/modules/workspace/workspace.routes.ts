@@ -21,7 +21,8 @@ import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { GitInternalsError, PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
-import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -44,25 +45,6 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 function requestPath(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   return canonicalRelativePath(value);
-}
-
-/** The query and body fields through which a workspace route names a path. */
-const GIT_GUARDED_QUERY_KEYS = ['path'] as const;
-const GIT_GUARDED_BODY_KEYS = ['path', 'oldPath', 'newPath', 'destination'] as const;
-
-/** Every workspace path a request names, array-shaped queries included. */
-function gitGuardedInputs(req: express.Request): string[] {
-  const out: string[] = [];
-  const add = (value: unknown) => {
-    for (const v of Array.isArray(value) ? value : [value]) if (typeof v === 'string' && v.length > 0) out.push(v);
-  };
-  const query = req.query as Record<string, unknown>;
-  for (const key of GIT_GUARDED_QUERY_KEYS) add(query[key]);
-  const body = req.body as unknown;
-  if (body && typeof body === 'object' && !Buffer.isBuffer(body)) {
-    for (const key of GIT_GUARDED_BODY_KEYS) add((body as Record<string, unknown>)[key]);
-  }
-  return out;
 }
 
 /**
@@ -92,34 +74,13 @@ export function createWorkspaceRoutes(
   disk: ITreeWalker,
 ): express.Router {
   const router = express.Router();
+  const gitInternalsRouteGuard = createGitInternalsRouteGuard(workspaceService);
 
-  /**
-   * The git folder is never reachable through this surface (see
-   * `shared/git-internals.ts`). Checked once, ahead of every route, on each
-   * input that names a workspace path: before the read gate, which would
-   * otherwise answer differently for a path that exists, and before any lock
-   * is taken. The resolved form is judged too, so a link in the repository
-   * that points into the folder gets the same refusal. An unauthenticated
-   * request passes through to its route's own 401, and resolves nothing.
-   */
-  router.use('/workspace/:id', async (req, res, next) => {
-    const inputs = gitGuardedInputs(req);
-    if (inputs.length === 0 || !req.userId) return next();
-    if (inputs.some(hasGitInternalsSegment)) return sendError(res, new GitInternalsError());
-    let workspaceDir: string;
-    try {
-      workspaceDir = await workspaceService.getWorkspacePath(req.params.id as string);
-    } catch {
-      // The route resolves the workspace again and reports its own failure.
-      return next();
-    }
-    try {
-      for (const input of inputs) await assertNotGitInternals(workspaceDir, input);
-    } catch (err) {
-      return sendError(res, err);
-    }
-    next();
-  });
+  // The git folder is refused ahead of every route here by
+  // `createGitInternalsRouteGuard`, which the app mounts once for the whole
+  // `/workspace/:id` prefix (see `git-internals.middleware.ts`). Mounted here
+  // too so this router carries the rule wherever it is mounted on its own.
+  router.use("/workspace/:id", gitInternalsRouteGuard);
 
   function authenticated(
     req: express.Request,
