@@ -3,6 +3,7 @@ import '../change-requests.css';
 import { Button, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { collapseUnchanged, type DiffLine } from '../utils/diff';
+import { waitingOnViewerLabel } from '../utils/author';
 import { ConflictHelp } from './ConflictHelp';
 
 export interface ChangeBoxProps {
@@ -60,6 +61,12 @@ export interface ChangeBoxProps {
   refusal?: string | null;
   /** Who the decision is waiting on, for the non-owner's footer. */
   owner?: string;
+  /**
+   * For a viewer who can decide: how many OTHER approvers the proposal is also
+   * waiting on. Given, the footer reads "Waiting on you" / "Waiting on you and
+   * N others" rather than the generic "You can decide this.".
+   */
+  othersPending?: number;
   busy?: boolean;
   /**
    * What the apply is doing right now, so the label names the step instead of
@@ -110,6 +117,7 @@ export function ChangeBox({
   conflictPrompt = null,
   refusal = null,
   owner,
+  othersPending,
   busy,
   phase = 'idle',
   onApprove,
@@ -208,7 +216,11 @@ export function ChangeBox({
             </span>
             {!busy && (
               <span className="text-meta text-ink-faint">
-                {canDecide ? 'You can decide this.' : `Waiting on ${owner ?? 'the owner'}`}
+                {canDecide
+                  ? othersPending === undefined
+                    ? 'You can decide this.'
+                    : waitingOnViewerLabel(othersPending)
+                  : `Waiting on ${owner ?? 'the owner'}`}
               </span>
             )}
             {/* What the server said, verbatim. The gate names the files and the
@@ -229,6 +241,8 @@ export function ChangeBox({
               Read the whole change
             </Button>
           )}
+          {/* Authorship and approval rights are independent: an approver who
+              wrote the proposal gets Withdraw AND the verdicts. */}
           {mine && onWithdraw && (
             <Button variant="quiet" size="tiny" onClick={onWithdraw} disabled={busy}>
               Withdraw

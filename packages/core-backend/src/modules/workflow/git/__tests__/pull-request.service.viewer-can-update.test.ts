@@ -27,6 +27,10 @@ const file = (
     eligibilityResolved,
     eligibleApprovers: { roles: owned ? ['Sales'] : [], users: [] },
     approvedBy: [],
+    // The server's own stamp: an owned Markdown or access-config file binds
+    // the gate, nothing else does — and an unresolved tree owns nothing.
+    inMergeGate:
+      owned && eligibilityResolved && (/\.md$/i.test(path) || path === 'roles.yaml'),
   }) as FileApprovalState;
 
 const base = {

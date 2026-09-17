@@ -29,7 +29,12 @@ describe('marketplace git url', () => {
     expect(cmds.claude).toBe(
       'claude plugin marketplace add https://key:bevel_abc@kb.acme.com/git/marketplace.git && claude plugin install hexis-all@hexis',
     );
-    expect(cmds.codex).toBe('codex plugin marketplace add https://key:bevel_abc@kb.acme.com/git/marketplace.git');
+    expect(cmds.codex.split('\n')).toEqual([
+      'codex plugin marketplace add https://key:bevel_abc@kb.acme.com/git/marketplace.git',
+      'codex plugin add skills-and-knowledge@hexis',
+      'codex mcp login hexis',
+      'codex exec --skip-git-repo-check "Call the hexis MCP server\'s list_tools tool and print the tool names it returns."',
+    ]);
     expect(cmds.skills).toBe('npx skills add https://key:bevel_abc@kb.acme.com/git/marketplace.git --all -y');
   });
 

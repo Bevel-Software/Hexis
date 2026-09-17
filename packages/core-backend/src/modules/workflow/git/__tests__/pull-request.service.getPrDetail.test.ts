@@ -132,3 +132,49 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
     expect(getApprovalStates).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * The link on a change request is what an agent hands a person, so it is built
+ * from the configured public frontend address — never from the source branch.
+ */
+describe('PullRequestService — change request link', () => {
+  function detailWith(publicFrontendUrl?: string | null) {
+    const git = {
+      resolvePrShas: async () => ({ baseSha: BASE, headSha: HEAD }),
+      changedFilesForPr: async () => [],
+    } as unknown as GitService;
+    const workspace = {
+      findAnyWorkspaceId: async () => 'ws-main',
+      ensureRemotesFetched: async () => undefined,
+    } as unknown as WorkspaceService;
+    const access = { canWriteAtRef: async () => false } as unknown as IAccessControl;
+    const svc = new PullRequestService(makeDb(), workspace, access, git, publicFrontendUrl);
+    svc.setDetailEnricher({
+      listComments: async () => [],
+      getApprovalStates: async () => [],
+      evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
+    });
+    return svc.getPrDetail(7, { fresh: true });
+  }
+
+  it('is absolute under a configured address, with no note', async () => {
+    const detail = await detailWith('https://bevel.example.com');
+    expect(detail?.number).toBe(7);
+    expect(detail?.url).toBe('https://bevel.example.com/change-requests/7');
+    expect(detail).not.toHaveProperty('urlNote');
+    expect(detail?.url).not.toContain('alice');
+    expect(detail?.url).not.toContain('feature');
+  });
+
+  it('includes a proxied deployment\'s path prefix', async () => {
+    const detail = await detailWith('https://example.com/hexis/');
+    expect(detail?.url).toBe('https://example.com/hexis/change-requests/7');
+  });
+
+  it('stays relative with a note when no address is configured', async () => {
+    const detail = await detailWith(null);
+    expect(detail?.number).toBe(7);
+    expect(detail?.url).toBe('/change-requests/7');
+    expect(detail?.urlNote).toBe('Set PUBLIC_FRONTEND_URL to get absolute links.');
+  });
+});
