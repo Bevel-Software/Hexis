@@ -112,7 +112,7 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
           </Surface>
         ) : (
           <Button variant="primary" disabled={requesting} onClick={() => void request()}>
-            Subscribe to its skills and tools
+            Subscribe to this plugin
           </Button>
         )}
       </div>

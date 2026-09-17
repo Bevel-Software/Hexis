@@ -22,6 +22,11 @@ export interface FileChangeBoxesProps {
   canDecide: boolean;
   /** Who the decision waits on, for the non-owner's footer. */
   ownersLabel: string;
+  /**
+   * For a viewer who can decide: how many approvers besides them the file
+   * still waits on. Feeds "Waiting on you and N others".
+   */
+  othersPending?: number;
   /** The default branch just changed under this file — a request landed. */
   onApplied(): void;
 }
@@ -45,6 +50,7 @@ export function FileChangeBoxes({
   requests,
   canDecide,
   ownersLabel,
+  othersPending,
   onApplied,
 }: FileChangeBoxesProps) {
   const { mineNumbers } = useOpenChangeRequests();
@@ -127,7 +133,10 @@ export function FileChangeBoxes({
             author={changeAuthorName(cr)}
             when={formatWhen(cr.createdAt)}
             mine={mine}
-            canDecide={canDecide && !mine}
+            // Approval rights come from the file, not from authorship: an
+            // eligible approver decides their own proposal too (the gate
+            // accepts it and records it as a self-approval).
+            canDecide={canDecide}
             diff={fileDiff}
             binary={binary}
             upToDate={fileDiff !== null && fileDiff.length === 0}
@@ -141,6 +150,7 @@ export function FileChangeBoxes({
                 : null
             }
             owner={ownersLabel}
+            othersPending={othersPending}
             busy={busyCr === cr.number || applying.activeCr === cr.number}
             phase={applying.activeCr === cr.number ? applying.phase : 'idle'}
             onApprove={() => applying.apply(cr)}

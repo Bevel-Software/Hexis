@@ -36,7 +36,7 @@ const workflowService = {
   },
   openChangeRequest: async (ws: string, user: { id: string }, body: unknown) => {
     calls.push(['openChangeRequest', ws, user.id, body]);
-    return { number: 7, url: 'http://cr/7' };
+    return { number: 7, url: 'https://bevel.example.com/change-requests/7' };
   },
   createBranch: async (ws: string, name: string) => {
     calls.push(['createBranch', ws, name]);
@@ -49,7 +49,19 @@ const workflowService = {
   releaseLock: async (ws: string, branch: string, path: string) => {
     calls.push(['releaseLock', ws, branch, path]);
   },
-  getChangeRequestDetail: async () => ({ headSha: 'head-1' }),
+  getChangeRequestDetail: async (number: number) => ({
+    number,
+    url: `https://bevel.example.com/change-requests/${number}`,
+    headSha: 'head-1',
+    approvals: [],
+    state: 'open',
+    title: 'T',
+    base: 'main',
+  }),
+  mergeChangeRequest: async (number: number) => {
+    calls.push(['mergeChangeRequest', number]);
+    return { kind: 'merged', result: { prNumber: number, sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' } };
+  },
   postComment: async (number: number, _user: unknown, input: { path?: string }) => {
     calls.push(['postComment', number, input.path]);
     return { id: 'c-1' };
@@ -124,6 +136,27 @@ describe('registerWorkflowTools', () => {
     ]);
   });
 
+  // An agent hands the change request's link to a person, so the tools that
+  // act on one by number return its `{ number, url }` beside their own payload.
+  it('post_change_request_comment and merge_change_request return the change request link', async () => {
+    const base = await start();
+    const comment = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi' });
+    expect(comment.status).toBe(200);
+    const commentBody = await comment.json();
+    expect(commentBody).toMatchObject({
+      comment: { id: 'c-1' },
+      changeRequest: { number: 3, url: 'https://bevel.example.com/change-requests/3' },
+    });
+    // A configured address yields an absolute link, so no note rides along.
+    expect(commentBody.changeRequest).not.toHaveProperty('urlNote');
+    const merge = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+    expect(merge.status).toBe(200);
+    expect(await merge.json()).toEqual({
+      outcome: { kind: 'merged', result: { prNumber: 4, sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' } },
+      changeRequest: { number: 4, url: 'https://bevel.example.com/change-requests/4' },
+    });
+  });
+
   it('list_branches takes no branch and lists from any existing clone (repo-global)', async () => {
     const base = await start();
     // No `branch` in the body — the tool is repo-global. It must NOT try to
@@ -142,7 +175,9 @@ describe('registerWorkflowTools', () => {
       title: 'My change',
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ changeRequest: { number: 7 } });
+    expect(await res.json()).toMatchObject({
+      changeRequest: { number: 7, url: 'https://bevel.example.com/change-requests/7' },
+    });
     // The workspace must be derived from the SOURCE branch (not a separate
     // `branch` arg) — encodeURIComponent('me/draft'). Regression guard for the
     // `-b undefined` clone bug when the model omitted `branch`.
