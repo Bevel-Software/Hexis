@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
 
@@ -618,11 +618,15 @@ describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
   const DRAFT = 'user/add-crm';
   const draftWs = workspaceIdForBranch(DRAFT);
 
+  /** Cloned here: the default branch, the draft, and `user/gone` (its remote branch since deleted). */
+  const cloned = new Set([wsId, draftWs, workspaceIdForBranch('user/gone')]);
+  const getOrCreateForBranch = vi.fn(async (branch: string) => {
+    if (branch === 'user/gone') throw new Error('branch does not exist');
+    return { id: workspaceIdForBranch(branch) };
+  });
   const workspaceService = {
-    getOrCreateForBranch: async (branch: string) => {
-      if (branch === 'user/gone') throw new Error('branch does not exist');
-      return { id: workspaceIdForBranch(branch) };
-    },
+    getOrCreateForBranch,
+    hasBootstrappedWorkspace: async (id: string) => cloned.has(id),
     getWorkspacePath: async (id: string) => join(root, id),
   } as unknown as WorkspaceService;
 
@@ -666,6 +670,12 @@ describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
   test('is empty for the default branch itself and for a branch without a workspace', async () => {
     expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DEFAULT_BRANCH)).toEqual([]);
     expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'user/gone')).toEqual([]);
+  });
+
+  test('never bootstraps a branch this process holds no clone of', async () => {
+    getOrCreateForBranch.mockClear();
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'someone/private-guess')).toEqual([]);
+    expect(getOrCreateForBranch).not.toHaveBeenCalledWith('someone/private-guess');
   });
 
   test('the released catalog never includes the draft declaration', async () => {

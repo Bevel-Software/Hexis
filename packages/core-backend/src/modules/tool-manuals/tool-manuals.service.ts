@@ -205,6 +205,12 @@ export class ToolManualService implements IToolManualService {
     branch: string,
   ): Promise<{ name: string; path: string; type: ToolManualType }[]> {
     if (!branch || branch === DEFAULT_BRANCH) return [];
+    // Only a draft this process already holds a clone of — the one the caller
+    // wrote the declaration on. `scanDisk` would otherwise BOOTSTRAP any branch
+    // name a caller sends, before the read gate below has had a say: a clone
+    // and a fetch per guessed, private or nonexistent branch. A declaration on
+    // a branch nobody has checked out here is nothing this answer can report.
+    if (!(await this.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(branch)))) return [];
     // Names and paths only — `scanDisk` never probes a server, so asking about
     // a draft costs no network and registers no OAuth client for a declaration
     // that may never be merged.
