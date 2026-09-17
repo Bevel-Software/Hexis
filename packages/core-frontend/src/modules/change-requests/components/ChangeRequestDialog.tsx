@@ -20,7 +20,7 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderers';
+import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
@@ -163,8 +163,10 @@ export function ChangeRequestDialog({
   // Markdown renders as a DOCUMENT with red/green change blocks — the same
   // `MarkdownDiffViewer` the review flow and version history use — because the
   // person deciding on a knowledge or skill change reads prose, not source.
-  // Everything else keeps the marked-source view below.
-  const selectedIsMarkdown = /\.md$/i.test(selected);
+  // Everything else keeps the marked-source view below — including a `.md` the
+  // file page shows as text (the access rules file), whose `#` comments would
+  // otherwise read as headings on both the proposed and the current side.
+  const selectedIsMarkdown = /\.md$/i.test(selected) && !rendersAsText(selected);
 
   const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -986,7 +988,7 @@ function authorsReason(body: string | undefined): string | null {
  *
  * Markdown never reaches this view when both sides are in — it renders
  * through `MarkdownDiffViewer` above. This is the presentation for the files
- * that ARE source (yaml, scripts, config), plus the loading and unreadable
+ * that ARE source (yaml, scripts, config, the access rules file), plus the loading and unreadable
  * states for everything.
  */
 function MarkedFile({

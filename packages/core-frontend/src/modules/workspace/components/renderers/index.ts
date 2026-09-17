@@ -97,6 +97,18 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
 }
 
 /**
+ * Does the file page show this file as plain text?
+ *
+ * The change-request dialog asks this before rendering a `.md` as a document:
+ * a name the registry above sends to `TextRenderer` (the access rules file) is
+ * YAML that happens to end in `.md`, and a Markdown diff would turn its `#`
+ * comments into headings there just as the renderer used to here.
+ */
+export function rendersAsText(filePath: string): boolean {
+  return getFileRenderer(filePath) === TextRenderer;
+}
+
+/**
  * Does this file get a real VIEWER — a renderer that fetches the file and
  * shows it — as opposed to the text fallback or the no-preview note?
  *
