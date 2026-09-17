@@ -86,8 +86,18 @@ function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: 
 export function describeToolFailure(err: unknown): string {
   const data = (err as { response?: { data?: unknown } })?.response?.data;
   if (data && typeof data === 'object') {
-    const inner = (data as { error?: unknown }).error;
-    if (typeof inner === 'string' && inner.length > 0) return inner;
+    const { error: inner, ...details } = data as { error?: unknown };
+    if (typeof inner === 'string' && inner.length > 0) {
+      // A typed refusal (`{ error, kind, … }`) keeps its machine-readable
+      // fields: an MCP caller sees only this string, and `kind` is what it
+      // branches on.
+      if (typeof (details as { kind?: unknown }).kind !== 'string') return inner;
+      try {
+        return `${inner} ${JSON.stringify(details)}`;
+      } catch {
+        return inner;
+      }
+    }
   }
   if (typeof data === 'string' && data.length > 0) return data;
   // Total, like `safeJsonText`: a thrown value whose own `toString` throws

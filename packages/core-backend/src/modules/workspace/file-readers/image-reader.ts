@@ -15,14 +15,15 @@ import {
  * note); over it, the honest downscale refusal — see image-read.ts for the
  * cap arithmetic and header-parsing details.
  *
- * No `greppableText`: a picture is never text-searchable. And images stay
- * `textEditable` — the write tools only refuse formats whose reads are lossy
- * EXTRACTIONS (documents); an image read is the real bytes, and image writes
- * were never gated.
+ * No `greppableText`: a picture is never text-searchable. Not `textEditable`
+ * either: a picture is bytes, and text written to `logo.png` could only
+ * produce a broken image — new pictures arrive through upload, existing ones
+ * travel with copy_file/move_file.
  */
 export class ImageReader implements FileReader {
   readonly extensions: readonly string[] = IMAGE_EXTENSIONS;
-  readonly textEditable = true;
+  readonly textEditable = false;
+  readonly fileKind = 'image' as const;
 
   async read(bytes: Buffer, path: string): Promise<ReadResult> {
     const mime = imageMimeType(path);

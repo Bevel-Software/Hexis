@@ -39,6 +39,13 @@ export function displayPath(path: string): string {
  */
 export const oneLine = displayPath;
 
+/**
+ * What a file IS, as the binary capability contract names it in a refusal:
+ * `text` (the text tools own it), `document` (read_file extracts it; the
+ * legacy .doc/.ppt/.xls count too), `image`, `archive`, or any other `binary`.
+ */
+export type FileKind = 'text' | 'document' | 'image' | 'archive' | 'binary';
+
 /** A per-format file reader. Register implementations in `createFileReaderRegistry`. */
 export interface FileReader {
   /** The extensions this reader owns — lowercase, with the dot. Empty for the default (fallback) reader. */
@@ -54,6 +61,8 @@ export interface FileReader {
   greppableText?(bytes: Buffer, path: string): Promise<string | null>;
   /** May the agent TEXT-editing tools (write_file/write_files/edit_file) touch this file? */
   readonly textEditable: boolean;
+  /** The kind this reader's extensions name — what a `binary_not_writable` refusal reports. */
+  readonly fileKind: FileKind;
   /**
    * Format-specific copy for the write-refusal thrown when `textEditable` is
    * false (see `assertNotDocumentEdit` in workspace.tools.ts). Absent = the

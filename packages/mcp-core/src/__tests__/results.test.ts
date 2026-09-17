@@ -14,6 +14,13 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
   });
 
+  it('keeps a typed refusal\'s machine-readable fields beside its message', () => {
+    const data = { error: 'logo.png is an image.', kind: 'binary_not_writable', fileKind: 'image', useInstead: ['upload'] };
+    expect(describeToolFailure({ response: { data } })).toBe(
+      'logo.png is an image. {"kind":"binary_not_writable","fileKind":"image","useInstead":["upload"]}',
+    );
+  });
+
   it('never throws on a thrown value whose own toString throws', () => {
     // A null-prototype object has no toString; String() on it throws — and a
     // describe that throws inside a catch path turns a tool failure into a
