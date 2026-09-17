@@ -4,6 +4,7 @@ import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
 import { useGit } from '../../git/state/git.context';
 import { readPersistedTabs } from '../utils/tab-persistence';
+import { syncFileTraceFlag, traceFiles } from '../utils/file-trace';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   NODE_ID_LINK_RE,
@@ -79,6 +80,10 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // (workspaceId, branch) pair we've successfully hydrated tabs for. Reset to
   // null on branch switch so re-hydration fires for the new branch.
   const lastHydratedKeyRef = useRef<string | null>(null);
+  // `?trace=files` diagnostics only (see `utils/file-trace`): numbers each
+  // hydration so overlapping ones show in the console in start/settle order.
+  const hydrateSeqRef = useRef(0);
+  const traceOn = syncFileTraceFlag(location.search);
 
   const {
     workspaceId,
@@ -141,7 +146,33 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 
   useEffect(() => {
-    if (!workspaceId) return;
+    // Everything the decision below reads, so one console line says which
+    // gate held the page. A no-op unless the trace is on.
+    const trace = (decision: string, extra: Record<string, unknown> = {}) => {
+      if (!traceOn) return;
+      traceFiles(decision, {
+        url: location.pathname,
+        branchFromUrl,
+        pathFromUrl,
+        segment,
+        gitStatusBranch: currentBranch,
+        gitAvailability: git.availability,
+        gitLastError: git.lastError,
+        workspaceId,
+        bootstrapError: workspace.bootstrapError,
+        hydrationKey: `${workspaceId}.${branchFromUrl}`,
+        lastHydratedKey: lastHydratedKeyRef.current,
+        openTabs: workspace.openTabs.map((t) => t.path),
+        openFilePath,
+        hasUnsavedEdits,
+        ...extra,
+      });
+    };
+
+    if (!workspaceId) {
+      trace('wait:no-workspace');
+      return;
+    }
     if (!branchFromUrl) return;
 
     let cancelled = false;
@@ -168,6 +199,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       //    the user is moving to a different on-disk workspace anyway.
       if (branchKnown && !branchMatches) {
         if (hasUnsavedEdits) {
+          trace('blocked:dirty');
           setError({
             kind: 'dirty',
             current: currentBranch,
@@ -176,6 +208,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           });
           return;
         }
+        trace('wait:branch-mismatch');
         setError(null);
         setPersistenceBranch(branchFromUrl);
         // Bail out and wait for the bootstrap to update workspaceId +
@@ -198,8 +231,11 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
         }
         const activePath = pathFromUrl || persisted.activePath;
         setPersistenceBranch(branchFromUrl);
+        const hydrateSeq = ++hydrateSeqRef.current;
+        trace('hydrate:start', { hydrateSeq, paths, activePath });
         try {
-          const { dropped, denied } = await hydrateTabs(paths, activePath);
+          const { surviving, dropped, denied } = await hydrateTabs(paths, activePath);
+          trace('hydrate:settled', { hydrateSeq, cancelled, surviving, dropped, denied });
           if (cancelled) return;
           lastHydratedKeyRef.current = hydrationKey;
           // If the URL deeplinked to a path that 404'd or 403'd, say why
@@ -213,6 +249,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
             setError(null);
           }
         } catch (err) {
+          trace('hydrate:failed', { hydrateSeq, cancelled, ...describeError(err) });
           if (!cancelled) {
             if (err instanceof WorkspaceApiError && err.status === 410) {
               setError({ kind: 'branch-gone', branch: branchFromUrl });
@@ -229,10 +266,13 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       // a different file within the same branch).
       if (pathFromUrl) {
         if (openFilePath !== pathFromUrl) {
+          trace('add-tab:start');
           try {
-            await addTab(pathFromUrl);
+            const added = await addTab(pathFromUrl);
+            trace('add-tab:settled', { added, cancelled });
             if (!cancelled) setError(null);
           } catch (err) {
+            trace('add-tab:failed', { cancelled, ...describeError(err) });
             if (cancelled) return;
             if (err instanceof WorkspaceApiError && err.status === 404) {
               setError({ kind: 'file-missing', path: pathFromUrl });
@@ -246,9 +286,11 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
             }
           }
         } else if (!cancelled) {
+          trace('noop:already-open');
           setError(null);
         }
       } else if (!cancelled) {
+        trace('noop:no-path');
         // URL with no path = "no active tab"; tabs in the strip stay open.
         setError(null);
       }
@@ -420,6 +462,14 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   }
 
   return <FileViewer />;
+}
+
+/** The status and message of a failed read, for the `?trace=files` log. */
+function describeError(err: unknown): { status: number | null; message: string } {
+  return {
+    status: err instanceof WorkspaceApiError ? err.status : null,
+    message: err instanceof Error ? err.message : String(err),
+  };
 }
 
 /**

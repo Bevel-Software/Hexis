@@ -420,3 +420,105 @@ describe('FileRoute', () => {
     });
   });
 });
+
+/**
+ * `?trace=files` — the reproduction diagnostics for a click that changes the
+ * URL but leaves the page blank. They log which gate held the page and change
+ * nothing about what it does.
+ */
+describe('FileRoute: ?trace=files diagnostics', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    localStorage.clear();
+  });
+
+  function traceCalls(info: ReturnType<typeof vi.spyOn>) {
+    return info.mock.calls
+      .filter((c: unknown[]) => c[0] === '[trace:files]')
+      .map((c: unknown[]) => ({ event: c[1] as string, fields: c[2] as Record<string, unknown> }));
+  }
+
+  it('logs the wait on a git status branch that differs from the URL, with the four reproduction fields', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const setPersistenceBranch = vi.fn();
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    const workspace = makeWorkspace({
+      hydrateTabs,
+      setPersistenceBranch,
+      bootstrapError: { branch: 'main', status: 500 },
+      openTabs: [makeTab({ path: 'Knowledge/Old.md' })],
+    });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/main/Knowledge/Foo.md?trace=files', { git, workspace });
+
+    await waitFor(() => expect(setPersistenceBranch).toHaveBeenCalledWith('main'));
+    const wait = traceCalls(info).find((c) => c.event === 'wait:branch-mismatch');
+    expect(wait?.fields).toMatchObject({
+      url: '/workspace/main/Knowledge/Foo.md',
+      branchFromUrl: 'main',
+      pathFromUrl: 'Knowledge/Foo.md',
+      gitStatusBranch: 'alice/draft',
+      bootstrapError: { branch: 'main', status: 500 },
+      openTabs: ['Knowledge/Old.md'],
+    });
+    // Behaviour unchanged: still waiting, still nothing on screen to say why.
+    expect(hydrateTabs).not.toHaveBeenCalled();
+    info.mockRestore();
+  });
+
+  it('numbers each hydration so a start and its settle can be paired in the console', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', { git, workspace });
+
+    await waitFor(() => {
+      expect(traceCalls(info).some((c) => c.event === 'hydrate:settled')).toBe(true);
+    });
+    const calls = traceCalls(info);
+    const start = calls.find((c) => c.event === 'hydrate:start');
+    const settled = calls.find((c) => c.event === 'hydrate:settled');
+    expect(start?.fields).toMatchObject({ paths: ['Knowledge/Foo.md'], activePath: 'Knowledge/Foo.md' });
+    expect(settled?.fields).toMatchObject({ surviving: ['Knowledge/Foo.md'], cancelled: false });
+    expect(settled?.fields.hydrateSeq).toBe(start?.fields.hydrateSeq);
+    info.mockRestore();
+  });
+
+  it('logs the failed status of a hydration before the error screen it already had', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn(async () => {
+      throw new WorkspaceApiError(500);
+    });
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', { git, workspace });
+
+    await waitFor(() => expect(screen.getByText(/Couldn't load this file/i)).toBeInTheDocument());
+    expect(traceCalls(info).find((c) => c.event === 'hydrate:failed')?.fields).toMatchObject({
+      status: 500,
+      cancelled: false,
+    });
+    info.mockRestore();
+  });
+
+  it('logs nothing without the flag', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
+    expect(traceCalls(info)).toHaveLength(0);
+    info.mockRestore();
+  });
+});
