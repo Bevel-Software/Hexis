@@ -902,7 +902,9 @@ describe('FileExplorer rows: the prototype tree', () => {
   });
 
   // The one prototype context-menu item the platform never had.
-  it('offers Copy path in the context menu and writes the entry path', async () => {
+  // Root-anchored, so the text pasted into a Markdown link opens the file from
+  // any folder rather than resolving against the linking file's own folder.
+  it('offers Copy path in the context menu and writes the root-anchored entry path', async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -914,7 +916,31 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('brief.md');
+    expect(writeText).toHaveBeenCalledWith('/brief.md');
+  });
+
+  it('copies a nested entry as its full root-anchored path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('a.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('/docs/a.md');
+  });
+
+  it('does not offer Copy path on the workspace root, which would copy "/."', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(screen.getAllByText('.')[0]);
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
   it('offers Copy path on a folder row too', () => {
@@ -1572,5 +1598,107 @@ describe('FileExplorer: delete and move ask first', () => {
       });
       expect(deleteEntry).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Read is default-deny, so an empty explorer has two causes that look the
+ * same: nothing is shared with the caller, or nothing exists yet. The listing
+ * root's `withheld` count tells them apart; the explorer says which, and says
+ * nothing once a single entry is on screen.
+ */
+describe('FileExplorer: an empty tree says why', () => {
+  const KBD = 'knowledge-base';
+  const dirAt = (rel: string, children: FileTreeEntry[] = []): FileTreeEntry => ({
+    name: rel.split('/').pop()!,
+    relativePath: rel,
+    type: 'directory',
+    children,
+  });
+  const fileAt = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
+  /** A seeded knowledge base: the reserved roots, forced visible, with `kb` under KnowledgeBase. */
+  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => ({
+    ...dirAt('.', [
+      dirAt(KBD, [
+        dirAt(`${KBD}/KnowledgeBase`, kb),
+        dirAt(`${KBD}/Plugins`),
+        dirAt(`${KBD}/Skills`),
+        ...loose,
+      ]),
+    ]),
+    ...extra,
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+  afterEach(() => {
+    configureBranchModel({
+      defaultBranch: 'target-company-state',
+      protectedBranches: ['current-company-state', 'target-company-state'],
+    });
+  });
+
+  it('says nothing is shared when entries were withheld and none are visible', () => {
+    renderExplorer({ fileTree: seeded([], { withheld: 12 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+    expect(screen.queryByText(/This knowledge base is empty/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('says the knowledge base is empty, with the create hint, when nothing was withheld and the caller may write', () => {
+    // A draft branch: writable without asking.
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'alice%2Fdraft' });
+    const notice = screen.getByTestId('tree-empty-notice');
+    expect(notice).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here is shared/)).not.toBeInTheDocument();
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+  });
+
+  it('still says "empty" when the only root entry is .bevelignore', () => {
+    renderExplorer({ fileTree: seeded([], {}, [fileAt(`${KBD}/.bevelignore`)]), workspaceId: 'alice%2Fdraft' });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+  });
+
+  it('leaves the create hint out when the caller may not write at the root', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(url).toContain('/access?path=KnowledgeBase&kind=folder');
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('shows the create hint on a protected branch once the root is known writable', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: true }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    expect(await screen.findByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('shows neither message with one visible entry, withheld or not', () => {
+    renderExplorer({ fileTree: seeded([fileAt(`${KBD}/KnowledgeBase/Handbook.md`)], { withheld: 3 }) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+    cleanup();
+    renderExplorer({ fileTree: seeded([dirAt(`${KBD}/KnowledgeBase/Finance`)]) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing while the tree is still loading', () => {
+    renderExplorer({ fileTree: null });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
 });

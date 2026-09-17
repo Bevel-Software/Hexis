@@ -30,6 +30,6 @@ export {
 
 export { ClaudeInstallLink } from './ClaudeInstallLink';
 export { ChatGptInstallLink } from './ChatGptInstallLink';
-export { ConnectionInstructions } from './ConnectionInstructions';
+export { AssistantConnectionInstructions, OtherAgentConnectionInstructions } from './ConnectionInstructions';
 export { CopyBlock } from './CopyBlock';
 export { useCopyFeedback } from './useCopyFeedback';

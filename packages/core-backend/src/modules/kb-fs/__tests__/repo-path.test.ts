@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assertInsideRepo, isInsideRepo } from '../repo-path.js';
+import { assertInsideRepo, isInsideRepo, normalizePathArgs, normalizeWorkspacePath } from '../repo-path.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
 
 const KB = 'knowledge-base';
@@ -102,5 +102,40 @@ describe('assertInsideRepo', () => {
       expect(message, p).toContain('Use "knowledge-base/" instead');
       expect(message, p).not.toMatch(/Use "[^"]*\.\.[^"]*" instead/);
     }
+  });
+});
+
+describe('normalizeWorkspacePath', () => {
+  it('drops the single leading slash of the root-anchored form', () => {
+    expect(normalizeWorkspacePath('/knowledge-base/KnowledgeBase/Foo.md')).toBe('knowledge-base/KnowledgeBase/Foo.md');
+    expect(normalizeWorkspacePath('knowledge-base/KnowledgeBase/Foo.md')).toBe('knowledge-base/KnowledgeBase/Foo.md');
+  });
+
+  it('leaves everything else for the usual refusal', () => {
+    expect(normalizeWorkspacePath('//knowledge-base/Foo.md')).toBe('//knowledge-base/Foo.md');
+    expect(normalizeWorkspacePath(undefined)).toBeUndefined();
+    expect(() => assertInsideRepo(normalizeWorkspacePath('/KnowledgeBase/Foo.md'), 'knowledge-base')).toThrow(
+      /outside the knowledge base repository/,
+    );
+  });
+
+  it('normalizes every path-shaped tool argument, batch entries included', () => {
+    expect(
+      normalizePathArgs({
+        branch: '/main',
+        path: '/knowledge-base/a.md',
+        src: '/knowledge-base/b.md',
+        dest: '/knowledge-base/c.md',
+        destination: '/knowledge-base/d',
+        files: [{ path: '/knowledge-base/e.md', content: '/x' }],
+      }),
+    ).toEqual({
+      branch: '/main',
+      path: 'knowledge-base/a.md',
+      src: 'knowledge-base/b.md',
+      dest: 'knowledge-base/c.md',
+      destination: 'knowledge-base/d',
+      files: [{ path: 'knowledge-base/e.md', content: '/x' }],
+    });
   });
 });

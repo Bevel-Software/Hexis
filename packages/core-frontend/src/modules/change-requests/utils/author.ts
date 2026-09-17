@@ -45,3 +45,35 @@ export function formatWhen(iso: string): string {
   if (days === 1) return 'yesterday';
   return then.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
+
+/**
+ * How many approvers besides the viewer a proposal is still waiting on — the
+ * "N" in "Waiting on you and N others".
+ *
+ * Called only for a viewer who can decide, so the viewer is always one of the
+ * pending approvers. The count is over GRANTS — the frontend never learns how
+ * many people a role holds — so a role counts once. The viewer's own user
+ * grant (matched by email, case-insensitively) is not "someone else". A viewer
+ * with no user grant of their own decides through a role, so one role grant is
+ * theirs: a file written only by `Admin` reads "Waiting on you" for an Admin,
+ * not "Waiting on you and 1 other". The viewer's roles are not known here, so
+ * one role is credited to them whichever it is.
+ */
+export function othersPendingBesides(
+  approvers: { roles: string[]; users: { email: string }[] },
+  viewerEmail: string | null | undefined,
+): number {
+  const me = viewerEmail?.trim().toLowerCase();
+  const otherUsers = approvers.users.filter((u) => !me || u.email.trim().toLowerCase() !== me);
+  const viewerHasUserGrant = otherUsers.length < approvers.users.length;
+  const otherRoles = viewerHasUserGrant
+    ? approvers.roles.length
+    : Math.max(0, approvers.roles.length - 1);
+  return otherRoles + otherUsers.length;
+}
+
+/** "Waiting on you", or "Waiting on you and 2 others" when more are pending. */
+export function waitingOnViewerLabel(othersPending: number): string {
+  if (othersPending <= 0) return 'Waiting on you';
+  return `Waiting on you and ${othersPending} ${othersPending === 1 ? 'other' : 'others'}`;
+}
