@@ -158,6 +158,10 @@ export function CardGrid({
         // edits — not the transport: a `.tool` manual whose call template is
         // `type: mcp` still edits as a UTCP manual, so the path suffix is the
         // authoritative signal, not the tool's `type` metadata.
+        // Whether THIS card carries a `…`, which the remove overlay below has
+        // to know: both are corner controls on the same card, and two things
+        // pinned to the same corner is one thing you cannot click.
+        const menued = item.kind === 'skill' && !!onShare && !item.pending;
         const kindProps =
           item.kind === 'integration'
             ? ({
@@ -166,7 +170,7 @@ export function CardGrid({
               } as const)
             : ({
                 kind: 'skill',
-                onShare: onShare && !item.pending ? () => onShare(item) : undefined,
+                onShare: menued ? () => onShare!(item) : undefined,
               } as const);
         const card = (
           <LibraryCard
@@ -205,8 +209,12 @@ export function CardGrid({
               title={`Remove ${item.name}`}
               onClick={() => onRemove(item)}
               className={cn(
-                'absolute right-1.5 top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
+                'absolute top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
                 'opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover/removable:opacity-100',
+                // The overflow `…` keeps the corner — that is where every menu
+                // in this product lives — so Remove steps left of it on a card
+                // that has one, and keeps the corner on a card that does not.
+                menued ? 'right-8' : 'right-1.5',
               )}
             >
               <Trash2 size={13} />

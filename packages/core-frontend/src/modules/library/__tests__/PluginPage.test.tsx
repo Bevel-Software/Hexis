@@ -634,6 +634,56 @@ describe('PluginPage', () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * The gap a business-user tester fell into: they were standing on a plugin's
+   * page looking at a skill, and the only Share on screen was the plugin's. A
+   * skill card carries its own now, and it opens the SKILL's folder — the
+   * thing the card is about — not the plugin's.
+   */
+  it("a skill card's menu shares that skill's own folder, not the plugin's", async () => {
+    renderPlugin('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for outreach' }));
+    expect(
+      within(screen.getByRole('menu'))
+        .getAllByRole('menuitem')
+        .map((i) => i.textContent),
+    ).toEqual(['Open', 'Share']);
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Plugins/GTM/outreach',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * Both are corner controls on the same card, and the manager view is the one
+   * place they meet. Neither may sit on top of the other.
+   */
+  it('gives a manager the card menu AND Remove, on separate targets', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([gtm({ canWrite: true })]);
+    renderPlugin('GTM');
+
+    const remove = await screen.findByRole('button', { name: 'Remove outreach' });
+    const dots = screen.getByRole('button', { name: 'Actions for outreach' });
+    expect(remove).not.toBe(dots);
+    // The `…` keeps the corner every menu in this product lives in; Remove
+    // steps left of it rather than under it.
+    expect(dots.className).toContain('right-1.5');
+    expect(remove.className).toContain('right-8');
+    expect(remove.className).not.toContain('right-1.5');
+  });
+
+  it('leaves a TOOL card alone — access to a tool is decided at its plugin', async () => {
+    renderPlugin('GTM');
+
+    expect(await screen.findByRole('button', { name: 'Actions for outreach' })).toBeInTheDocument();
+    // `connectedTool()` is in this plugin and renders a card beside the skill.
+    expect(screen.queryByRole('button', { name: /^Actions for (?!outreach)/ })).toBeNull();
+  });
+
   it('an UNDISCOVERABLE plugin renders exactly like one that does not exist', async () => {
     // Fail-closed: the endpoint omits plugins with no verdict at all, so the
     // page cannot tell "hidden from you" apart from "absent" — the point.

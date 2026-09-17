@@ -11,6 +11,7 @@ import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
 } from './plugin-page-parts';
 import { PageActions } from './PageActions';
 import { PersonalAddDialog } from './PersonalAddDialog';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { copyToClipboard } from '../utils/clipboard';
 
 /**
@@ -26,14 +27,20 @@ import { copyToClipboard } from '../utils/clipboard';
  * kind of thing — with ONE exception, and it is a real one rather than a
  * decision:
  *
- *  - no Share. Every other action here is a client-side affordance, but sharing
- *    needs a folder to write an `access.md` into, and this page is defined as
- *    the items in NO folder. There is nothing to point the dialog at. The
- *    prototype can share its personal list because there it is a real space
- *    record (`mine:<uid>`, proto:2265); the platform has no such object, and a
- *    Share button that opens an editor over nothing is worse than no button.
- *    Giving a person's own items a home folder is a backend change, and until
- *    that exists this stays absent.
+ *  - no Share IN THE TITLE ROW. Every other action here is a client-side
+ *    affordance, but sharing needs a folder to write an `access.md` into, and
+ *    this page is defined as the items in NO folder. There is nothing to point
+ *    the dialog at. The prototype can share its personal list because there it
+ *    is a real space record (`mine:<uid>`, proto:2265); the platform has no
+ *    such object, and a Share button that opens an editor over nothing is
+ *    worse than no button. Giving a person's own items a home folder is a
+ *    backend change, and until that exists this stays absent.
+ *
+ * That absence is about the SPACE, not about what is in it. A skill here is
+ * still a folder of its own with its own rules — which is exactly the
+ * standalone skill the skill page offers Share for — so each skill CARD
+ * carries the same `…` menu it carries everywhere else, pointed at its own
+ * folder. Only the page has nothing to share; the skills on it do.
  */
 export function PersonalPluginPage() {
   const data = useLibrary();
@@ -43,6 +50,12 @@ export function PersonalPluginPage() {
   const toast = useLibraryToast();
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
+  /**
+   * Which skill's folder the access dialog is open on, below the KB directory
+   * — set only by a card's Share, since the page itself has no folder. The
+   * plugin page keeps the same single-string state for the same dialog.
+   */
+  const [manageFolder, setManageFolder] = useState<string | null>(null);
 
   const name = personalPluginName();
   const items = useMemo(() => data.items.filter(isUngrouped), [data.items]);
@@ -91,6 +104,8 @@ export function PersonalPluginPage() {
         skillItems={skillItems}
         toolItems={toolItems}
         onOpen={openItem}
+        // The skill's own folder, not the space's — see the page's docstring.
+        onShare={kbDirName ? (item) => setManageFolder(item.path) : undefined}
         // Your own space: everything here is yours to remove — the backend's
         // per-path gate agrees, since your personal folder names you as owner.
         onRemove={setRemoving}
@@ -115,6 +130,26 @@ export function PersonalPluginPage() {
           name={name}
           existingSkills={allSkillNames}
           onClose={() => setAddOpen(false)}
+        />
+      )}
+
+      {/* The same dialog the plugin page opens, on a skill's folder instead of
+          a plugin's. `kbDirName` gates it because the resolver addresses files
+          repo-relative and the dialog strips that prefix. */}
+      {manageFolder && kbDirName && (
+        <ManageAccessDialog
+          key={manageFolder}
+          entry={{
+            name: manageFolder.split('/').pop() ?? manageFolder,
+            relativePath: `${kbDirName}/${manageFolder}`,
+            type: 'directory',
+          }}
+          onClose={() => {
+            setManageFolder(null);
+            // A grant can change who sees the skill — and whether it is still
+            // in no plugin at all — so the catalog is re-read.
+            data.reload();
+          }}
         />
       )}
 

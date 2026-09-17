@@ -368,6 +368,14 @@ export function PluginPage() {
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // A skill's OWN rules, from its card — the skill page's Share, on the
+        // skill's folder rather than the plugin's. It reuses this page's one
+        // access dialog (`manageFolder`), the same one the title row's Share
+        // and the join-request banner open, so retargeting at an ancestor
+        // still walks up to the plugin from here. `kbDirName` gates it for the
+        // reason the dialog itself does: the path we would hand over is not
+        // the path we mean without it.
+        onShare={kbDirName ? (item) => setManageFolder(item.path) : undefined}
         // Removal is the PLUGIN MANAGER's verb — the same canWrite that lets
         // them answer join requests. The backend's per-path gate enforces it
         // for real; this only decides who sees the affordance.
