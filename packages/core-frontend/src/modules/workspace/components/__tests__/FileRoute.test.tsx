@@ -681,10 +681,11 @@ describe('FileRoute: nothing waits silently', () => {
     const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
       async () => makeHydrateResult({ surviving: [PATH] }),
     );
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
 
     renderAt(`/workspace/main/${PATH}`, {
       git: makeGit({ status: makeStatus('main') }),
-      workspace: makeWorkspace({ openTabs: [tab], activeTab: tab, hydrateTabs }),
+      workspace: makeWorkspace({ openTabs: [tab], activeTab: tab, hydrateTabs, addTab }),
     });
 
     await waitFor(() =>
@@ -694,7 +695,18 @@ describe('FileRoute: nothing waits silently', () => {
     // The id is still resolving — and the file it names is the one already up.
     expect(routesMock.fetchNodeWorkspacePath).toHaveBeenCalled();
     expect(screen.queryByText(/Opening/)).not.toBeInTheDocument();
-    releaseResolve?.(PATH);
+
+    // And when it resolves — to the very file that is open — the page still
+    // doesn't blink: the route reads the resolved path and the viewer keeps
+    // the file. Released inside `act` because the resolution sets state and
+    // starts the read; outside it, React only warns and nothing here would
+    // have covered the frame the test is named for.
+    await act(async () => { releaseResolve?.(PATH); });
+    await settle();
+    expect(addTab).toHaveBeenCalledWith(PATH);
+    expect(screen.queryByText(/Opening/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Open a page to start reading/i)).not.toBeInTheDocument();
+    expect(screen.getByText(`content:${PATH}`)).toBeInTheDocument();
   });
 
   it('never reads from a workspace on another branch even when a RETAINED status says it matches', async () => {
