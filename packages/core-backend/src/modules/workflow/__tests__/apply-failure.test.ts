@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -17,6 +19,7 @@ import { WorkflowEventBus } from '../event-bus.js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { changeRequests } from '../../database/schema.js';
+import { coreMigrationsDir } from '../../../assets.js';
 import { WorkflowService } from '../workflow.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createWorkflowRoutes } from '../workflow.routes.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../../shared/domain-errors.js';
@@ -898,5 +901,80 @@ describe('PullRequestService — a recorded or cleared refusal reaches cached li
     const [cr] = await svc.listOpenPrs();
     expect(listReads).toBe(2);
     expect(cr!.lastApplyFailure?.reason).toBe('gate says no');
+  });
+});
+
+// ── Upgrading a database that already holds 0008 refusals ───────────────────
+
+describe('migration 0009 — refusals recorded before the kind existed are classified', () => {
+  const migration = readFileSync(
+    path.join(coreMigrationsDir(), '0009_change_request_apply_failure_kind.sql'),
+    'utf8',
+  );
+
+  /**
+   * The backfill's CASE, read out of the migration and applied to a 0008 row.
+   * Understands exactly the two arm forms it uses (`"col" = true` and
+   * `"col" LIKE '…%'`) and throws on any other, so an edit to the migration
+   * this cannot follow fails here rather than passing unexamined.
+   */
+  function backfilledKind(row: Row): string | null {
+    const update = migration.slice(migration.indexOf('UPDATE "change_requests"'));
+    const where = /WHERE "apply_failed_at" IS NOT NULL AND "apply_failure_kind" IS NULL;/;
+    expect(update).toMatch(where);
+    if (row.apply_failed_at == null || row.apply_failure_kind != null) return (row.apply_failure_kind as string) ?? null;
+    const caseBody = /CASE([\s\S]*?)END/.exec(update)![1]!;
+    for (const arm of caseBody.split('\n').map((l) => l.trim()).filter(Boolean)) {
+      let m = /^WHEN "(\w+)" = true THEN '(\w+)'$/.exec(arm);
+      if (m) {
+        if (row[m[1]!] === true) return m[2]!;
+        continue;
+      }
+      m = /^WHEN "(\w+)" LIKE '([^%']*)%' THEN '(\w+)'$/.exec(arm);
+      if (m) {
+        if (String(row[m[1]!] ?? '').startsWith(m[2]!)) return m[3]!;
+        continue;
+      }
+      m = /^ELSE '(\w+)'$/.exec(arm);
+      if (m) return m[1]!;
+      throw new Error(`unreadable CASE arm in 0009: ${arm}`);
+    }
+    return null;
+  }
+
+  const legacy = (over: Row): Row => ({
+    apply_failed_at: new Date('2026-09-16T10:00:00Z'),
+    apply_failure_conflicts: false,
+    apply_failure_kind: null,
+    ...over,
+  });
+
+  it("a gate refusal becomes 'gate', so an approval clears it after the upgrade", () => {
+    expect(
+      backfilledKind(legacy({ apply_failure_reason: 'Merge gate rejected: Waiting on approval for Plugins/x/SKILL.md' })),
+    ).toBe('gate');
+  });
+
+  it("a conflict becomes 'conflicts', and anything else 'error'", () => {
+    expect(
+      backfilledKind(
+        legacy({ apply_failure_conflicts: true, apply_failure_reason: 'This draft conflicts with the target and needs resolving first.' }),
+      ),
+    ).toBe('conflicts');
+    expect(backfilledKind(legacy({ apply_failure_reason: 'Merge failed: push rejected' }))).toBe('error');
+  });
+
+  it('rows with no refusal, or already classified, are left alone', () => {
+    expect(backfilledKind({ apply_failed_at: null, apply_failure_kind: null })).toBeNull();
+    expect(backfilledKind(legacy({ apply_failure_kind: 'conflicts', apply_failure_reason: 'Merge gate rejected: x' }))).toBe('conflicts');
+  });
+
+  it("the prefix it matches is the one the merge gate's refusal actually carries", () => {
+    const gateSource = readFileSync(
+      path.join(coreMigrationsDir(), '..', 'src/modules/workflow/review-workflow/review-workflow.service.ts'),
+      'utf8',
+    );
+    const prefix = /LIKE '([^%']*)%' THEN 'gate'/.exec(migration)![1]!;
+    expect(gateSource).toContain(`super(\`${prefix} \${reasons.join('; ')`);
   });
 });
