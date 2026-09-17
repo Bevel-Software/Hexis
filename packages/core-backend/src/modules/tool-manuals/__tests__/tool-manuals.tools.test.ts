@@ -50,6 +50,12 @@ const toolManualService = {
     email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
   ),
   listLocalOnly: async () => [],
+  // Alice declared `crm` on her draft; nothing else is pending anywhere.
+  listDeclaredOnlyOnBranch: vi.fn(async (email: string, branch: string) =>
+    email === ALICE.email && branch === 'alice/add-crm'
+      ? [{ name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp' as const }]
+      : [],
+  ),
 } as unknown as IToolManualService;
 
 const accessControl = {
@@ -113,11 +119,11 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-const callSetup = (base: string, bearer: string) =>
+const callSetup = (base: string, bearer: string, body: Record<string, unknown> = {}) =>
   fetch(`${base}/api/agent/tools/list_tool_setup`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   });
 
 describe('list_tool_setup — access controls resolved for the caller', () => {
@@ -152,5 +158,67 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('list_tool_setup — a declaration that lives on a draft says so', () => {
+  it('names the tools declared on the given branch that the default branch does not serve yet', async () => {
+    const base = await start();
+    const res = await callSetup(base, 'bevel_alice', { branch: 'alice/add-crm' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      tools: { slug: string }[];
+      onBranchOnly: { name: string; path: string; branch: string }[];
+      note?: string;
+    };
+    // Resolved for the caller, on the branch they named.
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    // The released catalog is unchanged — the draft's server is not in it...
+    expect(body.tools.map((t) => t.slug)).not.toContain('crm');
+    // ...and the agent is told where it is and what makes it live.
+    expect(body.onBranchOnly).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp', branch: 'alice/add-crm' },
+    ]);
+    expect(body.note).toContain('`alice/add-crm` only');
+    expect(body.note).toContain('open_change_request');
+  });
+
+  it('defaults to the in-app agent’s focused branch when no branch is given', async () => {
+    const base = await start();
+    // The in-process agent's loopback token carries the branch its workspace is on.
+    const agentToken = new InternalTokenService({ secret: 'test-secret' }).mint({
+      userId: ALICE.id,
+      focusedBranch: 'alice/add-crm',
+    });
+    const res = await callSetup(base, agentToken);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { onBranchOnly: { name: string; branch: string }[]; note?: string };
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(body.onBranchOnly).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp', branch: 'alice/add-crm' },
+    ]);
+    expect(body.note).toContain('`alice/add-crm` only');
+  });
+
+  it('prefers an explicit branch over the focused one', async () => {
+    const base = await start();
+    const agentToken = new InternalTokenService({ secret: 'test-secret' }).mint({
+      userId: ALICE.id,
+      focusedBranch: 'alice/other-draft',
+    });
+    const body = (await (await callSetup(base, agentToken, { branch: 'alice/add-crm' })).json()) as {
+      onBranchOnly: { name: string }[];
+    };
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledTimes(1);
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(body.onBranchOnly.map((p) => p.name)).toEqual(['crm']);
+  });
+
+  it('reports nothing pending, and no note, without a branch', async () => {
+    const base = await start();
+    const body = (await (await callSetup(base, 'bevel_alice')).json()) as { onBranchOnly: unknown[]; note?: string };
+    expect(body.onBranchOnly).toEqual([]);
+    expect(body.note).toBeUndefined();
+    expect(toolManualService.listDeclaredOnlyOnBranch).not.toHaveBeenCalled();
   });
 });
