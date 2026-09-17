@@ -86,17 +86,27 @@ function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: 
 export function describeToolFailure(err: unknown): string {
   const data = (err as { response?: { data?: unknown } })?.response?.data;
   if (data && typeof data === 'object') {
-    const { error: inner, ...details } = data as { error?: unknown };
+    let inner: unknown;
+    try {
+      inner = (data as { error?: unknown }).error;
+    } catch {
+      inner = undefined;
+    }
     if (typeof inner === 'string' && inner.length > 0) {
       // A typed refusal (`{ error, kind, … }`) keeps its machine-readable
       // fields: an MCP caller sees only this string, and `kind` is what it
-      // branches on.
-      if (typeof (details as { kind?: unknown }).kind !== 'string') return inner;
+      // branches on. Every read of `data` past `.error` runs under the guard,
+      // so a throwing getter or Proxy cannot escape this catch path; details
+      // that do not serialise (a cycle, a BigInt) degrade via `safeJsonText`
+      // rather than dropping `kind`.
       try {
-        return `${inner} ${JSON.stringify(details)}`;
+        const details: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+        delete details.error;
+        if (typeof (details as { kind?: unknown }).kind === 'string') return `${inner} ${safeJsonText(details)}`;
       } catch {
-        return inner;
+        // fall through to the plain message
       }
+      return inner;
     }
   }
   if (typeof data === 'string' && data.length > 0) return data;

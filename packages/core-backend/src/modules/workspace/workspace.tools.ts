@@ -187,7 +187,7 @@ const BINARY_USE_INSTEAD = ['upload', 'copy_file', 'move_file'] as const;
  */
 function binaryNotWritable(fileKind: FileKind, explanation: string): ToolError {
   return new ToolError(
-    `${explanation} [binary_not_writable: this is a ${fileKind} file; write_file, write_files and edit_file accept text only. ` +
+    `${explanation} [binary_not_writable: this file's kind is ${fileKind}; write_file, write_files and edit_file accept text only. ` +
       'Use upload for new bytes (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app), ' +
       'or copy_file / move_file to place bytes that are already in the workspace.]',
     415,
@@ -672,7 +672,11 @@ export function registerWorkspaceTools(
       if (stat.type !== 'file') return stat;
       // The mode is decided by the same registry the write gates consult, so
       // what stat reports is what write_file will do. Only a reader whose
-      // answer depends on the bytes (the text fallback) costs a read.
+      // answer depends on the bytes (the text fallback) costs a read — one
+      // full read, the same one write_file/edit_file already pay on the same
+      // file. A head-only sniff would be cheaper but wrong: invalid UTF-8 or a
+      // NUL anywhere makes the write gate refuse, so stat must judge the same
+      // bytes or it would report `text` for a file the write then refuses.
       const reader = readers.readerFor(p);
       const bytes = reader.textEditable && reader.editRefusalForExisting ? asBytes(await fs.readFile(p)) : undefined;
       return { ...stat, contentMode: contentModeOf(reader, bytes) };

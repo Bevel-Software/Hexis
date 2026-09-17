@@ -1132,7 +1132,7 @@ describe('office documents and PDFs', () => {
       expect(body.fileKind, label).toBe(fileKind);
       expect(body.useInstead, label).toEqual(['upload', 'copy_file', 'move_file']);
       // The prose names the kind and the alternatives too, for a caller that only sees the message.
-      expect(body.error, label).toContain(`this is a ${fileKind} file`);
+      expect(body.error, label).toContain(`this file's kind is ${fileKind};`);
       expect(body.error, label).toContain('upload');
       expect(body.error, label).toContain('copy_file / move_file');
     };
@@ -1156,6 +1156,11 @@ describe('office documents and PDFs', () => {
 
     it('write_file, write_files and edit_file accept the text file and refuse the other three with binary_not_writable, bytes untouched', async () => {
       const base = await start();
+      // The plain test filesystem has no batch commit; give it one that lands
+      // each write, so the text batch must actually SUCCEED past the gate.
+      (fs as unknown as { writeFiles: (writes: { path: string; content: string }[]) => Promise<void> }).writeFiles = async (writes) => {
+        for (const w of writes) await fs.writeFile(w.path, w.content);
+      };
       const files = await seed();
       for (const f of files) {
         const write = await post(`${base}/api/agent/tools/write_file`, { path: f.path, content: 'plain text' });
@@ -1163,9 +1168,7 @@ describe('office documents and PDFs', () => {
         const edit = await post(`${base}/api/agent/tools/edit_file`, { path: f.path, old_string: 'a', new_string: 'b' });
         if (f.kind === null) {
           expect(write.status, f.path).toBe(200);
-          // The plain test filesystem has no batch commit (`writeFiles`), so the
-          // batch fails past the gate — what matters here is that the gate let it through.
-          expect(batch.status, f.path).not.toBe(415);
+          expect(batch.status, f.path).toBe(200);
           // Content is now 'plain text', so 'a' is found once.
           expect(edit.status, f.path).toBe(200);
           expect((await onDisk(f.path)).toString('utf8')).toBe('plbin text');
