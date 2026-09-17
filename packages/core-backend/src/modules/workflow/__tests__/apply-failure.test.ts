@@ -114,9 +114,11 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
 
   it('a gate refusal answers the clicker AND is persisted for everyone else', async () => {
     h = await routeHarness(async () => {
-      // A domain error, like the gate's own `MergeBlockedError`: its message is
-      // what the route reports (a bare Error would read "Internal server error").
-      throw new WorkflowValidationError('Waiting on approval for Plugins/x/SKILL.md');
+      // The gate's own `MergeBlockedError` shape: a 422 carrying the reasons it
+      // still waits on. Its message is what the route reports.
+      throw new WorkflowDomainError('Merge gate rejected: Waiting on approval for Plugins/x/SKILL.md', 422, {
+        mergeBlockedReasons: ['Waiting on approval for Plugins/x/SKILL.md'],
+      });
     });
     const res = await post(h.baseUrl);
     expect(res.status).toBe(202);
@@ -124,7 +126,7 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
     await vi.waitFor(() => expect(h!.workflow.recordApplyFailure).toHaveBeenCalled());
     expect(h.workflow.recordApplyFailure).toHaveBeenCalledWith(
       7,
-      { reason: expect.stringContaining('Waiting on approval'), conflicts: false, at: expect.any(Date) },
+      { reason: expect.stringContaining('Waiting on approval'), kind: 'gate', at: expect.any(Date) },
       ADMIN,
       1,
     );
@@ -189,13 +191,27 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
     expect(h.workflow.recordApplyFailure).not.toHaveBeenCalled();
   });
 
+  it('any other refusal is persisted as an error, which an approval does not answer', async () => {
+    h = await routeHarness(async () => {
+      throw new WorkflowDomainError('Merge failed: push rejected', 502);
+    });
+    await post(h.baseUrl);
+    await vi.waitFor(() => expect(h!.workflow.recordApplyFailure).toHaveBeenCalled());
+    expect(h.workflow.recordApplyFailure).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ kind: 'error' }),
+      ADMIN,
+      1,
+    );
+  });
+
   it('a conflict is persisted as a conflict', async () => {
     h = await routeHarness(async () => ({ kind: 'conflicts-need-resolution', conflictedPaths: ['a.md'] }));
     await post(h.baseUrl);
     await vi.waitFor(() => expect(h!.workflow.recordApplyFailure).toHaveBeenCalled());
     expect(h.workflow.recordApplyFailure).toHaveBeenCalledWith(
       7,
-      expect.objectContaining({ conflicts: true }),
+      expect.objectContaining({ kind: 'conflicts' }),
       ADMIN,
       1,
     );
@@ -272,11 +288,12 @@ function service(
   db: Database,
   emit: (e: unknown) => void,
   reviewWorkflow: Partial<IReviewWorkflowService> = {},
+  deps: { git?: Partial<GitService>; prs?: Record<string, unknown> } = {},
 ) {
-  const prs = { invalidateDetailCache: vi.fn() };
+  const prs = { invalidateDetailCache: vi.fn(), ...deps.prs };
   const svc = new WorkflowService(
     db,
-    {} as GitService,
+    (deps.git ?? {}) as GitService,
     prs as unknown as PullRequestService,
     reviewWorkflow as IReviewWorkflowService,
     {} as WorkspaceService,
@@ -297,13 +314,17 @@ describe('WorkflowService — the persisted apply refusal', () => {
 
     const recorded = await svc.recordApplyFailure(
       7,
-      { reason: 'push failed: https://x-access-token:ghp_secret123@github.com/acme/kb', conflicts: false },
+      { reason: 'push failed: https://x-access-token:ghp_secret123@github.com/acme/kb', kind: 'error' },
       ADMIN,
       svc.beginApplyAttempt(7),
     );
     expect(recorded).toBe(true);
 
-    expect(sets[0]).toMatchObject({ applyFailureConflicts: false, applyFailedByName: 'Ada Admin' });
+    expect(sets[0]).toMatchObject({
+      applyFailureConflicts: false,
+      applyFailureKind: 'error',
+      applyFailedByName: 'Ada Admin',
+    });
     expect(sets[0]!.applyFailedAt).toBeInstanceOf(Date);
     // Persisted text is redacted like every other stored git error.
     expect(String(sets[0]!.applyFailureReason)).not.toContain('ghp_secret123');
@@ -316,7 +337,7 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const { svc } = service(db, () => {});
     const reason = `Waiting on approval for ${Array.from({ length: 12 }, (_, i) => `Plugins/x/file-${i}.md`).join(', ')}`;
     expect(reason.length).toBeGreaterThan(200);
-    await svc.recordApplyFailure(7, { reason, conflicts: false }, ADMIN, svc.beginApplyAttempt(7));
+    await svc.recordApplyFailure(7, { reason, kind: 'error' }, ADMIN, svc.beginApplyAttempt(7));
     expect(sets[0]!.applyFailureReason).toBe(reason);
   });
 
@@ -326,8 +347,8 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const { svc } = service(db, (e) => emitted.push(e));
     const older = svc.beginApplyAttempt(7);
     const newer = svc.beginApplyAttempt(7);
-    expect(await svc.recordApplyFailure(7, { reason: 'newer', conflicts: false }, ADMIN, newer)).toBe(true);
-    expect(await svc.recordApplyFailure(7, { reason: 'older', conflicts: false }, ADMIN, older)).toBe(false);
+    expect(await svc.recordApplyFailure(7, { reason: 'newer', kind: 'error' }, ADMIN, newer)).toBe(true);
+    expect(await svc.recordApplyFailure(7, { reason: 'older', kind: 'error' }, ADMIN, older)).toBe(false);
     expect(sets.map((v) => v.applyFailureReason)).toEqual(['newer']);
     expect(emitted).toHaveLength(1);
   });
@@ -339,7 +360,7 @@ describe('WorkflowService — the persisted apply refusal', () => {
 
     const ended = svc.beginApplyAttempt(7);
     svc.endApplyAttempt(7, ended);
-    expect(await svc.recordApplyFailure(7, { reason: 'ended', conflicts: false }, ADMIN, ended)).toBe(false);
+    expect(await svc.recordApplyFailure(7, { reason: 'ended', kind: 'error' }, ADMIN, ended)).toBe(false);
 
     // A running attempt, then a newer one that ends first: the older one finds
     // nothing to match and records nothing — even with a third attempt started
@@ -348,13 +369,16 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const newer = svc.beginApplyAttempt(7);
     svc.endApplyAttempt(7, newer);
     const third = svc.beginApplyAttempt(7);
-    expect(await svc.recordApplyFailure(7, { reason: 'older', conflicts: false }, ADMIN, older)).toBe(false);
+    // Never reissued: every token handed out is distinct, including the one
+    // issued after an earlier attempt on the same request ended.
+    expect(new Set([ended, older, newer, third]).size).toBe(4);
+    expect(await svc.recordApplyFailure(7, { reason: 'older', kind: 'error' }, ADMIN, older)).toBe(false);
     svc.endApplyAttempt(7, older);
     expect(sets).toEqual([]);
     expect(emitted).toEqual([]);
 
     // Ending the stale token left the current attempt able to record.
-    expect(await svc.recordApplyFailure(7, { reason: 'third', conflicts: false }, ADMIN, third)).toBe(true);
+    expect(await svc.recordApplyFailure(7, { reason: 'third', kind: 'error' }, ADMIN, third)).toBe(true);
     expect(sets.map((v) => v.applyFailureReason)).toEqual(['third']);
   });
 
@@ -362,7 +386,7 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const { db, wheres } = updateDb();
     const { svc } = service(db, () => {});
     const at = new Date('2026-09-16T10:00:00Z');
-    await svc.recordApplyFailure(7, { reason: 'r', conflicts: false, at }, ADMIN, svc.beginApplyAttempt(7));
+    await svc.recordApplyFailure(7, { reason: 'r', kind: 'error', at }, ADMIN, svc.beginApplyAttempt(7));
     const sql = renderSql(wheres[0]!);
     expect(sql).toContain('"state" = $');
     expect(sql).toMatch(/"apply_failed_at" is null or "change_requests"\."apply_failed_at" < \$\d/);
@@ -374,7 +398,7 @@ describe('WorkflowService — the persisted apply refusal', () => {
     const { svc, prs } = service(db, (e) => emitted.push(e));
     const recorded = await svc.recordApplyFailure(
       7,
-      { reason: 'already merged', conflicts: false },
+      { reason: 'already merged', kind: 'error' },
       ADMIN,
       svc.beginApplyAttempt(7),
     );
@@ -413,7 +437,7 @@ describe('change-request-apply-failed on the bus', () => {
 describe('WorkflowService — a refusal clears when a gate input changes', () => {
   const approveArgs = [7, 'Plugins/x/SKILL.md', ADMIN, [], 'h', 'main', null, 'ws'] as const;
 
-  it('an approval recorded after the refusal clears it and tells every viewer to re-read', async () => {
+  it('an approval recorded after a GATE refusal clears it and tells every viewer to re-read', async () => {
     const { db, sets, wheres } = updateDb();
     const emitted: { kind: string }[] = [];
     const { svc, prs } = service(db, (e) => emitted.push(e as { kind: string }), {
@@ -423,11 +447,62 @@ describe('WorkflowService — a refusal clears when a gate input changes', () =>
     await svc.approveFile(...approveArgs);
 
     expect(sets).toEqual([
-      { applyFailureReason: null, applyFailureConflicts: null, applyFailedAt: null, applyFailedByName: null },
+      {
+        applyFailureReason: null,
+        applyFailureConflicts: null,
+        applyFailedAt: null,
+        applyFailedByName: null,
+        applyFailureKind: null,
+      },
     ]);
-    expect(renderSql(wheres[0]!)).toContain('"apply_failed_at" is not null');
+    const sql = renderSql(wheres[0]!);
+    expect(sql).toContain('"apply_failed_at" is not null');
+    // Only a gate refusal: a conflict or a git error is not answered by an approval.
+    expect(sql).toContain('"apply_failure_kind" in (');
+    expect(new PgDialect().sqlToQuery(wheres[0]!).params).toContain('gate');
     expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
     expect(emitted.map((e) => e.kind)).toEqual(['change-request-apply-failed', 'approval-changed']);
+  });
+
+  it('an approval leaves a conflict or a git error standing: nothing matches, nothing is announced', async () => {
+    // The kind filter matches no row, exactly as the database answers for a
+    // request whose recorded refusal is a conflict or an error.
+    const { db, wheres } = updateDb(0);
+    const emitted: { kind: string }[] = [];
+    const { svc, prs } = service(db, (e) => emitted.push(e as { kind: string }), {
+      approveFile: vi.fn(async () => []),
+    });
+    await svc.approveFile(...approveArgs);
+    const params = new PgDialect().sqlToQuery(wheres[0]!).params;
+    expect(params).not.toContain('conflicts');
+    expect(params).not.toContain('error');
+    expect(emitted.map((e) => e.kind)).toEqual(['approval-changed']);
+    // Only the approval's own invalidation ran, none for a cleared refusal.
+    expect(prs.invalidateDetailCache).toHaveBeenCalledTimes(1);
+  });
+
+  it('a moved source head clears a refusal of ANY kind', async () => {
+    const { db, sets, wheres } = updateDb();
+    const emitted: { kind: string }[] = [];
+    const detail = { state: 'open', branch: 'bo/suggestions', base: 'main' };
+    const { svc } = service(
+      db,
+      (e) => emitted.push(e as { kind: string }),
+      {},
+      {
+        git: {
+          mergeFromOrigin: vi.fn(async () => ({ kind: 'merged', alreadyUpToDate: false })),
+          push: vi.fn(async () => undefined),
+        } as unknown as Partial<GitService>,
+        prs: { getPrDetail: vi.fn(async () => detail) },
+      },
+    );
+
+    await svc.updateFromTarget('bo%2Fsuggestions', ADMIN, 7);
+
+    expect(sets).toHaveLength(1);
+    expect(renderSql(wheres[0]!)).not.toContain('"apply_failure_kind"');
+    expect(emitted.map((e) => e.kind)).toContain('change-request-apply-failed');
   });
 
   it('with no refusal recorded, an approval announces only itself', async () => {

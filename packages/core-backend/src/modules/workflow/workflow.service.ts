@@ -40,6 +40,7 @@ import type {
   Change,
   ChangeInput,
   ChangeRequest,
+  ChangeRequestApplyFailureKind,
   ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestState,
@@ -53,7 +54,7 @@ import type {
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { and, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -1913,9 +1914,9 @@ export class WorkflowService implements IWorkflowService {
       authorIdHash,
       workspaceId,
     );
-    // A recorded approval is a gate input: the refusal that was waiting on it
-    // no longer describes the request.
-    await this.clearApplyFailure(number);
+    // A recorded approval answers a GATE refusal only: the one waiting on it no
+    // longer describes the request, but a conflict or a git error still does.
+    await this.clearApplyFailure(number, ['gate']);
     this.prs.invalidateDetailCache(number);
     this.events?.emit({
       kind: 'approval-changed',
@@ -2559,7 +2560,7 @@ export class WorkflowService implements IWorkflowService {
    */
   async recordApplyFailure(
     number: number,
-    failure: { reason: string; conflicts: boolean; at?: Date },
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
     user: AuthUser,
     attempt: number,
   ): Promise<boolean> {
@@ -2569,7 +2570,8 @@ export class WorkflowService implements IWorkflowService {
       .update(changeRequests)
       .set({
         applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
-        applyFailureConflicts: failure.conflicts,
+        applyFailureConflicts: failure.kind === 'conflicts',
+        applyFailureKind: failure.kind,
         applyFailedAt: at,
         applyFailedByName: user.name,
       })
@@ -2591,14 +2593,22 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
-   * Forget a request's recorded refusal because a gate input changed under it
-   * (an approval was recorded, the source head moved). Otherwise the request
-   * keeps saying "<name> could not apply this: Waiting on approval…" after the
-   * approval arrived, with nothing dating it. Announced on the same event a new
-   * refusal uses — every list and open dialog re-reads the request. Best-effort:
-   * the mutation that triggered it already happened and must not fail on this.
+   * Forget a request's recorded refusal because a change made it obsolete.
+   * Otherwise the request keeps saying "<name> could not apply this: Waiting on
+   * approval…" after the approval arrived, with nothing dating it.
+   *
+   * WHICH refusals a change makes obsolete is `kinds`: an approval answers only
+   * the gate — a conflict or a git error is untouched by it and must keep
+   * saying so — while a moved source head replaces the revision every kind of
+   * refusal described (omit `kinds` to clear any). A row with no recorded kind
+   * is only cleared by the latter. Announced on the same event a new refusal
+   * uses — every list and open dialog re-reads the request. Best-effort: the
+   * mutation that triggered it already happened and must not fail on this.
    */
-  private async clearApplyFailure(number: number): Promise<void> {
+  private async clearApplyFailure(
+    number: number,
+    kinds?: readonly ChangeRequestApplyFailureKind[],
+  ): Promise<void> {
     try {
       const cleared = await this.db
         .update(changeRequests)
@@ -2607,8 +2617,15 @@ export class WorkflowService implements IWorkflowService {
           applyFailureConflicts: null,
           applyFailedAt: null,
           applyFailedByName: null,
+          applyFailureKind: null,
         })
-        .where(and(eq(changeRequests.number, number), isNotNull(changeRequests.applyFailedAt)))
+        .where(
+          and(
+            eq(changeRequests.number, number),
+            isNotNull(changeRequests.applyFailedAt),
+            kinds ? inArray(changeRequests.applyFailureKind, [...kinds]) : undefined,
+          ),
+        )
         .returning({ number: changeRequests.number });
       if (cleared.length === 0) return;
       this.prs.invalidateDetailCache(number);

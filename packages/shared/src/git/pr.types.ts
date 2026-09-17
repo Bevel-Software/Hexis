@@ -60,6 +60,13 @@ export interface PullRequestSummary {
   lastApplyFailure?: ChangeRequestApplyFailure | null;
 }
 
+/**
+ * What refused an apply: the merge gate (approvals it still waits on), git
+ * (conflicts with the target), or anything else (a push, the roles.yaml guard,
+ * an internal error). Decides which later change makes the refusal obsolete.
+ */
+export type ChangeRequestApplyFailureKind = 'gate' | 'conflicts' | 'error';
+
 /** Why the last apply of a change request failed, as persisted on the request. */
 export interface ChangeRequestApplyFailure {
   /** Human-readable reason, credentials already redacted. */

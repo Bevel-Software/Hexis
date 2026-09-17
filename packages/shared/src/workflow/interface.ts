@@ -18,6 +18,7 @@
  */
 
 import type { AuthUser } from '../auth/types.js';
+import type { ChangeRequestApplyFailureKind } from '../git/pr.types.js';
 import type {
   AcquireLockResult,
   Branch,
@@ -534,7 +535,7 @@ export interface IWorkflowService {
    */
   recordApplyFailure(
     number: number,
-    failure: { reason: string; conflicts: boolean; at?: Date },
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
     user: AuthUser,
     attempt: number,
   ): Promise<boolean>;

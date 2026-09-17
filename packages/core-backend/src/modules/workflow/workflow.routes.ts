@@ -26,6 +26,7 @@ import type {
   AuthUser,
   ChangeInput,
   ChangeRequest,
+  ChangeRequestApplyFailureKind,
   IWorkflowService,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -1083,7 +1084,8 @@ export function createWorkflowRoutes(
     // What the clicker's reason is scoped against, once the request is loaded.
     // Unset (a failure before that) means read access is unproven: withheld.
     let readScope: { workspaceId: string; paths: string[] } | null = null;
-    const reportFailure = async (reason: string, conflicts: boolean, persist = true) => {
+    const reportFailure = async (reason: string, kind: ChangeRequestApplyFailureKind, persist = true) => {
+      const conflicts = kind === 'conflicts';
       const at = new Date();
       // The raw reason is persisted below and scoped per viewer on read; the
       // clicker's direct answer must not bypass that scope.
@@ -1099,7 +1101,7 @@ export function createWorkflowRoutes(
       });
       if (!persist) return;
       try {
-        await workflow.recordApplyFailure(num, { reason, conflicts, at }, user, attempt);
+        await workflow.recordApplyFailure(num, { reason, kind, at }, user, attempt);
       } catch (err) {
         // The clicker already has the reason; only the other viewers lose it.
         log.warn(`could not record the failed apply of change request #${num}:`, { err });
@@ -1136,7 +1138,7 @@ export function createWorkflowRoutes(
           { bypass },
         );
         if (outcome.kind === 'conflicts-need-resolution') {
-          await reportFailure('This draft conflicts with the target and needs resolving first.', true);
+          await reportFailure('This draft conflicts with the target and needs resolving first.', 'conflicts');
         }
         // Success path: `workflow.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {
@@ -1145,9 +1147,13 @@ export function createWorkflowRoutes(
         // A refusal of the CALLER (not allowed, nothing to act on) says nothing
         // about the request itself — it goes to the clicker alone.
         const aboutTheCaller = status === 401 || status === 403 || status === 404;
+        // The gate's refusal carries the reasons it still waits on; an approval
+        // can answer it. Anything else (a push, the roles.yaml guard, an internal
+        // error) an approval does not touch.
+        const gateRefusal = Array.isArray(errBody.mergeBlockedReasons);
         await reportFailure(
           typeof errBody.error === 'string' ? errBody.error : 'Merge failed',
-          false,
+          gateRefusal ? 'gate' : 'error',
           !aboutTheCaller,
         );
       } finally {
