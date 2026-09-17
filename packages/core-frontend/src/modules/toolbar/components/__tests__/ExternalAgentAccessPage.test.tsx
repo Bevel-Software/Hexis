@@ -729,16 +729,17 @@ describe('the one-click install link', () => {
 
   /**
    * ChatGPT sits beside Claude, with the honest difference: no prefill
-   * exists, so the button opens the settings pane and the copy under it
+   * exists, so the button opens the settings root and the copy under it
    * names the connector to type. Same gate — an endpoint Anthropic cannot
    * reach is one OpenAI cannot reach.
    */
   it('offers Add to ChatGPT beside it, naming what to call the connector', () => {
     mount(PUBLIC_URL);
     const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
-    // The whole href, not just the origin: the settings-pane anchor is the
-    // only part that makes the link worth clicking.
-    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
+    // The whole href, not just the origin: it opens the settings root, not a
+    // pane anchor — ChatGPT renamed the connectors pane, so no anchor reliably
+    // lands there, and the steps beside the button start from Settings.
+    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('Skills, Tools and Knowledge')).toBeInTheDocument();
