@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within, cleanup } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 /**
@@ -14,10 +15,12 @@ import { MemoryRouter } from 'react-router-dom';
  * shares its primary folder, and a plugin the caller cannot read is offered
  * the locked page's Subscribe instead.
  *
- * The behaviour around the menu — outside click, Escape, focus handback — is
- * `useDismissableMenu`'s and is covered where that is (`PluginsSidebarMenu`);
- * what the keyboard case here proves is the part this menu added, which is
- * that opening it lands focus INSIDE it and the arrows walk the items.
+ * Dismissal — outside click, Escape, the focus handback that comes with it —
+ * is `useDismissableMenu`'s and is covered where that is
+ * (`PluginsSidebarMenu`); what the keyboard cases here prove is the part this
+ * menu added, which is the INSIDE of it: opening lands focus on the first
+ * verb, the arrows walk the items, and the two other ways out that leave the
+ * focused node unmounted — Tab, and picking a verb — hand focus back too.
  */
 
 const svc = vi.hoisted(() => ({ requestPluginAccess: vi.fn() }));
@@ -155,6 +158,13 @@ describe('a skill card', () => {
 
     fireEvent.contextMenu(screen.getByRole('group', { name: 'rfi' }), { clientX: 120, clientY: 240 });
     expect(items()).toEqual(['Open', 'Share']);
+    // AT THE POINTER, which is the half of this that a menu opening at the
+    // trigger — or at the origin — would still pass without. The panel is
+    // placed by the fixed wrapper around it; nothing is measurable in this
+    // DOM, so the pointer is where it stays.
+    const panel = screen.getByRole('menu').parentElement as HTMLElement;
+    expect(panel.style.left).toBe('120px');
+    expect(panel.style.top).toBe('240px');
   });
 
   it('still opens the skill when the card body is clicked', () => {
@@ -180,7 +190,7 @@ describe('a skill card', () => {
    * The keyboard path the ticket names: the "…" is a tab stop after the card,
    * Enter opens, the arrows move, Escape closes and hands focus back.
    */
-  it('is driveable from the keyboard alone', () => {
+  it('is driveable from the keyboard alone', async () => {
     const onShare = vi.fn();
     card({ onShare });
     const dots = trigger('rfi');
@@ -192,7 +202,9 @@ describe('a skill card', () => {
     expect(frame.children[1]).toBe(dots);
 
     dots.focus();
-    fireEvent.click(dots);
+    // ENTER, not a synthesised click: the tab stop has to be operable by the
+    // key the ticket names, and a click would pass even if it were not.
+    await userEvent.keyboard('{Enter}');
     // Focus enters the menu with it, on the first verb.
     expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open' }));
 
@@ -206,6 +218,27 @@ describe('a skill card', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     expect(document.activeElement).toBe(dots);
     expect(onShare).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Every other way OUT of the menu, which all end with the focused node
+   * unmounted: Tab (the menu closes and carries on) and picking a verb whose
+   * action opens nothing that takes focus for itself. Focus left on a removed
+   * node restarts the next Tab at the top of the document.
+   */
+  it('hands focus back to the "…" when the menu is tabbed out of, or picked from', () => {
+    card({ onShare: vi.fn() });
+    const dots = trigger('rfi');
+
+    fireEvent.click(dots);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Tab' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(dots);
+
+    fireEvent.click(dots);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(dots);
   });
 });
 
@@ -253,9 +286,15 @@ describe('a plugin row', () => {
     expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument();
   });
 
-  it('gives a readable plugin no menu when the page cannot address folders yet', () => {
+  it('gives a readable plugin no menu when there is no folder to point Share at', () => {
+    // Two ways to have none: the PAGE cannot address folders yet (no `onShare`
+    // — its KB directory has not resolved), and the PLUGIN has no folder the
+    // index named. Either way Share would open on a path we do not mean.
     rows([entry({})]);
+    expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument();
 
+    cleanup();
+    rows([entry({ summary: summary({ folders: [] }) })], vi.fn());
     expect(screen.queryByRole('button', { name: /^Actions for/ })).not.toBeInTheDocument();
   });
 });

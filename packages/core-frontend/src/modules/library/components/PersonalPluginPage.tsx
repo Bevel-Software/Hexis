@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { isUngrouped } from '../utils/status';
 import { useNavigate } from 'react-router-dom';
 import { useLibrary, type LibraryItem } from '../state/library-data';
@@ -51,11 +52,12 @@ export function PersonalPluginPage() {
   /** The card being removed, while its confirm dialog is up. */
   const [removing, setRemoving] = useState<LibraryItem | null>(null);
   /**
-   * Which skill's folder the access dialog is open on, below the KB directory
-   * — set only by a card's Share, since the page itself has no folder. The
-   * plugin page keeps the same single-string state for the same dialog.
+   * Which folder the access dialog is open on — set only by a card's Share,
+   * since the page itself has no folder to share. Held as the dialog's own
+   * entry, exactly as the gallery and the skill page hold it, so retargeting
+   * at an ancestor is the setter itself.
    */
-  const [manageFolder, setManageFolder] = useState<string | null>(null);
+  const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
 
   const name = personalPluginName();
   const items = useMemo(() => data.items.filter(isUngrouped), [data.items]);
@@ -105,7 +107,16 @@ export function PersonalPluginPage() {
         toolItems={toolItems}
         onOpen={openItem}
         // The skill's own folder, not the space's — see the page's docstring.
-        onShare={kbDirName ? (item) => setManageFolder(item.path) : undefined}
+        onShare={
+          kbDirName
+            ? (item) =>
+                setManageTarget({
+                  name: item.path.split('/').pop() ?? item.path,
+                  relativePath: `${kbDirName}/${item.path}`,
+                  type: 'directory',
+                })
+            : undefined
+        }
         // Your own space: everything here is yours to remove — the backend's
         // per-path gate agrees, since your personal folder names you as owner.
         onRemove={setRemoving}
@@ -134,18 +145,26 @@ export function PersonalPluginPage() {
       )}
 
       {/* The same dialog the plugin page opens, on a skill's folder instead of
-          a plugin's. `kbDirName` gates it because the resolver addresses files
-          repo-relative and the dialog strips that prefix. */}
-      {manageFolder && kbDirName && (
+          a plugin's. `kbDirName` gates the OPENER because the resolver
+          addresses files repo-relative and the dialog strips that prefix. */}
+      {manageTarget && (
         <ManageAccessDialog
-          key={manageFolder}
-          entry={{
-            name: manageFolder.split('/').pop() ?? manageFolder,
-            relativePath: `${kbDirName}/${manageFolder}`,
-            type: 'directory',
-          }}
+          // Keyed on the path, so retargeting at an ancestor remounts it
+          // against that folder — the gallery's arrangement exactly.
+          key={manageTarget.relativePath}
+          // The Library speaks the DEFAULT branch: these cards list what is on
+          // it, so the rules they share are edited where they were read,
+          // whatever branch the ambient workspace happens to be on. Same choice
+          // the skill page's Share and the gallery's make.
+          workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+          entry={manageTarget}
+          // A personal skill's grant is usually its own, but one inherited from
+          // a folder above it is managed where it lives — the skill page's
+          // `Manage <Folder> →`, which a card's Share must offer too or the
+          // inherited grant is read-only here and editable there.
+          onManageAncestor={setManageTarget}
           onClose={() => {
-            setManageFolder(null);
+            setManageTarget(null);
             // A grant can change who sees the skill — and whether it is still
             // in no plugin at all — so the catalog is re-read.
             data.reload();

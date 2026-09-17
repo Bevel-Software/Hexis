@@ -57,12 +57,37 @@ vi.mock('../services/plugins.api', () => ({
 vi.mock('../../access/components/ManageAccessDialog', () => ({
   ManageAccessDialog: ({
     entry,
+    workspaceId,
+    onManageAncestor,
     onClose,
   }: {
     entry: { relativePath: string; type: string };
+    workspaceId?: string;
+    onManageAncestor?(entry: { name: string; relativePath: string; type: string }): void;
     onClose(): void;
   }) => (
-    <div role="dialog" aria-label={`Manage access ${entry.type} ${entry.relativePath}`}>
+    // The branch and the ancestor walk are the page's to hand over, so the
+    // stub surfaces both: which branch the rules are read and written on, and
+    // whether an inherited grant can be managed where it actually lives.
+    <div
+      role="dialog"
+      aria-label={`Manage access ${entry.type} ${entry.relativePath}`}
+      data-workspace={workspaceId}
+    >
+      {onManageAncestor && (
+        <button
+          type="button"
+          onClick={() =>
+            onManageAncestor({
+              name: 'GTM',
+              relativePath: 'knowledge-base/Plugins/GTM',
+              type: 'directory',
+            })
+          }
+        >
+          Manage GTM →
+        </button>
+      )}
       <button type="button" onClick={onClose}>
         Close access
       </button>
@@ -166,11 +191,18 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname + location.search}</div>;
 }
 
-function renderPlugin(name: string, children?: ReactNode, admin: AdminContextValue = nonAdmin) {
+function renderPlugin(
+  name: string,
+  children?: ReactNode,
+  admin: AdminContextValue = nonAdmin,
+  // The branch the app happens to have OPEN. It is the default one in every
+  // case but the access test, which is about the page not following it.
+  ambient: WorkspaceContextValue = workspace,
+) {
   return render(
     <MemoryRouter initialEntries={[`/skills-and-tools/plugins/${encodeURIComponent(name)}`]}>
       <AdminContext.Provider value={admin}>
-        <WorkspaceContext.Provider value={workspace}>
+        <WorkspaceContext.Provider value={ambient}>
           <LibraryToastProvider>
             <LibraryProvider>
               {withAuth(
@@ -656,6 +688,46 @@ describe('PluginPage', () => {
         name: 'Manage access directory knowledge-base/Plugins/GTM/outreach',
       }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * A skill in a plugin usually has NO rules of its own — it reads the ones the
+   * plugin folder above it sets. The skill page answers that with the dialog's
+   * `Manage <Folder> →`, and a card's Share is the same Share: without the
+   * walk, the grant it lands on is read-only here and editable one click away,
+   * which is the same dialog disagreeing with itself.
+   */
+  it("a card's Share can walk up to the folder the skill inherits from", async () => {
+    renderPlugin('GTM');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for outreach' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage GTM →' }));
+
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Plugins/GTM',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The Library lists the DEFAULT branch, so the rules it shares are edited
+   * where it read them. The ambient workspace here is a different branch on
+   * purpose: without the page pinning it, a grant would be spliced into an
+   * `access.md` on whatever branch happened to be open — a rule nobody merges,
+   * which looks like it worked.
+   */
+  it("edits access on the branch the catalog was read from, not the one that's open", async () => {
+    renderPlugin('GTM', undefined, nonAdmin, {
+      ...workspace,
+      workspaceId: 'a-change-request-branch',
+    } as WorkspaceContextValue);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.getAttribute('data-workspace')).toBe(encodeURIComponent(DEFAULT_BRANCH));
+    expect(dialog.getAttribute('data-workspace')).not.toBe('a-change-request-branch');
   });
 
   /**

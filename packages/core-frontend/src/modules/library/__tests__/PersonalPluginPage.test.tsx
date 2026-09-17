@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   WorkspaceContext,
   type WorkspaceContextValue,
@@ -34,8 +35,38 @@ vi.mock('../../access/api', async (importOriginal) => ({
 // The dialog fetches on mount; stubbed at the component so this stays on the
 // page's judgement — WHICH directory it opens on — as `PluginPage.test` does.
 vi.mock('../../access/components/ManageAccessDialog', () => ({
-  ManageAccessDialog: ({ entry }: { entry: { relativePath: string; type: string } }) => (
-    <div role="dialog" aria-label={`Manage access ${entry.type} ${entry.relativePath}`} />
+  ManageAccessDialog: ({
+    entry,
+    workspaceId,
+    onManageAncestor,
+  }: {
+    entry: { relativePath: string; type: string };
+    workspaceId?: string;
+    onManageAncestor?(entry: { name: string; relativePath: string; type: string }): void;
+  }) => (
+    // Which branch the rules are read and written on, and whether a grant the
+    // skill inherits can be managed where it lives, are both the page's to
+    // hand over — so the stub surfaces both.
+    <div
+      role="dialog"
+      aria-label={`Manage access ${entry.type} ${entry.relativePath}`}
+      data-workspace={workspaceId}
+    >
+      {onManageAncestor && (
+        <button
+          type="button"
+          onClick={() =>
+            onManageAncestor({
+              name: 'personal-juan',
+              relativePath: 'knowledge-base/Plugins/personal-juan',
+              type: 'directory',
+            })
+          }
+        >
+          Manage personal-juan →
+        </button>
+      )}
+    </div>
   ),
 }));
 
@@ -89,11 +120,13 @@ const CATALOG: LibraryData = {
   reload: vi.fn(),
 } as unknown as LibraryData;
 
-function renderPage() {
+/** `ambient` is the branch the app happens to have OPEN — the default one
+ * everywhere but the access test, which is about the page not following it. */
+function renderPage(ambient: WorkspaceContextValue = workspace) {
   render(
     <MemoryRouter initialEntries={['/skills-and-tools/yours']}>
       <AdminContext.Provider value={admin}>
-        <WorkspaceContext.Provider value={workspace}>
+        <WorkspaceContext.Provider value={ambient}>
           <LibraryToastProvider>
             <LibraryProvider>
               <PersonalPluginPage />
@@ -128,6 +161,32 @@ describe('your own space', () => {
     expect(
       await screen.findByRole('dialog', {
         name: 'Manage access directory knowledge-base/Plugins/personal-juan/rfi',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * Two things the skill page's Share does that a card's has to do as well, or
+   * the same dialog behaves differently depending on where it was opened from:
+   * it edits the DEFAULT branch (the one the catalog was read from — a grant
+   * spliced into an open change-request branch is a rule nobody merges), and
+   * it offers the walk up to a folder above the skill, without which an
+   * inherited grant is read-only here and editable on the skill's own page.
+   */
+  it("edits the default branch's rules, and can walk up to the folder above the skill", async () => {
+    renderPage({ ...workspace, workspaceId: 'a-change-request-branch' } as WorkspaceContextValue);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for rfi' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.getAttribute('data-workspace')).toBe(encodeURIComponent(DEFAULT_BRANCH));
+    expect(dialog.getAttribute('data-workspace')).not.toBe('a-change-request-branch');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manage personal-juan →' }));
+    expect(
+      await screen.findByRole('dialog', {
+        name: 'Manage access directory knowledge-base/Plugins/personal-juan',
       }),
     ).toBeInTheDocument();
   });

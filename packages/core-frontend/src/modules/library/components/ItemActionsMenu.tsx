@@ -176,6 +176,14 @@ export function ItemMenuFrame({
  * INSIDE of the menu, which no menu in the app owned yet: opening moves focus
  * to the first verb, and the arrows (plus Home/End) walk the list, so the menu
  * can be driven without a pointer at all.
+ *
+ * Every other way out of the menu hands focus back the same way Escape does,
+ * because all three end with the focused node gone: PICKING a verb (the menu
+ * unmounts under the finger — an action that opens a dialog mounts it after
+ * this and takes focus from there, which is what should happen), and TAB,
+ * which the menu pattern treats as "close and carry on" — focus goes to the
+ * "…" first so the browser's own Tab continues one step past it rather than
+ * from the top of the document, where a removed node strands it.
  */
 function ItemActionsMenu({
   x,
@@ -203,7 +211,21 @@ function ItemActionsMenu({
     menuItemsOf(ref.current)[0]?.focus();
   }, [ref]);
 
+  /** Close, and put focus back where the menu came from. See the docstring. */
+  function closeAndReturn() {
+    onClose();
+    returnFocusTo.current?.focus();
+  }
+
   function onKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // Tab leaves the menu, so the menu goes — and deliberately WITHOUT
+    // `preventDefault`: the browser reads the focused element after this
+    // handler, so moving focus to the trigger here makes its own Tab land on
+    // whatever follows the trigger, which is the next thing in the page.
+    if (e.key === 'Tab') {
+      closeAndReturn();
+      return;
+    }
     const items = menuItemsOf(ref.current);
     if (items.length === 0) return;
     const at = items.indexOf(document.activeElement as HTMLButtonElement);
@@ -236,7 +258,7 @@ function ItemActionsMenu({
               disabled={action.disabled}
               onClick={() => {
                 action.onSelect?.();
-                onClose();
+                closeAndReturn();
               }}
             >
               <span className="flex items-center gap-2">
