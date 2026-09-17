@@ -183,6 +183,37 @@ describe('list_tool_setup — a declaration that lives on a draft says so', () =
     expect(body.note).toContain('open_change_request');
   });
 
+  it('defaults to the in-app agent’s focused branch when no branch is given', async () => {
+    const base = await start();
+    // The in-process agent's loopback token carries the branch its workspace is on.
+    const agentToken = new InternalTokenService({ secret: 'test-secret' }).mint({
+      userId: ALICE.id,
+      focusedBranch: 'alice/add-crm',
+    });
+    const res = await callSetup(base, agentToken);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { onBranchOnly: { name: string; branch: string }[]; note?: string };
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(body.onBranchOnly).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp', branch: 'alice/add-crm' },
+    ]);
+    expect(body.note).toContain('`alice/add-crm` only');
+  });
+
+  it('prefers an explicit branch over the focused one', async () => {
+    const base = await start();
+    const agentToken = new InternalTokenService({ secret: 'test-secret' }).mint({
+      userId: ALICE.id,
+      focusedBranch: 'alice/other-draft',
+    });
+    const body = (await (await callSetup(base, agentToken, { branch: 'alice/add-crm' })).json()) as {
+      onBranchOnly: { name: string }[];
+    };
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledTimes(1);
+    expect(toolManualService.listDeclaredOnlyOnBranch).toHaveBeenCalledWith(ALICE.email, 'alice/add-crm');
+    expect(body.onBranchOnly.map((p) => p.name)).toEqual(['crm']);
+  });
+
   it('reports nothing pending, and no note, without a branch', async () => {
     const base = await start();
     const body = (await (await callSetup(base, 'bevel_alice')).json()) as { onBranchOnly: unknown[]; note?: string };
