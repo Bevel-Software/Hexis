@@ -142,10 +142,13 @@ describe('registerWorkflowTools', () => {
     const base = await start();
     const comment = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi' });
     expect(comment.status).toBe(200);
-    expect(await comment.json()).toMatchObject({
+    const commentBody = await comment.json();
+    expect(commentBody).toMatchObject({
       comment: { id: 'c-1' },
       changeRequest: { number: 3, url: 'https://bevel.example.com/change-requests/3' },
     });
+    // A configured address yields an absolute link, so no note rides along.
+    expect(commentBody.changeRequest).not.toHaveProperty('urlNote');
     const merge = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
     expect(merge.status).toBe(200);
     expect(await merge.json()).toEqual({
