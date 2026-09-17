@@ -29,7 +29,7 @@ import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
 import { displayPath, type FileKind, type FileReaderRegistry } from './file-readers/file-reader.js';
-import { contentModeOf } from './file-readers/content-mode.js';
+import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
@@ -635,7 +635,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'file_stat',
     description:
-      'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload).' +
+      'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -659,6 +659,19 @@ export function registerWorkspaceTools(
           enum: ['text', 'document', 'binary'],
           description: 'Files only: what the file tools can do with the content — `text` (read/write/edit as text), `document` (read extracts; replace by upload), `binary` (bytes: copy/move/delete; replace by upload).',
         },
+        kind: {
+          type: 'string',
+          enum: ['text', 'document', 'image', 'binary'],
+          description: 'Files only: what the file is, as read_file treats it (archives are `binary`; `mime` names them).',
+        },
+        mime: str('Files only: the MIME type — named by the extension, `text/plain` for text content, else `application/octet-stream`.'),
+        mimeSource: {
+          type: 'string',
+          enum: ['extension', 'sniff', 'fallback'],
+          description: 'Files only: where `mime` came from. `fallback` means no type was detected.',
+        },
+        textEditable: { type: 'boolean', description: 'Files only: whether write_file/write_files/edit_file accept this file as it is now.' },
+        mimeNote: str('Present when `mimeSource` is `fallback`: says the MIME type is a fallback, not a detected type.'),
       },
       additionalProperties: true,
     },
@@ -668,7 +681,11 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
+      // The filesystem's own `mimeType` comes from a second extension table
+      // (octet-stream for an extensionless text file) and would contradict
+      // `mime` below, so it is never passed through.
       const stat = await fs.stat(p);
+      delete stat.mimeType;
       if (stat.type !== 'file') return stat;
       // The mode is decided by the same registry the write gates consult, so
       // what stat reports is what write_file will do. Only a reader whose
@@ -677,9 +694,11 @@ export function registerWorkspaceTools(
       // file. A head-only sniff would be cheaper but wrong: invalid UTF-8 or a
       // NUL anywhere makes the write gate refuse, so stat must judge the same
       // bytes or it would report `text` for a file the write then refuses.
+      // `kind` and `mime` come from that same reader too, so stat never calls
+      // a file binary that read_file returns as text.
       const reader = readers.readerFor(p);
-      const bytes = reader.textEditable && reader.editRefusalForExisting ? asBytes(await fs.readFile(p)) : undefined;
-      return { ...stat, contentMode: contentModeOf(reader, bytes) };
+      const bytes = needsContent(reader) ? asBytes(await fs.readFile(p)) : undefined;
+      return { ...stat, ...fileTypeOf(reader, p, bytes) };
     },
   });
 
