@@ -419,6 +419,19 @@ describe('workspace routes refuse the git folder', () => {
     expect(JSON.stringify(await res.json())).not.toMatch(/"\.git"|gitlink|cfglink|chained/);
   });
 
+  it('a folder delete leaves a git folder in any spelling alone, and deletes the rest', async () => {
+    const upper = join(workspaceDir, KB, 'Notes', '.GIT');
+    await mkdir(upper, { recursive: true });
+    await writeFile(join(upper, 'config'), '[credential]\n');
+
+    const res = await fetch(`${baseUrl}/api/workspace/${WS}/file?path=${q(`${KB}/Notes`)}`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'deleted', count: 1 });
+    await expect(readFile(join(workspaceDir, KB, 'Notes', 'a.md'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(join(upper, 'config'), 'utf8')).toBe('[credential]\n');
+    workflow.acquireLock.mockClear();
+  });
+
   it('an ordinary read and a .github path still work', async () => {
     const read = await fetch(`${baseUrl}/api/workspace/${WS}/file?path=${q(`${KB}/Notes/a.md`)}`);
     expect(read.status).toBe(200);

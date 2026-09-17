@@ -1238,8 +1238,8 @@ export function createWorkspaceRoutes(
  * a recursive directory delete into per-file lock+release cycles so each
  * deletion lands as its own one-file change.
  *
- * Skips `.git` to avoid trying to commit the internal git index when a
- * caller targets it accidentally. Returns paths in the walk's order — stable
+ * Skips the git folder, in any spelling (`hasGitInternalsSegment`), so a
+ * folder delete never enumerates — or deletes — the repository's git data. Returns paths in the walk's order — stable
  * and lexical — for predictable commit sequencing. A link counts as a file:
  * it is deleted as one, never followed. A folder that cannot be listed is
  * the delete's error: an enumeration with a hole in it would delete what it
@@ -1250,7 +1250,7 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
   const relOf = (dir: string, name: string) =>
     path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
   try {
-    await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory(), unreadable: 'throw' }, [
+    await disk.walk(absoluteDir, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
       {
         onFile: (dir, name) => void out.push(relOf(dir, name)),
         onOther: (dir, e) => void out.push(relOf(dir, e.name)),
@@ -1278,7 +1278,7 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
  * remove `absoluteDir` itself if it ends up empty. A directory is removed only
  * if it contains nothing at the moment it's visited, so any file a concurrent
  * writer dropped in mid-delete — and every parent directory on its path —
- * survives. `.git` is left alone. Used after a recursive folder delete to
+ * survives. The git folder, in any spelling, is left alone. Used after a recursive folder delete to
  * sweep the leftover empty-folder shells off disk so the file tree (which
  * lists on-disk directories, not just tracked files) stops showing the
  * deleted container.
@@ -1292,7 +1292,7 @@ async function removeEmptyDirs(absoluteDir: string): Promise<void> {
     return;
   }
   for (const entry of entries) {
-    if (entry.name === '.git' && entry.isDirectory()) continue;
+    if (hasGitInternalsSegment(entry.name)) continue;
     if (entry.isDirectory()) {
       await removeEmptyDirs(path.join(absoluteDir, entry.name));
     }

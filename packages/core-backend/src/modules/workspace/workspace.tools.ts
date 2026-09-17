@@ -22,7 +22,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
-import { assertNoGitInternalsSegment } from '../../shared/git-internals.js';
+import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -381,7 +381,7 @@ async function grepWalk(
   entries = await filterReadableEntries(gate, dir, entries);
   for (const e of entries) {
     if (out.length >= max) return;
-    if (e.name === '.git' || e.name === 'node_modules') continue;
+    if (hasGitInternalsSegment(e.name) || e.name === 'node_modules') continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
       await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
