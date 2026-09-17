@@ -1428,8 +1428,11 @@ export function FileViewer() {
                     // Only when those grants were actually loaded: a draft, a
                     // non-KB path or a failed lookup default-allows with an
                     // EMPTY list, which would claim the viewer is the only one.
+                    // Nor mid-lookup: the hook keeps the PREVIOUS file's grants
+                    // while the next file's lookup is in flight.
                     othersPending={
                       !access.error &&
+                      !access.loading &&
                       (access.eligible.roles.length > 0 || access.eligible.users.length > 0)
                         ? othersPendingBesides(access.eligible, auth.user?.email)
                         : undefined
