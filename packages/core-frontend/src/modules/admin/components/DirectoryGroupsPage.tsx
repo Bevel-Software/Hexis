@@ -203,7 +203,11 @@ export function DirectoryGroupsPage() {
           )}
 
           {roster !== null &&
-            !directoryConnected &&
+            // Not while connected-but-unsynced (no roster to search yet), nor
+            // while the groups file is broken (its roster is empty by design —
+            // the banner above already says why).
+            (idpMode || !directoryConnected) &&
+            !broken &&
             targetGroup &&
             !roster.groups.some((g) => isNamedGroup(g, targetGroup)) && (
               // A shared link can outlive its group — say so rather than open

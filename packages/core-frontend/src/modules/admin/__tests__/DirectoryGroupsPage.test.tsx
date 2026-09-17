@@ -495,9 +495,19 @@ describe('DirectoryGroupsPage: opened on a named group', () => {
     expect(product.closest('[data-group]')).not.toHaveAttribute('aria-current');
   });
 
-  it('matches the name without regard to case, and by canonical name too', async () => {
+  it('matches the display name without regard to case', async () => {
     renderPage({ path: '/directory-groups?group=PRODUCT' });
     const input = await screen.findByRole('combobox', { name: 'Add member to Product' });
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it('matches by canonical name when it differs from the display name', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      ...MANUAL_ROSTER,
+      groups: [{ ...MANUAL_ROSTER.groups[0]!, canonical: 'gtm-team', displayName: 'GTM Team' }],
+    });
+    renderPage({ path: '/directory-groups?group=GTM-TEAM' });
+    const input = await screen.findByRole('combobox', { name: 'Add member to GTM Team' });
     await waitFor(() => expect(input).toHaveFocus());
   });
 
@@ -530,6 +540,41 @@ describe('DirectoryGroupsPage: opened on a named group', () => {
     renderPage({ path: '/directory-groups?group=Ghosts' });
     expect(await screen.findByText('No group named “Ghosts”.')).toBeInTheDocument();
     expect(scrolled).toEqual([]);
+  });
+
+  it('idp mode: says so when the named group is not synced, even with a directory connected', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue(IDP_ROSTER);
+    renderPage({
+      path: '/directory-groups?group=Ghosts',
+      directoryPanel: ({ onConnectedChange }) => (
+        <button onClick={() => onConnectedChange(true)}>simulate-connect</button>
+      ),
+    });
+    await userEvent.click(await screen.findByRole('button', { name: 'simulate-connect' }));
+    expect(screen.getByText('No group named “Ghosts”.')).toBeInTheDocument();
+  });
+
+  it('connected but not yet synced: no missing-group notice', async () => {
+    renderPage({
+      path: '/directory-groups?group=Ghosts',
+      directoryPanel: ({ onConnectedChange }) => (
+        <button onClick={() => onConnectedChange(true)}>simulate-connect</button>
+      ),
+    });
+    await userEvent.click(await screen.findByRole('button', { name: 'simulate-connect' }));
+    expect(screen.getByText(/An identity provider is connected/)).toBeInTheDocument();
+    expect(screen.queryByText(/No group named/)).not.toBeInTheDocument();
+  });
+
+  it('a broken synced groups file: the banner explains, no missing-group notice', async () => {
+    vi.mocked(getGroupsRoster).mockResolvedValue({
+      mode: 'idp',
+      groups: [],
+      groupsHealth: { ok: false, file: 'synced-groups.yaml', reason: 'bad indentation on line 3' },
+    });
+    renderPage({ path: '/directory-groups?group=Sales' });
+    expect(await screen.findByRole('alert')).toHaveTextContent('synced-groups.yaml');
+    expect(screen.queryByText(/No group named/)).not.toBeInTheDocument();
   });
 
   it('without a group, nothing is focused or scrolled', async () => {
