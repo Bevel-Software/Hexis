@@ -51,10 +51,13 @@ export function formatWhen(iso: string): string {
  * "N" in "Waiting on you and N others".
  *
  * Called only for a viewer who can decide, so the viewer is always one of the
- * pending approvers. Every other named grant counts: a direct user grant for
- * someone else, and every role, since a role names a group whose other members
- * could approve just as well. The viewer's own user grant (matched by email,
- * case-insensitively) is the one entry that is not "someone else".
+ * pending approvers. The count is over GRANTS — the frontend never learns how
+ * many people a role holds — so a role counts once. The viewer's own user
+ * grant (matched by email, case-insensitively) is not "someone else". A viewer
+ * with no user grant of their own decides through a role, so one role grant is
+ * theirs: a file written only by `Admin` reads "Waiting on you" for an Admin,
+ * not "Waiting on you and 1 other". The viewer's roles are not known here, so
+ * one role is credited to them whichever it is.
  */
 export function othersPendingBesides(
   approvers: { roles: string[]; users: { email: string }[] },
@@ -62,7 +65,11 @@ export function othersPendingBesides(
 ): number {
   const me = viewerEmail?.trim().toLowerCase();
   const otherUsers = approvers.users.filter((u) => !me || u.email.trim().toLowerCase() !== me);
-  return approvers.roles.length + otherUsers.length;
+  const viewerHasUserGrant = otherUsers.length < approvers.users.length;
+  const otherRoles = viewerHasUserGrant
+    ? approvers.roles.length
+    : Math.max(0, approvers.roles.length - 1);
+  return otherRoles + otherUsers.length;
 }
 
 /** "Waiting on you", or "Waiting on you and 2 others" when more are pending. */

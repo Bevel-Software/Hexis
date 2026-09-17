@@ -183,6 +183,18 @@ describe('waiting-label helpers', () => {
     };
     expect(othersPendingBesides(approvers, 'me@example.com')).toBe(2);
     expect(othersPendingBesides({ roles: [], users: [approvers.users[0]] }, 'me@example.com')).toBe(0);
-    expect(othersPendingBesides(approvers, null)).toBe(3);
+    // No user grant of the viewer's own: they decide through the role.
+    expect(othersPendingBesides(approvers, null)).toBe(2);
+  });
+
+  it('credits one role to a viewer who decides through a role', () => {
+    // The Admin-only file: an Admin viewer is the sole pending grant.
+    expect(othersPendingBesides({ roles: ['Admin'], users: [] }, 'admin@example.com')).toBe(0);
+    expect(
+      othersPendingBesides(
+        { roles: ['Admin', 'Docs'], users: [{ email: 'ali@example.com' }] },
+        'admin@example.com',
+      ),
+    ).toBe(2);
   });
 });

@@ -1425,7 +1425,15 @@ export function FileViewer() {
                     // Counted over `eligible` (the write: grants, which are what
                     // approval rights and the merge gate resolve against), NOT
                     // `owners` — a file can have writers and no owner: at all.
-                    othersPending={othersPendingBesides(access.eligible, auth.user?.email)}
+                    // Only when those grants were actually loaded: a draft, a
+                    // non-KB path or a failed lookup default-allows with an
+                    // EMPTY list, which would claim the viewer is the only one.
+                    othersPending={
+                      !access.error &&
+                      (access.eligible.roles.length > 0 || access.eligible.users.length > 0)
+                        ? othersPendingBesides(access.eligible, auth.user?.email)
+                        : undefined
+                    }
                     onApplied={() => {
                       reloadTabFromDisk(openFilePath).catch(() => {});
                     }}

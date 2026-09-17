@@ -926,6 +926,27 @@ describe('FileViewer', () => {
     expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
   });
 
+  /**
+   * A failed access lookup default-allows with an EMPTY grant list. That list
+   * is not the approver set, so the box must not claim "Waiting on you".
+   */
+  it('makes no waiting-on claim when the approver grants never loaded', async () => {
+    accessMock.fetchFileAccess.mockRejectedValueOnce(new Error('network down'));
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('You can decide this.')).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting on you/)).not.toBeInTheDocument();
+  });
+
   it('says nothing on a file nobody has proposed a change to', () => {
     render(<ViewerHarness initialContent="quiet" />);
     expect(screen.queryByText(/proposed a change/)).not.toBeInTheDocument();
