@@ -173,10 +173,9 @@ export function useApplyChangeRequest(opts: {
 
           for (const a of detail.approvals) {
             if (a.isApproved) continue;
-            // No eligible approvers means the gate ignores the file entirely.
-            const gateCares =
-              a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
-            if (!gateCares) continue;
+            // The server's verdict on whether the gate binds the file at all —
+            // a file it ignores gets no recorded approval.
+            if (!a.inMergeGate) continue;
             // A refusal here is "not your file", which is normal on a change
             // request spanning several owners — let the gate below decide
             // whether what did get approved is enough.

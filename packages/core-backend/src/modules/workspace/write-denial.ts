@@ -26,7 +26,13 @@ export interface ProposalStep {
  * caller's own and may hold anything, so they are never echoed back.
  */
 export interface WriteDeniedDetails {
-  code: 'write-denied';
+  /**
+   * The discriminator every typed tool refusal carries (`binary_not_writable`
+   * and the rest), which is also what `describeToolFailure` passes an MCP
+   * caller the details on. One name for one job — this answer is not special
+   * enough to introduce a second.
+   */
+  kind: 'write-denied';
   path: string;
   reason: string;
   canPropose: boolean;
@@ -97,7 +103,7 @@ export async function writeDenial(
   kbDirName: string,
 ): Promise<ToolError> {
   const path = err.access.path;
-  const base = { code: 'write-denied' as const, path, reason: reasonOf(err) };
+  const base = { kind: 'write-denied' as const, path, reason: reasonOf(err) };
   const refuse = (cannotProposeReason: string): ToolError => {
     const details: WriteDeniedDetails = { ...base, canPropose: false, cannotProposeReason };
     return new ToolError(`${err.message} ${cannotProposeReason}`, 403, { ...details });

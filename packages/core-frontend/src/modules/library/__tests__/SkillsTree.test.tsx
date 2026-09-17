@@ -328,3 +328,29 @@ describe('SkillsTree: menu', () => {
     expect(within(screen.getByRole('menu', { name: 'Actions for Engineering' })).queryByRole('menuitem', { name: 'New plugin' })).toBeNull();
   });
 });
+
+/** The Skills tree reads the same filtered listing as Knowledge's explorer, so it answers the same way. */
+describe('SkillsTree: an empty tree says why', () => {
+  const EMPTY_KB = (extra: Partial<FileTreeEntry> = {}): FileTreeEntry => ({
+    ...dir('.', [dir(KB, [dir(`${KB}/KnowledgeBase`, []), dir(`${KB}/Plugins`, []), dir(`${KB}/Skills`, [])])]),
+    ...extra,
+  });
+
+  it('says nothing is shared when entries were withheld', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB({ withheld: 4 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+  });
+
+  it('says the knowledge base is empty, with the create hint for a writer, when nothing was withheld', () => {
+    renderTree('/skills-and-tools', { fileTree: EMPTY_KB() });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('shows neither message once one entry is visible', () => {
+    renderTree('/skills-and-tools', { fileTree: { ...TREE, withheld: 2 } });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+});

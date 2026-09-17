@@ -46,6 +46,7 @@ import type { ReactNode } from 'react';
 import { AuthContext } from '../../../auth/state/auth.context';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../../core/events';
 import { useWorkspaceState } from '../useWorkspaceState';
+import { FILE_TRACE_STORAGE_KEY } from '../../utils/file-trace';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
 
 const WORKSPACE_FIXTURE = {
@@ -479,5 +480,72 @@ describe('dispatchUpload: suggestion routing', () => {
       file,
       { defer: false },
     );
+  });
+});
+
+/**
+ * `?trace=files`: the bootstrap is one of the gates a blank file page waits on,
+ * so its start and outcome are logged, and nothing else about it changes.
+ */
+describe('useWorkspaceState: bootstrap trace', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    apiMocks.getOrCreateWorkspace.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    sessionStorage.clear();
+    localStorage.clear();
+  });
+
+  function traceCalls(info: ReturnType<typeof vi.spyOn>) {
+    return info.mock.calls
+      .filter((c: unknown[]) => c[0] === '[trace:files]')
+      .map((c: unknown[]) => ({ event: c[1] as string, fields: c[2] as Record<string, unknown> }));
+  }
+
+  it('logs the start and the workspace a successful bootstrap produced', async () => {
+    sessionStorage.setItem(FILE_TRACE_STORAGE_KEY, '1');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockResolvedValue(WORKSPACE_FIXTURE);
+
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
+
+    const calls = traceCalls(info);
+    expect(calls.map((c) => c.event)).toEqual(['bootstrap:start', 'bootstrap:ok']);
+    expect(calls[0].fields).toMatchObject({ branch: null });
+    expect(calls[1].fields).toMatchObject({ branch: null, workspaceId: 'ws-1', cancelled: false });
+  });
+
+  it('logs the status and message of a failed bootstrap, which still surfaces as bootstrapError', async () => {
+    sessionStorage.setItem(FILE_TRACE_STORAGE_KEY, '1');
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockRejectedValue(new WorkspaceApiError(500));
+
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(traceCalls(info).some((c) => c.event === 'bootstrap:failed')).toBe(true));
+
+    expect(traceCalls(info).find((c) => c.event === 'bootstrap:failed')?.fields).toMatchObject({
+      branch: null,
+      status: 500,
+      message: 'HTTP 500',
+      cancelled: false,
+    });
+    expect(traceCalls(info).some((c) => c.event === 'bootstrap:ok')).toBe(false);
+    await waitFor(() => expect(result.current.bootstrapError).toMatchObject({ status: 500 }));
+    expect(result.current.workspaceId).toBeNull();
+  });
+
+  it('logs nothing without the flag', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockResolvedValue(WORKSPACE_FIXTURE);
+
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('ws-1'));
+
+    expect(traceCalls(info)).toHaveLength(0);
   });
 });

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Check, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { PageShell } from '../../../shared/components/PageShell';
 import { Dialog } from '../../../shared/components/Dialog';
@@ -18,6 +19,7 @@ import {
 } from '../services/groups.api';
 import { EMAIL_RE, isGroupPrefixed } from '../../../lib/email';
 import { AddMemberInput } from './AddMemberInput';
+import { GROUP_PARAM, isNamedGroup } from './group-members-path';
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
@@ -36,9 +38,16 @@ function errMessage(err: unknown, fallback: string): string {
  * contributes that UI through the registry's `groupsDirectoryPanel` slot,
  * rendered below the list in both modes. A core-only deployment simply never
  * mentions a directory connection.
+ *
+ * `?group=<name>` opens the page on one group (the Library sidebar's "Manage
+ * members"): its card is scrolled into view and, in manual mode, its
+ * add-member field takes focus. In IdP mode the same row is brought into view
+ * under the read-only notice, which is the answer to "why can't I edit this".
  */
 export function DirectoryGroupsPage() {
   const { isAdmin } = useAdmin();
+  const [searchParams] = useSearchParams();
+  const targetGroup = searchParams.get(GROUP_PARAM);
   const { groupsDirectoryPanel: DirectoryPanel } = useAppRegistry();
   const [roster, setRoster] = useState<GroupsRoster | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -174,7 +183,7 @@ export function DirectoryGroupsPage() {
           {roster === null ? (
             error || broken ? null : <div className="text-xs text-ink-muted">Loading…</div>
           ) : idpMode ? (
-            <IdpModeView roster={roster} />
+            <IdpModeView roster={roster} targetGroup={targetGroup} />
           ) : directoryConnected ? (
             // Connected, but the first provisioning push hasn't landed: the
             // IdP already owns groups, so no manual CRUD — creating one now
@@ -189,8 +198,22 @@ export function DirectoryGroupsPage() {
               onApply={applyRoster}
               onDeleteRequest={setDeleteTarget}
               runExclusive={runExclusive}
+              targetGroup={targetGroup}
             />
           )}
+
+          {roster !== null &&
+            // Not while connected-but-unsynced (no roster to search yet), nor
+            // while the groups file is broken (its roster is empty by design —
+            // the banner above already says why).
+            (idpMode || !directoryConnected) &&
+            !broken &&
+            targetGroup &&
+            !roster.groups.some((g) => isNamedGroup(g, targetGroup)) && (
+              // A shared link can outlive its group — say so rather than open
+              // on an unmarked page the reader has to search.
+              <p className="text-xs text-ink-muted">No group named “{targetGroup}”.</p>
+            )}
 
           {roster !== null && DirectoryPanel && (
             <DirectoryPanel
@@ -282,11 +305,13 @@ function ManualModeView({
   onApply,
   onDeleteRequest,
   runExclusive,
+  targetGroup,
 }: {
   roster: GroupsRoster;
   onApply: (roster: GroupsRoster) => void;
   onDeleteRequest: (group: GroupRosterEntry) => void;
   runExclusive: ExclusiveRunner;
+  targetGroup: string | null;
 }) {
   return (
     <>
@@ -307,6 +332,7 @@ function ManualModeView({
               onApply={onApply}
               onDeleteRequest={onDeleteRequest}
               runExclusive={runExclusive}
+              targeted={isNamedGroup(group, targetGroup)}
             />
           ))}
         </div>
@@ -382,12 +408,24 @@ function ManualGroupCard({
   onApply,
   onDeleteRequest,
   runExclusive,
+  targeted,
 }: {
   group: GroupRosterEntry;
   onApply: (roster: GroupsRoster) => void;
   onDeleteRequest: (group: GroupRosterEntry) => void;
   runExclusive: ExclusiveRunner;
+  /** The group the URL names: land on this card and in its add-member field. */
+  targeted: boolean;
 }) {
+  const card = useRef<HTMLDivElement>(null);
+  const addInput = useRef<HTMLInputElement>(null);
+  // On arrival only — keyed on `targeted`, so a roster re-applied after an
+  // edit does not yank the page back to this card.
+  useEffect(() => {
+    if (!targeted) return;
+    card.current?.scrollIntoView?.({ block: 'center' });
+    addInput.current?.focus({ preventScroll: true });
+  }, [targeted]);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -456,7 +494,12 @@ function ManualGroupCard({
   };
 
   return (
-    <div className="border border-line rounded-lg p-3">
+    <div
+      ref={card}
+      data-group={group.canonical}
+      aria-current={targeted || undefined}
+      className={`border rounded-lg p-3 ${targeted ? 'border-accent' : 'border-line'}`}
+    >
       <div className="flex items-start gap-3">
         {renameDraft === null ? (
           <h2 className="flex-1 min-w-0 text-sm font-semibold text-ink truncate">
@@ -558,6 +601,7 @@ function ManualGroupCard({
         inputLabel={`Add member to ${group.displayName}`}
         busy={busy}
         className="mt-2"
+        inputRef={addInput}
       />
 
       {error && (
@@ -570,7 +614,7 @@ function ManualGroupCard({
 }
 
 /** IdP mode: the synced roster, read-only — membership is managed in the IdP. */
-function IdpModeView({ roster }: { roster: GroupsRoster }) {
+function IdpModeView({ roster, targetGroup }: { roster: GroupsRoster; targetGroup: string | null }) {
   return (
     <>
       <p className="text-xs text-ink-muted leading-snug">
@@ -584,12 +628,7 @@ function IdpModeView({ roster }: { roster: GroupsRoster }) {
         <div className="max-w-xl space-y-1">
           <ul className="divide-y divide-line border border-line rounded-sm">
             {roster.groups.map((group) => (
-              <li key={group.canonical} className="px-3 py-2 text-sm">
-                <div className="font-medium truncate">{group.displayName}</div>
-                <div className="text-meta text-ink-muted truncate">
-                  {group.members.length} {group.members.length === 1 ? 'member' : 'members'}
-                </div>
-              </li>
+              <IdpGroupRow key={group.canonical} group={group} targeted={isNamedGroup(group, targetGroup)} />
             ))}
           </ul>
           <div className="text-meta text-ink-muted">
@@ -598,5 +637,26 @@ function IdpModeView({ roster }: { roster: GroupsRoster }) {
         </div>
       )}
     </>
+  );
+}
+
+/** One synced group. Brought into view when the URL names it — there is no field to focus. */
+function IdpGroupRow({ group, targeted }: { group: GroupRosterEntry; targeted: boolean }) {
+  const row = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (targeted) row.current?.scrollIntoView?.({ block: 'center' });
+  }, [targeted]);
+  return (
+    <li
+      ref={row}
+      data-group={group.canonical}
+      aria-current={targeted || undefined}
+      className={`px-3 py-2 text-sm ${targeted ? 'bg-hover' : ''}`}
+    >
+      <div className="font-medium truncate">{group.displayName}</div>
+      <div className="text-meta text-ink-muted truncate">
+        {group.members.length} {group.members.length === 1 ? 'member' : 'members'}
+      </div>
+    </li>
   );
 }

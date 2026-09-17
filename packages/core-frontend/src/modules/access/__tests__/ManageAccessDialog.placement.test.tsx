@@ -182,7 +182,7 @@ async function openAliceMenu(
   await user.click(trigger);
 
   const panel = screen
-    .getByRole('button', { name: /remove access/i })
+    .getByRole('button', { name: /^can download$/i })
     .closest('div.fixed') as HTMLElement;
   return { anchorEl, panel };
 }
@@ -192,7 +192,7 @@ async function openAliceMenu(
  *
  * `Dialog` renders its body inside `overflow-y-auto`, which clips an
  * absolutely positioned menu: opening the verb menu on a low grantee row cut
- * everything past the first item or two — "Remove access" included — off at
+ * everything past the first item or two — "Can download" included — off at
  * the body's edge, unreachable without scrolling the list out from under the
  * menu. The menus are `fixed` now, which means the placement is computed
  * rather than inherited, and has to keep up with everything that moves it.

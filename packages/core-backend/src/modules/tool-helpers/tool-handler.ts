@@ -79,13 +79,10 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
           res.end();
           return;
         }
-        if (err instanceof ToolError && err.details) {
-          // `error` goes last so no detail field can overwrite the message.
-          res.status(err.status).json({ ...err.details, error: err.message });
-          return;
-        }
         if (hasHttpStatus(err)) {
-          res.status(err.status).json({ error: err.message });
+          // Structured details ride beside `error`, never over it.
+          const details = err instanceof ToolError ? err.details : undefined;
+          res.status(err.status).json({ ...details, error: err.message });
           return;
         }
         const msg = err instanceof Error ? err.message : 'Unknown error';

@@ -20,10 +20,11 @@ import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
 import { useDefaultBranchFileRead } from '../hooks/useFileOnBranch';
 import { diffLines, type DiffLine } from '../utils/diff';
-import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderers';
+import { hasFileViewer, isBinaryFile, rendersAsText } from '../../workspace/components/renderers';
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
+import { hasOwnApproval } from '../utils/approval';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -162,8 +163,10 @@ export function ChangeRequestDialog({
   // Markdown renders as a DOCUMENT with red/green change blocks — the same
   // `MarkdownDiffViewer` the review flow and version history use — because the
   // person deciding on a knowledge or skill change reads prose, not source.
-  // Everything else keeps the marked-source view below.
-  const selectedIsMarkdown = /\.md$/i.test(selected);
+  // Everything else keeps the marked-source view below — including a `.md` the
+  // file page shows as text (the access rules file), whose `#` comments would
+  // otherwise read as headings on both the proposed and the current side.
+  const selectedIsMarkdown = /\.md$/i.test(selected) && !rendersAsText(selected);
 
   const asked = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -381,14 +384,17 @@ export function ChangeRequestDialog({
    * either already approved or approvable BY THIS VIEWER (they hold write on
    * it, so their click completes the gate). Anything less and Apply was a
    * button that walked into "Waiting on approval for …" — offering a verdict
-   * the viewer cannot actually deliver.
+   * the viewer cannot actually deliver. Only files the merge gate binds can
+   * hold it up; the rest neither warn nor block on the server, but the viewer
+   * still has to hold at least one file of the request to be offered Apply.
    */
   const canApply =
     detail !== null &&
     detail.approvals.length > 0 &&
-    detail.approvals.every((a) => a.isApproved || a.viewerCanApprove);
+    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
+    detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
 
-  /** Approve / revert verbs — per file, from the tree. */
+  /** Approve / revert verbs — approve from the file header and the footer, revert from the tree. */
   const [verbBusy, setVerbBusy] = useState(false);
   const [verbError, setVerbError] = useState<string | null>(null);
   useEffect(() => {
@@ -404,6 +410,28 @@ export function ChangeRequestDialog({
         ? await unapprovePrFile(cr.number, path)
         : await approvePrFile(cr.number, path);
       setDetail((d) => (d ? { ...d, approvals } : d));
+    } catch (err) {
+      setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
+    } finally {
+      setVerbBusy(false);
+    }
+  }
+
+  /**
+   * Every file still waiting on this viewer, approved one after another —
+   * sequential, so the approvals the server hands back after each call are
+   * the ones the next reads, and a failure stops the run with one banner
+   * instead of one per file.
+   */
+  async function approveAllMine(paths: string[]) {
+    if (!detail || verbBusy) return;
+    setVerbBusy(true);
+    setVerbError(null);
+    try {
+      for (const path of paths) {
+        const approvals = await approvePrFile(cr.number, path);
+        setDetail((d) => (d ? { ...d, approvals } : d));
+      }
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't record that.");
     } finally {
@@ -443,8 +471,46 @@ export function ChangeRequestDialog({
   }
 
   // Tolerant read (not useAuth): the dialog renders in tests without the
-  // provider, and the email only sharpens the withdraw affordance.
+  // provider, and the email only sharpens the undo affordance.
   const viewerEmail = useContext(AuthContext)?.user?.email ?? '';
+
+  /**
+   * The header's approve button, for the selected file: `approve` when it is
+   * the viewer's to approve and they have not, `undo` once their own current
+   * confirmation is on it, `null` when they cannot approve it at all.
+   */
+  const selectedApproval = touchesSelected ? approvalByPath.get(selected) : undefined;
+  const headerVerb: 'approve' | 'undo' | null = !selectedApproval?.viewerCanApprove
+    ? null
+    : hasOwnApproval(selectedApproval, viewerEmail)
+      ? 'undo'
+      : 'approve';
+
+  /** Files waiting on THIS viewer — theirs to approve and not yet approved. */
+  const mine = useMemo(
+    () =>
+      (detail?.approvals ?? [])
+        .filter(
+          (a) =>
+            a.inMergeGate && a.viewerCanApprove && !a.isApproved && changedFiles.has(a.path),
+        )
+        .map((a) => a.path),
+    [detail, changedFiles],
+  );
+  /**
+   * Who the unapproved files wait on, when none of them is the viewer's —
+   * the tree badge's wording, gathered across the request. Files outside the
+   * merge gate hold nothing up and name nobody.
+   */
+  const waitingOn = useMemo(() => {
+    const names = new Set<string>();
+    for (const a of detail?.approvals ?? []) {
+      if (!a.inMergeGate || a.isApproved || a.viewerCanApprove) continue;
+      for (const r of a.eligibleApprovers.roles) names.add(r);
+      for (const u of a.eligibleApprovers.users) names.add(u.name || u.email);
+    }
+    return [...names];
+  }, [detail]);
 
   /** The tree's per-file state, in the file list's order. */
   const treeFiles: CrTreeFileState[] = useMemo(() => {
@@ -460,7 +526,9 @@ export function ChangeRequestDialog({
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
   const allApproved =
-    detail !== null && detail.approvals.length > 0 && detail.approvals.every((a) => a.isApproved);
+    detail !== null &&
+    detail.approvals.length > 0 &&
+    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved);
 
   /** Admin-only: delete the request and its branch, with an armed confirm. */
   const [deleteArmed, setDeleteArmed] = useState(false);
@@ -650,9 +718,8 @@ export function ChangeRequestDialog({
               selected={selected}
               currentUserEmail={viewerEmail}
               onSelect={(p) => setSelected(p)}
-              onToggleApprove={(p, approved) => void toggleApprove(p, approved)}
               onRevert={(p) => void revertFile(p)}
-              busy={verbBusy}
+              busy={verbBusy || applyBusy}
             />
           </Surface>
 
@@ -670,6 +737,19 @@ export function ChangeRequestDialog({
                       : ' · what changes is marked'
                     : ' · not touched by this request'}
               </span>
+              {/* Where the reviewer is reading, labelled — the tree's check is
+                  status only. Right after the header text in the tab order. */}
+              {headerVerb && (
+                <Button
+                  variant={headerVerb === 'approve' ? 'primary' : 'outline'}
+                  size="tiny"
+                  className="ml-auto shrink-0"
+                  disabled={verbBusy || applyBusy}
+                  onClick={() => void toggleApprove(selected, headerVerb === 'undo')}
+                >
+                  {headerVerb === 'approve' ? 'Approve this file' : 'Approved – Undo'}
+                </Button>
+              )}
             </div>
             {/* The move, named. A rename's diff is otherwise unexplainable —
                 either it reads as an ordinary edit to a file that isn't there
@@ -793,7 +873,32 @@ export function ChangeRequestDialog({
 
         {/* The verdict. Fixed to the bottom of the surface — a decision the
             reader has to scroll to find is one they will make without reading. */}
-        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-line bg-sunken px-8 py-4">
+        <div className="mt-4 border-t border-line bg-sunken px-8 py-4">
+          {/* What is the viewer's to approve, above the verdict: a count and
+              one button for all of them, or who everyone is waiting on. */}
+          {!blocked && detail !== null && allFiles.length > 0 && (mine.length > 0 || !canApply) && (
+            <div className="mb-3 flex flex-wrap items-center gap-3">
+              <p className="text-meta font-medium text-ink">
+                {mine.length > 0
+                  ? `Your approval is needed on ${mine.length} file${mine.length === 1 ? '' : 's'}`
+                  : waitingOn.length > 0
+                    ? `Waiting on ${waitingOn.join(', ')}`
+                    : (detail.mergeWarnings[0] ??
+                      'Waiting on approval from the files’ owners — applying is theirs to do.')}
+              </p>
+              {mine.length > 1 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={verbBusy || applyBusy}
+                  onClick={() => void approveAllMine(mine)}
+                >
+                  Approve all mine
+                </Button>
+              )}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
           <p className="mr-auto max-w-[52ch] text-meta text-ink-muted">
             {blocked
               ? `Nothing changes for anyone until ${firstName} proposes it again against the current text.`
@@ -801,10 +906,9 @@ export function ChangeRequestDialog({
                 ? ''
                 : allFiles.length === 0
                   ? 'Applying would change nothing, so the button stays away.'
-                  : canApply
+                  : canApply && mine.length === 0
                     ? 'Every agent that connects after this picks it up. There is no staged rollout.'
-                    : detail.mergeWarnings[0] ??
-                      'Waiting on approval from the files’ owners — applying is theirs to do.'}
+                    : ''}
           </p>
           {/* Admins carry the moderation verb: delete the request AND its
               branch, armed on the first click. `viewerCanBypassMerge` is the
@@ -844,12 +948,13 @@ export function ChangeRequestDialog({
             <Button
               variant="primary"
               size="sm"
-              disabled={applyBusy}
+              disabled={applyBusy || verbBusy}
               onClick={() => applying.apply(cr)}
             >
               {applyBusy ? applyLabel : allApproved ? 'Apply changes' : 'Bypass approval and apply'}
             </Button>
           )}
+          </div>
         </div>
       </Surface>
     </div>
@@ -883,7 +988,7 @@ function authorsReason(body: string | undefined): string | null {
  *
  * Markdown never reaches this view when both sides are in — it renders
  * through `MarkdownDiffViewer` above. This is the presentation for the files
- * that ARE source (yaml, scripts, config), plus the loading and unreadable
+ * that ARE source (yaml, scripts, config, the access rules file), plus the loading and unreadable
  * states for everything.
  */
 function MarkedFile({

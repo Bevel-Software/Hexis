@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
 // The node-id lookup behind the canonical-URL redirect, so a test can say a
@@ -89,11 +89,23 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+/** Stands in for a file-tree click: navigates to a clean file URL. */
+function TreeClickProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" aria-label="tree-click-bar" onClick={() => navigate('/workspace/main/Knowledge/Bar.md')} />
+  );
+}
+
 function renderAt(
   url: string,
   opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
-): { workspace: WorkspaceContextValue; git: GitContextValue } {
-  const workspace = opts.workspace ?? makeWorkspace();
+): {
+  workspace: WorkspaceContextValue;
+  git: GitContextValue;
+  rerenderWorkspace: (next: WorkspaceContextValue) => void;
+} {
+  let workspace = opts.workspace ?? makeWorkspace();
   const git = opts.git ?? makeGit();
   const review: ReviewContextValue = {
     session: null,
@@ -132,18 +144,27 @@ function renderAt(
     );
   }
 
-  render(
+  const tree = () => (
     <MemoryRouter initialEntries={[url]}>
       <Tree>
         <Routes>
           <Route path="/workspace/:branch/*" element={<FileRoute canonicalize={opts.canonicalize} />} />
         </Routes>
         <LocationProbe />
+        <TreeClickProbe />
       </Tree>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const { rerender } = render(tree());
 
-  return { workspace, git };
+  return {
+    workspace,
+    git,
+    rerenderWorkspace: (next) => {
+      workspace = next;
+      rerender(tree());
+    },
+  };
 }
 
 beforeEach(() => {
@@ -418,5 +439,142 @@ describe('FileRoute', () => {
       const [, activePath] = hydrateTabs.mock.calls[0];
       expect(activePath).toBeNull();
     });
+  });
+});
+
+/**
+ * `?trace=files` — the reproduction diagnostics for a click that changes the
+ * URL but leaves the page blank. They log which gate held the page and change
+ * nothing about what it does.
+ */
+describe('FileRoute: ?trace=files diagnostics', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function traceCalls(info: ReturnType<typeof vi.spyOn>) {
+    return info.mock.calls
+      .filter((c: unknown[]) => c[0] === '[trace:files]')
+      .map((c: unknown[]) => ({ event: c[1] as string, fields: c[2] as Record<string, unknown> }));
+  }
+
+  it('logs the wait on a git status branch that differs from the URL, with the four reproduction fields', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const setPersistenceBranch = vi.fn();
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    const workspace = makeWorkspace({
+      hydrateTabs,
+      setPersistenceBranch,
+      bootstrapError: { branch: 'main', status: 500 },
+      openTabs: [makeTab({ path: 'Knowledge/Old.md' })],
+    });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/main/Knowledge/Foo.md?trace=files', { git, workspace });
+
+    await waitFor(() => expect(setPersistenceBranch).toHaveBeenCalledWith('main'));
+    const wait = traceCalls(info).find((c) => c.event === 'wait:branch-mismatch');
+    expect(wait?.fields).toMatchObject({
+      url: '/workspace/main/Knowledge/Foo.md',
+      branchFromUrl: 'main',
+      pathFromUrl: 'Knowledge/Foo.md',
+      gitStatusBranch: 'alice/draft',
+      bootstrapError: { branch: 'main', status: 500 },
+      openTabs: ['Knowledge/Old.md'],
+    });
+    // Behaviour unchanged: still waiting, still nothing on screen to say why.
+    expect(hydrateTabs).not.toHaveBeenCalled();
+  });
+
+  it('numbers each hydration so a start and its settle can be paired in the console', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', { git, workspace });
+
+    await waitFor(() => {
+      expect(traceCalls(info).some((c) => c.event === 'hydrate:settled')).toBe(true);
+    });
+    const calls = traceCalls(info);
+    const start = calls.find((c) => c.event === 'hydrate:start');
+    const settled = calls.find((c) => c.event === 'hydrate:settled');
+    expect(start?.fields).toMatchObject({ paths: ['Knowledge/Foo.md'], activePath: 'Knowledge/Foo.md' });
+    expect(settled?.fields).toMatchObject({
+      surviving: ['Knowledge/Foo.md'],
+      cancelled: false,
+      // What the hydration left open, not this render's pre-hydration tabs.
+      openTabs: ['Knowledge/Foo.md'],
+      openFilePath: 'Knowledge/Foo.md',
+    });
+    expect(settled?.fields.hydrateSeq).toBe(start?.fields.hydrateSeq);
+  });
+
+  it('logs the failed status of a hydration before the error screen it already had', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn(async () => {
+      throw new WorkspaceApiError(500);
+    });
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', { git, workspace });
+
+    await waitFor(() => expect(screen.getByText(/Couldn't load this file/i)).toBeInTheDocument());
+    expect(traceCalls(info).find((c) => c.event === 'hydrate:failed')?.fields).toMatchObject({
+      status: 500,
+      cancelled: false,
+    });
+  });
+
+  it('logs a bootstrap failure that arrives while the page waits for its workspace', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const git = makeGit({ status: null });
+    const { rerenderWorkspace } = renderAt('/workspace/main/Knowledge/Foo.md?trace=files', {
+      git,
+      workspace: makeWorkspace({ workspaceId: null }),
+    });
+
+    await waitFor(() => {
+      expect(traceCalls(info).some((c) => c.event === 'wait:no-workspace')).toBe(true);
+    });
+    rerenderWorkspace(makeWorkspace({ workspaceId: null, bootstrapError: { branch: 'main', status: 500 } }));
+
+    await waitFor(() => {
+      const waits = traceCalls(info).filter((c) => c.event === 'wait:no-workspace');
+      expect(waits.at(-1)?.fields).toMatchObject({ bootstrapError: { branch: 'main', status: 500 } });
+    });
+
+    // A file click while the workspace is still missing logs the new URL.
+    fireEvent.click(screen.getByLabelText('tree-click-bar'));
+    await waitFor(() => {
+      const waits = traceCalls(info).filter((c) => c.event === 'wait:no-workspace');
+      expect(waits.at(-1)?.fields).toMatchObject({
+        url: '/workspace/main/Knowledge/Bar.md',
+        pathFromUrl: 'Knowledge/Bar.md',
+      });
+    });
+  });
+
+  it('logs nothing without the flag', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const workspace = makeWorkspace({ hydrateTabs });
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
+    expect(traceCalls(info)).toHaveLength(0);
   });
 });
