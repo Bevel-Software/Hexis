@@ -131,8 +131,9 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // The fallback for a stale event that never came. Stale events now follow
     // the bus's merge / reject / apply-failed broadcasts, so a dropped bus
     // event would otherwise leave an applied request's markers in this tree
-    // until a reload. Cached reads (a merge evicts the server's list cache, so
-    // the first read after one is already true), and only while visible — a
+    // until a reload. Cached reads (a merge, a recorded refusal and a cleared
+    // one all evict the server's list cache, so the first read after any of
+    // them is already true), and only while visible — a
     // hidden tab catches up the moment it is shown instead.
     const reconcile = setInterval(() => {
       if (!document.hidden) load();

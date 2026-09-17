@@ -53,7 +53,7 @@ import type {
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -1845,6 +1845,8 @@ export class WorkflowService implements IWorkflowService {
     // already up to date there's nothing to share — short-circuit the push.
     if (!outcome.alreadyUpToDate) {
       await this.trackedPush(workspaceId, user);
+      // The source head moved: the refusal described a revision that is gone.
+      await this.clearApplyFailure(number);
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -1911,6 +1913,9 @@ export class WorkflowService implements IWorkflowService {
       authorIdHash,
       workspaceId,
     );
+    // A recorded approval is a gate input: the refusal that was waiting on it
+    // no longer describes the request.
+    await this.clearApplyFailure(number);
     this.prs.invalidateDetailCache(number);
     this.events?.emit({
       kind: 'approval-changed',
@@ -2039,6 +2044,8 @@ export class WorkflowService implements IWorkflowService {
       // a duplicate commit through releaseLock.
       await this.fileLocks.release(ws.id, headBranch, lockPath, user);
     }
+    // The source head moved: the refusal described a revision that is gone.
+    await this.clearApplyFailure(number);
     this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2557,20 +2564,58 @@ export class WorkflowService implements IWorkflowService {
     attempt: number,
   ): Promise<boolean> {
     if (this.applyAttempts.get(number) !== attempt) return false;
+    const at = failure.at ?? new Date();
     const updated = await this.db
       .update(changeRequests)
       .set({
         applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
         applyFailureConflicts: failure.conflicts,
-        applyFailedAt: failure.at ?? new Date(),
+        applyFailedAt: at,
         applyFailedByName: user.name,
       })
-      .where(and(eq(changeRequests.number, number), eq(changeRequests.state, 'open')))
+      // The write itself refuses to go backwards: the attempt map above is an
+      // early exit within this process, but an older UPDATE still in flight (or
+      // one from another replica) must never replace a newer refusal.
+      .where(
+        and(
+          eq(changeRequests.number, number),
+          eq(changeRequests.state, 'open'),
+          or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
+        ),
+      )
       .returning({ number: changeRequests.number });
     if (updated.length === 0) return false;
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-apply-failed', number });
     return true;
+  }
+
+  /**
+   * Forget a request's recorded refusal because a gate input changed under it
+   * (an approval was recorded, the source head moved). Otherwise the request
+   * keeps saying "<name> could not apply this: Waiting on approval…" after the
+   * approval arrived, with nothing dating it. Announced on the same event a new
+   * refusal uses — every list and open dialog re-reads the request. Best-effort:
+   * the mutation that triggered it already happened and must not fail on this.
+   */
+  private async clearApplyFailure(number: number): Promise<void> {
+    try {
+      const cleared = await this.db
+        .update(changeRequests)
+        .set({
+          applyFailureReason: null,
+          applyFailureConflicts: null,
+          applyFailedAt: null,
+          applyFailedByName: null,
+        })
+        .where(and(eq(changeRequests.number, number), isNotNull(changeRequests.applyFailedAt)))
+        .returning({ number: changeRequests.number });
+      if (cleared.length === 0) return;
+      this.prs.invalidateDetailCache(number);
+      this.events?.emit({ kind: 'change-request-apply-failed', number });
+    } catch (err) {
+      crLog.warn(`could not clear the recorded apply failure of change request #${number}:`, { err });
+    }
   }
 
   /**

@@ -14,6 +14,8 @@ import type { IReviewWorkflowService } from '../review-workflow/review-workflow.
 import type { FileLockService } from '../file-lock.service.js';
 import type { PendingCommitsService } from '../pending-commits.service.js';
 import { WorkflowEventBus } from '../event-bus.js';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { WorkflowService } from '../workflow.service.js';
 import { APPLY_FAILURE_REASON_WITHHELD, createWorkflowRoutes } from '../workflow.routes.js';
 import { WorkflowDomainError, WorkflowValidationError } from '../../../shared/domain-errors.js';
@@ -247,25 +249,36 @@ describe('POST /workflow/change-requests/:n/merge — a failed apply reaches eve
 
 function updateDb(openRows = 1) {
   const sets: Record<string, unknown>[] = [];
+  const wheres: SQL[] = [];
   const chain = {
     update: vi.fn(() => chain),
     set: vi.fn((values: Record<string, unknown>) => {
       sets.push(values);
       return chain;
     }),
-    where: vi.fn(() => chain),
+    where: vi.fn((condition: SQL) => {
+      wheres.push(condition);
+      return chain;
+    }),
     returning: vi.fn(async () => Array.from({ length: openRows }, () => ({ number: 7 }))),
   };
-  return { db: chain as unknown as Database, sets };
+  return { db: chain as unknown as Database, sets, wheres };
 }
 
-function service(db: Database, emit: (e: unknown) => void) {
+/** The SQL a drizzle condition renders to, so a test can read what the write is conditioned on. */
+const renderSql = (condition: SQL) => new PgDialect().sqlToQuery(condition).sql;
+
+function service(
+  db: Database,
+  emit: (e: unknown) => void,
+  reviewWorkflow: Partial<IReviewWorkflowService> = {},
+) {
   const prs = { invalidateDetailCache: vi.fn() };
   const svc = new WorkflowService(
     db,
     {} as GitService,
     prs as unknown as PullRequestService,
-    {} as IReviewWorkflowService,
+    reviewWorkflow as IReviewWorkflowService,
     {} as WorkspaceService,
     {} as IAccessControl,
     {} as FileLockService,
@@ -319,25 +332,40 @@ describe('WorkflowService — the persisted apply refusal', () => {
     expect(emitted).toHaveLength(1);
   });
 
-  it('holds no entry once attempts end, and a token is never reissued', async () => {
+  it('an ended attempt records nothing, and a token is never reissued', async () => {
     const { db, sets } = updateDb();
-    const { svc } = service(db, () => {});
-    const attempts = (svc as unknown as { applyAttempts: Map<number, number> }).applyAttempts;
-    for (let n = 1; n <= 50; n++) svc.endApplyAttempt(n, svc.beginApplyAttempt(n));
-    expect(attempts.size).toBe(0);
+    const emitted: unknown[] = [];
+    const { svc } = service(db, (e) => emitted.push(e));
 
-    // A running attempt, then a newer one that ends first: the older one, ending
-    // later, finds nothing to match and records nothing — even though a third
-    // attempt started after the entry left.
+    const ended = svc.beginApplyAttempt(7);
+    svc.endApplyAttempt(7, ended);
+    expect(await svc.recordApplyFailure(7, { reason: 'ended', conflicts: false }, ADMIN, ended)).toBe(false);
+
+    // A running attempt, then a newer one that ends first: the older one finds
+    // nothing to match and records nothing — even with a third attempt started
+    // after the newer one's entry left.
     const older = svc.beginApplyAttempt(7);
     const newer = svc.beginApplyAttempt(7);
     svc.endApplyAttempt(7, newer);
     const third = svc.beginApplyAttempt(7);
-    expect(third).not.toBe(older);
     expect(await svc.recordApplyFailure(7, { reason: 'older', conflicts: false }, ADMIN, older)).toBe(false);
     svc.endApplyAttempt(7, older);
-    expect(attempts.get(7)).toBe(third);
     expect(sets).toEqual([]);
+    expect(emitted).toEqual([]);
+
+    // Ending the stale token left the current attempt able to record.
+    expect(await svc.recordApplyFailure(7, { reason: 'third', conflicts: false }, ADMIN, third)).toBe(true);
+    expect(sets.map((v) => v.applyFailureReason)).toEqual(['third']);
+  });
+
+  it('the write itself never replaces a newer refusal — an older instant loses even past the in-process guard', async () => {
+    const { db, wheres } = updateDb();
+    const { svc } = service(db, () => {});
+    const at = new Date('2026-09-16T10:00:00Z');
+    await svc.recordApplyFailure(7, { reason: 'r', conflicts: false, at }, ADMIN, svc.beginApplyAttempt(7));
+    const sql = renderSql(wheres[0]!);
+    expect(sql).toContain('"state" = $');
+    expect(sql).toMatch(/"apply_failed_at" is null or "change_requests"\."apply_failed_at" < \$\d/);
   });
 
   it('a request a concurrent apply already landed announces no failure', async () => {
@@ -381,6 +409,47 @@ describe('change-request-apply-failed on the bus', () => {
 });
 
 // ── Read back through the summary ───────────────────────────────────────────
+
+describe('WorkflowService — a refusal clears when a gate input changes', () => {
+  const approveArgs = [7, 'Plugins/x/SKILL.md', ADMIN, [], 'h', 'main', null, 'ws'] as const;
+
+  it('an approval recorded after the refusal clears it and tells every viewer to re-read', async () => {
+    const { db, sets, wheres } = updateDb();
+    const emitted: { kind: string }[] = [];
+    const { svc, prs } = service(db, (e) => emitted.push(e as { kind: string }), {
+      approveFile: vi.fn(async () => []),
+    });
+
+    await svc.approveFile(...approveArgs);
+
+    expect(sets).toEqual([
+      { applyFailureReason: null, applyFailureConflicts: null, applyFailedAt: null, applyFailedByName: null },
+    ]);
+    expect(renderSql(wheres[0]!)).toContain('"apply_failed_at" is not null');
+    expect(prs.invalidateDetailCache).toHaveBeenCalledWith(7);
+    expect(emitted.map((e) => e.kind)).toEqual(['change-request-apply-failed', 'approval-changed']);
+  });
+
+  it('with no refusal recorded, an approval announces only itself', async () => {
+    const { db } = updateDb(0);
+    const emitted: { kind: string }[] = [];
+    const { svc } = service(db, (e) => emitted.push(e as { kind: string }), {
+      approveFile: vi.fn(async () => []),
+    });
+    await svc.approveFile(...approveArgs);
+    expect(emitted.map((e) => e.kind)).toEqual(['approval-changed']);
+  });
+
+  it('a failed clear never fails the approval that triggered it', async () => {
+    const db = {
+      update: () => {
+        throw new Error('db down');
+      },
+    } as unknown as Database;
+    const { svc } = service(db, () => {}, { approveFile: vi.fn(async () => []) });
+    await expect(svc.approveFile(...approveArgs)).resolves.toEqual([]);
+  });
+});
 
 describe('PullRequestService — lastApplyFailure on the request', () => {
   const ROW = {
@@ -599,5 +668,45 @@ describe('GET change requests — the refusal reason reaches only viewers who ca
     });
     const [failure] = await reasonsFrom(base);
     expect(failure.reason).toBe(APPLY_FAILURE_REASON_WITHHELD);
+  });
+});
+
+describe('PullRequestService — a recorded or cleared refusal reaches cached list reads too', () => {
+  it('invalidating the request evicts the list cache, so the next non-fresh list read sees the new row', async () => {
+    let rows: Record<string, unknown>[] = [
+      { number: 7, state: 'open', targetBranch: 'main', sourceBranch: 'b', title: 't', body: '',
+        authorEmail: 'bo@example.com', authorName: 'Bo', createdAt: new Date(), applyFailureReason: null, applyFailedAt: null },
+    ];
+    let listReads = 0;
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            orderBy: async () => {
+              listReads++;
+              return rows;
+            },
+          }),
+        }),
+      }),
+    } as unknown as Database;
+    const svc = new RealPullRequestService(
+      db,
+      { findAnyWorkspaceId: async () => 'ws' } as unknown as WorkspaceService,
+      {} as unknown as IAccessControl,
+      { changedPathsForPr: async () => ['Plugins/x/SKILL.md'] } as unknown as GitService,
+    );
+
+    expect((await svc.listOpenPrs())[0]!.lastApplyFailure).toBeNull();
+    await svc.listOpenPrs();
+    expect(listReads).toBe(1); // cached
+
+    // What recordApplyFailure (and clearing a refusal) does after its write.
+    rows = [{ ...rows[0], applyFailureReason: 'gate says no', applyFailedAt: new Date(), applyFailedByName: 'Ada' }];
+    svc.invalidateDetailCache(7);
+
+    const [cr] = await svc.listOpenPrs();
+    expect(listReads).toBe(2);
+    expect(cr!.lastApplyFailure?.reason).toBe('gate says no');
   });
 });

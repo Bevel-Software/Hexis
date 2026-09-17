@@ -170,12 +170,16 @@ export function createWorkflowRoutes(
    * since read access to its files cannot be proven. Returns copies; the
    * cached objects are never touched.
    */
-  async function scopeApplyFailures<T extends ChangeRequest>(req: express.Request, items: T[]): Promise<T[]> {
+  async function scopeApplyFailures<T extends ChangeRequest>(
+    req: express.Request,
+    items: T[],
+    knownUser?: AuthUser,
+  ): Promise<T[]> {
     const failing = items.filter((c) => c.lastApplyFailure);
     if (failing.length === 0) return items;
     let readable: Map<string, boolean> | null = null;
     try {
-      const user = req.userId ? await authService.getUserById(req.userId) : null;
+      const user = knownUser ?? (req.userId ? await authService.getUserById(req.userId) : null);
       if (user) {
         const workspace = await workspaceService.getOrCreateForUser(user);
         const paths = [...new Set(failing.flatMap((c) => c.touchedNodePaths))];
@@ -613,7 +617,7 @@ export function createWorkflowRoutes(
     // the list changed, and a cached answer would hide their own change.
     const fresh = isTruthyQuery(req.query.fresh);
     try {
-      res.json(await scopeApplyFailures(req, await workflow.listChangeRequestsAuthoredBy(user.email, { fresh })));
+      res.json(await scopeApplyFailures(req, await workflow.listChangeRequestsAuthoredBy(user.email, { fresh }), user));
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -627,7 +631,7 @@ export function createWorkflowRoutes(
     try {
       const workspace = await workspaceService.getOrCreateForUser(user);
       res.json(
-        await scopeApplyFailures(req, await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh })),
+        await scopeApplyFailures(req, await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh }), user),
       );
     } catch (err) {
       const { status, body } = toHttpError(err);

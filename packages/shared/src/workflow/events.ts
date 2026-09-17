@@ -233,6 +233,11 @@ export interface ChangeRequestRejectedEvent {
  * no error text in front of every session, and a session that missed the event
  * reads the same answer on its next fetch.
  */
+/*
+ * Also sent when a recorded refusal is CLEARED because a gate input changed
+ * (an approval recorded, the source head moved): either way the request's
+ * `lastApplyFailure` changed, and every viewer re-reads it.
+ */
 export interface ChangeRequestApplyFailedEvent {
   kind: 'change-request-apply-failed';
   number: number;
