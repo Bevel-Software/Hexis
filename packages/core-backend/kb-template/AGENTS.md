@@ -217,6 +217,13 @@ Access to any path — reading it as much as writing it — is governed by
   never overridable by an `access.md`.
 - **`access.md` files are picked up at any depth**, so a folder can tighten or
   widen what it inherited from its parent.
+- **Per-file rules exist for Markdown notes only.** A note (`.md`) may name
+  verbs in its own frontmatter, and those rules apply to that one note. Every
+  other file (a PDF, a presentation, a spreadsheet, an image, any binary)
+  cannot carry frontmatter and takes its folder's rules: sharing it on its own
+  is refused with `folder-governs-access`, naming the folder. To change who
+  can open such a file, change its folder's `access.md`, or move the file to a
+  folder whose rules fit.
 
 Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
 when access is resolved.

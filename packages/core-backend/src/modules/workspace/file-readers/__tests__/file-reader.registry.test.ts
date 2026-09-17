@@ -9,6 +9,7 @@ import { createFileReaderRegistry } from '../file-reader.registry.js';
 import { ImageReader } from '../image-reader.js';
 import { BinaryReader, LegacyOfficeReader, TextReader } from '../text-reader.js';
 import { OCTET_STREAM_FALLBACK_NOTE, contentModeOf, fileTypeOf, needsContent } from '../content-mode.js';
+import { FRONTMATTER_CARRIER_EXTENSIONS, canCarryFrontmatter } from '@bevel-software/platform-shared';
 
 /**
  * Routing tests for THE file-reader registry: one lookup (`readerFor`) decides
@@ -178,5 +179,35 @@ describe('file-reader registry routing', () => {
     });
     expect(custom.readerFor('x.png')).toBeInstanceOf(ImageReader);
     expect(custom.readerFor('x.md')).toBeInstanceOf(TextReader);
+  });
+});
+
+/**
+ * `canCarryFrontmatter` (platform-shared) is the one predicate that decides
+ * which files may hold their own access rules; it is derived from this
+ * registry. Pinned here so the two cannot drift: a carrier extension must be
+ * served by a text-editable text reader, and no extension a non-text reader
+ * claims may ever count as a carrier.
+ */
+describe('frontmatter carriers follow the registry', () => {
+  it('every carrier extension is claimed by no specialised reader and reads as editable text', () => {
+    const owned = new Set(registry.ownedExtensions());
+    for (const ext of FRONTMATTER_CARRIER_EXTENSIONS) {
+      expect(owned.has(ext), ext).toBe(false);
+      const reader = registry.readerFor(`Notes/note${ext}`);
+      expect(reader.textEditable, ext).toBe(true);
+      expect(reader.fileKind, ext).toBe('text');
+      expect(canCarryFrontmatter(`Notes/note${ext}`), ext).toBe(true);
+      expect(canCarryFrontmatter(`Notes/NOTE${ext.toUpperCase()}`), ext).toBe(true);
+    }
+  });
+
+  it('no extension a reader claims is a carrier, and neither is an extensionless file', () => {
+    for (const ext of registry.ownedExtensions()) {
+      expect(canCarryFrontmatter(`Sales/file${ext}`), ext).toBe(false);
+    }
+    for (const p of ['Sales/Report.pdf', 'Sales/Deck.pptx', 'Sales/Logo.png', 'Sales/blob', 'Sales/.hidden', 'notes.txt']) {
+      expect(canCarryFrontmatter(p), p).toBe(false);
+    }
   });
 });

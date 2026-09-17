@@ -6,7 +6,12 @@ import { logger } from '../../shared/logging.js';
 const grantLog = logger('access.grant');
 const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH, pluginManifestName } from '@bevel-software/platform-shared';
+import {
+  canCarryFrontmatter,
+  isProtectedBranch,
+  DEFAULT_BRANCH,
+  pluginManifestName,
+} from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
   GrantPrincipal,
@@ -24,6 +29,8 @@ import {
   AccessMutationService,
   AccessMutationError,
   accessMdPathForFolder,
+  assertFileCarriesAccessRules,
+  governingFolderOf,
   type TargetKind,
 } from './access-mutation.service.js';
 import {
@@ -524,11 +531,16 @@ export function createAccessRoutes(
    * The access.md / node path the write lands on, and the path the write-gate
    * keys on. For a folder both are the folder's access.md; for a file they are
    * the node file itself.
+   *
+   * A file that cannot carry frontmatter has no path of its own to edit: this
+   * throws `folder-governs-access` (422) before any gate, lock or read, so the
+   * grant, default revoke and deny-here all refuse it identically.
    */
   function gateAndEditPaths(kind: TargetKind, repoRelTarget: string): {
     gatePath: string;
     editPath: string;
   } {
+    assertFileCarriesAccessRules(kind, repoRelTarget);
     const editPath = kind === 'folder' ? accessMdPathForFolder(repoRelTarget) : repoRelTarget;
     return { gatePath: editPath, editPath };
   }
@@ -635,7 +647,24 @@ export function createAccessRoutes(
       }),
     ]);
 
-    return { canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, sources };
+    // A file that cannot carry frontmatter has no rules of its own: name the
+    // folder whose rules govern it (repo-relative, `''` for the root), which
+    // is where the mutation routes point too.
+    const governedByFolder =
+      kind === 'file' && !canCarryFrontmatter(repoRelTarget) ? governingFolderOf(repoRelTarget) : undefined;
+
+    return {
+      canRead,
+      canWrite,
+      canDownload,
+      canOwner,
+      eligible,
+      readers,
+      owners,
+      downloaders,
+      sources,
+      ...(governedByFolder !== undefined && { governedByFolder }),
+    };
   }
 
   /**

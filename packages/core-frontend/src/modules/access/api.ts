@@ -114,6 +114,13 @@ export interface AccessResponse {
    * is how the dialog chains into "Remove from parent?".
    */
   sources: Record<string, GrantSources>;
+  /**
+   * Present for a file that cannot carry frontmatter (a PDF, a deck, an
+   * image): the repo-relative folder (`''` for the root) whose rules govern
+   * it. Such a file has no per-file rules, and the mutation routes refuse it
+   * with `folder-governs-access`.
+   */
+  governedByFolder?: string;
 }
 
 /**

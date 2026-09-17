@@ -52,6 +52,11 @@ import {
   type TokenMatch,
 } from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import {
+  canCarryFrontmatter,
+  FOLDER_GOVERNS_ACCESS_KIND,
+  folderGovernsAccessMessage,
+} from '@bevel-software/platform-shared';
 
 /** Whether the dialog target is a folder (edit folder access.md) or a file (edit node frontmatter). */
 export type TargetKind = 'folder' | 'file';
@@ -81,6 +86,30 @@ export function targetFileForNode(repoRelFile: string): string {
   return repoRelFile;
 }
 
+/**
+ * Refuse a FILE target that cannot carry frontmatter (see `canCarryFrontmatter`):
+ * splicing a YAML block into a PDF, a presentation or an image corrupts its
+ * bytes, and the rule would never resolve anyway. Such a file takes its
+ * folder's rules, so the refusal names that folder. 422 with kind
+ * `folder-governs-access`, thrown BEFORE the file is read, locked or written.
+ * A folder target, or a Markdown note, passes.
+ */
+export function assertFileCarriesAccessRules(kind: TargetKind, repoRelTarget: string): void {
+  if (kind !== 'file' || canCarryFrontmatter(repoRelTarget)) return;
+  const folder = governingFolderOf(repoRelTarget);
+  throw new AccessMutationError(
+    folderGovernsAccessMessage(folder || 'the whole workspace'),
+    422,
+    { kind: FOLDER_GOVERNS_ACCESS_KIND, folder },
+  );
+}
+
+/** The repo-relative folder a file sits in (`''` for a file at the repo root). */
+export function governingFolderOf(repoRelFile: string): string {
+  const dir = path.posix.dirname(repoRelFile);
+  return dir === '.' ? '' : dir;
+}
+
 export class AccessMutationService {
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -92,8 +121,13 @@ export class AccessMutationService {
    * Resolve the file we'll actually edit for a (kind, target) pair, repo-relative.
    *   - folder → the folder's `access.md` (block-list form)
    *   - file   → the node file itself (its own frontmatter, scalar form allowed)
+   *
+   * A file that cannot carry frontmatter throws `folder-governs-access`
+   * instead: every mutation resolves its edit path here before reading, so
+   * none of them ever opens such a file.
    */
   fileToEdit(kind: TargetKind, repoRelTarget: string): { editPath: string; allowScalar: boolean } {
+    assertFileCarriesAccessRules(kind, repoRelTarget);
     if (kind === 'folder') {
       return { editPath: accessMdPathForFolder(repoRelTarget), allowScalar: false };
     }
