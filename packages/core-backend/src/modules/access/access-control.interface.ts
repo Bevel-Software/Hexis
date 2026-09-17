@@ -441,6 +441,14 @@ export interface IAccessControl {
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null>;
 
   /**
+   * Whether `userEmail` holds the Admin write floor at the repository root —
+   * a member of the Admin role or the deployment owner — in the working-tree
+   * model. The share dialog asks before restricting a PERSON's write at the
+   * root: the floor keeps it, so the deny could only be rolled back.
+   */
+  holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
+
+  /**
    * Batched: resolve eligible writers + expanded emails for a list of paths
    * at a specific ref in one model load. Returns null with the same
    * semantics as `eligibleWritersAtRef` (ref unresolvable).
