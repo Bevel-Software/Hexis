@@ -256,6 +256,8 @@ function ViewerHarness({
     kbDirName,
     fileTree,
     bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
     openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],

@@ -35,12 +35,27 @@ export function EventBusProvider({ children }: { children: ReactNode }) {
   // Per-tab session id. Generated once and persisted in sessionStorage so
   // a refresh keeps the same id (which lets the server's ring buffer
   // replay anything missed in the gap via Last-Event-ID).
+  // Storage is best-effort, NEVER load-bearing: `sessionStorage` throws on
+  // access in a sandboxed iframe and on write when the quota is full, and an
+  // unguarded call here took the entire app down with it (`#root` empty —
+  // this provider wraps the router). A tab that cannot persist its id still
+  // gets one, generated in memory; it just loses Last-Event-ID replay across
+  // a refresh, which is a degraded connection, not a blank page.
   const sessionId = useMemo(() => {
     if (typeof window === 'undefined') return ''; // SSR / test fallback
-    let id = window.sessionStorage.getItem(SESSION_ID_KEY);
+    let id: string | null = null;
+    try {
+      id = window.sessionStorage.getItem(SESSION_ID_KEY);
+    } catch (err) {
+      console.warn('sessionStorage unavailable; using an in-memory session id:', err);
+    }
     if (!id) {
       id = (window.crypto?.randomUUID?.() ?? `s-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      window.sessionStorage.setItem(SESSION_ID_KEY, id);
+      try {
+        window.sessionStorage.setItem(SESSION_ID_KEY, id);
+      } catch (err) {
+        console.warn('Failed to persist the event-bus session id:', err);
+      }
     }
     return id;
   }, []);

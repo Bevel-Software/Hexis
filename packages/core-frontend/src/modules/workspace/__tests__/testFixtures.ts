@@ -14,6 +14,8 @@ export function makeWorkspaceFixture(
     kbDirName: 'knowledge-base',
     fileTree: null,
     bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
     openTabs: [],
     activeTab: null,
     dirtyTabFilenames: [],

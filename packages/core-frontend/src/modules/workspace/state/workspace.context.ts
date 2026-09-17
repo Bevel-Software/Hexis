@@ -64,9 +64,25 @@ export interface WorkspaceContextValue {
    * leaves `workspaceId` on whatever it was, so without this a route could
    * only wait forever; `status` is the HTTP status the bootstrap answered
    * (410: the branch no longer exists on the git host), 0 for a transport
-   * failure. Cleared by the next successful bootstrap.
+   * failure, and `message` is what the failure said, so a screen can name it
+   * rather than only naming the branch. Cleared by the next successful
+   * bootstrap and by `retryBootstrap`.
    */
-  bootstrapError: { branch: string; status: number } | null;
+  bootstrapError: { branch: string; status: number; message: string } | null;
+  /**
+   * The branch `workspaceId` actually is, or null before the first bootstrap
+   * lands. Distinct from the branch a route is NAVIGATING to: mid-switch, the
+   * URL names the destination and this still names the workspace on screen.
+   * Anything keyed "per branch" off the live workspace (tab persistence) must
+   * use this, or it crosses one branch's content with another's key.
+   */
+  workspaceBranch: string | null;
+  /**
+   * Re-run the bootstrap for the branch currently asked for. Clears
+   * `bootstrapError` and starts again — the recovery behind the file page's
+   * Retry, so a 500 or a dropped connection doesn't need a page reload.
+   */
+  retryBootstrap: () => void;
 
   /** All tabs currently open in the editor strip. */
   openTabs: OpenTab[];

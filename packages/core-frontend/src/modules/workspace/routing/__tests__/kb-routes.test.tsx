@@ -5,10 +5,13 @@ import { WorkspaceContext } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { useFileNav, resolveKbHref } from '../kb-routes';
 
-// Capture what openFile navigates to.
+// Capture what openFile navigates to, and stand in for the URL it reads the
+// branch out of.
 const navigateMock = vi.hoisted(() => vi.fn());
+const routerMock = vi.hoisted(() => ({ pathname: '/' }));
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigateMock,
+  useLocation: () => ({ pathname: routerMock.pathname, search: '', hash: '', state: null, key: 'k' }),
 }));
 
 function gitOnBranch(branch: string): GitContextValue {
@@ -30,7 +33,17 @@ function gitOnBranch(branch: string): GitContextValue {
   };
 }
 
-function renderNav(branch: string, kbDirName: string | null = 'knowledge-base') {
+/**
+ * `branch` is what git status reports; `pathname` is the URL the app is on.
+ * They agree except mid-switch, which is what the switch tests below exercise.
+ * Default: a URL outside `/workspace`, so the status is the only branch there is.
+ */
+function renderNav(
+  branch: string,
+  kbDirName: string | null = 'knowledge-base',
+  pathname = '/',
+) {
+  routerMock.pathname = pathname;
   return renderHook(() => useFileNav(), {
     wrapper: ({ children }) => (
       <GitContext.Provider value={gitOnBranch(branch)}>
@@ -330,5 +343,55 @@ describe('useFileNav.openLink', () => {
     expect(navigateMock).toHaveBeenCalledWith(
       '/workspace/alice%2Fdraft/knowledge-base/Knowledge/Foo.md#overview',
     );
+  });
+});
+
+/**
+ * A tree click during a branch switch. `git.status.branch` reports the branch
+ * being LEFT until the destination workspace bootstraps and answers, so a
+ * click built from it landed the user back on the branch they were leaving —
+ * the switch appearing to undo itself. The URL is the authority for which
+ * branch is on screen, so the click follows it.
+ */
+describe('useFileNav: which branch a click lands on', () => {
+  it('opens on the branch the URL is switching TO, not the one git status still reports', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav(
+      'alice/draft',
+      'knowledge-base',
+      '/workspace/target-company-state/knowledge-base/Knowledge/Old.md',
+    );
+    result.current.openFile('knowledge-base/Knowledge/New.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/target-company-state/knowledge-base/Knowledge/New.md',
+    );
+  });
+
+  it('decodes the URL branch exactly once — the pathname is still encoded', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('main', 'knowledge-base', '/workspace/alice%2Fdraft/Knowledge/Old.md');
+    result.current.openFile('Knowledge/New.md');
+    // Decoded to `alice/draft`, then re-encoded canonically by kbFileUrl.
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/New.md');
+  });
+
+  it('a relative link during the same switch also follows the URL branch', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav(
+      'alice/draft',
+      'knowledge-base',
+      '/workspace/target-company-state/knowledge-base/Knowledge/Old.md',
+    );
+    result.current.openLink('./New.md', 'knowledge-base/Knowledge/Old.md');
+    expect(navigateMock).toHaveBeenCalledWith(
+      '/workspace/target-company-state/knowledge-base/Knowledge/New.md',
+    );
+  });
+
+  it('falls back to git status off a workspace route, where the URL names no branch', () => {
+    navigateMock.mockClear();
+    const { result } = renderNav('alice/draft', 'knowledge-base', '/library/skills');
+    result.current.openFile('Knowledge/New.md');
+    expect(navigateMock).toHaveBeenCalledWith('/workspace/alice%2Fdraft/Knowledge/New.md');
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
@@ -97,6 +97,25 @@ function TreeClickProbe() {
   );
 }
 
+/** Two tree clicks on the SAME branch, for the URL→URL→URL sequences. */
+function SameBranchClickProbe() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="click-foo"
+        onClick={() => navigate('/workspace/alice%2Fdraft/Knowledge/Foo.md')}
+      />
+      <button
+        type="button"
+        aria-label="click-baz"
+        onClick={() => navigate('/workspace/alice%2Fdraft/Knowledge/Baz.md')}
+      />
+    </>
+  );
+}
+
 function renderAt(
   url: string,
   opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
@@ -104,9 +123,10 @@ function renderAt(
   workspace: WorkspaceContextValue;
   git: GitContextValue;
   rerenderWorkspace: (next: WorkspaceContextValue) => void;
+  rerenderGit: (next: GitContextValue) => void;
 } {
   let workspace = opts.workspace ?? makeWorkspace();
-  const git = opts.git ?? makeGit();
+  let git = opts.git ?? makeGit();
   const review: ReviewContextValue = {
     session: null,
     selectedPath: null,
@@ -152,6 +172,7 @@ function renderAt(
         </Routes>
         <LocationProbe />
         <TreeClickProbe />
+        <SameBranchClickProbe />
       </Tree>
     </MemoryRouter>
   );
@@ -164,8 +185,15 @@ function renderAt(
       workspace = next;
       rerender(tree());
     },
+    rerenderGit: (next) => {
+      git = next;
+      rerender(tree());
+    },
   };
 }
+
+/** Let every pending microtask and effect settle, to assert something did NOT happen. */
+const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 30)); });
 
 beforeEach(() => {
   routesMock.fetchNodeId.mockReset().mockResolvedValue(null);
@@ -337,7 +365,7 @@ describe('FileRoute', () => {
   it('renders the branch-gone screen when the BOOTSTRAP of the URL branch answered 410', async () => {
     // No workspace ever came up for this branch: GET /workspace said the
     // branch is gone. The state surfaces that; the route must not sit waiting.
-    const workspace = makeWorkspace({ bootstrapError: { branch: 'alice/draft', status: 410 } });
+    const workspace = makeWorkspace({ bootstrapError: { branch: 'alice/draft', status: 410, message: 'Gone' } });
     const git = makeGit({ status: makeStatus('main') });
 
     renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
@@ -348,7 +376,7 @@ describe('FileRoute', () => {
   });
 
   it('a stale bootstrap failure from another branch does not paint over this one', async () => {
-    const workspace = makeWorkspace({ bootstrapError: { branch: 'someone/else', status: 410 } });
+    const workspace = makeWorkspace({ bootstrapError: { branch: 'someone/else', status: 410, message: 'Gone' } });
     const git = makeGit({ status: makeStatus('alice/draft') });
 
     renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
@@ -443,6 +471,239 @@ describe('FileRoute', () => {
 });
 
 /**
+ * The page is never silently blank. Every reason a file can fail to appear —
+ * a bootstrap that failed, a git status that won't answer, a read still in
+ * flight — has a screen that says so, and the ones that can recover have a
+ * Retry. The generic "Open a page to start reading." belongs to a URL that
+ * names no file, and to nothing else.
+ */
+describe('FileRoute: nothing waits silently', () => {
+  it('shows a bootstrap failure of ANY status, names the branch and the failure, and recovers on Retry', async () => {
+    const retryBootstrap = vi.fn();
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const git = makeGit({ status: makeStatus('alice/draft') });
+    const { rerenderWorkspace } = renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
+      git,
+      workspace: makeWorkspace({
+        bootstrapError: { branch: 'alice/draft', status: 500, message: 'HTTP 500' },
+        retryBootstrap,
+        hydrateTabs,
+      }),
+    });
+
+    expect(await screen.findByText(/Couldn't open alice\/draft/)).toBeInTheDocument();
+    // Names what failed, not just that something did.
+    expect(screen.getByText(/failed with HTTP 500/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(retryBootstrap).toHaveBeenCalledTimes(1);
+
+    // The retried bootstrap succeeds: the failure screen gives way to the file.
+    const tab = makeTab({ path: 'Knowledge/Foo.md' });
+    rerenderWorkspace(makeWorkspace({ openTabs: [tab], activeTab: tab, hydrateTabs }));
+    await waitFor(() => expect(screen.queryByText(/Couldn't open/)).not.toBeInTheDocument());
+  });
+
+  it('shows a failed FIRST bootstrap even though it is reported under the default branch', async () => {
+    // Nothing has asked for a branch yet, so the failure carries the default
+    // branch's name while the URL names another. There is still no workspace,
+    // so nothing can open until a bootstrap succeeds — say so.
+    const git = makeGit({ status: null, availability: 'loading' });
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
+      git,
+      workspace: makeWorkspace({
+        workspaceId: null,
+        bootstrapError: { branch: 'main', status: 0, message: 'Failed to fetch' },
+      }),
+    });
+
+    expect(await screen.findByText(/Couldn't open main/)).toBeInTheDocument();
+    expect(screen.getByText(/the request never completed/)).toBeInTheDocument();
+    expect(screen.getByText('Failed to fetch')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it('shows a failing git status refresh with a Retry rather than waiting on the next poll', async () => {
+    // The refresh failed, so the last branch we know of is the one we were on
+    // before, not the one the URL names. Reading now would read the wrong
+    // branch's file; waiting silently is what produced the blank page.
+    const refreshStatus = vi.fn(async () => null);
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    const git = makeGit({
+      status: makeStatus('alice/draft'),
+      availability: 'error',
+      lastError: 'branch-status: 503',
+      refreshStatus,
+    });
+
+    renderAt('/workspace/main/Knowledge/Foo.md', { git, workspace: makeWorkspace({ hydrateTabs }) });
+
+    expect(
+      await screen.findByText(/Couldn't check which branch this workspace is on/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText('branch-status: 503')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    await waitFor(() => expect(refreshStatus).toHaveBeenCalledTimes(1));
+    // Still no read against a workspace whose branch is unconfirmed.
+    expect(hydrateTabs).not.toHaveBeenCalled();
+  });
+
+  it('a failed status refresh on the branch we are ALREADY on is not an error screen', async () => {
+    // Same availability, but the last known branch is the URL's branch: the
+    // route knows which workspace it has and can read from it. A stale poll is
+    // no reason to take the file off the screen.
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const git = makeGit({
+      status: makeStatus('alice/draft'),
+      availability: 'error',
+      lastError: 'branch-status: 503',
+    });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace: makeWorkspace({ hydrateTabs }) });
+
+    await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
+    expect(
+      screen.queryByText(/Couldn't check which branch this workspace is on/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it('names the file it is opening while the read is in flight, instead of the generic empty state', async () => {
+    // The reported symptom: the URL names a file, the page says "Open a page
+    // to start reading." and shows no tab strip, for as long as the read takes.
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      () => new Promise(() => {}),
+    );
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace: makeWorkspace({ hydrateTabs }) });
+
+    expect(await screen.findByText(/Opening Foo\.md/)).toBeInTheDocument();
+    expect(screen.getByText('Knowledge/Foo.md')).toBeInTheDocument();
+    expect(screen.queryByText(/Open a page to start reading/i)).not.toBeInTheDocument();
+  });
+
+  it('names the file while the workspace itself is still bootstrapping', async () => {
+    const git = makeGit({ status: null, availability: 'loading' });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
+      git,
+      workspace: makeWorkspace({ workspaceId: null }),
+    });
+
+    expect(await screen.findByText(/Opening Foo\.md/)).toBeInTheDocument();
+    expect(screen.queryByText(/Open a page to start reading/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the generic empty state for a URL that names no file', async () => {
+    localStorage.clear();
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    const git = makeGit({ status: makeStatus('alice/draft') });
+
+    renderAt('/workspace/alice%2Fdraft', { git, workspace: makeWorkspace({ hydrateTabs }) });
+
+    expect(await screen.findByText(/Open a page to start reading/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Opening/)).not.toBeInTheDocument();
+  });
+
+  it('reads nothing until the git status for the URL branch is known', async () => {
+    // `gitStatusBranch=null` on every fresh browser session. The route used to
+    // fall straight through and read the URL's path out of whatever workspace
+    // the first bootstrap returned — a 404 for a file that exists, dropped.
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+    );
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
+    const workspace = makeWorkspace({ hydrateTabs, addTab });
+    const { rerenderGit } = renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
+      git: makeGit({ status: null, availability: 'loading' }),
+      workspace,
+    });
+
+    await settle();
+    expect(hydrateTabs).not.toHaveBeenCalled();
+    expect(addTab).not.toHaveBeenCalled();
+    expect(screen.getByText(/Opening Foo\.md/)).toBeInTheDocument();
+
+    // Status answers with the URL's branch — now the read may run.
+    rerenderGit(makeGit({ status: makeStatus('alice/draft') }));
+    await waitFor(() => expect(hydrateTabs).toHaveBeenCalled());
+  });
+
+  it('never reads the URL path out of a workspace serving another branch', async () => {
+    // Status says the workspace is on `alice/draft`; the URL is on `main`. The
+    // only correct move is to re-bootstrap, never to read `main`'s path here.
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
+    const setPersistenceBranch = vi.fn();
+
+    renderAt('/workspace/main/Knowledge/Foo.md', {
+      git: makeGit({ status: makeStatus('alice/draft') }),
+      workspace: makeWorkspace({ hydrateTabs, addTab, setPersistenceBranch }),
+    });
+
+    await waitFor(() => expect(setPersistenceBranch).toHaveBeenCalledWith('main'));
+    await settle();
+    expect(hydrateTabs).not.toHaveBeenCalled();
+    expect(addTab).not.toHaveBeenCalled();
+    // And it says what it is doing rather than showing the empty state.
+    expect(screen.getByText(/Opening Foo\.md/)).toBeInTheDocument();
+  });
+
+  it('re-asserts the URL file through addTab even when it is ALREADY the open tab', async () => {
+    // `addTab` on an open tab costs no read, and it is the only way to mark
+    // this open as the latest — without it an older in-flight read still
+    // counted as latest and activated its own file when it landed, leaving the
+    // URL naming one file and the screen showing another.
+    const tab = makeTab({ path: 'Knowledge/Foo.md' });
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
+    const workspace = makeWorkspace({
+      openTabs: [tab],
+      activeTab: tab,
+      addTab,
+      // Pretend hydration already ran for this (workspace, branch).
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(
+        async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+      ),
+    });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', {
+      git: makeGit({ status: makeStatus('alice/draft') }),
+      workspace,
+      canonicalize: false,
+    });
+
+    await waitFor(() => expect(workspace.hydrateTabs).toHaveBeenCalled());
+
+    // Click another file, then click straight back onto the one already open.
+    fireEvent.click(screen.getByLabelText('click-baz'));
+    await waitFor(() => expect(addTab).toHaveBeenCalledWith('Knowledge/Baz.md'));
+    fireEvent.click(screen.getByLabelText('click-foo'));
+
+    await waitFor(() => expect(addTab).toHaveBeenCalledWith('Knowledge/Foo.md'));
+    // The LAST thing the route asked for is the file the URL names.
+    expect(addTab.mock.calls.at(-1)?.[0]).toBe('Knowledge/Foo.md');
+  });
+
+  it('shows a 404 from a hydration whose branch matches the URL, rather than dropping it', async () => {
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(
+      async () => makeHydrateResult({ dropped: ['Knowledge/Gone.md'] }),
+    );
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Gone.md', {
+      git: makeGit({ status: makeStatus('alice/draft') }),
+      workspace: makeWorkspace({ hydrateTabs }),
+    });
+
+    expect(await screen.findByText(/File not found/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Opening Gone\.md/)).not.toBeInTheDocument();
+  });
+});
+
+/**
  * `?trace=files` — the reproduction diagnostics for a click that changes the
  * URL but leaves the page blank. They log which gate held the page and change
  * nothing about what it does.
@@ -470,7 +731,7 @@ describe('FileRoute: ?trace=files diagnostics', () => {
     const workspace = makeWorkspace({
       hydrateTabs,
       setPersistenceBranch,
-      bootstrapError: { branch: 'main', status: 500 },
+      bootstrapError: { branch: 'main', status: 500, message: 'Internal Server Error' },
       openTabs: [makeTab({ path: 'Knowledge/Old.md' })],
     });
     const git = makeGit({ status: makeStatus('alice/draft') });
@@ -484,10 +745,12 @@ describe('FileRoute: ?trace=files diagnostics', () => {
       branchFromUrl: 'main',
       pathFromUrl: 'Knowledge/Foo.md',
       gitStatusBranch: 'alice/draft',
-      bootstrapError: { branch: 'main', status: 500 },
+      bootstrapError: { branch: 'main', status: 500, message: 'Internal Server Error' },
       openTabs: ['Knowledge/Old.md'],
     });
-    // Behaviour unchanged: still waiting, still nothing on screen to say why.
+    // Still no read against a workspace on the wrong branch — but the page now
+    // says so rather than sitting on the empty state (see the bootstrap-failure
+    // screen tests above).
     expect(hydrateTabs).not.toHaveBeenCalled();
   });
 
@@ -546,11 +809,11 @@ describe('FileRoute: ?trace=files diagnostics', () => {
     await waitFor(() => {
       expect(traceCalls(info).some((c) => c.event === 'wait:no-workspace')).toBe(true);
     });
-    rerenderWorkspace(makeWorkspace({ workspaceId: null, bootstrapError: { branch: 'main', status: 500 } }));
+    rerenderWorkspace(makeWorkspace({ workspaceId: null, bootstrapError: { branch: 'main', status: 500, message: 'Internal Server Error' } }));
 
     await waitFor(() => {
       const waits = traceCalls(info).filter((c) => c.event === 'wait:no-workspace');
-      expect(waits.at(-1)?.fields).toMatchObject({ bootstrapError: { branch: 'main', status: 500 } });
+      expect(waits.at(-1)?.fields).toMatchObject({ bootstrapError: { branch: 'main', status: 500, message: 'Internal Server Error' } });
     });
 
     // A file click while the workspace is still missing logs the new URL.
@@ -562,6 +825,84 @@ describe('FileRoute: ?trace=files diagnostics', () => {
         pathFromUrl: 'Knowledge/Bar.md',
       });
     });
+  });
+
+  it('logs the wait for a git status that has not answered yet', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const hydrateTabs = vi.fn<WorkspaceContextValue['hydrateTabs']>(async () => makeHydrateResult());
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', {
+      git: makeGit({ status: null, availability: 'loading' }),
+      workspace: makeWorkspace({ hydrateTabs }),
+    });
+
+    await waitFor(() =>
+      expect(traceCalls(info).some((c) => c.event === 'wait:git-status')).toBe(true),
+    );
+    expect(traceCalls(info).find((c) => c.event === 'wait:git-status')?.fields).toMatchObject({
+      branchFromUrl: 'alice/draft',
+      pathFromUrl: 'Knowledge/Foo.md',
+      gitStatusBranch: null,
+    });
+    expect(hydrateTabs).not.toHaveBeenCalled();
+  });
+
+  it('names the screen that won, so the console says what the reader is looking at', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', {
+      git: makeGit({ status: makeStatus('alice/draft') }),
+      workspace: makeWorkspace({
+        bootstrapError: { branch: 'alice/draft', status: 500, message: 'HTTP 500' },
+      }),
+    });
+
+    await waitFor(() =>
+      expect(traceCalls(info).some((c) => c.event === 'screen')).toBe(true),
+    );
+    expect(traceCalls(info).filter((c) => c.event === 'screen').at(-1)?.fields)
+      .toMatchObject({ screen: 'bootstrap-failed' });
+  });
+
+  it('logs the loading screen, naming the file it is waiting on', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', {
+      git: makeGit({ status: makeStatus('alice/draft') }),
+      workspace: makeWorkspace({
+        hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(() => new Promise(() => {})),
+      }),
+    });
+
+    await waitFor(() => {
+      const last = traceCalls(info).filter((c) => c.event === 'screen').at(-1);
+      expect(last?.fields).toMatchObject({ screen: 'loading', loadingFile: 'Knowledge/Foo.md' });
+    });
+  });
+
+  it('logs the re-assertion of a file that is already open', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const tab = makeTab({ path: 'Knowledge/Foo.md' });
+    const addTab = vi.fn<WorkspaceContextValue['addTab']>(async () => true);
+    const workspace = makeWorkspace({
+      openTabs: [tab],
+      activeTab: tab,
+      addTab,
+      hydrateTabs: vi.fn<WorkspaceContextValue['hydrateTabs']>(
+        async () => makeHydrateResult({ surviving: ['Knowledge/Foo.md'] }),
+      ),
+    });
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md?trace=files', {
+      git: makeGit({ status: makeStatus('alice/draft') }),
+      workspace,
+      canonicalize: false,
+    });
+
+    await waitFor(() => expect(workspace.hydrateTabs).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText('click-baz'));
+    await waitFor(() => expect(addTab).toHaveBeenCalledWith('Knowledge/Baz.md'));
+    fireEvent.click(screen.getByLabelText('click-foo'));
+
+    await waitFor(() =>
+      expect(traceCalls(info).some((c) => c.event === 'add-tab:already-open')).toBe(true),
+    );
   });
 
   it('logs nothing without the flag', async () => {
