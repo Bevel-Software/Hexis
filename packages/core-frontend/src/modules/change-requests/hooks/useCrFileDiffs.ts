@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { DEFAULT_BRANCH, type PullRequestSummary } from '@bevel-software/platform-shared';
+import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { readFileAtForkPoint, readFileOnBranch, type ForkPointFile } from '../services/change-requests.api';
 import { PR_STALE_EVENT } from '../../../core/events';
 import { isBinaryFile } from '../../workspace/components/renderers';
@@ -18,12 +18,14 @@ import { diffLines, hasChanges, type DiffLine } from '../utils/diff';
  * the newer edit.) The request dialog reads the same fork point, so the box and
  * the whole-change view never disagree about what a request does.
  *
- * Main's text is the "before" in exactly one case: branches with no shared
- * history have no fork point to read, and the tip is the only text left. That
- * read is made HERE, and only once a fork read comes back without a fork
- * point, so it carries the same generation as the two sides it joins — a main
- * copy passed in from the page would keep whatever moment the page last read
- * it at, and pair a fresh branch copy with a stale target.
+ * The TARGET branch's text is the "before" in exactly one case: branches with
+ * no shared history have no fork point to read, and the target's tip is the
+ * only text left. That read is made HERE — against the request's own
+ * `base`, which is not always the default branch — and only once a fork read
+ * comes back without a fork point, so it carries the same generation as the
+ * two sides it joins. A copy passed in from the page would keep whatever
+ * moment the page last read it at, and pair a fresh branch copy with a stale
+ * target.
  *
  * Branch reads are keyed by CR number + path + revision so a tab switch or a
  * reload can never show the previous file's diff under this file's heading.
@@ -62,7 +64,7 @@ export function useCrFileDiffs(
   /** Requests already made, so a failed read is not retried on every render. */
   const asked = useRef<Set<string>>(new Set());
   const forkAsked = useRef<Set<string>>(new Set());
-  const mainAsked = useRef<Set<string>>(new Set());
+  const targetAsked = useRef<Set<string>>(new Set());
   /**
    * Bumped when something moved a request — an apply, a cancel, an Update.
    * Both sides are re-read: a request that moved has a new head as well as a
@@ -73,7 +75,7 @@ export function useCrFileDiffs(
     const onStale = () => {
       asked.current.clear();
       forkAsked.current.clear();
-      mainAsked.current.clear();
+      targetAsked.current.clear();
       setStaleEpoch((e) => e + 1);
     };
     window.addEventListener(PR_STALE_EVENT, onStale);
@@ -87,7 +89,13 @@ export function useCrFileDiffs(
   );
   const key = (n: number) => `${n}::${repoRelativePath}::${revision}::${staleEpoch}`;
   const forkKey = (n: number) => `${n}::${repoRelativePath}::${staleEpoch}`;
-  const mainKey = `${repoRelativePath}::${staleEpoch}`;
+  /**
+   * The fallback read is keyed by the TARGET BRANCH, not just the path: a
+   * request does not have to target the default branch, and two requests on
+   * one file can aim at different ones. Keying by path alone served whichever
+   * target happened to be read first to every no-history request on the file.
+   */
+  const targetKey = (base: string) => `target:${base}::${repoRelativePath}::${staleEpoch}`;
   const wanted = relevant.map((c) => `${c.number}|${c.branch}`).join(',');
 
   /**
@@ -107,7 +115,7 @@ export function useCrFileDiffs(
     liveKeys.current = new Set([
       ...relevant.map((cr) => key(cr.number)),
       ...relevant.map((cr) => forkKey(cr.number)),
-      mainKey,
+      ...relevant.map((cr) => targetKey(cr.base)),
     ]);
     // Declared BEFORE the read effect so it has already run when those reads
     // are started, and so before any of their answers can arrive.
@@ -125,7 +133,7 @@ export function useCrFileDiffs(
     // boxes render their own binary notice instead of a diff.
     if (isBinaryFile(repoRelativePath)) return;
     // The guards are refs, so they outlive the generation that filled them.
-    for (const set of [asked.current, forkAsked.current, mainAsked.current]) {
+    for (const set of [asked.current, forkAsked.current, targetAsked.current]) {
       for (const k of [...set]) if (!live(k)) set.delete(k);
     }
     for (const cr of relevant) {
@@ -161,20 +169,21 @@ export function useCrFileDiffs(
           setForkReads((m) => prunedMap(m).set(fk, read));
           // No fork point (no shared history): main's tip is the only "before"
           // left, and it is read now, under this generation's key.
-          if (read.forkSha === null && !mainAsked.current.has(mainKey)) {
-            mainAsked.current.add(mainKey);
-            readFileOnBranch(DEFAULT_BRANCH, repoRelativePath)
+          const tk = targetKey(cr.base);
+          if (read.forkSha === null && !targetAsked.current.has(tk)) {
+            targetAsked.current.add(tk);
+            readFileOnBranch(cr.base, repoRelativePath)
               .then((content) => {
-                if (live(mainKey)) setContents((m) => prunedMap(m).set(mainKey, content));
+                if (live(tk)) setContents((m) => prunedMap(m).set(tk, content));
               })
               .catch((err: unknown) => {
-                if (!live(mainKey)) return;
-                // Absent on main is a real answer: the request adds the file.
+                if (!live(tk)) return;
+                // Absent on the target is a real answer: the request adds the file.
                 if (err instanceof WorkspaceApiError && err.status === 404) {
-                  setContents((m) => prunedMap(m).set(mainKey, ''));
+                  setContents((m) => prunedMap(m).set(tk, ''));
                   return;
                 }
-                setFailed((s) => prunedSet(s).add(mainKey));
+                setFailed((s) => prunedSet(s).add(tk));
               });
           }
         })
@@ -199,7 +208,7 @@ export function useCrFileDiffs(
       if (
         failed.has(key(cr.number)) ||
         failed.has(forkKey(cr.number)) ||
-        (noSharedHistory && failed.has(mainKey))
+        (noSharedHistory && failed.has(targetKey(cr.base)))
       ) {
         out.set(cr.number, 'unreadable');
         continue;
@@ -211,7 +220,7 @@ export function useCrFileDiffs(
         fork === undefined
           ? null
           : noSharedHistory
-            ? (contents.get(mainKey) ?? null)
+            ? (contents.get(targetKey(cr.base)) ?? null)
             : (fork.content ?? '');
       if (before === null || branchRaw === undefined) {
         out.set(cr.number, null);

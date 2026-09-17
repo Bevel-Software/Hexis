@@ -21,7 +21,12 @@ const PATH = 'Sales/deal.yaml';
 const ORIGINAL = 'price: 100\nstatus: draft\n';
 const MAIN_NOW = 'price: 100\nstatus: signed\n'; // edited on main after the proposal
 const PROPOSED = 'price: 120\nstatus: draft\n';
-const CR = { number: 21, branch: 'alice/deal', touchedNodePaths: [PATH] } as unknown as PullRequestSummary;
+const CR = {
+  number: 21,
+  branch: 'alice/deal',
+  base: DEFAULT_BRANCH,
+  touchedNodePaths: [PATH],
+} as unknown as PullRequestSummary;
 
 const lines = (d: { kind: string; text: string }[] | null | undefined | 'unreadable', kind: string) =>
   (d === 'unreadable' ? [] : (d ?? [])).filter((l) => l.kind === kind).map((l) => l.text);
@@ -136,28 +141,28 @@ describe('useCrFileDiffs', () => {
     expect(lines(result.current.get(21), 'added')).toEqual(['price: 120', 'status: draft']);
   });
 
-  it('branches with no shared history fall back to main — the only text left', async () => {
+  it('branches with no shared history fall back to the target — the only text left', async () => {
     api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: null });
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
     expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100', 'status: signed']);
-    // Main is read HERE, under this generation — and only because there was no
-    // fork point to read instead.
+    // The target is read HERE, under this generation — and only because there
+    // was no fork point to read instead.
     expect(api.readFileOnBranch).toHaveBeenCalledWith(DEFAULT_BRANCH, PATH);
   });
 
-  it('never reads main for a request that has a fork point', async () => {
+  it('never reads the target for a request that has a fork point', async () => {
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
     expect(api.readFileOnBranch).not.toHaveBeenCalledWith(DEFAULT_BRANCH, PATH);
   });
 
-  it('a stale event re-reads main too, so an unrelated-history box never pairs two moments', async () => {
+  it('a stale event re-reads the target too, so an unrelated-history box never pairs two moments', async () => {
     api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: null });
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
 
-    // Main moved on, and so did the proposal.
+    // The target moved on, and so did the proposal.
     api.readFileOnBranch.mockImplementation(async (branch: string) =>
       branch === DEFAULT_BRANCH ? 'price: 100\nstatus: closed\n' : 'price: 140\nstatus: closed\n',
     );
@@ -167,7 +172,7 @@ describe('useCrFileDiffs', () => {
     await waitFor(() =>
       expect(lines(result.current.get(21), 'added')).toEqual(['price: 140']),
     );
-    // Against main as it stands NOW: its own 'status: closed' is not a deletion.
+    // Against the target as it stands NOW: its 'status: closed' is not a deletion.
     expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100']);
   });
 
@@ -189,5 +194,45 @@ describe('useCrFileDiffs', () => {
     api.readFileOnBranch.mockRejectedValue(new Error('403'));
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).toBe('unreadable'));
+  });
+  it("reads the request's OWN target, not the default branch", async () => {
+    // A proposal against a non-default target with no shared history: its
+    // "before" is that target's tip. Reading the default branch would show it
+    // changes someone else's file.
+    const RELEASE = 'release-2027';
+    const onRelease = { ...CR, number: 22, base: RELEASE } as unknown as PullRequestSummary;
+    api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: null });
+    api.readFileOnBranch.mockImplementation(async (branch: string) =>
+      branch === RELEASE ? 'price: 90\nstatus: draft\n' : branch === DEFAULT_BRANCH ? MAIN_NOW : PROPOSED,
+    );
+    const { result } = renderHook(() => useCrFileDiffs([onRelease], PATH));
+    await waitFor(() => expect(result.current.get(22)).not.toBeNull());
+
+    expect(api.readFileOnBranch).toHaveBeenCalledWith(RELEASE, PATH);
+    expect(api.readFileOnBranch).not.toHaveBeenCalledWith(DEFAULT_BRANCH, PATH);
+    // Diffed against the release tip: only the price moved.
+    expect(lines(result.current.get(22), 'removed')).toEqual(['price: 90']);
+    expect(lines(result.current.get(22), 'added')).toEqual(['price: 120']);
+  });
+
+  it('two no-history requests on one file never share a target read', async () => {
+    const RELEASE = 'release-2027';
+    const onRelease = { ...CR, number: 22, branch: 'bo/deal', base: RELEASE } as unknown as PullRequestSummary;
+    api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: null });
+    api.readFileOnBranch.mockImplementation(async (branch: string) =>
+      branch === RELEASE
+        ? 'price: 90\nstatus: draft\n'
+        : branch === DEFAULT_BRANCH
+          ? MAIN_NOW
+          : PROPOSED,
+    );
+    const { result } = renderHook(() => useCrFileDiffs([CR, onRelease], PATH));
+    await waitFor(() => expect(result.current.get(21)).not.toBeNull());
+    await waitFor(() => expect(result.current.get(22)).not.toBeNull());
+
+    // Each box against ITS own target: main's 'status: signed' for one, the
+    // release's 'price: 90' for the other.
+    expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100', 'status: signed']);
+    expect(lines(result.current.get(22), 'removed')).toEqual(['price: 90']);
   });
 });
