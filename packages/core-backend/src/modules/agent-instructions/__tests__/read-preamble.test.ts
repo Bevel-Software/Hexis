@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { readAgentPreamble, type PreambleWorkspace } from '../read-preamble.js';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+
+/** The one disk, as production wires it. */
+const disk = new NodeFs();
 
 /**
  * The reader against a real directory: a regular file is read, an absent one
@@ -38,7 +42,7 @@ describe('readAgentPreamble', () => {
   it('reads the default branch copy at <kbDirName>/mcp-description.md, creating the workspace first', async () => {
     await fs.writeFile(path.join(wsDir, KB, 'mcp-description.md'), 'Acme.\n', 'utf8');
     const ws = workspace();
-    expect(await readAgentPreamble(ws, KB)).toBe('Acme.\n');
+    expect(await readAgentPreamble(ws, KB, disk)).toBe('Acme.\n');
     expect(ws.getOrCreateForBranch).toHaveBeenCalledWith(DEFAULT_BRANCH);
     expect(ws.getWorkspacePath).toHaveBeenCalledWith(workspaceIdForBranch(DEFAULT_BRANCH));
   });
@@ -46,19 +50,19 @@ describe('readAgentPreamble', () => {
   it("spells the path with the deployment's own KB dir name", async () => {
     await fs.mkdir(path.join(wsDir, 'kb'), { recursive: true });
     await fs.writeFile(path.join(wsDir, 'kb', 'mcp-description.md'), 'Renamed root.', 'utf8');
-    expect(await readAgentPreamble(workspace(), 'kb')).toBe('Renamed root.');
-    expect(await readAgentPreamble(workspace(), KB)).toBeNull(); // the default-named root has none
+    expect(await readAgentPreamble(workspace(), 'kb', disk)).toBe('Renamed root.');
+    expect(await readAgentPreamble(workspace(), KB, disk)).toBeNull(); // the default-named root has none
   });
 
-  it('only ENOENT is an absence', async () => {
-    expect(await readAgentPreamble(workspace(), KB)).toBeNull();
+  it('a file that is not there is an absence, not a fault', async () => {
+    expect(await readAgentPreamble(workspace(), KB, disk)).toBeNull();
   });
 
   it('refuses a symlink: the secret it points at is never read, and it is not an absence either', async () => {
     const secret = path.join(root, 'secret.txt');
     await fs.writeFile(secret, 'DATABASE_URL=postgres://…', 'utf8');
     await fs.symlink(secret, path.join(wsDir, KB, 'mcp-description.md'));
-    await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/symlink, not a regular file/);
+    await expect(readAgentPreamble(workspace(), KB, disk)).rejects.toThrow(/symlink, not a regular file/);
   });
 
   it('refuses a repository folder reached through a link — the whole path must be its own, not only the file', async () => {
@@ -68,7 +72,7 @@ describe('readAgentPreamble', () => {
     await fs.writeFile(path.join(elsewhere, 'mcp-description.md'), 'Not the repository.', 'utf8');
     await fs.rm(path.join(wsDir, KB), { recursive: true });
     await fs.symlink(elsewhere, path.join(wsDir, KB), process.platform === 'win32' ? 'junction' : 'dir');
-    await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/through a symlink/);
+    await expect(readAgentPreamble(workspace(), KB, disk)).rejects.toThrow(/through a symlink/);
   });
 
   it('reads through a link ABOVE the workspace — a mounted volume is the operator\'s, not the repository\'s', async () => {
@@ -77,20 +81,39 @@ describe('readAgentPreamble', () => {
     await fs.symlink(wsDir, mount, process.platform === 'win32' ? 'junction' : 'dir');
     const ws = workspace();
     ws.getWorkspacePath.mockImplementation(async () => mount);
-    expect(await readAgentPreamble(ws, KB)).toBe('Acme.\n');
+    expect(await readAgentPreamble(ws, KB, disk)).toBe('Acme.\n');
   });
 
   it('refuses a directory squatting the name', async () => {
     await fs.mkdir(path.join(wsDir, KB, 'mcp-description.md'));
-    await expect(readAgentPreamble(workspace(), KB)).rejects.toThrow(/directory, not a regular file/);
+    await expect(readAgentPreamble(workspace(), KB, disk)).rejects.toThrow(/directory, not a regular file/);
+  });
+
+  it('a KB directory that is a regular file is an ABSENT preamble, the shared rule for "nothing can be there"', async () => {
+    // The lstat below it fails with ENOTDIR. Nothing can live under a regular
+    // file, so this is absence — the same answer every other reader in the
+    // platform gives it (see `isAbsence`), not a fault to broadcast. A root
+    // squatted this way is the startup phase's to refuse, loudly, once.
+    await fs.rm(path.join(wsDir, KB), { recursive: true });
+    await fs.writeFile(path.join(wsDir, KB), 'not a directory', 'utf8');
+    expect(await readAgentPreamble(workspace(), KB, disk)).toBeNull();
   });
 
   it('an lstat that fails for any reason but absence throws, never an empty preamble', async () => {
-    // The KB dir is a regular file, so the lstat of the path beneath it fails
-    // with ENOTDIR: a real filesystem error that is not ENOENT.
-    await fs.rm(path.join(wsDir, KB), { recursive: true });
-    await fs.writeFile(path.join(wsDir, KB), 'not a directory', 'utf8');
-    await expect(readAgentPreamble(workspace(), KB)).rejects.toMatchObject({ code: 'ENOTDIR' });
+    // A disk fault (EACCES here) must never masquerade as "no preamble": the
+    // admin wrote one, and answering null would silently drop it from every
+    // agent session. Spied rather than staged, so the property holds on
+    // every platform.
+    const real = fs.lstat;
+    const spy = vi.spyOn(fs, 'lstat').mockImplementation(((p: string) =>
+      String(p).endsWith('mcp-description.md')
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (p: string) => Promise<unknown>).call(fs, p)) as never);
+    try {
+      await expect(readAgentPreamble(workspace(), KB, disk)).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Root reads a mode-000 file, and Windows has no mode bits to deny with, so neither can make the open fail.
@@ -98,7 +121,7 @@ describe('readAgentPreamble', () => {
     const file = path.join(wsDir, KB, 'mcp-description.md');
     await fs.writeFile(file, 'Acme.', 'utf8');
     await fs.chmod(file, 0o000); // the lstat still passes; the open is what fails
-    await expect(readAgentPreamble(workspace(), KB)).rejects.toMatchObject({ code: 'EACCES' });
+    await expect(readAgentPreamble(workspace(), KB, disk)).rejects.toMatchObject({ code: 'EACCES' });
   });
 
   it('a workspace that cannot be located throws too', async () => {
@@ -107,6 +130,6 @@ describe('readAgentPreamble', () => {
     ws.getWorkspacePath.mockImplementation(async () => {
       throw eio;
     });
-    await expect(readAgentPreamble(ws, KB)).rejects.toBe(eio);
+    await expect(readAgentPreamble(ws, KB, disk)).rejects.toBe(eio);
   });
 });

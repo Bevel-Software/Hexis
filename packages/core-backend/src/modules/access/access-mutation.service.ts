@@ -25,7 +25,8 @@
  *     no last-owner guard and no self-lockout guard. `owner` names who validates a
  *     file/folder, not a stronger privilege tier, so removing the last owner
  *     creates no lockout; and a user may drop their own access (including write),
- *     since admins keep rescue access regardless.
+ *     since admins keep rescue access regardless. The one refusal: the Admin
+ *     role's write at the repository root (see `removesAdminRootWrite`).
  *
  * Paths in/out of this service are REPO-RELATIVE (e.g. `Knowledge/Sales`,
  * `Knowledge/Sales/Deal.md`). The route strips the `<kbDirName>/` prefix once at
@@ -36,8 +37,10 @@ import path from 'node:path';
 
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import {
   type Verb,
+  ADMIN_CANONICAL,
   KNOWN_VERBS,
   ROLE_TOKEN_PREFIX,
   canonicalRoleName,
@@ -69,6 +72,44 @@ export class AccessMutationError extends WorkflowDomainError {
  */
 export function accessMdPathForFolder(repoRelDir: string): string {
   return repoRelDir ? `${repoRelDir}/access.md` : 'access.md';
+}
+
+/** The refusal for a mutation that would take Admin's write away at the repository root. */
+export const ADMIN_ROOT_WRITE_MESSAGE =
+  'Admins always keep write access at the root so the deployment cannot lock itself out.';
+
+/**
+ * Whether revoking or denying `principal` on `verb` (absent = every verb) at
+ * this target touches the Admin ROLE's write at the repository root — the
+ * root folder's `access.md`, or a file directly in the root. The resolver
+ * ignores such a rule anyway (the Admin write floor), so writing it would only
+ * leave a line that says something the app does not do. A bare token matched
+ * `exact` is a group's (or a shadowed name's), never the Admin role. Targets
+ * arrive in one spelling: the routes refuse `.` and `..` segments.
+ */
+export function removesAdminRootWrite(
+  kind: TargetKind,
+  repoRelTarget: string,
+  principal: Principal,
+  verb: Verb | undefined,
+  tokenMatch: TokenMatch,
+): boolean {
+  if (principal.kind !== 'role') return false;
+  if (!touchesRootWrite(kind, repoRelTarget, verb)) return false;
+  const canonical = canonicalRoleName(principal.role);
+  const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
+  if (!explicit && tokenMatch === 'exact') return false;
+  return (explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical) === ADMIN_CANONICAL;
+}
+
+/** Whether a mutation on `verb` (absent = every verb) at this target reaches write at the repository root. */
+function touchesRootWrite(kind: TargetKind, repoRelTarget: string, verb: Verb | undefined): boolean {
+  if (verb !== undefined && verb !== 'write') return false;
+  return kind === 'folder' ? repoRelTarget === '' : !repoRelTarget.includes('/');
+}
+
+function adminRootWriteRefusal(): AccessMutationError {
+  return new AccessMutationError(ADMIN_ROOT_WRITE_MESSAGE, 403, { kind: 'admin-root-write' });
 }
 
 /**
@@ -115,10 +156,7 @@ export class AccessMutationService {
     try {
       return await this.workspaceService.readFile(workspaceId, wsRelative);
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (allowMissing && (code === 'ENOENT' || code === 'ENOTDIR')) {
-        return '';
-      }
+      if (allowMissing && isAbsence(err)) return '';
       throw err;
     }
   }
@@ -243,6 +281,7 @@ export class AccessMutationService {
     const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
     let next = original;
     let changed = false;
+    let writeRemoved = false;
     try {
       const verbsToRevoke = verb ? [verb] : KNOWN_VERBS;
       for (const v of verbsToRevoke) {
@@ -252,9 +291,16 @@ export class AccessMutationService {
         });
         next = r.text;
         changed = changed || r.changed;
+        writeRemoved = writeRemoved || (v === 'write' && r.changed);
       }
     } catch (err) {
       throw this.toMutationError(err);
+    }
+    // Refused only when an Admin write entry would really go: a whole-row
+    // Remove at a root that grants Admin other verbs but no write line (write
+    // comes from the floor) strips those verbs as usual.
+    if (writeRemoved && removesAdminRootWrite(kind, repoRelTarget, principal, verb, tokenMatch)) {
+      throw adminRootWriteRefusal();
     }
     if (!changed) return { changed: false, editPath };
 
@@ -312,6 +358,19 @@ export class AccessMutationService {
     // Same shadowing-aware matching as revoke(): the strip must not swallow a
     // same-named OTHER principal's grant (bare = group vs role/<name> = role).
     const tokenMatch = opts?.tokenMatch ?? (await this.revokeTokenMatch(workspaceId, principal));
+    if (removesAdminRootWrite(kind, repoRelTarget, principal, verb, tokenMatch)) {
+      throw adminRootWriteRefusal();
+    }
+    // A PERSON who is an admin keeps root write through the floor, so a deny
+    // there could only be rolled back as "ineffective" — refuse it up front
+    // with the reason instead.
+    if (
+      principal.kind === 'user' &&
+      touchesRootWrite(kind, repoRelTarget, verb) &&
+      (await this.accessControl.holdsAdminRootWrite(workspaceId, principal.email))
+    ) {
+      throw adminRootWriteRefusal();
+    }
     let next = original;
     try {
       for (const v of verbsToDeny) {

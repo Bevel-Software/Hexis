@@ -70,6 +70,13 @@ export interface PluginSummary {
    * "Private" mark on the row. Absent from an older server.
    */
   isPrivate?: boolean;
+  /**
+   * What the platform left out of this plugin's definition and why, in
+   * plain words — an MCP server its profile selects that could not be kept,
+   * a skill root that is not a folder. Shown on the plugin's page, counted
+   * as attention on its row. Absent from an older server.
+   */
+  warnings?: string[];
   /** The caller has an OPEN join change request for this plugin. */
   hasRequested: boolean;
   /** That CR's number when `hasRequested` (deep-links the review UI). */

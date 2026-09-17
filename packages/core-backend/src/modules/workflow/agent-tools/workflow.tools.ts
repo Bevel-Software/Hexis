@@ -6,7 +6,12 @@ import { toolDef, withBranchInput } from '../../tool-helpers/tool-def.js';
 import type { ToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import { requireInternalSource } from '../../tool-auth/tool-auth.middleware.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
-import { assertInsideRepo } from '../../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../../kb-fs/repo-path.js';
+
+/** `knowledge-base/KnowledgeBase/x.md` → `KnowledgeBase/x.md`; anything else unchanged. */
+function stripKbDir(path: string, kbDirName: string): string {
+  return path.startsWith(`${kbDirName}/`) ? path.slice(kbDirName.length + 1) : path;
+}
 
 // A function, not a constant: the branch model is applied during boot, and a
 // module-scope capture would freeze this at the empty set that exists before it.
@@ -71,11 +76,33 @@ const commentSchema: JsonSchema = {
   required: ['id', 'author', 'body', 'headSha', 'createdAt'],
 };
 
+const changeRequestUrlSchema: JsonSchema = {
+  type: 'string',
+  description:
+    'Link a person can open: absolute (`https://<public address>/change-requests/<number>`) when the deployment ' +
+    'has a public address configured, else the relative in-app path (with `urlNote`).',
+};
+const changeRequestUrlNoteSchema: JsonSchema = { type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
+
+/** The link to a change request, for a tool whose payload is not the change request itself. */
+const changeRequestLinkSchema: JsonSchema = {
+  type: 'object',
+  properties: { number: { type: 'integer' }, url: changeRequestUrlSchema, urlNote: changeRequestUrlNoteSchema },
+  required: ['number', 'url'],
+};
+
+/** `{ number, url, urlNote? }` of a change request summary or detail. */
+function linkOf(cr: { number: number; url: string; urlNote?: string }): { number: number; url: string; urlNote?: string } {
+  return { number: cr.number, url: cr.url, ...(cr.urlNote ? { urlNote: cr.urlNote } : {}) };
+}
+
 const changeRequestDetailSchema: JsonSchema = {
   type: 'object',
   description: 'Full change-request detail (aliased from the underlying pull request).',
   properties: {
     number: { type: 'integer' },
+    url: changeRequestUrlSchema,
+    urlNote: changeRequestUrlNoteSchema,
     title: { type: 'string' },
     body: { type: 'string' },
     author: { type: 'object', properties: { login: { type: 'string' }, name: { type: 'string' } }, required: ['login'] },
@@ -85,7 +112,7 @@ const changeRequestDetailSchema: JsonSchema = {
     comments: { type: 'array', items: commentSchema },
     approvals: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Per-file approval state, one entry per file in `files`.' },
   },
-  required: ['number', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
+  required: ['number', 'url', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
   additionalProperties: true,
 };
 
@@ -153,7 +180,9 @@ export function registerWorkflowTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      toolHandler(spec.handler, { write: spec.write }),
+      // A leading slash is the root-anchored form Copy path gives and names
+      // the same workspace path — normalised once here, for every path input.
+      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args), ctx), { write: spec.write }),
     );
   };
 
@@ -228,7 +257,7 @@ export function registerWorkflowTools(
         path: {
           type: 'string',
           minLength: 1,
-          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).`,
+          description: `Workspace-relative path, as write_file expects: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash.`,
         },
       },
       required: ['path'],
@@ -376,7 +405,7 @@ export function registerWorkflowTools(
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
         body: { type: 'string', minLength: 1, description: 'Comment body (Markdown).' },
-        path: { type: 'string', description: 'Workspace-relative path for a file-level/inline comment.' },
+        path: { type: 'string', description: `Repository-relative path of the changed file for a file-level/inline comment (e.g. \`KnowledgeBase/Foo.md\`); the workspace form \`${kbDirName}/KnowledgeBase/Foo.md\`, with or without a leading slash, names the same file.` },
         line: { type: 'integer', minimum: 1, description: 'Line number for an inline comment. Requires `path`.' },
         parentId: { type: 'string', description: 'Comment id to reply to.' },
       },
@@ -385,8 +414,11 @@ export function registerWorkflowTools(
     },
     outputs: {
       type: 'object',
-      properties: { comment: { ...commentSchema, description: 'The posted review comment.' } },
-      required: ['comment'],
+      properties: {
+        comment: { ...commentSchema, description: 'The posted review comment.' },
+        changeRequest: { ...changeRequestLinkSchema, description: 'The change request commented on.' },
+      },
+      required: ['comment', 'changeRequest'],
     },
     write: true,
     // Keyed by change-request number, not a draft — the workspace is only a
@@ -396,7 +428,10 @@ export function registerWorkflowTools(
     handler: async (args, ctx: ToolContext) => {
       const number = args.number as number;
       const line = typeof args.line === 'number' ? args.line : undefined;
-      const path = typeof args.path === 'string' ? args.path : undefined;
+      // A change request's files are repository-relative; the workspace form
+      // Copy path gives (`/<kbDirName>/…`, its slash already dropped by the
+      // mount) carries the clone folder, which no changed file would match.
+      const path = typeof args.path === 'string' ? stripKbDir(args.path, kbDirName) : undefined;
       if (line !== undefined && !path) {        throw new ToolError('`path` is required when `line` is provided (inline comments anchor to a file).', 400);
       }
       const detail = await ctx.workflowService.getChangeRequestDetail(number, {
@@ -412,7 +447,7 @@ export function registerWorkflowTools(
         { body: args.body as string, path, line, parentId: typeof args.parentId === 'string' ? args.parentId : undefined },
         detail.headSha,
       );
-      return { comment };
+      return { comment, changeRequest: linkOf(detail) };
     },
   });
 
@@ -433,8 +468,11 @@ export function registerWorkflowTools(
     },
     outputs: {
       type: 'object',
-      properties: { outcome: mergeOutcomeSchema },
-      required: ['outcome'],
+      properties: {
+        outcome: mergeOutcomeSchema,
+        changeRequest: { ...changeRequestLinkSchema, description: 'The change request merged, or awaiting conflict resolution.' },
+      },
+      required: ['outcome', 'changeRequest'],
     },
     write: true,
     // Keyed by change-request number, not a draft — the workspace is only a
@@ -462,7 +500,7 @@ export function registerWorkflowTools(
         workspaceId,
         { bypass: args.bypass === true },
       );
-      return { outcome };
+      return { outcome, changeRequest: linkOf(detail) };
     },
   });
 

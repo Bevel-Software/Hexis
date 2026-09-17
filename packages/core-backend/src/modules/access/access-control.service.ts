@@ -1,11 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
 
-import { isAbsence } from '../../shared/fs-errors.js';
-import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
+const log = logger('access');
+
+import { isAbsence, type ITreeWalker, type WalkListener } from '../../shared/fs.contract.js';
+import { isGitTimeout, type IGitRunner } from '../../shared/git.contract.js';
+import { hashEmail } from '../../shared/email-identity.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
@@ -52,8 +54,6 @@ import {
   DIRECTORY_SYNC_BOT_NAME,
 } from './directory-sync-bot.js';
 
-const execFileAsync = promisify(execFile);
-
 /**
  * Read many objects from a git repo in ONE `git cat-file --batch` process.
  * `specs` are `<ref>:<path>` lines; the result array is index-aligned with
@@ -62,60 +62,39 @@ const execFileAsync = promisify(execFile);
  * request: `<oid> <type> <size>\n<size bytes>\n`, or `<spec> missing\n`
  * (the spec may itself contain spaces, hence the endsWith checks).
  */
-function catFileBatch(repoDir: string, specs: string[]): Promise<(string | null)[]> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', ['-C', repoDir, 'cat-file', '--batch'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    child.stdout.on('data', (c: Buffer) => chunks.push(c));
-    child.stderr.on('data', (c: Buffer) => errChunks.push(c));
-    // A dying git can close stdin mid-write; the 'close' handler below still
-    // fires with the exit code, which is the error we want to surface.
-    child.stdin.on('error', () => undefined);
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git cat-file --batch exited ${code}: ${Buffer.concat(errChunks).toString('utf-8').trim()}`));
-        return;
-      }
-      try {
-        const out = Buffer.concat(chunks);
-        const results: (string | null)[] = [];
-        let off = 0;
-        for (let i = 0; i < specs.length; i++) {
-          const nl = out.indexOf(0x0a, off);
-          if (nl < 0) throw new Error('unexpected end of git cat-file output');
-          const header = out.subarray(off, nl).toString('utf-8');
-          off = nl + 1;
-          if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
-            results.push(null);
-            continue;
-          }
-          const parts = header.split(' ');
-          const size = Number(parts[2]);
-          if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
-            throw new Error(`unexpected git cat-file header: ${header}`);
-          }
-          // Non-blob (a directory path resolves to a tree) → null, but the
-          // payload still has to be skipped to stay aligned.
-          results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
-          off += size + 1; // payload + trailing LF
-        }
-        resolve(results);
-      } catch (err) {
-        reject(err);
-      }
-    });
-    child.stdin.write(`${specs.join('\n')}\n`);
-    child.stdin.end();
+async function catFileBatch(
+  runner: IGitRunner,
+  repoDir: string,
+  specs: string[],
+): Promise<(string | null)[]> {
+  // Bytes, not text: every `<size>` in the header counts bytes, and the walk
+  // below has to step by that count through content that is not all ASCII.
+  const { stdout: out } = await runner.run(repoDir, ['cat-file', '--batch'], {
+    input: `${specs.join('\n')}\n`,
+    encoding: 'buffer',
   });
-}
-
-/** Mirrors `shared/hash-email.ts`. Duplicated to avoid a cross-cutting import. */
-function sha256Email(email: string): string {
-  return createHash('sha256').update(email.trim().toLowerCase()).digest('hex');
+  const results: (string | null)[] = [];
+  let off = 0;
+  for (let i = 0; i < specs.length; i++) {
+    const nl = out.indexOf(0x0a, off);
+    if (nl < 0) throw new Error('unexpected end of git cat-file output');
+    const header = out.subarray(off, nl).toString('utf-8');
+    off = nl + 1;
+    if (header.endsWith(' missing') || header.endsWith(' ambiguous')) {
+      results.push(null);
+      continue;
+    }
+    const parts = header.split(' ');
+    const size = Number(parts[2]);
+    if (parts.length !== 3 || !Number.isInteger(size) || size < 0) {
+      throw new Error(`unexpected git cat-file header: ${header}`);
+    }
+    // Non-blob (a directory path resolves to a tree) → null, but the
+    // payload still has to be skipped to stay aligned.
+    results.push(parts[1] === 'blob' ? out.subarray(off, off + size).toString('utf-8') : null);
+    off += size + 1; // payload + trailing LF
+  }
+  return results;
 }
 
 
@@ -133,10 +112,11 @@ interface AccessModel {
    * Canonical emails that count as Admin whatever `roles.yaml` says — the
    * deployment owner (`ADMIN_EMAIL`). Empty when none is configured.
    *
-   * This exists for the two hardcoded `write` rescues below, and only those.
-   * It is NOT a general grant: it never enters scope resolution, so it gives
-   * no read, no download, and no write anywhere except `roles.yaml` and
-   * `access.md`. The deployment owner is the person who can already change
+   * This exists for the two hardcoded `write` rescues below and the root write
+   * floor, and only those. It is NOT a general grant: it never enters scope
+   * resolution, so it gives no read, no download, and no write beyond
+   * `roles.yaml`, `access.md`, and what the root floor reaches (see
+   * `hasPermissionResolved`). The deployment owner is the person who can already change
    * `ADMIN_EMAIL` itself, so admitting them to the rescue path concedes
    * nothing they could not already take — while withholding it turns a
    * `roles.yaml` that has lost its last Admin into a knowledge base nobody
@@ -171,13 +151,13 @@ export type GroupsHealth = { ok: true } | { ok: false; file: string; reason: str
  * even when the synced file is empty or malformed — falling back would
  * resurrect retired manual groups); otherwise `groups.yaml` → manual mode.
  *
- * `read` returns null for a genuinely-absent file and may THROW for any other
- * failure. Only ENOENT/ENOTDIR count as absent (the caller may also whitelist
- * them into null); every other read error — notably a non-absence error on
- * `synced-groups.yaml` — is treated as a BROKEN source: no groups, no
- * fallback to the manual file (falling back would resurrect retired groups),
- * and an `ok: false` health marker. Structural parse failures degrade the
- * same way; this function never throws.
+ * `read` returns null for a genuinely-absent file — ENOENT/ENOTDIR, the
+ * reader's judgement through the fs probe — and THROWS for any other failure.
+ * Every thrown error — notably one on `synced-groups.yaml` — is treated as a
+ * BROKEN source: no groups, no fallback to the manual file (falling back
+ * would resurrect retired groups), and an `ok: false` health marker.
+ * Structural parse failures degrade the same way; this function never throws
+ * (except to let an `AccessUnreadableError` through — see below).
  */
 export async function loadActiveGroups(
   read: (filename: string) => Promise<string | null>,
@@ -201,14 +181,10 @@ export async function loadActiveGroups(
     // subprocess. roles.yaml and access.md already fail the build closed on
     // the same error; groups cannot be the one input that does not.
     if (err instanceof AccessUnreadableError) throw err;
-    if (isAbsence(err)) {
-      syncedText = null;
-    } else {
-      // A non-absence read error on the SYNCED source must NOT fall back to
-      // groups.yaml — the synced file may exist and its manual predecessor is
-      // retired. Broken-groups instead.
-      return broken(SYNCED_GROUPS_YAML, err instanceof Error ? err.message : String(err));
-    }
+    // A read error on the SYNCED source must NOT fall back to groups.yaml —
+    // the synced file may exist and its manual predecessor is retired.
+    // Broken-groups instead.
+    return broken(SYNCED_GROUPS_YAML, err instanceof Error ? err.message : String(err));
   }
 
   const sourceFile = syncedText !== null ? SYNCED_GROUPS_YAML : GROUPS_YAML;
@@ -220,8 +196,7 @@ export async function loadActiveGroups(
       text = await read(GROUPS_YAML);
     } catch (err) {
       if (err instanceof AccessUnreadableError) throw err; // see above
-      if (isAbsence(err)) text = null;
-      else return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
+      return broken(GROUPS_YAML, err instanceof Error ? err.message : String(err));
     }
   }
   if (text === null) return { groups: new Map(), sourceFile, warnings: [], health: { ok: true } };
@@ -301,7 +276,7 @@ function accessFileListener(
   repoDir: string,
   out: Map<string, AccessFile>,
   pluginDirs: Map<string, string>,
-): KbWalkListener {
+): WalkListener {
   return {
     async onFile(dir, name) {
       const rel = dir ? `${dir}/${name}` : name;
@@ -316,14 +291,12 @@ function accessFileListener(
       if (!parsed.ok) {
         // Treat as if the file didn't exist for resolution purposes.
         // Admin-rescue on access.md paths still lets an admin fix it.
-        for (const e of parsed.errors) console.warn(`[access] ${e} — file ignored`);
+        for (const e of parsed.errors) log.warn(`${e} — file ignored`);
         return;
       }
-      for (const w of parsed.warnings) console.warn(`[access] ${w}`);
+      for (const w of parsed.warnings) log.warn(w);
       if (out.has(parsed.file.dir)) {
-        console.warn(
-          `[access] ${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`,
-        );
+        log.warn(`${rel}: duplicate access.md for directory '${parsed.file.dir}' — keeping the first one seen`);
         return;
       }
       out.set(parsed.file.dir, parsed.file);
@@ -463,6 +436,27 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
   return new Set([...(own ?? []), ...pub]);
 }
 
+/** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
+const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * Add to `keys` what holding them confers on top: every plugin principal
+ * expanded from one of the keys, and the public keys every caller holds.
+ */
+function addDerivedKeys(model: AccessModel, keys: Set<string>): Set<string> {
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (keys.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
 /**
  * Every principal key that being in `group` confers — the group's OWN key,
  * the roles that list the group (`group:<Name>` in roles.yaml), the plugin
@@ -485,17 +479,7 @@ function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | 
   }
   // Plugin principals were expanded from role/group entries; a plugin that
   // admits the group, or a role the group is folded into, admits the group.
-  for (const [key, principal] of model.roles.byCanonical) {
-    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
-    for (const source of principal.sourceKeys) {
-      if (keys.has(source)) {
-        keys.add(key);
-        break;
-      }
-    }
-  }
-  for (const key of model.roles.publicKeys ?? []) keys.add(key);
-  return keys;
+  return addDerivedKeys(model, keys);
 }
 
 /** The key set of a caller who holds nothing: `hasPermissionForKeys` then answers as `everyone`. */
@@ -504,7 +488,8 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 /**
  * The tier-2 half of `hasPermissionResolved` on its own: a verdict for a set
  * of principal KEYS with no person behind them — no direct-email tier, no
- * admin rescue, no machine-owned rule. Closest scope first; within a scope a
+ * admin rescue, no machine-owned rule — only the Admin write floor, when the
+ * keys include the Admin role. Closest scope first; within a scope a
  * grant to any key wins over a denial to another, exactly as for a person.
  */
 function hasPermissionForKeys(
@@ -514,7 +499,9 @@ function hasPermissionForKeys(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  const adminFloor = verb === 'write' && keys.has(ADMIN_ROLE_KEY);
   for (const scope of resolveScopes(model, verb, relativePath, fileOwn)) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
     let grant = false;
     let deny = false;
     for (const key of keys) {
@@ -526,7 +513,19 @@ function hasPermissionForKeys(
     if (deny) return false;
     if (scope.everyone) return scope.everyone === 'grant';
   }
-  return false;
+  return adminFloor;
+}
+
+/**
+ * Whether a scope sits at the Admin write floor: the repository root's own
+ * `access.md`, or the own frontmatter of a file directly in the root (those
+ * files are part of the root, so their own rules cannot take Admin's write
+ * away either). A folder directly in the root is not covered — its own
+ * `access.md` is an ordinary subfolder scope that may exclude Admin.
+ */
+function isAdminFloorScope(scope: AccessScope, relativePath: string): boolean {
+  if (scope.source.kind === 'own') return !relativePath.includes('/');
+  return scope.source.path === 'access.md';
 }
 
 function isAdminEmail(model: AccessModel, email: string): boolean {
@@ -535,7 +534,7 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
   // Check the explicit `role/admin` alias, NOT the bare token: bare-name
   // precedence is group-first, so a group that happens to be named "Admin"
   // owns the bare key — and its members must never inherit the capability.
-  return !!roles && roles.has(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+  return !!roles && roles.has(ADMIN_ROLE_KEY);
 }
 
 /**
@@ -569,6 +568,16 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
  * owner is whoever can already set `ADMIN_EMAIL`, so this concedes no
  * authority they did not have; it only gives it a door.
  *
+ * One floor for `write`, applied during the walk: an admin (same definition)
+ * always holds `write` at the repository root. When the walk reaches the root
+ * `access.md` (or the own frontmatter of a file directly in the root) — or runs
+ * out of scopes without a verdict — an admin is granted,
+ * whatever the root file says, so no root rule can lock the deployment out of
+ * its own tree. A NEARER scope still decides first: a subfolder that denies
+ * Admin (or denies `everyone` without naming Admin) excludes admins there like
+ * anyone else. The root file's own entries are not rewritten — the floor is a
+ * verdict, not a grant line — so `grantSources` stays file-backed.
+ *
  * No special-cases for `read`/`download` — they fall through to scope resolution.
  */
 function hasPermissionResolved(
@@ -585,10 +594,19 @@ function hasPermissionResolved(
     if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) return true;
   }
 
-  const userRoles = principalKeysOf(model, email);
+  const adminFloor = verb === 'write' && isAdminEmail(model, email);
+  // For write, the deployment owner IS Admin — the floor admits them, so the
+  // Admin rules along the way bind them too: a subfolder denying Admin excludes
+  // the owner exactly as it excludes the role's members.
+  let userRoles = principalKeysOf(model, email);
+  if (adminFloor && !userRoles?.has(ADMIN_ROLE_KEY)) {
+    userRoles = new Set([...(userRoles ?? []), ...principalKeysOfToken(model, ADMIN_ROLE_KEY)]);
+  }
   const scopes = resolveScopes(model, verb, relativePath, fileOwn);
 
   for (const scope of scopes) {
+    if (adminFloor && isAdminFloorScope(scope, relativePath)) return true;
+
     // Tier 1 — direct email entry is the most specific verdict at this scope.
     const direct = scope.byEmail.get(email);
     if (direct) return direct === 'grant';
@@ -615,7 +633,8 @@ function hasPermissionResolved(
     // No verdict at this scope — fall through to the next (farther) one.
   }
 
-  return false;
+  // No verdict anywhere (and no root access.md to stop at): the floor still holds.
+  return adminFloor;
 }
 
 /**
@@ -813,6 +832,30 @@ function canReadResolved(
   return hasPermissionResolved(model, 'read', userEmail, relativePath, fileOwn);
 }
 
+/**
+ * The key set someone holding exactly the principal behind `token` carries —
+ * the question "would a member of this principal be allowed?" put to
+ * `hasPermissionForKeys`. A group gets its full member key set
+ * (`principalKeysOfGroup`); a role or plugin principal gets every key its
+ * record is registered under (the bare name and the `role/` alias share one
+ * record) plus the plugin principals expanded from those keys; a token with no
+ * record (`everyone`, a vanished principal) is just itself. Public keys are
+ * always included — every caller holds them.
+ */
+function principalKeysOfToken(model: AccessModel, token: string): Set<string> {
+  const record = model.roles.byCanonical.get(token);
+  if (record?.kind === 'group') return principalKeysOfGroup(model, token) ?? new Set([token]);
+  const keys = new Set<string>([token]);
+  if (!record) {
+    for (const key of model.roles.publicKeys ?? []) keys.add(key);
+    return keys;
+  }
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal === record) keys.add(key);
+  }
+  return addDerivedKeys(model, keys);
+}
+
 function eligibleHoldersResolved(
   model: AccessModel,
   verb: Verb,
@@ -837,16 +880,31 @@ function eligibleHoldersResolved(
     const key = `${kind}\0${name.toLowerCase()}`;
     if (!byIdentity.has(key)) byIdentity.set(key, { name, kind });
   };
+  // Every row is re-checked against the resolver. The collapsed view keeps a
+  // principal's closest OWN verdict, but a nearer scope can still decide for
+  // them without naming them — a `deny everyone` in a subfolder cuts off a
+  // root `write: Admin` — and a list that named them anyway would tell the
+  // dialog and the denial message that someone is eligible whom the gate then
+  // refuses.
+  const allowedFor = (keys: ReadonlySet<string>) =>
+    hasPermissionForKeys(model, verb, keys, relativePath, fileOwn);
   for (const [canonical, state] of byRole) {
     if (state !== 'grant') continue;
+    if (!allowedFor(principalKeysOfToken(model, canonical))) continue;
     const record = model.roles.byCanonical.get(canonical);
     addPrincipal(record ? record.displayName : canonical, record?.kind ?? 'role');
+  }
+  // The Admin write floor (see `hasPermissionResolved`): Admin holds write here
+  // whenever no nearer scope excludes it, whether or not any file names it.
+  if (verb === 'write' && model.roles.byCanonical.has(ADMIN_ROLE_KEY)) {
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY)!;
+    if (allowedFor(principalKeysOfToken(model, ADMIN_ROLE_KEY))) addPrincipal(adminRole.displayName, 'role');
   }
   // The derived everyone verdict: a public plugin principal granted here
   // means anyone signed in holds the verb, and a list that counts holders (an
   // approval gate, a "restricted to" banner) must say so — as `everyone`, the
   // same row a literal grant produces.
-  if (everyone === 'grant') addPrincipal(EVERYONE_CANONICAL, 'role');
+  if (everyone === 'grant' && allowedFor(NO_KEYS)) addPrincipal(EVERYONE_CANONICAL, 'role');
 
   // Mirror the admin overrides applied in `hasPermissionResolved`: write on
   // `roles.yaml` and on any `access.md` is granted to Admin even if the
@@ -860,7 +918,7 @@ function eligibleHoldersResolved(
     // Look the Admin ROLE up via its explicit alias — the bare key may be
     // owned by a same-named group under group-first precedence. The override
     // is the ROLE's capability, so the row's kind is 'role' regardless.
-    const adminRole = model.roles.byCanonical.get(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY);
     addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
@@ -875,11 +933,24 @@ function eligibleHoldersResolved(
   const users: { name: string; email: string }[] = [];
   for (const [email, state] of byEmail) {
     if (state !== 'grant') continue;
+    if (!hasPermissionResolved(model, verb, email, relativePath, fileOwn)) continue;
     users.push({ name: '', email });
   }
   users.sort((a, b) => a.email.localeCompare(b.email));
 
   return { principals, roles, users };
+}
+
+/**
+ * Every individual the model names: `roles.yaml` members, emails named inline
+ * at this path's scope, and the deployment owner (Admin for the write floor
+ * even when `roles.yaml` does not list them).
+ */
+function namedCandidateEmails(model: AccessModel, byEmail: CollapsedScope['byEmail']): Set<string> {
+  const candidates = new Set<string>(model.deploymentOwners);
+  for (const email of model.roles.byEmail.keys()) candidates.add(email);
+  for (const email of byEmail.keys()) candidates.add(email);
+  return candidates;
 }
 
 /**
@@ -907,10 +978,10 @@ function eligibleHolderEmailsResolved(
   // in an access.md entry at this path's scope (whether granted or denied —
   // `hasPermissionResolved` filters denials out below). The built-in
   // `everyone` role can grant arbitrary signed-in users, but this finite
-  // expansion can only return emails the access tree explicitly names.
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  // expansion can only return emails the access tree explicitly names. The
+  // deployment owner is a candidate too: the Admin write floor admits them
+  // whether or not `roles.yaml` lists them.
+  const candidates = namedCandidateEmails(model, byEmail);
 
   for (const email of candidates) {
     if (hasPermissionResolved(model, verb, email, relativePath, fileOwn)) {
@@ -937,9 +1008,7 @@ function ineligibleNamedEmailsResolved(
   fileOwn?: OwnEntries | null,
 ): Set<string> {
   const { byEmail } = resolveAtPath(model, verb, relativePath, fileOwn);
-  const candidates = new Set<string>();
-  for (const email of model.roles.byEmail.keys()) candidates.add(email);
-  for (const email of byEmail.keys()) candidates.add(email);
+  const candidates = namedCandidateEmails(model, byEmail);
 
   const out = new Set<string>();
   for (const email of candidates) {
@@ -1028,6 +1097,7 @@ export class AccessControlService implements IAccessControl {
   constructor(
     private readonly workspaceService: WorkspaceService,
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
     /**
      * Emails that count as Admin for the two hardcoded `write` rescues,
      * whatever `roles.yaml` says — in practice `ADMIN_EMAIL`. Optional so the
@@ -1035,6 +1105,13 @@ export class AccessControlService implements IAccessControl {
      * current behaviour (no owner, roles.yaml is the only authority).
      */
     deploymentOwners: readonly string[] = [],
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner; the default is the same runner on its default
+     * deadline, kept for the same reason as `deploymentOwners` above: a great
+     * many fixtures construct this service directly.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.deploymentOwners = new Set(
       deploymentOwners.filter(Boolean).map((e) => canonicalEmail(e)),
@@ -1455,7 +1532,7 @@ export class AccessControlService implements IAccessControl {
       ...namesByEmail.keys(),
     ]);
     for (const email of candidates) {
-      if (sha256Email(email) === hash) {
+      if (hashEmail(email) === hash) {
         const displayName = namesByEmail.get(email) ?? email.split('@')[0];
         return { email, displayName };
       }
@@ -1474,7 +1551,7 @@ export class AccessControlService implements IAccessControl {
    */
   private machineOwnedWriteRule(userEmail: string, relativePath: string): boolean | null {
     if (relativePath !== SYNCED_GROUPS_YAML) return null;
-    return userEmail.trim().toLowerCase() === DIRECTORY_SYNC_BOT_EMAIL;
+    return canonicalEmail(userEmail) === DIRECTORY_SYNC_BOT_EMAIL;
   }
 
   async canWriteAtRef(
@@ -1553,6 +1630,11 @@ export class AccessControlService implements IAccessControl {
     const repoDir = await this.repoDir(workspaceId);
     const own = await this.readOwnEntriesAtRef(repoDir, loaded.resolvedRef, relativePath);
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
+  }
+
+  async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
+    const model = await this.loadModel(workspaceId);
+    return isAdminEmail(model, canonicalEmail(userEmail));
   }
 
   async eligibleWritersForPathsAtRef(
@@ -1645,23 +1727,22 @@ export class AccessControlService implements IAccessControl {
       try {
         return await fs.readFile(path.join(repoDir, filename), 'utf-8');
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        if (isAbsence(err)) return null;
         throw err;
       }
     });
     if (!activeGroups.health.ok) {
-      console.error(
-        `[access] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      log.error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access] ${w}`);
+    for (const w of activeGroups.warnings) log.warn(w);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access] ${w}`);
+    for (const w of mergeWarnings) log.warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
 
@@ -1679,7 +1760,7 @@ export class AccessControlService implements IAccessControl {
     // / `roles.yaml` because `hasPermissionResolved` admin-rescues those
     // paths, so the bad config remains fixable from inside the app.
     const pluginDirs = new Map<string, string>();
-    await walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
+    await this.disk.walkKb(repoDir, [accessFileListener(repoDir, accessFiles, pluginDirs)]);
 
     // Plugin principals (`plugin/<Name>/<verb>`), derived from each plugin
     // folder's own access.md — a plugin being a folder with a manifest, at
@@ -1696,9 +1777,7 @@ export class AccessControlService implements IAccessControl {
       for (const verb of KNOWN_VERBS) {
         file.entries[verb] = file.entries[verb].filter((entry) => {
           if (entry.kind === 'role' && !roleKnown(rolesParsed.index, entry.role)) {
-            console.warn(
-              `[access] ${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`,
-            );
+            log.warn(`${file.path}: '${verb}' references unknown role '${entry.displayRole}' — entry ignored`);
             return false;
           }
           return true;
@@ -1786,7 +1865,7 @@ export class AccessControlService implements IAccessControl {
       else if (!wanted.includes(p)) wanted.push(p);
     }
     if (wanted.length === 0) return result;
-    const texts = await catFileBatch(repoDir, wanted.map((p) => `${ref}:${p}`));
+    const texts = await catFileBatch(this.gitRunner, repoDir, wanted.map((p) => `${ref}:${p}`));
     wanted.forEach((p, i) => {
       const text = texts[i];
       if (text === null) result.set(p, null);
@@ -1830,15 +1909,7 @@ export class AccessControlService implements IAccessControl {
     relativePath: string,
   ): Promise<{ kind: 'text'; text: string } | { kind: 'absent' } | { kind: 'error' }> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'show', `${ref}:${relativePath}`],
-        {
-          encoding: 'utf-8',
-          maxBuffer: 16 * 1024 * 1024,
-          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-        },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['show', `${ref}:${relativePath}`]);
       return { kind: 'text', text: stdout };
     } catch (err) {
       const stderr =
@@ -1863,11 +1934,7 @@ export class AccessControlService implements IAccessControl {
     ref: string,
   ): Promise<{ accessFiles: string[]; pluginDirs: string[] } | 'error'> {
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'ls-tree', '-r', '--name-only', ref],
-        { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, ['ls-tree', '-r', '--name-only', ref]);
       const out: string[] = [];
       const pluginDirs: string[] = [];
       for (const line of stdout.split('\n')) {
@@ -1950,14 +2017,19 @@ export class AccessControlService implements IAccessControl {
   private async revParseCommit(repoDir: string, ref: string): Promise<string | null> {
     if (!ref || ref.startsWith('-')) return null;
     try {
-      const { stdout } = await execFileAsync(
-        'git',
-        ['-C', repoDir, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
-        { encoding: 'utf-8' },
-      );
+      const { stdout } = await this.gitRunner.run(repoDir, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        `${ref}^{commit}`,
+      ]);
       const sha = stdout.trim();
       return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
-    } catch {
+    } catch (err) {
+      // Null means "does not resolve". A deadline says nothing about the ref,
+      // and as a null it would turn a stalled git into a gate that quietly
+      // reads no roles at that ref; it surfaces instead, as a read failure.
+      if (isGitTimeout(err)) throw err;
       return null;
     }
   }
@@ -1994,7 +2066,7 @@ export class AccessControlService implements IAccessControl {
       if (outcome.kind === 'error') {
         // The operational signal: one line per failed read, naming the commit
         // and the path, so a run of these is visible in the logs.
-        console.warn(`[access@${tag}] git read of ${relativePath} failed; refusing to decide from a partial tree`);
+        logger(`access@${tag}`).warn(`git read of ${relativePath} failed; refusing to decide from a partial tree`);
         throw new AccessUnreadableError(label, relativePath);
       }
       return outcome.kind === 'text' ? outcome.text : null;
@@ -2014,22 +2086,22 @@ export class AccessControlService implements IAccessControl {
     // fires only on a file that was read and would not parse.
     const activeGroups = await loadActiveGroups(read);
     if (!activeGroups.health.ok) {
-      console.error(
-        `[access@${tag}] groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
+      logger(`access@${tag}`).error(
+        `groups source ${activeGroups.health.file} is broken (${activeGroups.health.reason}) — groups contribute nothing until it is fixed`,
       );
     }
-    for (const w of activeGroups.warnings) console.warn(`[access@${tag}] ${w}`);
+    for (const w of activeGroups.warnings) logger(`access@${tag}`).warn(w);
     const mergeWarnings = mergeGroupsIntoRoles(
       rolesParsed.index,
       activeGroups.groups,
       activeGroups.sourceFile,
     );
-    for (const w of mergeWarnings) console.warn(`[access@${tag}] ${w}`);
+    for (const w of mergeWarnings) logger(`access@${tag}`).warn(w);
 
     const accessFiles = new Map<string, AccessFile>();
     const listed = await this.listAccessFilesAtRef(repoDir, commit);
     if (listed === 'error') {
-      console.warn(`[access@${tag}] listing access.md files failed; refusing to decide from a partial tree`);
+      logger(`access@${tag}`).warn('listing access.md files failed; refusing to decide from a partial tree');
       throw new AccessUnreadableError(label, 'access.md (ls-tree)');
     }
     for (const p of listed.accessFiles) {

@@ -1,12 +1,21 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workspace');
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { assertValidRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { BevelIgnoreStack } from './bevel-ignore.js';
+import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import type { IGitRunner } from '../../shared/git.contract.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
+import { assertWithinDirectory } from '../../shared/path-containment.js';
+import {
+  PathTraversalError,
+  UnreadableArchiveError,
+  WorkflowValidationError,
+} from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
   RemoteBranchGoneError,
@@ -21,7 +30,6 @@ import {
   SAFE_IMPLICIT_FETCH_ARGS,
 } from '../kb-fs/clone-config.js';
 import type { IDiffService } from '../diff/diff.interface.js';
-import { isAbsence } from '../../shared/fs-errors.js';
 
 /** One held path turn: the settled tail of the nested mutations launched inside it. */
 interface HeldTurn {
@@ -83,7 +91,13 @@ export class FolderTooLargeError extends Error {
   }
 }
 
-const execFileAsync = promisify(execFile);
+/**
+ * A floor under the git deadline for a clone: a first clone of a large
+ * knowledge base over a slow link legitimately takes minutes, and the port's
+ * default is sized for a running deployment's operations. A configured
+ * ceiling above this applies as configured.
+ */
+const CLONE_TIMEOUT_MS = 600_000;
 
 /**
  * Identity stamped on the per-branch clone's git config. Every workflow
@@ -117,8 +131,8 @@ async function readForConditionalWrite(absolutePath: string, relativePath: strin
   try {
     return await fs.readFile(absolutePath, 'utf-8');
   } catch (err) {
+    if (isAbsence(err)) return '';
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return '';
     if (code === 'EISDIR') {
       const notAFile: Error & { status?: number } = new Error(
         `"${relativePath}" is a directory, not a file.`,
@@ -128,6 +142,20 @@ async function readForConditionalWrite(absolutePath: string, relativePath: strin
     }
     throw err;
   }
+}
+
+/**
+ * The published library's path rule, refused as a TYPED 400.
+ *
+ * The library throws a bare `Error('Invalid path: …')` — it is shared with
+ * the frontend and cannot carry a backend domain type — and the routes used
+ * to recognise that by its message prefix. Converting it here, at the one
+ * layer that calls it, is what lets the route layer read a status off a
+ * class like it does for every other refusal.
+ */
+function assertValidPath(relativePath: string): void {
+  const reason = validateRelativePath(relativePath);
+  if (reason) throw new WorkflowValidationError(`Invalid path: ${reason}`);
 }
 
 /** Throw the conditional write's 409 unless the file still holds `expectedContent`. */
@@ -152,8 +180,12 @@ async function assertConditionalWriteMatches(
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
  * the route from the access service so `WorkspaceService` stays access-agnostic
  * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
+ *
+ * `'unlisted'` hides an entry WITHOUT counting it as withheld: a listing
+ * decision (the admin-only `.bevelignore`) rather than content the caller's
+ * read rules keep from them, so it must not tell them something is being kept.
  */
-export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
+export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean | 'unlisted'>>;
 
 export class WorkspaceService implements IWorkspaceService {
   /** Maps branch → absolute directory path. Lazily populated. */
@@ -220,7 +252,15 @@ export class WorkspaceService implements IWorkspaceService {
      */
     kbRepoUrl: string | (() => string),
     private readonly kbDirName: string,
+    private readonly disk: ITreeWalker,
     gitUsername: string | (() => string) = 'x-access-token',
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner carrying the deployment's deadline; the default
+     * is the same runner on its default deadline, for a directly constructed
+     * service.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
     this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
@@ -350,8 +390,7 @@ export class WorkspaceService implements IWorkspaceService {
     try {
       entries = await fs.readdir(this.workspacesRoot, { withFileTypes: true });
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return [];
+      if (isAbsence(err)) return [];
       throw err;
     }
     const cloned: Array<{ id: string; branch: string; unreadable?: string }> = [];
@@ -371,8 +410,7 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         await fs.access(path.join(this.workspacesRoot, entry.name, this.kbDirName, '.git'));
       } catch (err) {
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        if (isAbsence(err)) continue;
         cloned.push({
           id: entry.name,
           branch,
@@ -401,24 +439,23 @@ export class WorkspaceService implements IWorkspaceService {
     branch: string,
     referenceRepo: string | null,
   ): Promise<void> {
+    // Long enough for a first clone, whatever the configured ceiling says.
+    const timeoutMs = Math.max(this.gitRunner.defaultTimeoutMs, CLONE_TIMEOUT_MS);
     if (referenceRepo) {
       try {
-        await execFileAsync('git', this.gitCloneArgs(targetDir, branch, referenceRepo), {
-          env: { ...process.env },
+        await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch, referenceRepo), {
+          timeoutMs,
         });
         return;
       } catch (err) {
-        console.warn(
-          `[workspace] referenced clone for "${branch}" failed, retrying without reference:`,
-          redactError(err),
-        );
+        log.warn(`referenced clone for "${branch}" failed, retrying without reference:`, {
+          detail: redactError(err),
+        });
         // Clear any partial output so the retry clones into a clean dir.
         await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       }
     }
-    await execFileAsync('git', this.gitCloneArgs(targetDir, branch), {
-      env: { ...process.env },
-    });
+    await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch), { timeoutMs });
   }
 
   /**
@@ -582,15 +619,12 @@ export class WorkspaceService implements IWorkspaceService {
   private async normalizeCloneConfig(repoDir: string, branch: string): Promise<void> {
     try {
       for (const args of cloneTrackingConfigArgs(branch)) {
-        await execFileAsync('git', ['-C', repoDir, ...args]);
+        await this.gitRunner.run(repoDir, args);
       }
     } catch (err) {
       // One line per branch, not per key: every key writes to the same
       // `.git/config`, so what fails for one fails for all.
-      console.warn(
-        `[workspace] could not normalize the config of the "${branch}" clone:`,
-        redactError(err),
-      );
+      log.warn(`could not normalize the config of the "${branch}" clone:`, { detail: redactError(err) });
     }
     await this.stampCredentialHelper(repoDir, branch);
   }
@@ -631,28 +665,24 @@ export class WorkspaceService implements IWorkspaceService {
       // re-clone that fails on the same validation — masking the real cause.
       // Contain it as a loud non-stamp instead; `normalizeCloneConfig`'s
       // never-throws contract stays true.
-      console.warn(
-        `[workspace] refusing to stamp the credential helper of the "${branch}" clone:`,
-        redactError(err),
-      );
+      log.warn(`refusing to stamp the credential helper of the "${branch}" clone:`, { detail: redactError(err) });
       this.stampedCredentialFingerprint.delete(branch);
       return;
     }
     let stamped = true;
     for (const args of argLists) {
       try {
-        await execFileAsync('git', ['-C', repoDir, ...args]);
+        await this.gitRunner.run(repoDir, args);
       } catch (err) {
         // `--unset-all` with no matching value (exit 5) is the expected no-op
         // for a clone that never carried an app helper; anything else is a
         // real failure.
-        const code = (err as { code?: number } | null)?.code;
+        const code = (err as { exitCode?: number } | null)?.exitCode;
         if (!(args.includes('--unset-all') && code === 5)) {
           stamped = false;
-          console.warn(
-            `[workspace] could not stamp the credential helper of the "${branch}" clone:`,
-            redactError(err),
-          );
+          log.warn(`could not stamp the credential helper of the "${branch}" clone:`, {
+            detail: redactError(err),
+          });
         }
       }
     }
@@ -689,19 +719,25 @@ export class WorkspaceService implements IWorkspaceService {
     // propagate to the caller instead of getting silently swallowed by an
     // outer catch (the previous shape let an inner rethrow fall through
     // to a clone-into-non-empty-dir, producing a confusing 500).
-    let targetExists = true;
-    try {
-      await fs.access(targetDir);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        targetExists = false;
-      } else {
-        throw err;
-      }
+    //
+    // A FILE squatting the clone's name is refused outright, never wiped:
+    // the recovery below exists for a crashed bootstrap's directory shell,
+    // and a regular file here is a state a human put the deployment in — so
+    // it is named and stopped, the same stance the startup phase takes on a
+    // squatted reserved root. (Links are followed: one clone mounted
+    // elsewhere is the operator's business, as it is at the workspace root.)
+    const target = await fs.stat(targetDir).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (target !== null && !target.isDirectory()) {
+      throw new Error(
+        `The clone path "${this.kbDirName}" in this workspace exists but is not a directory. ` +
+          'Remove or rename it — the platform requires this name to be the knowledge-base clone.',
+      );
     }
 
-    if (targetExists) {
+    if (target !== null) {
       // The directory exists, but a previous bootstrap may have crashed
       // mid-clone — leaving a directory shell without `.git`. Treat
       // anything missing `.git` as not-cloned and re-clone. (Can't be
@@ -718,10 +754,9 @@ export class WorkspaceService implements IWorkspaceService {
         // re-clone". A transient EACCES / EIO / EBUSY must NOT delete
         // what might be a perfectly valid repo whose `.git` we couldn't
         // read this moment — surface the error so the caller can retry.
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        if (code !== 'ENOENT' && code !== 'ENOTDIR') {
-          throw err;
-        }
+        // (`targetDir` is known to be a directory here, so ENOTDIR can only
+        // mean `.git` itself vanished under us — an absence either way.)
+        if (!isAbsence(err)) throw err;
       }
       if (alreadyCloned) {
         // We don't auto-pull because that could clobber another user's
@@ -742,21 +777,18 @@ export class WorkspaceService implements IWorkspaceService {
       await this.runClone(targetDir, branch, reference);
       // Persist longpaths in the cloned repo's config so subsequent
       // checkouts also honor it.
-      await execFileAsync('git', ['-C', targetDir, 'config', 'core.longpaths', 'true']);
+      await this.gitRunner.run(targetDir, ['config', 'core.longpaths', 'true']);
       // Generic bot identity for the clone — every workflow commit
       // overrides via `--author=…` so the real human shows up in
       // `git log`. This is purely the fallback committer.
-      await execFileAsync('git', ['-C', targetDir, 'config', 'user.name', BOT_NAME]);
-      await execFileAsync('git', ['-C', targetDir, 'config', 'user.email', BOT_EMAIL]);
+      await this.gitRunner.run(targetDir, ['config', 'user.name', BOT_NAME]);
+      await this.gitRunner.run(targetDir, ['config', 'user.email', BOT_EMAIL]);
       // Pin the clone to exactly one fetch refspec and one upstream ref for
       // this branch. `git clone -b` already produces that shape; stamping it
       // explicitly means the shape is asserted rather than assumed, and the
       // same call is what repairs an existing clone that drifted.
       await this.normalizeCloneConfig(targetDir, branch);
-      console.log(
-        `[workspace] Cloned ${this.kbDirName} for branch "${branch}"` +
-          (reference ? ' (referenced a sibling clone)' : ''),
-      );
+      log.info(`Cloned ${this.kbDirName} for branch "${branch}"` + (reference ? ' (referenced a sibling clone)' : ''));
       // A fresh clone has already downloaded every ref — tell the git layer
       // so the first `listBranches` skips the redundant implicit `git fetch`.
       // Isolated from the clone-rollback `catch` below: a misbehaving listener
@@ -764,10 +796,9 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         this.onWorkspaceCloned?.(workspaceIdForBranch(branch));
       } catch (listenerErr) {
-        console.error(
-          `[workspace] onWorkspaceCloned listener failed for branch "${branch}":`,
-          redactError(listenerErr),
-        );
+        log.error(`onWorkspaceCloned listener failed for branch "${branch}":`, {
+          detail: redactError(listenerErr),
+        });
       }
     } catch (err) {
       const redacted = redactError(err);
@@ -779,10 +810,10 @@ export class WorkspaceService implements IWorkspaceService {
       // routes answer 410 with the branch named and the browser can say "this
       // branch no longer exists" instead of "something went wrong".
       if (isMissingRemoteBranchFailure(redacted)) {
-        console.log(`[workspace] branch "${branch}" does not exist on origin — nothing to clone`);
+        log.info(`branch "${branch}" does not exist on origin — nothing to clone`);
         throw new RemoteBranchGoneError(branch);
       }
-      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
+      log.error(`Failed to clone for branch "${branch}":`, { detail: redacted });
       throw new Error(`Failed to clone process map: ${redacted}`);
     }
   }
@@ -810,7 +841,7 @@ export class WorkspaceService implements IWorkspaceService {
 
   async listFiles(workspaceId: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
-    return this.buildFileTree(workspaceDir, workspaceDir, BevelIgnoreStack.empty(), readFilter);
+    return this.buildFileTree(workspaceDir, workspaceDir, readFilter);
   }
 
   async readFile(workspaceId: string, relativePath: string): Promise<string> {
@@ -843,11 +874,11 @@ export class WorkspaceService implements IWorkspaceService {
    * The workspace root may sit behind a link of the operator's (a mounted
    * volume): both sides are resolved, so that is allowed.
    *
-   * The same message as the lexical check on purpose: the routes map it to
-   * the traversal refusal, which is what this is.
+   * The same refusal as the lexical check on purpose: this IS a traversal,
+   * reached through a link rather than through a spelling.
    */
   private async assertNotThroughLink(absolutePath: string, workspaceDir: string): Promise<void> {
-    const traversal = () => new Error('Path traversal detected');
+    const traversal = () => new PathTraversalError();
     const entry = await fs.lstat(absolutePath).catch((err: unknown) => {
       if (isAbsence(err)) return null;
       throw err;
@@ -901,23 +932,15 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoRoot = path.join(workspaceDir, this.kbDirName);
     const files: Record<string, string> = {};
-    const walk = async (dir: string, ignoreStack: BevelIgnoreStack): Promise<void> => {
-      const nextStack = await ignoreStack.extendedWith(dir);
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name === '.git' && entry.isDirectory()) continue;
-        const childAbs = path.join(dir, entry.name);
-        if (nextStack.isIgnored(childAbs, entry.isDirectory())) continue;
-        if (entry.isDirectory()) {
-          await walk(childAbs, nextStack);
-          continue;
-        }
-        if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-        const repoPath = path.relative(repoRoot, childAbs).replace(/\\/g, '/');
-        files[repoPath] = await fs.readFile(childAbs, 'utf-8');
-      }
-    };
-    await walk(repoRoot, BevelIgnoreStack.empty());
+    await this.disk.walk(repoRoot, explorerWalk(), [
+      {
+        async onFile(dir, name) {
+          if (!name.endsWith('.md')) return;
+          const repoPath = dir ? `${dir}/${name}` : name;
+          files[repoPath] = await fs.readFile(path.join(repoRoot, dir, name), 'utf-8');
+        },
+      },
+    ]);
     return files;
   }
 
@@ -947,45 +970,31 @@ export class WorkspaceService implements IWorkspaceService {
     const zip = new AdmZip();
     let totalBytes = 0;
 
-    const walk = async (dir: string, ignoreStack: BevelIgnoreStack): Promise<void> => {
-      const nextStack = await ignoreStack.extendedWith(dir);
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      entries.sort((a, b) => a.name.localeCompare(b.name));
-      for (const entry of entries) {
-        if (entry.name === '.git' && entry.isDirectory()) continue;
-        if (entry.name === '.gitkeep' && entry.isFile()) continue;
-        const childAbs = path.join(dir, entry.name);
-        if (nextStack.isIgnored(childAbs, entry.isDirectory())) continue;
-        if (entry.isDirectory()) {
-          await walk(childAbs, nextStack);
-          continue;
-        }
-        if (!entry.isFile()) continue; // skip sockets, symlinks, etc.
-        // Check the size cap BEFORE reading the file into memory. Reading
-        // first would let a single hostile 2 GB file allocate the whole
-        // buffer before the throw — defeating the cap as a peak-heap
-        // bound. `stat.size` is an upper bound that we re-verify after
-        // the read in case the file grew between stat and readFile.
-        const stat = await fs.stat(childAbs);
-        if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
-          throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-        }
-        const data = await fs.readFile(childAbs);
-        if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
-          throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
-        }
-        totalBytes += data.byteLength;
-        // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
-        // separators regardless of host OS so the zip extracts cleanly
-        // on Windows/Mac/Linux alike.
-        const relInside = path
-          .relative(absoluteRoot, childAbs)
-          .replace(/\\/g, '/');
-        zip.addFile(`${zipRoot}/${relInside}`, data);
-      }
-    };
-
-    await walk(absoluteRoot, BevelIgnoreStack.empty());
+    await this.disk.walk(absoluteRoot, explorerWalk(), [
+      {
+        async onFile(dir, name) {
+          const childAbs = path.join(absoluteRoot, dir, name);
+          // Check the size cap BEFORE reading the file into memory. Reading
+          // first would let a single hostile 2 GB file allocate the whole
+          // buffer before the throw — defeating the cap as a peak-heap
+          // bound. `stat.size` is an upper bound that we re-verify after
+          // the read in case the file grew between stat and readFile.
+          const stat = await fs.stat(childAbs);
+          if (totalBytes + stat.size > ZIP_DOWNLOAD_MAX_BYTES) {
+            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+          }
+          const data = await fs.readFile(childAbs);
+          if (totalBytes + data.byteLength > ZIP_DOWNLOAD_MAX_BYTES) {
+            throw new FolderTooLargeError(ZIP_DOWNLOAD_MAX_BYTES);
+          }
+          totalBytes += data.byteLength;
+          // Path inside the archive: <folderName>/<relPathUnderFolder>, POSIX
+          // separators regardless of host OS so the zip extracts cleanly
+          // on Windows/Mac/Linux alike.
+          zip.addFile(`${zipRoot}/${dir ? `${dir}/${name}` : name}`, data);
+        },
+      },
+    ]);
     return zip.toBuffer();
   }
 
@@ -1012,11 +1021,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     for (const candidate of candidates) {
       try {
-        const { stdout } = await execFileAsync(
-          'git',
-          ['-C', repoDir, 'show', `${candidate}:${relativePath}`],
-          { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-        );
+        const { stdout } = await this.gitRunner.run(repoDir, ['show', `${candidate}:${relativePath}`]);
         return stdout;
       } catch {
         // Try next candidate.
@@ -1054,18 +1059,15 @@ export class WorkspaceService implements IWorkspaceService {
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
     // in `kb-fs/clone-config.ts` for the full rationale.
-    const promise = execFileAsync(
-      'git',
-      ['-C', repoDir, ...SAFE_IMPLICIT_FETCH_ARGS],
-      { env: { ...process.env } },
-    )
+    const promise = this.gitRunner
+      .run(repoDir, [...SAFE_IMPLICIT_FETCH_ARGS])
       .then(() => {
         this.lastFetchAt.set(repoDir, Date.now());
         this.lastFetchOk.set(repoDir, true);
       })
       .catch((err) => {
         this.lastFetchOk.set(repoDir, false);
-        console.warn('[workspace] git fetch origin failed:', redactError(err));
+        log.warn('git fetch origin failed:', { detail: redactError(err) });
       })
       .finally(() => {
         if (this.inFlightFetches.get(repoDir) === promise) {
@@ -1138,7 +1140,7 @@ export class WorkspaceService implements IWorkspaceService {
    * serializes it against the app's own editors.
    */
   async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
-    assertValidRelativePath(newRelativePath);
+    assertValidPath(newRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const oldAbsolute = path.resolve(workspaceDir, oldRelativePath);
     const newAbsolute = path.resolve(workspaceDir, newRelativePath);
@@ -1171,11 +1173,11 @@ export class WorkspaceService implements IWorkspaceService {
     relativePath: string,
     expectedContent: string,
   ): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    await assertConditionalWriteMatches(absolutePath, relativePath, expectedContent);
+    await assertConditionalWriteMatches(absolutePath, relativePath,expectedContent);
   }
 
   /**
@@ -1204,7 +1206,7 @@ export class WorkspaceService implements IWorkspaceService {
    * them as one would be a worse bug than the race it would close.
    */
   async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1278,7 +1280,7 @@ export class WorkspaceService implements IWorkspaceService {
     content: string,
     options?: { failIfExists?: boolean; expectedContent?: string },
   ): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1290,7 +1292,7 @@ export class WorkspaceService implements IWorkspaceService {
       // happened. The compare reads the file, and an absent file reads as
       // empty whether or not its directory exists.
       if (options?.expectedContent !== undefined) {
-        await assertConditionalWriteMatches(absolutePath, relativePath, options.expectedContent);
+        await assertConditionalWriteMatches(absolutePath, relativePath,options.expectedContent);
       }
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       try {
@@ -1318,7 +1320,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async createDirectory(workspaceId: string, relativePath: string): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1331,7 +1333,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
-    assertValidRelativePath(relativePath);
+    assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1369,7 +1371,7 @@ export class WorkspaceService implements IWorkspaceService {
     const zipAbsolute = path.resolve(workspaceDir, zipRelativePath);
     this.assertWithinWorkspace(zipAbsolute, workspaceDir);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
-      throw new Error('Only .zip files can be extracted');
+      throw new WorkflowValidationError('Only .zip files can be extracted');
     }
 
     const inferredDest = (() => {
@@ -1377,7 +1379,7 @@ export class WorkspaceService implements IWorkspaceService {
       return d === '.' ? '' : d;
     })();
     const destRel = destDirRelativePath ?? inferredDest;
-    if (destRel) assertValidRelativePath(destRel);
+    if (destRel) assertValidPath(destRel);
     const destAbsolute = destRel ? path.resolve(workspaceDir, destRel) : workspaceDir;
     this.assertWithinWorkspace(destAbsolute, workspaceDir);
     // Neither the archive nor the destination may sit behind a link; each
@@ -1389,8 +1391,7 @@ export class WorkspaceService implements IWorkspaceService {
     try {
       zip = new AdmZip(zipAbsolute);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Could not read zip file: ${msg}`);
+      throw new UnreadableArchiveError(err instanceof Error ? err.message : String(err));
     }
 
     // The destination directory is created on demand by the first allowed entry
@@ -1473,7 +1474,7 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
       } catch (err) {
-        if (err instanceof Error && err.message === 'Path traversal detected') {
+        if (err instanceof PathTraversalError) {
           skipped.push({ path: rawName, reason: err.message });
           continue;
         }
@@ -1618,15 +1619,9 @@ export class WorkspaceService implements IWorkspaceService {
     }
     let stdout: string;
     try {
-      ({ stdout } = await execFileAsync('git', ['-C', repoDir, 'status', '--porcelain=v1', '-z'], {
-        encoding: 'utf-8',
-        maxBuffer: 16 * 1024 * 1024,
-      }));
+      ({ stdout } = await this.gitRunner.run(repoDir, ['status', '--porcelain=v1', '-z']));
     } catch (err) {
-      console.warn(
-        `[workspace] orphan scan via git status failed for ${workspaceId}:`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`orphan scan via git status failed for ${workspaceId}:`, { err });
       return [];
     }
     if (!stdout.trim()) return [];
@@ -1695,10 +1690,7 @@ export class WorkspaceService implements IWorkspaceService {
         this.branchDirs.delete(branchForWorkspaceId(entry.name));
         removed.push(entry.name);
       } catch (err) {
-        console.warn(
-          `[workspace] sweep failed for ${entry.name}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`sweep failed for ${entry.name}:`, { err });
       }
     }
     return { removed };
@@ -1788,78 +1780,107 @@ export class WorkspaceService implements IWorkspaceService {
     }
   }
 
+  /** The shared lexical containment check (see `shared/path-containment.ts`). */
   private assertWithinWorkspace(absolutePath: string, workspaceDir: string): void {
-    const resolved = path.resolve(absolutePath);
-    const root = path.resolve(workspaceDir);
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
-      throw new Error('Path traversal detected');
-    }
+    assertWithinDirectory(absolutePath, workspaceDir);
   }
 
-  private async buildFileTree(
-    dir: string,
-    workspaceRoot: string,
-    parentIgnore: BevelIgnoreStack,
-    readFilter?: ReadTreeFilter,
-  ): Promise<FileTreeEntry> {
-    const name = path.basename(dir);
-    const relativePath = path.relative(workspaceRoot, dir).replace(/\\/g, '/');
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-
-    const ignoreStack = await parentIgnore.extendedWith(dir);
-
-    // First pass: the entries surviving `.git`/`.gitkeep` + `.bevelignore`.
-    const candidates: { entry: (typeof entries)[number]; entryPath: string; rel: string }[] = [];
-    for (const entry of entries) {
-      // `.git/` is never user content and listing it would blow up the
-      // tree response. `.gitkeep` is the empty-folder placeholder — not
-      // worth surfacing in the file list.
-      if (entry.name === '.git' && entry.isDirectory()) continue;
-      if (entry.name === '.gitkeep' && entry.isFile()) continue;
-
-      const entryPath = path.join(dir, entry.name);
-      if (ignoreStack.isIgnored(entryPath, entry.isDirectory())) continue;
-
-      candidates.push({
-        entry,
-        entryPath,
-        rel: path.relative(workspaceRoot, entryPath).replace(/\\/g, '/'),
-      });
+  private async buildFileTree(root: string, workspaceRoot: string, readFilter?: ReadTreeFilter): Promise<FileTreeEntry> {
+    /** A folder while the tree is built: whether the caller may read it decides, once its subtree is known, whether it stays. */
+    interface DirNode {
+      name: string;
+      relativePath: string;
+      readable: boolean;
+      /** Hidden by a listing decision, not a read rule: dropping it withholds nothing. */
+      unlisted: boolean;
+      children: (FileTreeEntry | DirNode)[];
     }
+    const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, unlisted: false, children: [] };
+    const nodes = new Map<string, DirNode>([['', top]]);
+    // Entries the caller's read rules kept out — counted, never named. Only an
+    // entry the filter judged unreadable counts: `.bevelignore`d and `.git`
+    // entries never reach it, and an `'unlisted'` one is kept from no one.
+    let withheld = 0;
 
-    // Read-permission filter: ONE batched check per directory. Drops files the
-    // caller can't read. A directory is kept when the caller can read it — a
-    // readable directory left empty after filtering stays visible, the folder
-    // itself is readable — OR when something readable survives beneath it: a
-    // grant below (a linked skill's folder opened to a plugin's readers, a
-    // sub-folder shared on its own) makes the folders above it the way there,
-    // shown as containers whose own contents stay filtered. So an unreadable
-    // directory is walked, not skipped, and dropped only when the walk finds
-    // nothing. Fail-closed: anything not explicitly readable is dropped. No
-    // filter → identical to the pre-feature tree (regression-safe).
-    const verdict = readFilter && candidates.length > 0 ? await readFilter(candidates.map((c) => c.rel)) : null;
-    const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
+    await this.disk.walk(root, explorerWalk(), [
+      {
+        async onDir(rel, entries) {
+          const node = nodes.get(rel)!;
+          const abs = path.join(root, rel);
+          const rels = entries.map((e) => relOf(path.join(abs, e.name)));
+          // Read-permission filter: ONE batched check per directory. Drops files the
+          // caller can't read. A directory is kept when the caller can read it — a
+          // readable directory left empty after filtering stays visible, the folder
+          // itself is readable — OR when something readable survives beneath it: a
+          // grant below (a linked skill's folder opened to a plugin's readers, a
+          // sub-folder shared on its own) makes the folders above it the way there,
+          // shown as containers whose own contents stay filtered. So an unreadable
+          // directory is walked, not skipped, and dropped only when the walk finds
+          // nothing (see `finish`). Fail-closed: anything not explicitly readable is
+          // dropped. No filter → identical to the pre-feature tree (regression-safe).
+          const verdict = readFilter && entries.length > 0 ? await readFilter(rels) : null;
+          const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
+          const unlisted = (rel: string) => verdict !== null && verdict.get(rel) === 'unlisted';
+          entries.forEach((entry, i) => {
+            const entryRel = rels[i]!;
+            if (entry.isDirectory()) {
+              const child: DirNode = {
+                name: entry.name,
+                relativePath: entryRel,
+                readable: readable(entryRel),
+                unlisted: unlisted(entryRel),
+                children: [],
+              };
+              nodes.set(rel ? `${rel}/${entry.name}` : entry.name, child);
+              node.children.push(child);
+            } else if (readable(entryRel)) {
+              node.children.push({ name: entry.name, relativePath: entryRel, type: 'file' });
+            } else if (!unlisted(entryRel)) {
+              withheld++;
+            }
+          });
+        },
+      },
+    ]);
 
-    const children: FileTreeEntry[] = [];
-    for (const { entry, entryPath, rel } of candidates) {
-      if (entry.isDirectory()) {
-        const sub = await this.buildFileTree(entryPath, workspaceRoot, ignoreStack, readFilter);
-        if (readable(rel) || (sub.children?.length ?? 0) > 0) children.push(sub);
-      } else if (readable(rel)) {
-        children.push({ name: entry.name, relativePath: rel, type: 'file' });
+    /** Bottom-up: drop a folder the caller may not read once nothing readable turned up beneath it; sort each level. */
+    const finish = (node: DirNode): FileTreeEntry => {
+      const children: FileTreeEntry[] = [];
+      for (const child of node.children) {
+        if ('type' in child) {
+          children.push(child);
+          continue;
+        }
+        const sub = finish(child);
+        if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
+        else if (!child.unlisted) withheld++;
       }
-    }
-
-    children.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    return {
-      name,
-      relativePath: relativePath || '.',
-      type: 'directory',
-      children,
+      children.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      return { name: node.name, relativePath: node.relativePath, type: 'directory', children };
     };
+    const tree = finish(top);
+    // Only when something was withheld, so an unfiltered — or all-readable —
+    // listing stays exactly the tree it always was.
+    return withheld > 0 ? { ...tree, withheld } : tree;
   }
+}
+
+/**
+ * The explorer's walk of a workspace: no git internals (never user content,
+ * and listing it would blow up the tree), no `.gitkeep` (the empty-folder
+ * placeholder, not worth showing), `.bevelignore` honoured on the way down —
+ * and a folder that cannot be listed is the request's error, not a tree with
+ * a silent gap. A folder download and the whole-KB read walk the same way,
+ * so they carry exactly what the explorer shows.
+ */
+function explorerWalk(): TreeWalkOptions {
+  return {
+    skip: (e) => (e.name === '.git' && e.isDirectory()) || (e.name === '.gitkeep' && e.isFile()),
+    ignore: true,
+    unreadable: 'throw',
+  };
 }

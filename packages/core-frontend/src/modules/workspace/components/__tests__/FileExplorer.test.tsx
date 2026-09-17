@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
 import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
@@ -16,6 +16,34 @@ import { OpenChangeRequestsContext } from '../../state/open-change-requests.cont
 const mockAuthFetch = vi.fn();
 vi.mock('../../../../lib/api', () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
+}));
+
+// The sheet itself is covered by the access module's own tests; here only
+// WHICH workspace and proposal the tree hands it matters.
+vi.mock('../../../access/components/ManageAccessDialog', () => ({
+  ManageAccessDialog: (props: {
+    entry: FileTreeEntry;
+    workspaceId?: string;
+    proposal?: { number: number; branch: string | null };
+    onManageAncestor?: (entry: FileTreeEntry) => void;
+  }) => (
+    <div
+      data-testid="manage-access-dialog"
+      data-path={props.entry.relativePath}
+      data-workspace={props.workspaceId ?? ''}
+      data-proposal={JSON.stringify(props.proposal ?? null)}
+    >
+      {/* Stands in for the sheet's `Manage <folder> →` on an inherited grant. */}
+      <button
+        type="button"
+        onClick={() =>
+          props.onManageAncestor?.({ name: 'docs', relativePath: 'docs', type: 'directory', children: [] })
+        }
+      >
+        Manage docs →
+      </button>
+    </div>
+  ),
 }));
 
 const EMPTY_TREE: FileTreeEntry = {
@@ -67,6 +95,9 @@ interface RenderOptions {
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
   deleteEntry?: ReturnType<typeof vi.fn>;
+  moveEntry?: ReturnType<typeof vi.fn>;
+  /** The workspace id — the encoded branch name, so it decides "protected". */
+  workspaceId?: string;
   openFilePath?: string | null;
   /** Workspace-relative paths with an open change request. */
   openChangeRequestPaths?: string[];
@@ -79,6 +110,7 @@ function renderExplorer(opts: RenderOptions = {}) {
   const clearUploadError = opts.clearUploadError ?? vi.fn();
   const createFile = opts.createFile ?? vi.fn().mockResolvedValue(undefined);
   const deleteEntry = opts.deleteEntry ?? vi.fn().mockResolvedValue(undefined);
+  const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
@@ -91,16 +123,13 @@ function renderExplorer(opts: RenderOptions = {}) {
     clearUploadError,
     createFile,
     deleteEntry,
+    moveEntry,
+    ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
   });
-  return {
-    dispatchUpload,
-    clearUploadError,
-    createFile,
-    deleteEntry,
-    ...render(
+  const ui = (ws: WorkspaceContextValue) => (
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
-          <WorkspaceContext.Provider value={workspace}>
+          <WorkspaceContext.Provider value={ws}>
             <GitContext.Provider value={makeGit()}>
                 <OpenChangeRequestsContext.Provider
                   value={{
@@ -136,8 +165,18 @@ function renderExplorer(opts: RenderOptions = {}) {
             </GitContext.Provider>
           </WorkspaceContext.Provider>
         </AuthContext.Provider>
-      </MemoryRouter>,
-    ),
+      </MemoryRouter>
+  );
+  const result = render(ui(workspace));
+  return {
+    moveEntry,
+    dispatchUpload,
+    clearUploadError,
+    createFile,
+    deleteEntry,
+    ...result,
+    /** Re-render the same explorer as though the user switched workspace. */
+    switchWorkspace: (workspaceId: string) => result.rerender(ui({ ...workspace, workspaceId })),
   };
 }
 
@@ -764,18 +803,95 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(row.querySelectorAll('svg')).toHaveLength(0);
   });
 
-  it('gives a childless folder no caret and does not toggle it', async () => {
+  it('gives a childless folder the caret, like any folder', () => {
     renderExplorer({ fileTree: TREE });
+    // Without the caret an empty folder reads as a file.
     const empty = screen.getByText('reports').closest('button')!;
-    expect(empty.querySelectorAll('svg')).toHaveLength(0);
-    // Nothing to open, so no claim about being open: `aria-expanded` is
-    // for a control that can expand — and a click changes nothing.
-    expect(empty).not.toHaveAttribute('aria-expanded');
-    fireEvent.click(empty);
-    expect(empty).not.toHaveAttribute('aria-expanded');
+    expect(empty.querySelectorAll('svg')).toHaveLength(1);
+    expect(empty).toHaveAttribute('aria-expanded');
 
     const withKids = screen.getByText('docs').closest('button')!;
     expect(withKids.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('shows one muted, inert "Empty" row under an open empty folder', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: 'outer',
+          relativePath: 'outer',
+          type: 'directory',
+          children: [{ name: 'reports', relativePath: 'outer/reports', type: 'directory', children: [] }],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: tree });
+    // Depth 2 starts closed, so nothing says "Empty" until it is opened.
+    const reports = screen.getByText('reports').closest('button')!;
+    expect(reports).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+
+    fireEvent.click(reports);
+    expect(reports).toHaveAttribute('aria-expanded', 'true');
+    const emptyRows = screen.getAllByText('Empty');
+    expect(emptyRows).toHaveLength(1);
+    const emptyRow = emptyRows[0].closest('[data-tree-empty]') as HTMLElement;
+    expect(emptyRow).toHaveClass('text-ink-faint');
+    // A statement, not a row: no controls, no path, nothing to focus.
+    expect(emptyRow.querySelector('button, [tabindex], svg')).toBeNull();
+    expect(emptyRow).not.toHaveAttribute('data-tree-path');
+    // One indent step deeper than the folder, where a first child would sit.
+    expect(emptyRow.style.paddingLeft).toBe(`${parseInt(reports.parentElement!.style.paddingLeft) + 13}px`);
+
+    fireEvent.click(reports);
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+  });
+
+  it('truncates a long file name in the middle, keeping its last 8 characters', () => {
+    const name = 'Sidebar-Rows-Say-What-They-Are.md';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name, relativePath: name, type: 'file' }],
+    };
+    renderExplorer({ fileTree: tree });
+    const row = screen.getByRole('button', { name });
+    const lead = row.querySelector('[data-name-lead]')!;
+    const tail = row.querySelector('[data-name-tail]')!;
+    // The lead is what shrinks behind an ellipsis; the tail never does.
+    expect(lead.textContent).toBe('Sidebar-Rows-Say-What-The');
+    expect(lead).toHaveClass('truncate');
+    expect(tail.textContent).toBe('y-Are.md');
+    expect(tail).toHaveClass('flex-none');
+    expect(tail).not.toHaveClass('truncate');
+    // Together they are the whole name, so a name that fits is unchanged.
+    expect(`${lead.textContent}${tail.textContent}`).toBe(name);
+  });
+
+  it('renders a short file name whole, in one piece', () => {
+    renderExplorer({ fileTree: TREE });
+    const name = screen.getByText('brief.md');
+    expect(name.tagName).toBe('SPAN');
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
+  });
+
+  it('keeps end truncation for a folder name — no extension to protect', () => {
+    const folder = 'a-very-long-folder-name-that-will-not-fit';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name: folder, relativePath: folder, type: 'directory', children: [] }],
+    };
+    renderExplorer({ fileTree: tree });
+    const name = screen.getByText(folder);
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
   });
 
   it('marks directory rows with aria-expanded and the open file with aria-current', () => {
@@ -786,7 +902,9 @@ describe('FileExplorer rows: the prototype tree', () => {
   });
 
   // The one prototype context-menu item the platform never had.
-  it('offers Copy path in the context menu and writes the entry path', async () => {
+  // Root-anchored, so the text pasted into a Markdown link opens the file from
+  // any folder rather than resolving against the linking file's own folder.
+  it('offers Copy path in the context menu and writes the root-anchored entry path', async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -798,7 +916,31 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('brief.md');
+    expect(writeText).toHaveBeenCalledWith('/brief.md');
+  });
+
+  it('copies a nested entry as its full root-anchored path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('a.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('/docs/a.md');
+  });
+
+  it('does not offer Copy path on the workspace root, which would copy "/."', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(screen.getAllByText('.')[0]);
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
   it('offers Copy path on a folder row too', () => {
@@ -833,12 +975,16 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 
-  it('still deletes from the context menu', async () => {
+  it('still deletes from the context menu, once confirmed', async () => {
     const deleteEntry = vi.fn(async () => {});
     renderExplorer({ fileTree: TREE, deleteEntry });
     fireEvent.contextMenu(screen.getByText('brief.md'));
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+    expect(deleteEntry).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     });
     expect(deleteEntry).toHaveBeenCalledWith('brief.md');
   });
@@ -916,6 +1062,106 @@ describe('FileExplorer rows: the prototype tree', () => {
     // A normal row opens the FILE, never the dialog.
     fireEvent.click(row);
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  /**
+   * A proposed-only file's access lives where the file does: on the change
+   * request's branch. Its right-click offers Manage access, and the sheet is
+   * handed that request — never the viewed branch, where the file is absent.
+   */
+  it('opens Manage access on a proposed-only file against its change request', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    const row = screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 40 });
+
+    // Only what applies to a file this branch does not have.
+    expect(screen.queryByRole('menuitem', { name: /Rename/i })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Delete/i })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Download/i })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('docs/new-idea.md');
+    expect(JSON.parse(dialog.dataset.proposal!)).toEqual({
+      number: 12,
+      branch: 'suggestions/me/knowledge',
+    });
+  });
+
+  it('keeps an existing file on the viewed branch even when my request modifies it', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['brief.md', 12]]),
+    });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('brief.md');
+    // No proposal, no pinned workspace: the ambient branch, exactly as before.
+    expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
+    expect(dialog.dataset.workspace).toBe('');
+  });
+
+  /**
+   * An inherited grant on a proposed file was read on the request's branch, so
+   * following it to the folder keeps editing there — the folder path alone
+   * would resolve to the viewed branch.
+   */
+  it('keeps the change request when a proposed file retargets to its folder', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    const row = screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage docs →' }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('docs');
+    expect(JSON.parse(dialog.dataset.proposal!)).toEqual({
+      number: 12,
+      branch: 'suggestions/me/knowledge',
+    });
+  });
+
+  it('retargets an ordinary file to its folder on the viewed branch', () => {
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage docs →' }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('docs');
+    expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
+  });
+
+  it('forgets a retargeted change request on the next right-click', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+
+    const row = screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+    fireEvent.contextMenu(row, { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage docs →' }));
+
+    // A fresh right-click on an ordinary file is a new sheet on the viewed branch.
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Manage access/i }));
+
+    const dialog = screen.getByTestId('manage-access-dialog');
+    expect(dialog.dataset.path).toBe('brief.md');
+    expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
   });
 });
 
@@ -1085,5 +1331,374 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
   it('leaves window.innerWidth and innerHeight as it found them', () => {
     expect(window.innerWidth).toBe(REAL_VIEWPORT.width);
     expect(window.innerHeight).toBe(REAL_VIEWPORT.height);
+  });
+});
+
+// Delete asked nothing and a drop moved a file into another folder without a
+// word about what that means. Both now ask first — and a move says that access
+// follows the destination, plus whatever else about it is worth knowing.
+describe('FileExplorer: delete and move ask first', () => {
+  const DRAG_MIME = 'application/x-workspace-path';
+  const KB = 'knowledge-base';
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          {
+            name: 'KnowledgeBase',
+            relativePath: `${KB}/KnowledgeBase`,
+            type: 'directory',
+            children: [
+              {
+                name: 'Legal',
+                relativePath: `${KB}/KnowledgeBase/Legal`,
+                type: 'directory',
+                children: [
+                  { name: 'contract.pdf', relativePath: `${KB}/KnowledgeBase/Legal/contract.pdf`, type: 'file' },
+                  { name: 'access.md', relativePath: `${KB}/KnowledgeBase/Legal/access.md`, type: 'file' },
+                  {
+                    name: 'Old',
+                    relativePath: `${KB}/KnowledgeBase/Legal/Old`,
+                    type: 'directory',
+                    children: [
+                      { name: 'nda.md', relativePath: `${KB}/KnowledgeBase/Legal/Old/nda.md`, type: 'file' },
+                    ],
+                  },
+                ],
+              },
+              { name: 'Sales', relativePath: `${KB}/KnowledgeBase/Sales`, type: 'directory', children: [] },
+            ],
+          },
+          { name: 'Data', relativePath: `${KB}/Data`, type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+  const CONTRACT = `${KB}/KnowledgeBase/Legal/contract.pdf`;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+  // The branch model is module-global; put back what the shared test setup
+  // applied, so a case that protects `main` does not leak into the next suite.
+  afterEach(() => {
+    configureBranchModel({
+      defaultBranch: 'target-company-state',
+      protectedBranches: ['current-company-state', 'target-company-state'],
+    });
+  });
+
+  /** Open Legal so its rows render (Knowledge's children start collapsed). */
+  function openLegal() {
+    fireEvent.click(screen.getByText('Legal'));
+  }
+
+  async function dropOn(rowName: string, sourcePath: string) {
+    await act(async () => {
+      fireEvent.drop(screen.getByText(rowName), {
+        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''), files: [] },
+      });
+    });
+  }
+
+  async function chooseDelete(rowName: string) {
+    fireEvent.contextMenu(screen.getByText(rowName));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+  }
+
+  describe('delete', () => {
+    it('names the file and deletes it on Confirm', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      await chooseDelete('contract.pdf');
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent('Delete contract.pdf?');
+      expect(deleteEntry).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+      });
+      expect(deleteEntry).toHaveBeenCalledWith(CONTRACT);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('counts every file under a folder, nested ones included', async () => {
+      renderExplorer({ fileTree: TREE });
+      await chooseDelete('Legal');
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Legal and its 3 files?');
+    });
+
+    it('deletes nothing on Cancel', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      await chooseDelete('Sales');
+      expect(screen.getByRole('dialog')).toHaveTextContent('Delete Sales and its 0 files?');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(deleteEntry).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('move', () => {
+    it('states that access follows the destination, and moves on Confirm', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      await dropOn('Sales', CONTRACT);
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(
+        "Move contract.pdf to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      // A move between two folders of the same root, on a draft: nothing else to say.
+      expect(screen.queryAllByRole('note')).toHaveLength(0);
+      expect(moveEntry).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+    });
+
+    it("uses 's for a destination that does not end in s", async () => {
+      renderExplorer({ fileTree: TREE });
+      openLegal();
+      await dropOn('Old', CONTRACT);
+      expect(screen.getByRole('dialog')).toHaveTextContent("Access to it will follow Old's rules from now on.");
+    });
+
+    it('sends nothing on Cancel', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      await dropOn('Sales', CONTRACT);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(moveEntry).not.toHaveBeenCalled();
+      expect(mockAuthFetch).not.toHaveBeenCalled();
+    });
+
+    it('drops an open confirmation when the workspace changes under it', async () => {
+      const { moveEntry, switchWorkspace } = renderExplorer({ fileTree: TREE, workspaceId: 'draft-a' });
+      await dropOn('Sales', CONTRACT);
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        switchWorkspace('draft-b');
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      // Nor does switching back resurrect it.
+      await act(async () => {
+        switchWorkspace('draft-a');
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
+    it('does nothing on a drop onto the folder the entry is already in', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      await dropOn('Legal', CONTRACT);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
+    it('warns that a platform-managed file is read differently once moved', async () => {
+      renderExplorer({ fileTree: TREE });
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
+      expect(screen.getByRole('note')).toHaveTextContent(
+        'access.md is a platform-managed file; moving it changes how the platform reads it.',
+      );
+    });
+
+    it('warns when the move crosses from one root into another', async () => {
+      renderExplorer({ fileTree: TREE });
+      await dropOn('Data', CONTRACT);
+      expect(screen.getByRole('note')).toHaveTextContent(
+        'This moves it out of KnowledgeBase/ into Data/ — the two roots are handled differently.',
+      );
+    });
+
+    it('warns that a move into a folder the caller cannot write will be refused', async () => {
+      configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
+      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: false }) });
+      renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      await dropOn('Sales', CONTRACT);
+      expect(await screen.findByRole('note')).toHaveTextContent(
+        "You can't write to Sales — the move will be refused.",
+      );
+      // The lookup is the folder's, repo-relative — what the access route resolves.
+      expect(String(mockAuthFetch.mock.calls[0][0])).toContain(
+        `/api/workspace/main/access?path=${encodeURIComponent('KnowledgeBase/Sales')}&kind=folder`,
+      );
+    });
+
+    it('adds no refusal warning when the caller can write the destination', async () => {
+      configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
+      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: true }) });
+      renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      await dropOn('Sales', CONTRACT);
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      expect(screen.queryAllByRole('note')).toHaveLength(0);
+    });
+  });
+
+  describe('keyboard', () => {
+    it('confirms on Enter and moves focus to the row it was dropped on', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      // The dragged row leaves the tree once the move lands; the target stays.
+      const row = screen.getByText('Sales').closest('button')!;
+      await dropOn('Sales', CONTRACT);
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move' }));
+      await act(async () => {
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+      });
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it('cancels on Escape and returns focus to the row', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      const row = screen.getByText('contract.pdf').closest('button')!;
+      await chooseDelete('contract.pdf');
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(deleteEntry).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(row);
+    });
+
+    it('returns focus to the containing folder after a confirmed delete', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      openLegal();
+      const folder = screen.getByText('Legal').closest('button')!;
+      await chooseDelete('contract.pdf');
+      await act(async () => {
+        fireEvent.keyDown(document.activeElement!, { key: 'Enter' });
+      });
+      expect(deleteEntry).toHaveBeenCalledWith(CONTRACT);
+      expect(document.activeElement).toBe(folder);
+    });
+
+    it('lets Enter press Cancel when Cancel has focus', async () => {
+      const { deleteEntry } = renderExplorer({ fileTree: TREE });
+      await chooseDelete('Sales');
+      const cancel = screen.getByRole('button', { name: 'Cancel' });
+      cancel.focus();
+      await act(async () => {
+        fireEvent.keyDown(cancel, { key: 'Enter' });
+      });
+      expect(deleteEntry).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * Read is default-deny, so an empty explorer has two causes that look the
+ * same: nothing is shared with the caller, or nothing exists yet. The listing
+ * root's `withheld` count tells them apart; the explorer says which, and says
+ * nothing once a single entry is on screen.
+ */
+describe('FileExplorer: an empty tree says why', () => {
+  const KBD = 'knowledge-base';
+  const dirAt = (rel: string, children: FileTreeEntry[] = []): FileTreeEntry => ({
+    name: rel.split('/').pop()!,
+    relativePath: rel,
+    type: 'directory',
+    children,
+  });
+  const fileAt = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
+  /** A seeded knowledge base: the reserved roots, forced visible, with `kb` under KnowledgeBase. */
+  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => ({
+    ...dirAt('.', [
+      dirAt(KBD, [
+        dirAt(`${KBD}/KnowledgeBase`, kb),
+        dirAt(`${KBD}/Plugins`),
+        dirAt(`${KBD}/Skills`),
+        ...loose,
+      ]),
+    ]),
+    ...extra,
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+  afterEach(() => {
+    configureBranchModel({
+      defaultBranch: 'target-company-state',
+      protectedBranches: ['current-company-state', 'target-company-state'],
+    });
+  });
+
+  it('says nothing is shared when entries were withheld and none are visible', () => {
+    renderExplorer({ fileTree: seeded([], { withheld: 12 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+    expect(screen.queryByText(/This knowledge base is empty/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('says the knowledge base is empty, with the create hint, when nothing was withheld and the caller may write', () => {
+    // A draft branch: writable without asking.
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'alice%2Fdraft' });
+    const notice = screen.getByTestId('tree-empty-notice');
+    expect(notice).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here is shared/)).not.toBeInTheDocument();
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+  });
+
+  it('still says "empty" when the only root entry is .bevelignore', () => {
+    renderExplorer({ fileTree: seeded([], {}, [fileAt(`${KBD}/.bevelignore`)]), workspaceId: 'alice%2Fdraft' });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+  });
+
+  it('leaves the create hint out when the caller may not write at the root', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(url).toContain('/access?path=KnowledgeBase&kind=folder');
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('shows the create hint on a protected branch once the root is known writable', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: true }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    expect(await screen.findByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('shows neither message with one visible entry, withheld or not', () => {
+    renderExplorer({ fileTree: seeded([fileAt(`${KBD}/KnowledgeBase/Handbook.md`)], { withheld: 3 }) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+    cleanup();
+    renderExplorer({ fileTree: seeded([dirAt(`${KBD}/KnowledgeBase/Finance`)]) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing while the tree is still loading', () => {
+    renderExplorer({ fileTree: null });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
 });

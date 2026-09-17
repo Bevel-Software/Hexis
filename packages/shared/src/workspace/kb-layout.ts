@@ -186,6 +186,22 @@ export function currentKbLayout(): KbLayout {
 }
 
 /**
+ * Whether a layout — the one in effect, unless one is given — is the default
+ * one. The setup-completing save applies the stored names while this holds,
+ * the same "only from none to some" rule the branch model follows — and also
+ * on a retry after its own failed initialization run, when the process holds
+ * names setup applied but the app never opened (see `setup.routes.ts`). A
+ * layout the process booted with is never replaced here.
+ */
+export function isDefaultKbLayout(layout: KbLayout = currentKbLayout()): boolean {
+  return (
+    layout.knowledgeBaseDir === DEFAULT_KB_LAYOUT.knowledgeBaseDir &&
+    layout.skillsDir === DEFAULT_KB_LAYOUT.skillsDir &&
+    layout.pluginsDir === DEFAULT_KB_LAYOUT.pluginsDir
+  );
+}
+
+/**
  * Render the layout placeholders a managed template carries —
  * `{{knowledgeBaseDir}}`, `{{skillsDir}}`, `{{pluginsDir}}` — with the
  * names in effect. The packaged `AGENTS.md` and `.bevelignore` are written

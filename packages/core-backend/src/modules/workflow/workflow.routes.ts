@@ -18,6 +18,10 @@
  */
 
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workflow.routes');
+const crLog = logger('cr');
 import type {
   AuthUser,
   ChangeInput,
@@ -32,18 +36,16 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
 function toHttpError(
   err: unknown,
 ): { status: number; body: Record<string, unknown> } {
   if (err instanceof WorkflowDomainError) {
-    return {
-      status: err.status,
-      body: { error: err.message, ...(err.payload ?? {}) },
-    };
+    return { status: err.status, body: domainErrorBody(err) };
   }
-  console.error('[workflow.routes] unhandled error:', err);
+  log.error('unhandled error:', { err });
   return { status: 500, body: { error: 'Internal server error' } };
 }
 
@@ -91,7 +93,7 @@ export function createWorkflowRoutes(
       }
       return user;
     } catch (err) {
-      console.error('[workflow.routes] requireUser failed:', err);
+      log.error('requireUser failed:', { err });
       res.status(500).json({ error: 'Internal server error' });
       return null;
     }
@@ -420,6 +422,14 @@ export function createWorkflowRoutes(
 
   // ── File locks ────────────────────────────────────────────────────────────
 
+  // These routes hand the caller's spelling straight to the workflow service,
+  // which is where ONE file identity is decided (`canonicalFileIdentity`), so
+  // `./x//a.md` and `x/a.md` are the same lock on every verb below. Refusals
+  // arrive here as `WorkflowDomainError`s carrying the status the file verbs
+  // answer for that same input, and `toHttpError` passes it through unchanged.
+  // Nothing is canonicalised at this layer on purpose: a route-level fix would
+  // leave any other caller of the service coordinating on its own identity.
+
   router.post('/workspace/:id/workflow/locks', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
@@ -633,7 +643,7 @@ export function createWorkflowRoutes(
               })) ?? detail;
           }
         } catch (err) {
-          console.warn(`[cr] lazy empty-close of #${num} failed (non-fatal):`, err);
+          crLog.warn(`lazy empty-close of #${num} failed (non-fatal):`, { err });
         }
       }
       res.json(detail);
@@ -1035,7 +1045,7 @@ export function createWorkflowRoutes(
         // Success path: `workflow.mergeChangeRequest` emits `change-request-merged`.
       } catch (err) {
         const { body: errBody } = toHttpError(err);
-        console.error(`[workflow.routes] async merge of change request #${num} failed:`, err);
+        log.error(`async merge of change request #${num} failed:`, { err });
         events.emit({
           kind: 'change-request-merge-failed',
           forUserId: user.id,

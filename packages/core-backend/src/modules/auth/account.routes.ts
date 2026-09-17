@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('accounts');
 import type { AuthService } from './auth.service.js';
 import type { IAccountErasureService } from './account-erasure.service.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
@@ -28,7 +31,8 @@ export function createAccountRoutes(
     next();
   };
 
-  // GET /api/admin/accounts — id, email, name, whether a password is set.
+  // GET /api/admin/accounts — id, email, name, whether a password hash is
+  // stored, and whether the account is the env bootstrap admin.
   router.get('/admin/accounts', requireAdmin, async (_req, res) => {
     res.json({ accounts: await authService.listAccounts() });
   });
@@ -71,17 +75,14 @@ export function createAccountRoutes(
       const erased = await accountErasure.eraseUser(userId);
       // Accountability record for the destructive path: WHO erased WHOM, by
       // id only — the target's email must not outlive the erasure in logs.
-      console.log(
-        '[accounts] erasure audit:',
-        JSON.stringify({ action: 'erase-user', actorUserId: req.userId, targetUserId: userId, erased }),
-      );
+      log.info('erasure audit:', { action: 'erase-user', actorUserId: req.userId, targetUserId: userId, erased });
       if (!erased) {
         res.status(404).json({ error: 'No such user' });
         return;
       }
       res.status(204).end();
     } catch (err) {
-      console.error('[accounts] user erasure failed:', err);
+      log.error('user erasure failed:', { err });
       res.status(500).json({ error: 'Failed to erase user' });
     }
   });

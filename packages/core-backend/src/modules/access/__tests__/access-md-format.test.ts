@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -171,7 +172,7 @@ describe('end-to-end resolution over a new-format plugin', () => {
         return workspaceDir;
       },
     } as unknown as WorkspaceService;
-    return new AccessControlService(stub, KB);
+    return new AccessControlService(stub, KB, new NodeFs());
   }
 
   it('a NON-member can read the access.md itself (discovery) but nothing inside the folder', async () => {

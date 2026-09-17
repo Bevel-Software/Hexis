@@ -1,10 +1,13 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { isPrivateAccessMd } from '../access-model/access-grammar.js';
-import { isAbsence } from '../../shared/fs-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -14,7 +17,6 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -52,6 +54,8 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly skillService: ISkillService,
     private readonly toolManualService: IToolManualService,
     private readonly kbDirName: string,
+    /** Where plugins come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
     /**
      * The link index, when the deployment has one: a plugin's skill count is
@@ -59,8 +63,6 @@ export class PluginIndexService implements IPluginIndexService {
      * set (and older tests) keep the inline-only count.
      */
     private readonly links?: PluginLinkIndex,
-    /** Where plugins come from — native manifests unless a dialect is configured. */
-    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -137,13 +139,12 @@ export class PluginIndexService implements IPluginIndexService {
           writers,
           readers,
           isPrivate,
+          warnings: scanned.get(name)?.warnings ?? [],
         });
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
     } catch (err) {
-      console.warn(
-        `[plugins] plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      log.warn(`plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   }
@@ -158,16 +159,23 @@ export class PluginIndexService implements IPluginIndexService {
    */
   private async scanFolders(
     kbRoot: string,
-  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>> {
-    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>();
+  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string; warnings: string[] }>> {
+    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string; warnings: string[] }>();
     const discovered = await this.source.discover(kbRoot);
-    for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+    for (const w of discovered.warnings) log.warn(w);
     for (const plugin of discovered.plugins) {
       if (plugin.personal || !plugin.exists) continue;
       byName.set(plugin.name, {
         folders: [plugin.folder],
         linksAreManaged: plugin.linksAreManaged,
         displayName: plugin.displayName,
+        // Discovery prefixes what it says about one plugin with that
+        // plugin's folder; the page names the plugin already, so the
+        // prefix goes. Whatever names no folder (an unreadable registry)
+        // stays in the log alone.
+        warnings: discovered.warnings
+          .filter((w) => w.startsWith(`${plugin.folder}: `) || w.startsWith(`${plugin.folder}/`))
+          .map((w) => w.slice(plugin.folder.length).replace(/^[:/]\s*/, '')),
       });
     }
     return byName;

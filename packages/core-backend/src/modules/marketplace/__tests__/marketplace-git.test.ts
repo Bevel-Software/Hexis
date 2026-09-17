@@ -10,6 +10,7 @@ import type { AuthUser } from '@bevel-software/platform-shared';
 
 import { MarketplaceRepoService, type MarketplaceCompiler } from '../marketplace-repo.service.js';
 import { createMarketplaceGitRoutes } from '../git-http.routes.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 import type { VirtualTree } from '../../plugins/compile/compile-marketplace.js';
 
 const execFileAsync = promisify(execFile);
@@ -64,7 +65,7 @@ describe('marketplace git endpoint', () => {
       sourceCommit: async () => source,
       compileFor: async ({ userEmail }) => tree(trees[userEmail] ?? {}, source),
     };
-    repo = new MarketplaceRepoService(path.join(root, 'data', 'marketplace.git'), compiler);
+    repo = new MarketplaceRepoService(path.join(root, 'data', 'marketplace.git'), compiler, new NodeGitRunner());
     const app = express();
     app.use(
       '/git',

@@ -11,6 +11,7 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   state: 'Sign-in could not be verified. Please try again.',
   auth: 'Sign-in failed. Please try again.',
   start: 'Could not start sign-in. Please try again.',
+  not_configured: 'Single sign-on is not configured on this deployment.',
 };
 
 export function LoginScreen() {

@@ -8,7 +8,7 @@ import {
 import { type WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
-import { hashEmail } from '../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import { resolveDeclaredId } from '../../shared/frontmatter-id.js';
 import { isSafeSkillName, parseSkillFrontmatter } from './skills.service.js';
 import type { IPendingSkillService, ISkillService, PendingSkill } from './skills.contract.js';
@@ -49,7 +49,7 @@ export class PendingSkillsService implements IPendingSkillService {
   ) {}
 
   async listPendingSkills(userEmail: string): Promise<PendingSkill[]> {
-    const email = userEmail.trim().toLowerCase();
+    const email = canonicalEmail(userEmail);
     if (!email) return [];
 
     let crs: ChangeRequest[];

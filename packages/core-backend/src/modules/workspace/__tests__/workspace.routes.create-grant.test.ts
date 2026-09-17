@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -29,6 +30,8 @@ interface Harness {
   server: Server;
   baseUrl: string;
   writes: Array<{ path: string; content: string }>;
+  /** The exact bytes each binary write (POST /upload) handed the service. */
+  binaryWrites: Array<{ path: string; bytes: Buffer }>;
   lockedPaths: string[];
   writeFileMock: ReturnType<typeof vi.fn>;
   creatorAccess: {
@@ -41,6 +44,7 @@ interface Harness {
 async function makeHarness(opts: { extracted?: string[] } = {}): Promise<Harness> {
   const writes: Array<{ path: string; content: string }> = [];
   const lockedPaths: string[] = [];
+  const binaryWrites: Array<{ path: string; bytes: Buffer }> = [];
 
   const writeFileMock = vi.fn(async (_id: string, p: string, content: string) => {
     writes.push({ path: p, content });
@@ -49,6 +53,7 @@ async function makeHarness(opts: { extracted?: string[] } = {}): Promise<Harness
     writeFile: writeFileMock,
     writeFileBinary: vi.fn(async (_id: string, p: string, data: Uint8Array) => {
       writes.push({ path: p, content: Buffer.from(data).toString('utf8') });
+      binaryWrites.push({ path: p, bytes: Buffer.from(data) });
     }),
     createDirectory: vi.fn(async () => undefined),
     unzipFile: vi.fn(async () => ({ extracted: opts.extracted ?? [] })),
@@ -95,6 +100,7 @@ async function makeHarness(opts: { extracted?: string[] } = {}): Promise<Harness
         creatorAccess as unknown as ICreatorAccess,
       // Not exercised here — only `.bevelignore`'s tree visibility consults it.
       { isAdmin: async () => false } as unknown as IAdminAccessService,
+      new NodeFs(),
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -105,6 +111,7 @@ async function makeHarness(opts: { extracted?: string[] } = {}): Promise<Harness
     server,
     baseUrl: `http://127.0.0.1:${addr.port}`,
     writes,
+    binaryWrites,
     lockedPaths,
     writeFileMock,
     creatorAccess,
@@ -236,5 +243,38 @@ describe('creator read-grant hooks on the creation routes', () => {
     expect(h.writes).toEqual([
       { path: `${KB}/KnowledgeBase/up.md`, content: '---\nread: Alice <alice@example.com>\n---\n# Uploaded\n' },
     ]);
+  });
+});
+
+describe('POST /upload is where new bytes of any kind arrive', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  it('lands a text file, a document, an image and a zip byte-for-byte', async () => {
+    h = await makeHarness();
+    const files = [
+      { name: 'notes.md', bytes: Buffer.from('# Notes\n') },
+      // A zip container with a NUL and a high byte: what a .pptx looks like on the wire.
+      { name: 'deck.pptx', bytes: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x10]) },
+      { name: 'logo.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xfe]) },
+      { name: 'bundle.zip', bytes: Buffer.from([0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0xc3, 0x28]) },
+    ];
+    for (const f of files) {
+      const path = `${KB}/KnowledgeBase/${f.name}`;
+      const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/upload?path=${encodeURIComponent(path)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: f.bytes,
+      });
+      expect(res.status, f.name).toBe(200);
+    }
+    expect(h.binaryWrites.map((w) => w.path)).toEqual(files.map((f) => `${KB}/KnowledgeBase/${f.name}`));
+    for (const [i, f] of files.entries()) {
+      // Never decoded as text on the way: invalid UTF-8 would not survive a round trip.
+      expect(h.binaryWrites[i].bytes.equals(f.bytes), f.name).toBe(true);
+    }
   });
 });

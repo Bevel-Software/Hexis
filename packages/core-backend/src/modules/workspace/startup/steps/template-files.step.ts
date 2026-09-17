@@ -1,15 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {
-  KNOWLEDGE_BASE_DIR,
-  PLUGINS_DIR,
-  SKILLS_DIR,
-  renderKbLayoutPlaceholders,
-  validateKbRootName,
-} from '@bevel-software/platform-shared';
-import { IGNORE_FILENAME } from '../../bevel-ignore.js';
+import { KNOWLEDGE_BASE_DIR, PLUGINS_DIR, SKILLS_DIR, validateKbRootName } from '@bevel-software/platform-shared';
+import { IGNORE_FILENAME, isAbsence, type IFsProbe } from '../../../../shared/fs.contract.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
-import { defaultKbTemplateDir } from '../../../../assets.js';
+import { TemplateSource } from './template-source.js';
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
 /** Root-anchored so a knowledge folder may still contain an ordinary namesake. */
@@ -45,17 +39,6 @@ export const REQUIRED_FILES: readonly string[] = [
 ];
 
 /**
- * Required files added AFTER a distribution may have forked the template. A
- * custom `KB_TEMPLATE_DIR` that predates one of these would otherwise stop
- * the boot with ENOENT on the first start after an upgrade, on every
- * protected branch, over a file whose shipped content is one comment. For
- * these the packaged template's copy stands in, with one line in the log;
- * every other required file keeps the strict contract (a custom template
- * missing `access.md` is a real mistake and should fail loudly).
- */
-export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set([PREAMBLE_FILE]);
-
-/**
  * Repo-root files the startup phase GENERATES rather than copies — today just
  * `roles.yaml`, rendered from `ADMIN_EMAIL` (see roles-yaml.step.ts and
  * seed-tree.ts). Reserved-root validation must treat these exactly like
@@ -63,16 +46,6 @@ export const PACKAGED_FALLBACK_FILES: ReadonlySet<string> = new Set([PREAMBLE_FI
  * typo with the same silent outcome.
  */
 export const GENERATED_FILES: readonly string[] = ['roles.yaml'];
-
-/**
- * Destination name → the packable spelling the template may carry instead.
- * npm strips every file named `.gitignore` from a published tarball, so the
- * packaged template cannot ship one under its real name (see
- * {@link templateSource}).
- */
-export const TEMPLATE_SOURCE_FALLBACKS: Readonly<Record<string, string>> = {
-  '.gitignore': 'gitignore.template',
-};
 
 /**
  * The three roots CORE gives a knowledge base: the ontologies, the shared
@@ -143,44 +116,6 @@ export function reservedRootDirs(extraRootDirs: readonly string[]): readonly str
 }
 
 /**
- * Where `relPath`'s template content actually lives. npm refuses to pack
- * files named `.gitignore` — every such file is silently stripped from the
- * published tarball — so the packaged template ships the KB's gitignore
- * under a packable name and the seeder writes it to its real one. A
- * template carrying the literal file (a distribution's own
- * KB_TEMPLATE_DIR, or this repo's tree in a Docker build) wins outright:
- * the mapping is a fallback, never a rename.
- */
-export async function templateSource(templateDir: string, relPath: string): Promise<string> {
-  const direct = path.join(templateDir, relPath);
-  if (await exists(direct)) return direct;
-  const packable = TEMPLATE_SOURCE_FALLBACKS[relPath];
-  if (packable !== undefined) {
-    const fallback = path.join(templateDir, packable);
-    if (await exists(fallback)) return fallback;
-  }
-  return direct; // let the ENOENT surface under the name the caller asked for
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** `lstat` without the throw — null when nothing is at `p`. */
-async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.lstat(p);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * The template top-up as an {@link OnServerStart} step: add any missing base
  * scaffolding to every PROTECTED branch, and keep the managed AGENTS.md
  * current. Drafts are deliberately out of scope — whatever the protected
@@ -198,8 +133,6 @@ async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
 export class TemplateFilesStep implements OnServerStart {
   readonly name = 'template-files';
 
-  private readonly requiredDirs: readonly string[];
-
   /**
    * @param extraRootDirs Additional root folders this distribution reserves,
    *                      on top of core's two. Their `.gitkeep` is written
@@ -207,8 +140,16 @@ export class TemplateFilesStep implements OnServerStart {
    *                      claim a root without also shipping a template entry
    *                      for it.
    */
-  constructor(extraRootDirs: readonly string[] = []) {
-    this.requiredDirs = reservedRootDirs(extraRootDirs);
+  constructor(
+    private readonly disk: IFsProbe,
+    private readonly extraRootDirs: readonly string[] = [],
+  ) {
+    // Validated NOW, so a bad extra fails at boot beside the rest of the
+    // wiring — but the list itself is NOT kept: the core roots are live
+    // bindings, and the save that completes first-run setup applies the
+    // admin's names after this step was built. A snapshot taken here
+    // scaffolded `Skills/` beside the `skills/` they had just chosen.
+    reservedRootDirs(extraRootDirs);
   }
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
@@ -219,6 +160,10 @@ export class TemplateFilesStep implements OnServerStart {
   }
 
   private async topUp(templateDir: string, branch: KbBranch): Promise<void> {
+    // The template directory is runtime data (the start context's), the disk
+    // port is the injected dependency — bound together once here so nothing
+    // below has to carry either as an argument.
+    const templates = new TemplateSource(this.disk, templateDir);
     const repoDir = await branch.repoDir();
     const added: string[] = [];
 
@@ -228,7 +173,7 @@ export class TemplateFilesStep implements OnServerStart {
       // would then report success over a knowledge base whose root access
       // policy (say) cannot be read. Fail-closed, same as the reserved-root
       // squatting check below: this is a state a human must fix.
-      const found = await lstatOrNull(path.join(repoDir, rel));
+      const found = await this.disk.lstatOrNull(path.join(repoDir, rel));
       if (found) {
         if (found.isFile()) continue;
         throw new Error(
@@ -237,7 +182,7 @@ export class TemplateFilesStep implements OnServerStart {
             'Remove or rename it — the platform requires this name to be a readable file.',
         );
       }
-      let content = await readTemplate(templateDir, rel);
+      let content = await templates.read(rel);
       // The on-disk merge below only runs against an EXISTING ignore file; a
       // freshly-declared one was merely assumed to carry the AGENTS.md rule —
       // true of the packaged template, not necessarily of a distribution's
@@ -298,7 +243,7 @@ export class TemplateFilesStep implements OnServerStart {
     // all the rules: separate passes would each read the on-disk file and
     // a later declared write would lose an earlier one's.
     added.push(
-      ...(await reconcileIgnoreRules(repoDir, branch, {
+      ...(await this.reconcileIgnoreRules(repoDir, branch, {
         // The preamble rule is respelled before it is added: a knowledge base
         // that booted the release shipping the unanchored spelling carries the
         // platform's own line, and that line hides a nested namesake too.
@@ -314,8 +259,8 @@ export class TemplateFilesStep implements OnServerStart {
     // phase. The file's own header says so, which is what makes overwriting
     // edits a stated contract instead of a surprise.
     let agentsRefreshed = false;
-    if (!added.includes('AGENTS.md') && (await templateDiffers(templateDir, repoDir, 'AGENTS.md'))) {
-      branch.write('AGENTS.md', await readTemplate(templateDir, 'AGENTS.md'));
+    if (!added.includes('AGENTS.md') && (await templates.differsFrom(repoDir, 'AGENTS.md'))) {
+      branch.write('AGENTS.md', await templates.read('AGENTS.md'));
       added.push('AGENTS.md');
       agentsRefreshed = true;
     }
@@ -345,8 +290,8 @@ export class TemplateFilesStep implements OnServerStart {
    */
   private async missingDirs(repoDir: string): Promise<string[]> {
     const missing: string[] = [];
-    for (const rootDir of this.requiredDirs) {
-      const found = await lstatOrNull(path.join(repoDir, rootDir));
+    for (const rootDir of reservedRootDirs(this.extraRootDirs)) {
+      const found = await this.disk.lstatOrNull(path.join(repoDir, rootDir));
       if (found) {
         if (found.isDirectory()) continue;
         throw new Error(
@@ -374,97 +319,59 @@ export class TemplateFilesStep implements OnServerStart {
     }
     return added;
   }
-}
 
-/**
- * The template's content for `relPath`, RENDERED: the managed files name the
- * three root folders, and a deployment may have renamed those, so the
- * placeholders the template carries (`{{pluginsDir}}` …) are filled with the
- * names in effect. Every required file is text; a template without
- * placeholders passes through unchanged.
- */
-async function readTemplate(templateDir: string, relPath: string): Promise<string> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(await templateSource(templateDir, relPath), 'utf8');
-  } catch (err) {
-    const packaged = defaultKbTemplateDir();
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || !PACKAGED_FALLBACK_FILES.has(relPath) || templateDir === packaged) {
-      throw err;
+  /**
+   * Reconcile the platform's OWN rules in `.bevelignore`: every `respell` pair
+   * rewritten in place, every `add` pattern guaranteed present as a line, every
+   * `drop` pattern taken out. Returns the paths changed, for the note.
+   *
+   * Never rewrites the rest. The file is the operator's, and every rule already
+   * in it is theirs to keep: adding puts one line under a comment saying where
+   * it came from, and dropping removes exactly the line (and the comment) an
+   * earlier release put there — never a line the operator wrote. Absent file is
+   * a no-op — it means the template's copy (declared in the same step, and
+   * reconciled the same way at declaration) arrives with the right rules in it.
+   *
+   * Matched line-wise rather than by substring: a rule for `Plugins/AGENTS.md`
+   * is not a rule for the root `AGENTS.md`, and treating it as one would leave
+   * the mismatch this exists to close.
+   */
+  private async reconcileIgnoreRules(
+    repoDir: string,
+    branch: KbBranch,
+    rules: {
+      add: string[];
+      drop: string[];
+      dropEvery?: string[];
+      /** `[from, to]` pairs: a rule an earlier release wrote, and its spelling now. */
+      respell?: ReadonlyArray<readonly [string, string]>;
+    },
+  ): Promise<string[]> {
+    let current: string;
+    try {
+      current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
+    } catch (err) {
+      // No ignore file — the copy declared from the template arrives with the
+      // right rules in it (guaranteed at declaration time, see the
+      // required-files loop above). A file that is there but cannot be read is
+      // NOT "no file": its rules may still be hiding the tree, so the hole is
+      // the step's failure, as it is for the migration's retirement.
+      if (!isAbsence(err)) throw err;
+      return [];
     }
-    console.warn(
-      `[kb-startup] template-files: the configured KB template has no "${relPath}"; ` +
-        'using the packaged copy. Add the file to the template to silence this.',
+    const respelled = (rules.respell ?? []).reduce(
+      (text, [from, to]) => withPlatformIgnorePatternRespelled(text, from, to),
+      current,
     );
-    raw = await fs.readFile(await templateSource(packaged, relPath), 'utf8');
+    const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), respelled);
+    const merged = (rules.dropEvery ?? []).reduce(
+      (text, pattern) => withoutIgnoreLine(text, pattern),
+      rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
+    );
+    if (merged === current) return [];
+    branch.write(IGNORE_FILENAME, merged);
+    return [IGNORE_FILENAME];
   }
-  return renderKbLayoutPlaceholders(raw);
-}
-
-/**
- * Whether the repo's copy of `relPath` differs from the RENDERED template's,
- * modulo line endings — a CRLF checkout of identical content must read as
- * "same", or the managed-file refresh would commit churn on every boot
- * forever. Rendered, so a renamed root is compared against the guide that
- * names it, not against the placeholders.
- */
-async function templateDiffers(templateDir: string, repoDir: string, relPath: string): Promise<boolean> {
-  const norm = (text: string) => text.replace(/\r\n?/g, '\n');
-  const [current, template] = await Promise.all([
-    fs.readFile(path.join(repoDir, relPath), 'utf8'),
-    readTemplate(templateDir, relPath),
-  ]);
-  return norm(current) !== norm(template);
-}
-
-/**
- * Reconcile the platform's OWN rules in `.bevelignore`: every `respell` pair
- * rewritten in place, every `add` pattern guaranteed present as a line, every
- * `drop` pattern taken out. Returns the paths changed, for the note.
- *
- * Never rewrites the rest. The file is the operator's, and every rule already
- * in it is theirs to keep: adding puts one line under a comment saying where
- * it came from, and dropping removes exactly the line (and the comment) an
- * earlier release put there — never a line the operator wrote. Absent file is
- * a no-op — it means the template's copy (declared in the same step, and
- * reconciled the same way at declaration) arrives with the right rules in it.
- *
- * Matched line-wise rather than by substring: a rule for `Plugins/AGENTS.md`
- * is not a rule for the root `AGENTS.md`, and treating it as one would leave
- * the mismatch this exists to close.
- */
-async function reconcileIgnoreRules(
-  repoDir: string,
-  branch: KbBranch,
-  rules: {
-    add: string[];
-    drop: string[];
-    dropEvery?: string[];
-    /** `[from, to]` pairs: a rule an earlier release wrote, and its spelling now. */
-    respell?: ReadonlyArray<readonly [string, string]>;
-  },
-): Promise<string[]> {
-  let current: string;
-  try {
-    current = await fs.readFile(path.join(repoDir, IGNORE_FILENAME), 'utf8');
-  } catch {
-    // No ignore file — the copy declared from the template arrives with the
-    // right rules in it (guaranteed at declaration time, see the
-    // required-files loop above).
-    return [];
-  }
-  const respelled = (rules.respell ?? []).reduce(
-    (text, [from, to]) => withPlatformIgnorePatternRespelled(text, from, to),
-    current,
-  );
-  const added = rules.add.reduce((text, pattern) => withIgnorePattern(text, pattern), respelled);
-  const merged = (rules.dropEvery ?? []).reduce(
-    (text, pattern) => withoutIgnoreLine(text, pattern),
-    rules.drop.reduce((text, pattern) => withoutPlatformIgnorePattern(text, pattern), added),
-  );
-  if (merged === current) return [];
-  branch.write(IGNORE_FILENAME, merged);
-  return [IGNORE_FILENAME];
 }
 
 /**

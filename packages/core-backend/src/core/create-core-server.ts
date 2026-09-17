@@ -1,4 +1,8 @@
 import express from 'express';
+import { logger } from '../shared/logging.js';
+
+const startupLog = logger('kb-startup');
+const crLog = logger('cr');
 import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
@@ -40,6 +44,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
 import {
   createKbSyncRoutes,
   isSyncRawBodyPath,
@@ -53,6 +58,8 @@ import {
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { GIT_SHA } from '../version.js';
 import { publicConfig } from './public-config.js';
+import { createReadiness } from './readiness.js';
+import { KbRemoteUnreachableError } from '../modules/workspace/startup/kb-startup-runner.js';
 import { createAgentInstructionsRoutes } from '../modules/agent-instructions/index.js';
 import type { CoreServices } from './create-core-services.js';
 
@@ -139,12 +146,9 @@ export async function createCoreServer(
   // page still can't read events on the user's behalf.
   //
   // `exposedHeaders` lets a BROWSER-based MCP client (e.g. MCP Inspector) read
-  // the Streamable-HTTP session header off the `initialize` response — custom
-  // response headers are hidden from browser JS unless exposed, so without this
-  // the client can't send `Mcp-Session-Id` back at all, and every follow-up
-  // 400s with "Bad Request: Mcp-Session-Id header is required" — the
-  // missing-header case, not the unknown-session one (that answers 404
-  // "Session not found"). `WWW-Authenticate` is
+  // custom response headers, which are hidden from browser JS unless exposed.
+  // The MCP endpoint is stateless and never sends `Mcp-Session-Id`, so only
+  // `Mcp-Protocol-Version` is exposed for it. `WWW-Authenticate` is
   // exposed so a browser client can read the 401 challenge and start the OAuth
   // discovery flow. (Native clients like Claude Code aren't subject to CORS.)
   app.use(
@@ -153,7 +157,7 @@ export async function createCoreServer(
       credentials: true,
       // `SYNC_RESPONSE_HEADER` is how the browser tells the sync endpoint's
       // own 503 from a reverse proxy's — see `kb-sync.routes.ts`.
-      exposedHeaders: ['Mcp-Session-Id', 'Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
+      exposedHeaders: ['Mcp-Protocol-Version', 'WWW-Authenticate', SYNC_RESPONSE_HEADER],
     }),
   );
   // Global JSON body parser. Some overlay routes carry a whole document dump
@@ -177,6 +181,34 @@ export async function createCoreServer(
   // rollout matches the merged commit before smoke-testing it.
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', sha: GIT_SHA, timestamp: Date.now() });
+  });
+
+  // Readiness: the facts `/api/health` never carried — is the database
+  // reachable, is the commit queue draining and how far behind is it, did the
+  // last attempt to reach the git remote succeed, how much disk is left.
+  // Computed per request, never stored; 503 only when the database is gone,
+  // because a restart cures none of the other conditions and costs every
+  // in-flight request. See `core/readiness.ts`.
+  const readiness = createReadiness({
+    db: core.db,
+    oldestQueuedAt: () => core.pendingCommitsService.oldestQueuedAt(),
+    drains: () => core.commitWorker.held,
+    // Whichever of the two layers reached the remote most recently: the
+    // workspace layer's fetches once the deployment is open, the startup
+    // phase's `ls-remote` at boot — which on a gated deployment is the only
+    // contact there is, and the one that says why it is gated.
+    lastRemoteContact: () => {
+      const contacts = [core.gitService.lastRemoteContact(), core.kbStartupRunner.lastRemoteContact()];
+      return contacts.reduce<{ at: number; ok: boolean } | null>(
+        (latest, c) => (c !== null && (latest === null || c.at > latest.at) ? c : latest),
+        null,
+      );
+    },
+    freeBytes: () => core.disk.freeBytes(core.config.workspacesRoot),
+  });
+  app.get('/api/ready', async (_req, res) => {
+    const report = await readiness();
+    res.status(report.status === 'unavailable' ? 503 : 200).json(report);
   });
 
   /**
@@ -257,7 +289,28 @@ export async function createCoreServer(
   // from that template; the runner then brings every branch up to this build
   // before any route can serve KB content. Throws to stop the boot (the
   // container's restart policy is the retry) — see kb-startup-runner.ts.
-  await core.kbStartupRunner.runAll();
+  //
+  // Runs in the booting process whether or not it holds the commit-worker
+  // lease, so on a redeploy it overlaps the outgoing holder's commits for the
+  // seconds it takes — the documented window at `holdCommitWorkerLease`.
+  try {
+    await core.kbStartupRunner.runAll();
+  } catch (err) {
+    // The one failure a boot survives: the remote cannot be reached. That
+    // says nothing about the knowledge base — what we would write is not
+    // known to be wrong, we cannot get there — so refusing to boot only took
+    // away the login and setup screens an operator needs to fix it (a
+    // rotated token, say). The deployment comes up GATED: the setup routes
+    // read the runner's standing failure and keep the app shut, the setup
+    // screen shows why, saving it retries, and the runner keeps trying on
+    // its own. Every other failure still stops the boot, because it means
+    // the template or a step would write something wrong.
+    if (!(err instanceof KbRemoteUnreachableError)) throw err;
+    startupLog.error('booting UNMAINTAINED and gated — the knowledge-base remote could not be reached:', {
+      detail: err.message,
+    });
+    core.kbStartupRunner.retryUntilMaintained();
+  }
 
   // Close change requests whose source branch has been deleted. SEQUENCED
   // AFTER the startup phase above, for two reasons: the sweep's fresh fetch
@@ -275,10 +328,10 @@ export async function createCoreServer(
     .closeChangeRequestsWithDeletedBranches()
     .then((n) => {
       if (n > 0) {
-        console.log(`[cr] closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
+        crLog.info(`closed ${n} change request${n === 1 ? '' : 's'} with a deleted branch`);
       }
     })
-    .catch((err) => console.warn('[cr] deleted-branch sweep failed:', err));
+    .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
@@ -409,7 +462,13 @@ export async function createCoreServer(
     core.toolManualService,
     core.manualAuthMiddleware,
     async (userId) => (await core.authService.getUserById(userId))?.email,
-    { workspaceService: core.workspaceService, accessControl: core.accessControl, kbDirName: core.kbDirName },
+    {
+      workspaceService: core.workspaceService,
+      accessControl: core.accessControl,
+      kbDirName: core.kbDirName,
+      disk: core.disk,
+      pluginIndex: core.pluginIndexService,
+    },
   ));
   // What every connected agent is told at session start, as the hosted proxy
   // composes it: read by the local `hexis-mcp` bridge at startup and by the
@@ -465,6 +524,7 @@ export async function createCoreServer(
     core.kbDirName,
     core.creatorAccess,
     core.adminAccess,
+    core.disk,
   ));
   // Workflow is the only branches / changes / change-request surface. The
   // former /git/*, /pr/*, /pr/:n/* routes are gone — every consumer goes
@@ -585,12 +645,19 @@ export async function createCoreServer(
   app.use(
     '/api',
     core.authMiddleware,
-    createSetupRoutes(core.settings, core.adminAccess, core.kbStartupRunner, {
-      // Same address family as the MCP endpoint above, userinfo stripped for
-      // the same reason: this string is handed to admins to paste elsewhere.
-      url: syncUrl.toString(),
-      lastSync: () => core.kbSyncService.lastSync(),
-    }),
+    createSetupRoutes(
+      core.settings,
+      core.adminAccess,
+      core.kbStartupRunner,
+      {
+        // Same address family as the MCP endpoint above, userinfo stripped for
+        // the same reason: this string is handed to admins to paste elsewhere.
+        url: syncUrl.toString(),
+        lastSync: () => core.kbSyncService.lastSync(),
+      },
+      // The connection probe's git runs through the deployment's one runner.
+      repositoryConnectionCheck(core.gitRunner),
+    ),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
     service: core.mcpServerEditService,
@@ -615,7 +682,8 @@ export async function createCoreServer(
   }));
 
   // What an Owner pastes into Claude's admin settings to register this
-  // deployment as a GitHub Enterprise Server — admins only.
+  // deployment as a GitHub Enterprise Server — admins only — plus whether it
+  // is registered, a boolean every signed-in person may read.
   app.use('/api', core.authMiddleware, createGitHubFacadeAdminRoutes({
     credentials: core.githubFacadeCredentials,
     isAdmin: (email) => core.adminAccess.isAdmin(email),

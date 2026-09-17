@@ -1,10 +1,16 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import { LockingFilesystem } from '../kb-fs/locking-filesystem.js';
 import { ReadOnlyFilesystem } from '../kb-fs/read-only-filesystem.js';
-import { makeRolesYamlWriteValidator } from '../access-model/roles-yaml-guard.js';
+import {
+  makeAgentRolesYamlWriteValidator,
+  ROLES_YAML_BASENAME,
+} from '../access-model/roles-yaml-guard.js';
 import type { ICreatorAccess } from '../access-model/creator.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import type { AuthService } from '../auth/auth.service.js';
@@ -26,6 +32,16 @@ export interface ToolContextDeps {
   creatorAccess: ICreatorAccess;
 }
 
+/** A file's text, or null when it does not exist. Any other failure throws. */
+async function readTextIfExists(absolutePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(absolutePath, 'utf-8');
+  } catch (err) {
+    if (isAbsence(err)) return null;
+    throw err;
+  }
+}
+
 export type ResolveToolContext = (
   auth: ToolAuth,
   abortSignal: AbortSignal,
@@ -44,11 +60,6 @@ export type ResolveToolContext = (
  * a request body; `branch` arrives as an explicit argument from the tool.
  */
 export function createToolContextResolver(deps: ToolContextDeps): ResolveToolContext {
-  // Reject an agent write that would leave roles.yaml unparseable (app-wide
-  // admin lockout) before it reaches disk — the agent gets a tool error and the
-  // file is untouched, mirroring the human editor's save-time gate.
-  const validateRolesWrite = makeRolesYamlWriteValidator(deps.kbDirName);
-
   return async function resolveToolContext(auth, abortSignal, sessionId) {
     const user = await deps.authService.getUserById(auth.userId);
     if (!user) throw new ToolError('Your account is no longer available.', 401);
@@ -70,7 +81,13 @@ export function createToolContextResolver(deps: ToolContextDeps): ResolveToolCon
                 branch: branchForWorkspaceId(workspaceId),
                 user,
                 kbDirName: deps.kbDirName,
-                validateWrite: validateRolesWrite,
+                // Reject an agent write that would leave roles.yaml unparseable
+                // (app-wide admin lockout) or that creates a role before it
+                // reaches disk — the agent gets a tool error and the file is
+                // untouched. Agents manage membership; roles are pre-set.
+                validateWrite: makeAgentRolesYamlWriteValidator(deps.kbDirName, () =>
+                  readTextIfExists(path.join(basePath, deps.kbDirName, ROLES_YAML_BASENAME)),
+                ),
                 creatorAccess: deps.creatorAccess,
               },
             )

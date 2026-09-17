@@ -1,4 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('settings');
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
@@ -46,7 +49,14 @@ export const validateHttpsRemote = (value: string): string | null => {
   } catch {
     return 'Enter a full URL, e.g. https://github.com/acme/knowledge-base.git';
   }
-  return parsed.protocol === 'https:' ? null : 'The URL must start with https://';
+  if (parsed.protocol !== 'https:') return 'The URL must start with https://';
+  // Userinfo would ride into git's argv on every call, visible in process
+  // listings — the KB startup refuses such a URL, so saving one only defers the
+  // failure to the next boot.
+  if (parsed.username || parsed.password) {
+    return 'Remove the username and token from the URL — enter the token in its own field.';
+  }
+  return null;
 };
 
 /**
@@ -166,8 +176,9 @@ export const CORE_SETTINGS: SettingDef[] = [
   },
 
   /**
-   * Single sign-on. Restart-to-apply because the provider is built once at boot
-   * and pushed into the auth plugin array the server mounts from.
+   * Single sign-on. Applies without a restart: the OIDC provider is mounted
+   * once at boot but reads these on every probe and sign-in, advertising
+   * itself only while issuer, client id and secret are all set.
    */
   {
     key: 'oidcIssuerUrl',
@@ -180,32 +191,27 @@ export const CORE_SETTINGS: SettingDef[] = [
         return 'Enter the issuer URL, e.g. https://login.microsoftonline.com/<tenant>/v2.0';
       }
     },
-    restartToApply: true,
   },
   {
     key: 'oidcClientId',
     envVar: 'OIDC_CLIENT_ID',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcClientSecret',
     envVar: 'OIDC_CLIENT_SECRET',
     section: 'sign-in',
     secret: true,
-    restartToApply: true,
   },
   {
     key: 'oidcScopes',
     envVar: 'OIDC_SCOPES',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcProviderLabel',
     envVar: 'OIDC_PROVIDER_LABEL',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     // Belongs with SSO because SSO is what makes it load-bearing: sign-in
@@ -256,6 +262,10 @@ export interface ResolvedSetting {
  * deployment that has nothing to serve until it is. Nobody is mid-session on a
  * second replica at that moment.
  *
+ * The single sign-on settings are the first to bend that: they apply live, so
+ * on a multi-replica deployment an OIDC change reaches only the replica that
+ * served the save until the others restart.
+ *
  * It stops being acceptable the moment a setting is something an operator
  * changes on a live multi-replica deployment. Adding one means adding
  * invalidation with it — the event bus already carries user-scoped and
@@ -290,9 +300,7 @@ export class DeploymentSettingsService {
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
-          console.warn(
-            `[settings] "${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`,
-          );
+          log.warn(`"${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`);
           continue;
         }
         try {
@@ -301,7 +309,7 @@ export class DeploymentSettingsService {
           // A rotated or mistyped key. Loud, and skipped rather than fatal:
           // one unreadable setting must not stop the server from booting into
           // the screen where it can be fixed.
-          console.error(`[settings] could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
+          log.error(`could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
         }
         continue;
       }
@@ -371,11 +379,61 @@ export class DeploymentSettingsService {
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
    * leave the screen implying otherwise.
+   *
+   * `restartRequired` is this service's view: some restart-to-apply setting
+   * changed. It cannot know what the caller then applies to the running
+   * process, so `restartKeys` names the settings behind it — the setup route
+   * leaves out the folder names and the branch model when the save that
+   * completes setup has just applied them, and reports only what remains.
    */
   async save(
     entries: Record<string, string>,
     updatedBy: string | null,
-  ): Promise<{ restartRequired: boolean }> {
+  ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
+    const toWrite = this.plan(entries);
+
+    /** The settings this save changed that a running server cannot pick up. */
+    const restartKeys: string[] = [];
+    for (const { key, value, def } of toWrite) {
+      // Compared against the EFFECTIVE value: a layout root that was unset
+      // was already running on its default, so saving that default changes
+      // nothing a restart would pick up.
+      const effective =
+        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
+      if (def.restartToApply && effective !== value) restartKeys.push(key);
+      const encrypted = def.secret === true;
+      const stored = encrypted ? this.crypto!.encrypt(value) : value;
+      await this.db
+        .insert(deploymentSettings)
+        .values({ key, value: stored, encrypted, updatedBy })
+        .onConflictDoUpdate({
+          target: deploymentSettings.key,
+          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
+        });
+      this.stored.set(key, value);
+    }
+
+    // The git token is consumed through the environment (the credential helper
+    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
+    // it there is what makes a token saved here work without a restart.
+    this.syncGitTokenEnv();
+    return { restartRequired: restartKeys.length > 0, restartKeys };
+  }
+
+  /**
+   * What {@link resolve} would answer for each key AFTER saving `entries` —
+   * validated by exactly the rules `save` applies, and throwing the same
+   * {@link SettingsValidationError}, but writing nothing. It is how a caller
+   * checks the values a save would put in effect (the repository connection)
+   * before letting the save happen.
+   */
+  resolveAfter(entries: Record<string, string>): (key: string) => string {
+    const toWrite = this.plan(entries);
+    return (key) => toWrite.find((w) => w.key === key)?.value ?? this.resolve(key);
+  }
+
+  /** Validate a batch and return the writes it amounts to; throws on any problem. */
+  private plan(entries: Record<string, string>): { key: string; value: string; def: SettingDef }[] {
     const problems: Record<string, string> = {};
     const toWrite: { key: string; value: string; def: SettingDef }[] = [];
 
@@ -445,32 +503,7 @@ export class DeploymentSettingsService {
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
-
-    let restartRequired = false;
-    for (const { key, value, def } of toWrite) {
-      // Compared against the EFFECTIVE value: a layout root that was unset
-      // was already running on its default, so saving that default changes
-      // nothing a restart would pick up.
-      const effective =
-        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
-      if (def.restartToApply && effective !== value) restartRequired = true;
-      const encrypted = def.secret === true;
-      const stored = encrypted ? this.crypto!.encrypt(value) : value;
-      await this.db
-        .insert(deploymentSettings)
-        .values({ key, value: stored, encrypted, updatedBy })
-        .onConflictDoUpdate({
-          target: deploymentSettings.key,
-          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
-        });
-      this.stored.set(key, value);
-    }
-
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
-    return { restartRequired };
+    return toWrite;
   }
 
   /** Drop stored rows for settings this build no longer defines. */

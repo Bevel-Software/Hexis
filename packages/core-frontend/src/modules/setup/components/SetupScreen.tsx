@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { DEFAULT_KB_LAYOUT, type KbLayout } from '@bevel-software/platform-shared';
 import { Banner, Button, Surface, TextField } from '../../../shared/components';
 import { tokenUsernameForHost } from '../utils/git-host';
+import { isRootFolderSuggestion, rootFolderState, type RootFolderState } from '../utils/root-folders';
 import { copyToClipboard } from '../../../lib/clipboard';
+import { MarketplaceSection } from '../../settings/components/MarketplaceSection';
 import {
   saveSettings,
   syncNow,
   syncOutcomeError,
   testConnection,
+  KbInitFailed,
   SettingsProblems,
   type ConnectionTest,
+  type KbInitFailure,
   type LastSync,
   type SettingStatus,
   type SyncNowResult,
@@ -98,23 +103,23 @@ const FIELDS: Record<
     placeholder: 'A long random string',
     advanced: true,
   },
+  // The three roots are NOT under Advanced: a repository whose skills live in
+  // `skills/` connected fine, got an empty `Skills/` scaffolded beside it and
+  // imported nothing — a choice that has to be seen to be made.
   knowledgeBaseDir: {
     label: 'Knowledge folder',
     help: 'The top-level folder in the repository that holds the knowledge. Change it only to read a repository laid out by someone else.',
     placeholder: 'KnowledgeBase',
-    advanced: true,
   },
   skillsDir: {
     label: 'Skills folder',
-    help: 'The top-level folder that holds shared skills. The three folder names must differ.',
+    help: 'The top-level folder that holds shared skills. The three folder names must differ. Case matters: skills and Skills are different folders.',
     placeholder: 'Skills',
-    advanced: true,
   },
   pluginsDir: {
     label: 'Plugins folder',
     help: 'The top-level folder that holds plugins. The three folder names must differ.',
     placeholder: 'Plugins',
-    advanced: true,
   },
   defaultBranch: {
     label: 'Main branch',
@@ -179,6 +184,18 @@ const REQUIRED_KEYS = ['kbRepoUrl', 'gitToken', 'defaultBranch', 'protectedBranc
  */
 const CONNECTION_KEYS = ['kbRepoUrl', 'gitToken', 'gitUsername'];
 
+/** The three root folder fields, checked against the repository's listing. */
+const ROOT_FOLDER_KEYS: readonly (keyof KbLayout)[] = ['knowledgeBaseDir', 'skillsDir', 'pluginsDir'];
+const isRootFolderKey = (key: string): key is keyof KbLayout =>
+  (ROOT_FOLDER_KEYS as readonly string[]).includes(key);
+
+/** How a near-miss folder differs from the configured name, as the warning words it. */
+const VARIANT_DIFFERENCE: Record<Extract<RootFolderState, { kind: 'variant' }>['difference'], string> = {
+  case: 'differs only by case',
+  'trailing-s': 'differs only by a trailing s',
+  'case-and-trailing-s': 'differs by case and a trailing s',
+};
+
 /** The blocks, in the order they are worked through. */
 const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[] = [
   {
@@ -197,7 +214,16 @@ const SECTIONS: { id: SettingStatus['section']; title: string; blurb: string }[]
 
 interface Props {
   settings: SettingStatus[];
-  /** Re-read the status after a save, so the gate can let the app through. */
+  /**
+   * Re-read the status after a save, so the gate can let the app through.
+   *
+   * The host must let only its LATEST read land (`SetupGate` and
+   * `DeploymentPage` both read through `useSetupStatus`, which does): each
+   * fresh `kbInit` replaces the failure on
+   * screen, so an earlier read answering late — the refresh after a failed
+   * save, landing after a retry that succeeded — would otherwise put the
+   * cleared failure back.
+   */
   onSaved(): void;
   /**
    * Where the screen is standing. `setup` (the default) is the first-run
@@ -213,6 +239,12 @@ interface Props {
    * calls, and what the last call did. Absent on a build without the module.
    */
   sync?: SyncStatus;
+  /**
+   * A standing knowledge-base initialization failure, from the status
+   * endpoint — so the banner is there when the screen is opened, not only
+   * right after the save that failed.
+   */
+  kbInit?: KbInitFailure;
 }
 
 /**
@@ -231,8 +263,43 @@ interface Props {
  * silently outranking the infrastructure config someone is reviewing in a
  * repo, which is the same rule the server enforces.
  */
-export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Props) {
+/** Two reports of the same initialization failure (a status read builds a new object each time). */
+function sameFailure(a: KbInitFailure, b: KbInitFailure): boolean {
+  return a.kind === b.kind && a.cause === b.cause;
+}
+
+export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit }: Props) {
   const [draft, setDraft] = useState<Record<string, string>>({});
+  /**
+   * The initialization failure on screen: the status endpoint's, until a save
+   * or a retry from this screen answers more recently. A fresh status read
+   * (a new `kbInit` from the host) takes over again — adjusted during render
+   * rather than in an effect, so the stale banner never paints. That a fresh
+   * prop really is the latest read is the host's promise (see `onSaved`), and
+   * each retry or save that clears the failure here also asks for that read.
+   */
+  const [initFailure, setInitFailure] = useState<KbInitFailure | null>(kbInit ?? null);
+  const [seenKbInit, setSeenKbInit] = useState(kbInit);
+  /**
+   * The failure a save or retry from THIS screen has just seen cleared, until a
+   * status read agrees. A read that went out before the retry — the refresh
+   * after the failed save — can still answer after it, reporting that same
+   * failure as standing; this screen knows better, so the stale copy is not
+   * shown. The guard lifts on the first read without a failure, and never
+   * hides a DIFFERENT failure: that is news, whenever it arrives.
+   */
+  const [clearedFailure, setClearedFailure] = useState<KbInitFailure | null>(null);
+  if (kbInit !== seenKbInit) {
+    setSeenKbInit(kbInit);
+    if (!kbInit) {
+      setClearedFailure(null);
+      setInitFailure(null);
+    } else if (!(clearedFailure && sameFailure(kbInit, clearedFailure))) {
+      setClearedFailure(null);
+      setInitFailure(kbInit);
+    }
+  }
+  const [retrying, setRetrying] = useState(false);
   const [syncing, setSyncing] = useState(false);
   /** What the last "Sync now" from THIS page came back with (a failure to ask is `error`). */
   const [syncResult, setSyncResult] = useState<SyncNowResult | null>(null);
@@ -284,6 +351,25 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
   };
 
   /**
+   * Something typed that a save would actually store. The retry sends an EMPTY
+   * save — pressed now, it would re-run against the stored values while a
+   * corrected token sits unsaved in the form — so it waits, and Save (which
+   * retries too) is the way to try with the new values. Judged like the
+   * connection gate above — an edit put back changes nothing — and a token
+   * username that is just what an address answers (the one typed, or the one
+   * stored) is not an edit of its own: typing the address fills it in, and once
+   * the address is put back or cleared, nothing the admin did is left unsaved.
+   */
+  const answeredUsernames = [draft.kbRepoUrl, settings.find((s) => s.key === 'kbRepoUrl')?.value].map(
+    (address) => (address ? tokenUsernameForHost(address)?.username : undefined),
+  );
+  const draftChanged = Object.keys(draft).some(
+    (key) =>
+      !(key === 'gitUsername' && answeredUsernames.includes(draft.gitUsername)) &&
+      connectionKeyChanged(key),
+  );
+
+  /**
    * Whether THIS save has to stand behind the repository connection.
    *
    * On first run it always does: everything behind the gate reads from a
@@ -311,6 +397,8 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
    * reader has already changed.
    */
   const connectionRejected = mustProveConnection && test?.ok === false;
+  /** Of those, the host let the token read but not write — a different fix. */
+  const connectionReadOnly = connectionRejected && test?.outcome === 'read-only';
 
   function set(key: string, value: string) {
     setDraft((d) => {
@@ -515,9 +603,47 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
     );
   }
 
+  /**
+   * Re-run the knowledge-base initialization. No endpoint of its own: any save
+   * while the failure stands re-runs the phase, and an EMPTY one changes no
+   * setting — so nothing has to be typed again, and the server's one-save-at-a-
+   * time chain covers this exactly as it covers the form.
+   */
+  async function retryInitialization() {
+    if (retrying || saving || draftChanged) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      const result = await saveSettings({});
+      setClearedFailure(initFailure);
+      setInitFailure(null);
+      if (result.awaitingRestart) {
+        setNeedsRestart(true);
+        // As after a save: the settings page still wants fresh status, or its
+        // host keeps the failure this retry just cleared.
+        if (variant === 'settings') onSaved();
+        return;
+      }
+      if (result.complete && variant === 'setup') {
+        // The same full reload the completing save does, for the same reason:
+        // the browser's branch model predates the app it is about to open.
+        window.location.reload();
+        return;
+      }
+      onSaved();
+    } catch (err) {
+      if (err instanceof KbInitFailed) {
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+      } else setError(err instanceof Error ? err.message : 'Could not retry the initialization.');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (saving) return;
+    if (saving || retrying) return;
     setSaving(true);
     setError(null);
     setProblems({});
@@ -554,11 +680,15 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         setTesting(true);
         await probe();
         setTesting(false);
+        // Includes a probe the server REFUSED (a 4xx comes back as a
+        // rejection, not a throw) — that is an answer about these values.
         if (proven && !proven.ok) {
           setError(
-            variant === 'setup'
-              ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
-              : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
+            proven.outcome === 'read-only'
+              ? 'Not saved. The token can read the repository but cannot write to it — grant it write access and test again.'
+              : variant === 'setup'
+                ? 'Not saved. Nothing behind this screen works until the repository answers, and it did not — fix the connection above and test it again.'
+                : 'Not saved. The repository did not answer with those details — fix the connection above and test it again.',
           );
           return;
         }
@@ -571,11 +701,16 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       // above fills the same fields from the same answer.
       if (
         !probed &&
+        // No address, nothing to look a branch up in.
+        !!resolvedIn(payload, 'kbRepoUrl') &&
         (!resolvedIn(payload, 'defaultBranch') || !resolvedIn(payload, 'protectedBranches'))
       ) {
         await probe();
       }
       const result = await saveSettings(payload);
+      // A save while a failure stands re-ran the initialization, and it held.
+      setClearedFailure(initFailure);
+      setInitFailure(null);
       setRestartRequired(result.restartRequired);
       setDraft({});
       // A save can succeed and STILL leave the deployment unusable: a blank
@@ -611,8 +746,24 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
       }
       onSaved();
     } catch (err) {
-      if (err instanceof SettingsProblems) setProblems(err.problems);
-      else setError(err instanceof Error ? err.message : 'Could not save these settings.');
+      if (err instanceof SettingsProblems) {
+        setProblems(err.problems);
+        // A problem about a field this form does not render — the server's
+        // connection check blaming a token the environment supplies, say —
+        // would otherwise vanish, leaving a save that failed silently.
+        const unshown = Object.entries(err.problems).filter(
+          ([key]) => !editable.some((s) => s.key === key),
+        );
+        if (unshown.length > 0) setError(unshown.map(([, message]) => message).join(' '));
+      } else if (err instanceof KbInitFailed) {
+        // The values ARE stored — only the initialization failed. The form
+        // shows what was saved, and the banner says what to fix and retries
+        // without asking for any of it again.
+        setClearedFailure(null);
+        setInitFailure(err.kbInit);
+        setDraft({});
+        onSaved();
+      } else setError(err instanceof Error ? err.message : 'Could not save these settings.');
     } finally {
       setSaving(false);
       // The page scrolls now, and every message lands at the top of it while
@@ -631,11 +782,56 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
    */
   const remoteBranches = test?.ok ? (test.branches ?? []) : [];
 
+  /**
+   * The top-level folders the connection test found, or null when there is
+   * nothing to judge the root fields against: no test yet, a failed one, a
+   * listing that did not come back — or an EMPTY repository, whose one message
+   * already says everything will be set up, and three "will be created" notes
+   * beneath it would only repeat that.
+   */
+  const remoteRootFolders =
+    test?.ok && !test.empty && Array.isArray(test.rootFolders) ? test.rootFolders : null;
+
+  /**
+   * What the repository holds for one root field, as it would save now. Judged
+   * live against the listing — the listing describes the repository, not the
+   * field, so correcting the name to the one suggested says "found" at once.
+   * Never a problem that blocks the save: an admin may mean to create the
+   * folder, or to rename the old one later.
+   */
+  function renderRootFolderState(key: keyof KbLayout) {
+    if (!remoteRootFolders) return null;
+    const name = resolved(key) || DEFAULT_KB_LAYOUT[key];
+    const state = rootFolderState(name, remoteRootFolders);
+    const folder = (value: string) => <code className="font-mono">{value}</code>;
+    return (
+      <p id={`${key}-repo-state`} className={`mt-1 text-meta ${state.kind === 'variant' ? 'text-wait' : 'text-ok'}`}>
+        {state.kind === 'found' && <>{folder(name)} found in the repository.</>}
+        {state.kind === 'missing' && (
+          <>{folder(name)} is not in the repository yet — it will be created.</>
+        )}
+        {state.kind === 'variant' && (
+          <>
+            Not found — the repository has {folder(state.candidate)} (
+            {VARIANT_DIFFERENCE[state.difference]}): set
+            this field to {folder(state.candidate)} or rename the folder.
+          </>
+        )}
+      </p>
+    );
+  }
+
   function renderField(setting: SettingStatus) {
     const copy = FIELDS[setting.key];
     if (!copy) return null;
     const isBranchField = setting.key === 'defaultBranch' || setting.key === 'protectedBranches';
-    const listId = isBranchField && remoteBranches.length > 0 ? `${setting.key}-options` : undefined;
+    const isFolderField = isRootFolderKey(setting.key);
+    const suggestions = isBranchField
+      ? remoteBranches
+      : isFolderField
+        ? (remoteRootFolders ?? []).filter(isRootFolderSuggestion)
+        : [];
+    const listId = suggestions.length > 0 ? `${setting.key}-options` : undefined;
     return (
       <div key={setting.key}>
         <label className="block space-y-1.5">
@@ -657,12 +853,13 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         </label>
         {listId && (
           <datalist id={listId}>
-            {remoteBranches.map((b) => (
+            {suggestions.map((b) => (
               <option key={b} value={b} />
             ))}
           </datalist>
         )}
         <p className="mt-1 text-meta text-ink-faint">{copy.help}</p>
+        {isRootFolderKey(setting.key) && renderRootFolderState(setting.key)}
         {setting.key === 'kbSyncSecret' && renderSyncPanel()}
         {/* Only AFTER setup: on first run there is nothing yet to lose, so
             the caution would be noise. Once a deployment is live, this field
@@ -705,6 +902,31 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
         )}
 
         <div ref={noticeRef}>
+          {/* Saved, but the knowledge base behind the gate was never set up.
+              The cause is the server's classified sentence — what to fix, not
+              what git said — and the retry needs nothing re-entered. */}
+          {initFailure && (
+            <Banner tone="danger" role="alert" className="mt-6" data-testid="kb-init-failure">
+              <p className="font-semibold">Saved, but the knowledge base could not be initialized</p>
+              <p className="mt-1">{initFailure.cause}</p>
+              {draftChanged && (
+                <p className="mt-1">
+                  The form has unsaved changes — saving them retries the initialization with them.
+                </p>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => void retryInitialization()}
+                disabled={retrying || saving || testing || draftChanged}
+              >
+                {retrying ? 'Initializing…' : 'Retry initialization'}
+              </Button>
+            </Banner>
+          )}
+
           {error && (
             <Banner tone="danger" role="alert" className="mt-6">
               {error}
@@ -741,7 +963,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
           </Banner>
         )}
 
-        <form onSubmit={submit} className="mt-8 space-y-10">
+        {/* Named so its submit button can sit outside it, below the
+            Marketplace section: the button is the last thing on the page, but
+            Marketplace is deliberately not part of this form (see below). */}
+        <form id="setup-settings-form" onSubmit={submit} className="mt-8 space-y-10">
           {SECTIONS.map((section) => {
             const fields = editable.filter((s) => s.section === section.id);
             // A section whose every field comes from the environment has
@@ -776,7 +1001,9 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                     </p>
                   )}
                 </div>
-                {fields.filter((f) => !FIELDS[f.key]?.advanced).map((f) => renderField(f))}
+                {fields
+                  .filter((f) => !FIELDS[f.key]?.advanced && !isRootFolderKey(f.key))
+                  .map((f) => renderField(f))}
 
                 {/* Immediately under the two fields it proves, and above the
                     Advanced block it fills in — the middle of the sequence
@@ -795,13 +1022,13 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                         // Also while SAVING: a save may be asking the remote
                         // itself, and a second test racing it would overwrite
                         // both the result and the versions derived from it.
-                        disabled={testing || saving}
+                        disabled={testing || saving || retrying}
                       >
                         {testing ? 'Checking…' : 'Test connection'}
                       </Button>
                       <span className="text-meta text-ink-faint">
-                        Checks the address and token against the host, and fills in the versions
-                        below.
+                        Checks the address and token against the host, looks for the folders below,
+                        and fills in the versions.
                       </span>
                     </div>
                     {test && (
@@ -820,6 +1047,12 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
                     )}
                   </Surface>
                 )}
+
+                {/* The three root folders: in the main section, directly under
+                    the test whose listing they are checked against — the
+                    connection fields above it stay next to the button that
+                    proves them. */}
+                {fields.filter((f) => isRootFolderKey(f.key)).map((f) => renderField(f))}
 
                 {/* Everything a normal setup never touches, out of the way but
                     not hidden: a self-hosted git server does need the token
@@ -882,32 +1115,51 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync }: Prop
             </Surface>
           )}
 
-          {/* A rejected connection stops here rather than at the far side of
-              it. Saving these answers would finish setup — the server checks
-              that they are present, not that they work — and open the app onto
-              a repository it cannot reach, which reads as a broken product
-              rather than a wrong token. */}
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={saving || testing || connectionRejected}
-              // Described by the refusal, so a reader who lands on a button
-              // that will not move is told why rather than left guessing.
-              aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
-            >
-              {saving ? 'Saving…' : 'Save and continue'}
-            </Button>
-            {connectionRejected && (
-              // Not a live region: the test panel above already announced the
-              // host's own words, and the save banner announces a blocked
-              // attempt. This is the label for a button that will not move.
-              <span id="connection-refusal" className="text-meta text-danger">
-                The repository turned that connection down. Fix it above and test again.
-              </span>
-            )}
-          </div>
         </form>
+
+        {/* Outside the form: nothing in it is saved by "Save and continue",
+            and on first run it is optional — the gate never waits on it. The
+            same section in both variants, so first run and Deployment
+            settings cannot drift. */}
+        <MarketplaceSection variant={variant} />
+
+        {/* The submit button lives HERE, after Marketplace, though it belongs
+            to the form above — `form=` is what lets those two facts hold at
+            once. It is the last thing on the page because a reader should
+            meet every section, Marketplace included, before the control that
+            leaves the screen; when it sat above Marketplace, the page looked
+            finished while a section was still below it.
+
+            A rejected connection stops here rather than at the far side of
+            it. Saving these answers would finish setup — the server checks
+            that they are present, not that they work — and open the app onto
+            a repository it cannot reach, which reads as a broken product
+            rather than a wrong token. */}
+        <div className="mt-10 flex flex-wrap items-center justify-end gap-3">
+          {connectionRejected && (
+            // Before the button in the DOM so the reason is read first, and
+            // so `justify-end` leaves the button itself at the right edge.
+            // Not a live region: the test panel above already announced the
+            // host's own words, and the save banner announces a blocked
+            // attempt. This is the label for a button that will not move.
+            <span id="connection-refusal" className="text-meta text-danger">
+              {connectionReadOnly
+                ? 'That token can read the repository but cannot write to it. Grant write access and test again.'
+                : 'The repository turned that connection down. Fix it above and test again.'}
+            </span>
+          )}
+          <Button
+            type="submit"
+            form="setup-settings-form"
+            variant="primary"
+            disabled={saving || testing || retrying || connectionRejected}
+            // Described by the refusal, so a reader who lands on a button
+            // that will not move is told why rather than left guessing.
+            aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
+          >
+            {saving ? 'Saving…' : 'Save and continue'}
+          </Button>
+        </div>
 
         {fromEnv.length > 0 && (
           <Surface tone="sunken" radius="md" className="mt-10 p-4">

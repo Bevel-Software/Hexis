@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { logger } from '../shared/logging.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
@@ -23,6 +24,11 @@ import { RolesYamlStep } from '../modules/workspace/startup/steps/roles-yaml.ste
 import { buildSeedTree } from '../modules/workspace/startup/steps/seed-tree.js';
 import { DeploymentSettingsService } from '../modules/settings/deployment-settings.service.js';
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
+import { NodeFs } from '../modules/kb-fs/node-fs.js';
+import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
+import type { IGitRunner } from '../shared/git.contract.js';
+import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
+import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -44,7 +50,7 @@ import { DocExtractService } from '../modules/workspace/file-readers/doc-extract
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
-import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
+import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
@@ -79,6 +85,7 @@ import {
 } from '../modules/secrets-vault/index.js';
 import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
+import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
 import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import { assertGitVersion } from '../modules/workflow/git/git-version.js';
@@ -113,7 +120,6 @@ import {
   createManualAuthMiddleware,
 } from '../modules/tool-auth/tool-auth.middleware.js';
 import { unmeteredLlmUsage, type ILlmUsageMeter } from '../modules/tool-auth/llm-usage-meter.js';
-import { McpSessionStore } from '../modules/mcp/mcp-session-store.js';
 import { McpService } from '../modules/mcp/mcp.service.js';
 import { readAgentPreamble, type AgentPreambleReader } from '../modules/agent-instructions/index.js';
 import { createMcpAuthMiddleware } from '../modules/mcp/mcp-auth.middleware.js';
@@ -141,6 +147,26 @@ import { registerCatalogCacheInvalidation } from './catalog-cache-invalidation.j
 export interface CoreServices {
   config: CoreConfig;
   db: Database;
+  /**
+   * Reading the disk without locks — the one tree walk and the one path
+   * probe (see `shared/fs.contract.ts`). Every core module that reads a
+   * checkout is handed this; an overlay's own readers take it too, rather
+   * than carrying a `readdir` loop or an errno check of their own.
+   */
+  disk: ITreeWalker & IFsProbe;
+  /**
+   * Running git — the one runner every module shells out through, carrying
+   * the deployment's deadline. Exposed like `disk` so an overlay's own git
+   * callers run under the same ceiling rather than spawning their own.
+   */
+  gitRunner: IGitRunner;
+  /**
+   * The commit-worker lease loop (see `core/lifecycle.ts`). `held` says
+   * whether THIS process is the one draining the queue; `stop()` is the
+   * shutdown sequence's way of finishing the in-flight commit and handing the
+   * lease to the replacement.
+   */
+  commitWorker: LeaseLoopHandle;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -309,11 +335,20 @@ export async function createCoreServices(
   // The remote URL and username are read per-operation instead, so an admin
   // finishing setup can clone immediately without bouncing the process.
   const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
+  // The disk: one walk, one probe, for every reader below.
+  const disk = new NodeFs();
+  // How git is run, for every module that runs it: one environment, one buffer
+  // ceiling, one error shape, and — the reason it exists — one deadline, so a
+  // git that never returns cannot hold a workspace (and with it the commit
+  // queue) open indefinitely. See `shared/git.contract.ts`.
+  const gitRunner = new NodeGitRunner(config.gitTimeoutMs);
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => settings.resolve('kbRepoUrl'),
     kbDirName,
+    disk,
     () => settings.resolve('gitUsername') || 'x-access-token',
+    gitRunner,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -326,11 +361,11 @@ export async function createCoreServices(
   // reshapes trees the template top-up would otherwise re-scaffold — then
   // whatever the distribution appends.
   const kbStartupSteps = [
-    new GroupsToPluginsStep(),
-    new PluginManifestsStep(),
-    new PersonalSpacesStep(),
-    new TemplateFilesStep(extraDirs),
-    new RolesYamlStep([config.adminEmail]),
+    new GroupsToPluginsStep(disk),
+    new PluginManifestsStep(disk),
+    new PersonalSpacesStep(disk),
+    new TemplateFilesStep(disk, extraDirs),
+    new RolesYamlStep(disk, [config.adminEmail]),
     ...(ports.kbStartupSteps ?? []),
   ];
   const kbStartupRunner = new KbStartupRunner({
@@ -339,6 +374,7 @@ export async function createCoreServices(
     // the first thing that needs them.
     kbRepoUrl: () => settings.resolve('kbRepoUrl'),
     gitUsername: () => settings.resolve('gitUsername') || 'x-access-token',
+    gitToken: () => settings.resolve('gitToken'),
     workspacesRoot: config.workspacesRoot,
     kbDirName,
     templateDir: config.kbTemplateDir,
@@ -348,7 +384,8 @@ export async function createCoreServices(
     // same answer `SEED_ADMIN_EMAILS` used to ask for a second time.
     seedAdminEmails: [config.adminEmail],
     steps: kbStartupSteps,
-    buildSeedTree: buildSeedTree(config.kbTemplateDir, extraDirs, [config.adminEmail]),
+    buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail]),
+    gitRunner,
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
@@ -362,13 +399,17 @@ export async function createCoreServices(
   // gate cannot disagree about who the owner is. They did: the owner could
   // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
-  const accessControl = new AccessControlService(workspaceService, kbDirName, [
-    config.adminEmail,
-  ]);
+  const accessControl = new AccessControlService(
+    workspaceService,
+    kbDirName,
+    disk,
+    [config.adminEmail],
+    gitRunner,
+  );
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
-  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName);
+  const creatorAccess = new CreatorAccessService(workspaceService, accessControl, kbDirName, disk);
 
   // Ontology-session boundary: records each agent run's touched ontologies and
   // blocks writes once a run has crossed ontologies. Postgres-backed so the
@@ -380,31 +421,31 @@ export async function createCoreServices(
   // one run, unlike the Postgres-backed ontology touched-set above.
   const routineWritePolicy = new RoutineWritePolicyService();
   // Skills: discovered from the default-branch workspace only (global catalog).
-  const skillService = new SkillService(workspaceService, accessControl, kbDirName);
+  const skillService = new SkillService(workspaceService, accessControl, kbDirName, disk);
   // Tool manuals: user-authored `*.tool` files under `Plugins/` in the default
   // branch — access-controlled like Skills, served to external agents via
   // `GET /api/agent/all-tools` and registered on the MCP proxy's UTCP client.
   // Where plugins come from: one walk of the plugins root that reads every
   // plugin folder in whichever file shape it carries (see
   // modules/plugins/discovery). Nothing to configure, nothing to document.
-  const pluginSource = new KbPluginSource();
-  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, Date.now, pluginSource);
+  const pluginSource = new KbPluginSource(disk);
+  const toolManualService = new ToolManualService(workspaceService, accessControl, kbDirName, disk, pluginSource);
   // Plugins: the folders under `Plugins/` that carry a
   // team's skills AND the tools they need. Enumerated for EVERY authenticated
   // caller — a plugin they cannot read still exists for them, as a locked one —
   // with the counts read off the two catalogs above rather than a second scan.
   // The link index resolves manifests against the released catalog, and the
   // plugin index counts through it (inline + linked), so it comes first.
-  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, Date.now, pluginSource);
+  const pluginLinkIndex = new PluginLinkIndex(workspaceService, skillService, accessControl, kbDirName, pluginSource);
   const pluginIndexService = new PluginIndexService(
     workspaceService,
     accessControl,
     skillService,
     toolManualService,
     kbDirName,
+    pluginSource,
     Date.now,
     pluginLinkIndex,
-    pluginSource,
   );
   // Auth service — resolves identities for login, PR author attribution, and
   // access lookups. (Change requests now store the author email directly, so
@@ -435,6 +476,7 @@ export async function createCoreServices(
     kbDirName,
     workspaceMutex,
     accessControl,
+    gitRunner,
   );
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
@@ -444,6 +486,7 @@ export async function createCoreServices(
     workspaceService,
     accessControl,
     gitService,
+    config.configuredPublicFrontendUrl,
   );
   const diffService = new DiffService(
     workspaceService,
@@ -451,6 +494,7 @@ export async function createCoreServices(
     config.workspacesRoot,
     config.backupsRoot,
     kbDirName,
+    disk,
   );
   // Late-bind the diff service into WorkspaceService so file writes/moves
   // trigger backup updates. (GitService used to take a diffService too — for
@@ -539,6 +583,7 @@ export async function createCoreServices(
     workflowService,
     accessControl,
     pluginSource,
+    disk,
     kbDirName,
     eventBus,
     () => {
@@ -565,12 +610,15 @@ export async function createCoreServices(
       knowledgeBaseMcp: { name: 'hexis', url: mcpEndpointUrl(config.publicBackendUrl) },
     },
     pluginSource,
+    disk,
+    gitRunner,
   );
   // Sibling of the workspaces root, like the spill store: one bare repo, one
   // git namespace per caller (see marketplace-repo.service.ts).
   const marketplaceRepo = new MarketplaceRepoService(
     path.resolve(config.workspacesRoot, '..', 'marketplace.git'),
     marketplaceCompiler,
+    gitRunner,
   );
 
   // Remote sync. Drives the workflow module's per-branch pull-and-announce
@@ -586,6 +634,7 @@ export async function createCoreServices(
     accessControl,
     toolManualService,
     kbDirName,
+    disk,
   );
 
   // Plugin provisioning — the one privileged door that brings `Plugins/<name>/`
@@ -598,6 +647,8 @@ export async function createCoreServices(
     accessControl,
     kbDirName,
     eventBus,
+    pluginSource,
+    disk,
   );
 
   // Pending skills: the other half of the catalog — skills that exist only on
@@ -703,11 +754,11 @@ export async function createCoreServices(
   const accountErasureService = new AccountErasureService(db, ports.erasureParticipants ?? []);
 
   // MCP (remote agent access). ExternalApiKeyService handles connection-key
-  // lifecycle; McpSessionStore holds per-session userId in memory
-  // (single-replica — see docs/mcp-remote-access.md). McpService is now a
-  // GENERIC proxy: per session it discovers the UTCP manual at /api/agent/utcp
-  // over loopback and re-exposes every tool, dispatching calls back through the
-  // REST tool surface (so agent logic + metering live there, once).
+  // lifecycle. McpService is a GENERIC, STATELESS proxy: per request it
+  // discovers the caller's catalog at /api/agent/all-tools over loopback and
+  // re-exposes every tool, dispatching calls back through the REST tool
+  // surface (so agent logic + metering live there, once). No MCP session is
+  // kept, so a restart is invisible to connected clients.
   // Connection keys also come as GitHub-shaped links (`gho_…`, kind
   // `github-link`): the same key, minted by the marketplace facade below when
   // a person connects an account on claude.ai, told apart by its stored kind.
@@ -732,15 +783,13 @@ export async function createCoreServices(
     stateSecret: config.jwtSecret,
     publicFrontendUrl: config.publicFrontendUrl,
   });
-  const mcpSessionStore = new McpSessionStore();
-  // What every connected agent is told at session start: the admin's preamble
+  // What every connected agent is told at initialize: the admin's preamble
   // at the repository root, read as the platform (the root is default-deny
   // for readers, and the preamble is a broadcast). One reader, two consumers:
-  // the proxy below composes in-process per session; the agent-facing route
+  // the proxy below composes in-process per request; the agent-facing route
   // serves the same composition to the local bridge and the frontend card.
-  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName);
+  const readPreamble: AgentPreambleReader = () => readAgentPreamble(workspaceService, kbDirName, disk);
   const mcpService = new McpService(
-    mcpSessionStore,
     {
       // Loopback to our own REST tool surface — 127.0.0.1 (not localhost) to pin
       // IPv4 and dodge resolver ambiguity. The proxy authenticates each call with
@@ -748,7 +797,7 @@ export async function createCoreServices(
       loopbackBaseUrl: `http://127.0.0.1:${config.port}`,
       // Manual namespace + UTCP variable prefix (KNOWLEDGE_BASE_API_URL / …).
       manualName: 'KNOWLEDGE_BASE',
-      // Oversized chain results spill here too — an external MCP session has no
+      // Oversized chain results spill here too — an external MCP caller has no
       // ambient workspace, so it reads the spill back by ref via `read_file`.
       spillStore,
       // For the needs-authorization setup link surfaced to external agents.
@@ -760,19 +809,19 @@ export async function createCoreServices(
     // tool need?".
     secretsVaultService,
     toolManualService,
-    // Loopback bearer mint for OAuth/JWT sessions — their own bearer would
+    // Loopback bearer mint for OAuth/JWT requests — their own bearer would
     // 401 at the connection-key/internal-only /api/agent/* hop.
     internalTokenService,
-    // Session-grant reset for broken tool sign-ins. A closure because the
+    // Grant reset for broken tool sign-ins. A closure because the
     // provider is constructed just below (it needs nothing from McpService;
     // the binding is only dereferenced at call time, long after boot).
     (bearer) => mcpOAuthProvider.revokeByAccessToken(bearer),
   );
-  // A changed secret invalidates the proxy's remembered manual failures for
-  // that user (null = shared secret → everyone), so a just-repaired
-  // credential is retried on the very next session build instead of waiting
-  // out the failure memo's TTL.
-  secretsVaultService.onMutation((changedUserId) => mcpService.clearManualFailures(changedUserId));
+  // A changed secret invalidates what the proxy built from the old value for
+  // that user (null = shared secret → everyone): remembered manual failures,
+  // so a just-repaired credential is retried on the very next request instead
+  // of waiting out the failure memo's TTL, and pooled downstream connections.
+  secretsVaultService.onMutation((changedUserId) => mcpService.onSecretsChanged(changedUserId));
   // MCP OAuth 2.1 authorization server (our own AS): lets MCP clients with no
   // pre-shared connection key connect via the standard 401 → discovery → DCR →
   // authorize (PKCE) flow. The authorize step routes the browser to /connect
@@ -836,16 +885,17 @@ export async function createCoreServices(
   // retry budget AND recovery-agent budget exhausted) the worker emits
   // a `'system'` feedback notice that admins triage out of band.
   //
-  // The orphan-startup sweep runs BEFORE start() so any rows that
-  // previous deploys left as `running` (process crashed mid-commit) get
-  // reset to `pending` before the worker starts claiming. The sweep
-  // also enqueues working-tree dirt that pre-dates the queue (the
-  // existing `target-company-state` orphans).
-  await pendingCommitsService.startupReconcile(
-    workspaceService.knownWorkspaces(),
-    { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
-    { email: recoveryBot.email, name: recoveryBot.name },
-  );
+  // The queue's recovery — rows a dead process left `running` go back to
+  // `pending`, and working-tree dirt that pre-dates the queue is enqueued —
+  // runs under the commit-worker lease, right before the worker starts (see
+  // `withStartupTask` below). At boot, before the lease, it would reset rows
+  // the outgoing process of a redeploy is still committing.
+  const reconcileQueue = () =>
+    pendingCommitsService.startupReconcile(
+      workspaceService.knownWorkspaces(),
+      { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
+      { email: recoveryBot.email, name: recoveryBot.name },
+    );
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
     // The service IS the driver — passed directly rather than wrapped in a
@@ -870,33 +920,31 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  pendingCommitsWorker.start();
+  const leased = withStartupTask(pendingCommitsWorker, reconcileQueue);
+  // Not `start()`: the worker runs only while this process holds the
+  // commit-worker lease. On a redeploy the outgoing container still holds it,
+  // so this one serves requests and declines to drain until that one exits;
+  // then it takes the lease and starts. Two processes draining one shared
+  // clone volume is the failure this prevents — see `core/lifecycle.ts`.
+  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker), leased);
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
-  // the server is built, later). Core contributes the generic OIDC provider
-  // when the env configures one.
+  // the server is built, later). Core contributes the generic OIDC provider.
   const authProviders = ports.authProviders ?? [];
-  // Resolved through settings, so an admin can configure SSO from the setup
-  // screen instead of the environment. Env still wins, so a deployment that
-  // sets these keeps behaving exactly as it did.
-  const oidcIssuerUrl = settings.resolve('oidcIssuerUrl');
-  const oidcClientId = settings.resolve('oidcClientId');
-  const oidcClientSecret = settings.resolve('oidcClientSecret');
-  if (oidcIssuerUrl && oidcClientId && oidcClientSecret) {
-    authProviders.push(
-      new OidcAuthProvider({
-        issuerUrl: oidcIssuerUrl,
-        clientId: oidcClientId,
-        clientSecret: oidcClientSecret,
-        scopes: settings.resolve('oidcScopes') || 'openid profile email',
-        label: settings.resolve('oidcProviderLabel') || 'Single sign-on',
-        publicBackendUrl: config.publicBackendUrl,
-        publicFrontendUrl: config.publicFrontendUrl,
-        cookieSecure: config.publicBackendUrl.startsWith('https'),
-      }),
-    );
-  }
+  // Registered unconditionally and resolved through settings on every use, so
+  // an admin can configure SSO from the setup screen — or change it — without
+  // a restart; the provider advertises itself only while the configuration is
+  // complete. Env still wins, so a deployment that sets these keeps behaving
+  // exactly as it did.
+  authProviders.push(
+    new OidcAuthProvider({
+      settings: () => oidcSettingsFrom(settings),
+      publicBackendUrl: config.publicBackendUrl,
+      publicFrontendUrl: config.publicFrontendUrl,
+      cookieSecure: config.publicBackendUrl.startsWith('https'),
+    }),
+  );
 
   // Materializer factory for an overlay-provided directory source: every
   // provisioning burst regenerates `synced-groups.yaml` on the default branch
@@ -920,7 +968,7 @@ export async function createCoreServices(
         defaultBranchOf: () => DEFAULT_BRANCH,
       }),
       debounceMs: opts?.debounceMs,
-      log: opts?.log ?? ((message) => console.warn(message)),
+      log: opts?.log ?? ((message) => logger('directory-sync').warn(message)),
     });
   };
   // Groups — the "who you are" principal sets. Manual-mode CRUD on
@@ -938,6 +986,9 @@ export async function createCoreServices(
   return {
     config,
     db,
+    gitRunner,
+    commitWorker,
+    disk,
     mcpServerEditService,
     workspaceService,
     kbStartupRunner,

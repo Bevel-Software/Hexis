@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -45,6 +46,7 @@ describe('AccessControlService — a load that straddles invalidate() never repo
     const service = new AccessControlService(
       { getWorkspacePath: async () => workspaceDir } as unknown as WorkspaceService,
       KB_DIR,
+      new NodeFs(),
     );
 
     // Hold the OLD load exactly where the walk reads Notes/access.md: the

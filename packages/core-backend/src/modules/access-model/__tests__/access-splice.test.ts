@@ -366,3 +366,30 @@ write:
     expect(r.text).not.toContain('Sales'); // bare token falls back to the role — same principal
   });
 });
+
+describe('line endings: a splice rewrites the file, so it must rewrite it the way the file is written', () => {
+  const felix = { kind: 'user', email: 'felix@example.com', displayName: 'Felix' } as const;
+
+  it('a CRLF file comes back CRLF', () => {
+    const text = '---\r\nread:\r\n  - Admin\r\n---\r\nread:\r\n  - Admin\r\n';
+    const out = spliceGrant(text, 'read', felix, { target: 'folder' }).text;
+    expect(out).toContain('\r\n');
+    expect(out.split('\n').every((l, i, a) => i === a.length - 1 || l.endsWith('\r'))).toBe(true);
+  });
+
+  it('an LF file with ONE stray CRLF stays LF — the stray does not rewrite every other line', () => {
+    // The rule this pins replaces "CRLF if the text contains one anywhere",
+    // under which a single stray ending — in a comment, in the body, pasted
+    // from somewhere else — re-wrote every line of a knowledge base's access
+    // rules and surfaced as churn in somebody's change request.
+    const text = '---\nread:\n  - Admin\n---\nread:\n  - Admin\n# a pasted comment\r\n';
+    const out = spliceGrant(text, 'read', felix, { target: 'folder' }).text;
+    expect(out).not.toContain('\r');
+  });
+
+  it('a mostly-CRLF file with one stray LF stays CRLF — the majority is the file', () => {
+    const text = '---\r\nread:\r\n  - Admin\r\n---\r\nread:\r\n  - Admin\r\n# a pasted comment\n';
+    const out = spliceGrant(text, 'read', felix, { target: 'folder' }).text;
+    expect(out.split('\n').every((l, i, a) => i === a.length - 1 || l.endsWith('\r'))).toBe(true);
+  });
+});

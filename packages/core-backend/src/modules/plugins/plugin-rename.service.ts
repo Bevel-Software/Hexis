@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
+import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import {
   PLUGIN_TOKEN_PREFIX,
@@ -69,6 +69,7 @@ export class PluginRenameService {
     private readonly commits: RenameCommitDriver,
     private readonly accessControl: IAccessControl,
     private readonly source: PluginSource,
+    private readonly disk: ITreeWalker,
     private readonly kbDirName: string,
     private readonly events?: {
       emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void;
@@ -103,14 +104,14 @@ export class PluginRenameService {
     // happens here — no file is read, nothing is decided — so it can run
     // before authorization without telling anyone anything.
     const grantFiles: string[] = [];
-    const grantListener: KbWalkListener = {
+    const grantListener: WalkListener = {
       onFile(dir, name) {
         if (hasAccessFrontmatterExtension(name)) grantFiles.push(dir ? `${dir}/${name}` : name);
       },
     };
     const { discovery, holes } = this.source.walkWith
       ? await this.source.walkWith(kbRoot, [grantListener])
-      : { discovery: await this.source.discover(kbRoot), holes: (await walkKb(kbRoot, [grantListener])).holes };
+      : { discovery: await this.source.discover(kbRoot), holes: (await this.disk.walkKb(kbRoot, [grantListener])).holes };
     const { plugins } = discovery;
     const unreadable = [...new Set([...discovery.unreadable, ...holes])];
     // Three phases: READ everything, DECIDE, then WRITE. Nothing about the

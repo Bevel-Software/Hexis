@@ -58,7 +58,16 @@ export interface LibraryItem {
   id: string;
   name: string;
   description: string;
+  /**
+   * The caller is named in the item's `owner:` grant, directly or through a
+   * role — the Owner pill and "Owned by me". Write access is not ownership.
+   */
   owned: boolean;
+  /**
+   * The caller may write the item — a skill's SKILL.md, a tool's `.tool`
+   * file. What the editor-side affordances go by, owner or not.
+   */
+  canWrite: boolean;
   status: AttentionStatus;
   /** Folder plugin from the KB path, or null when the item is in none. */
   plugin: string | null;
@@ -185,6 +194,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: data.ownedSkills.has(s.name),
+      canWrite: data.writableSkills.has(s.name),
       plugin: pluginOfItem(s.path, s.plugins, pluginSummaries),
       shared: isSharedPath(s.path),
       plugins: s.plugins ?? [],
@@ -212,6 +222,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       name: s.name,
       description: s.description,
       owned: false,
+      canWrite: false,
       plugin: pluginOfItem(s.path, undefined, pluginSummaries),
       shared: isSharedPath(s.path),
       path: s.path,
@@ -231,7 +242,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       // The browser tool surface exposes no human description for a `.tool`
       // manual yet (see report) — the card stays clean; detail lives behind it.
       description: '',
-      owned: t.canWrite,
+      owned: data.ownedTools.has(t.slug),
+      canWrite: t.canWrite,
       plugin: pluginOfItem(t.path, undefined, pluginSummaries),
       path: t.path,
       status: toolStatus(t),
@@ -242,6 +254,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     data.pendingSkills,
     data.tools,
     data.ownedSkills,
+    data.writableSkills,
+    data.ownedTools,
     data.allowedToolsBySkill,
     pluginSummaries,
   ]);
@@ -339,16 +353,18 @@ export function workspaceHasNoPlugins(lib: LibraryContextValue): boolean {
  * concern, not a setup one, and belong to a different surface.
  */
 export interface PluginAttention {
-  /** Everything that needs a person: integrations to set up plus broken links. */
+  /** Everything that needs a person: integrations to set up, broken links, and what the definition left out. */
   total: number;
   /** The broken-link part alone — what turns the count orange. */
   brokenLinks: number;
+  /** What the platform could not keep of the plugin's definition — a server, a skill root — as the server reports it. */
+  warnings: number;
 }
 
 export function attentionOf(
   items: readonly LibraryItem[],
   plugin: string,
-  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks'>[] = [],
+  summaries: readonly Pick<PluginSummary, 'name' | 'brokenLinks' | 'warnings'>[] = [],
 ): PluginAttention {
   // One pass for the links, returned beside the total: every caller wants
   // both, and computing the part again for the tone would filter the whole
@@ -357,7 +373,10 @@ export function attentionOf(
   const integrations = items.filter(
     (i) => isInPlugin(i, plugin) && i.kind === 'integration' && i.status.state !== 'ok',
   ).length;
-  return { total: integrations + brokenLinks, brokenLinks };
+  // Amber, like an integration to set up: it needs a person who can edit
+  // the plugin's files, and blocks nobody but the users of what is missing.
+  const warnings = summaries.find((s) => s.name === plugin)?.warnings?.length ?? 0;
+  return { total: integrations + brokenLinks + warnings, brokenLinks, warnings };
 }
 
 /**

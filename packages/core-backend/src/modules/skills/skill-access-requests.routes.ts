@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('skills');
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
   DEFAULT_BRANCH,
@@ -9,6 +12,8 @@ import {
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { spliceGrant } from '../access-model/access-splice.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { domainErrorBody } from '../../shared/http-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { JoinRequestsService } from '../plugins/join-requests.service.js';
@@ -113,8 +118,7 @@ export function createSkillAccessRequestRoutes(deps: {
       // Only a PROVEN absence reads as "no rules yet": any other failure must
       // not be turned into an empty file that a splice then overwrites.
       const current = await workspaceService.readFile(ws.id, accessPath).catch((err: unknown) => {
-        const code = (err as { code?: unknown } | null)?.code;
-        if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+        if (!isAbsence(err)) throw err;
         return '';
       });
       const spliced = spliceGrant(
@@ -139,10 +143,10 @@ export function createSkillAccessRequestRoutes(deps: {
       res.json({ ok: true, number: detail.number });
     } catch (err) {
       if (err instanceof WorkflowDomainError) {
-        res.status(err.status).json({ error: err.message, ...(err.payload ?? {}) });
+        res.status(err.status).json(domainErrorBody(err));
         return;
       }
-      console.error('[skills] failed to open an access request:', err);
+      log.error('failed to open an access request:', { err });
       res.status(500).json({ error: 'Failed to request access' });
     }
   });
@@ -169,7 +173,7 @@ export function createSkillAccessRequestRoutes(deps: {
       const crs = await workflow.listChangeRequests();
       res.json({ requests: await joinRequests.list(ctx.folder, ctx.folder, crs, ctx.user) });
     } catch (err) {
-      console.error('[skills] failed to list access requests:', err);
+      log.error('failed to list access requests:', { err });
       res.status(500).json({ error: 'Failed to list access requests' });
     }
   });
@@ -190,7 +194,7 @@ export function createSkillAccessRequestRoutes(deps: {
       }
       res.json({ closed: await joinRequests.reconcile(ctx.folder, ctx.folder, cr, ctx.user) });
     } catch (err) {
-      console.error('[skills] failed to reconcile an access request:', err);
+      log.error('failed to reconcile an access request:', { err });
       res.status(500).json({ error: 'Failed to reconcile the request' });
     }
   });

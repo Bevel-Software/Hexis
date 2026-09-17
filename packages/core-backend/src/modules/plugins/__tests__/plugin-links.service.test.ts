@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -80,9 +82,10 @@ describe('PluginLinksService', () => {
     await write('Skills/Eng/deploy/SKILL.md', '---\ndescription: Ship it.\n---\n');
     await write('Skills/Eng/rollback/SKILL.md', '---\ndescription: Undo it.\n---\n');
 
-    access = new AccessControlService(workspaceService, KB_DIR);
-    skills = new SkillService(workspaceService, access, KB_DIR);
-    index = new PluginLinkIndex(workspaceService, skills, access, KB_DIR);
+    const disk = new NodeFs();
+    access = new AccessControlService(workspaceService, KB_DIR, disk);
+    skills = new SkillService(workspaceService, access, KB_DIR, disk);
+    index = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, new KbPluginSource(disk));
     svc = new PluginLinksService(workspaceService, driver, access, skills, index, KB_DIR);
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));

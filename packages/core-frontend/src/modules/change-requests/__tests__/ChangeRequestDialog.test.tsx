@@ -92,6 +92,7 @@ const approval = (over: Partial<FileApprovalState>): FileApprovalState => ({
   approvedBy: [],
   isApproved: false,
   viewerCanApprove: false,
+  inMergeGate: true,
   ...over,
 });
 
@@ -127,7 +128,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     );
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
     // The waiting line takes the button's place — naming who is being waited on.
-    expect(await screen.findByText(/Waiting on approval for Docs\/a\.md/)).toBeInTheDocument();
+    expect(await screen.findByText('Waiting on Admin')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
 
@@ -156,21 +157,96 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
   });
 
-  it('the tree row confirms in one click and shows the confirmed badge', async () => {
+  it('one file pending for the viewer: the header approves it, the footer counts it', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([approval({ viewerCanApprove: true })]),
     );
     approvalsApi.approvePrFile.mockResolvedValue([
-      approval({ viewerCanApprove: true, isApproved: true }),
+      approval({
+        viewerCanApprove: true,
+        isApproved: true,
+        approvedBy: [
+          { email: 'olga@bevel.software', name: 'Olga', approvedAt: '', isStale: false, isSelfApproval: false },
+        ],
+      }),
     ]);
-    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Docs/a.md' }));
+    render(
+      <AuthContext.Provider
+        value={{ user: { id: 'u1', email: 'olga@bevel.software', name: 'Olga' } } as never}
+      >
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </AuthContext.Provider>,
+    );
+    expect(await screen.findByText('Your approval is needed on 1 file')).toBeInTheDocument();
+    // One file needs no "all" button.
+    expect(screen.queryByRole('button', { name: 'Approve all mine' })).not.toBeInTheDocument();
+    // The tree's check is status, not a control.
+    expect(screen.getByRole('img', { name: 'Waiting on your approval' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Confirm Docs/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve this file' }));
     expect(approvalsApi.approvePrFile).toHaveBeenCalledWith(12, 'Docs/a.md');
-    // The presplit anatomy: approval STATE lands as the inline green badge.
-    expect(await screen.findByRole('img', { name: /Confirmed by/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Approved – Undo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Approved by you' })).toBeInTheDocument();
+    expect(screen.queryByText(/Your approval is needed/)).not.toBeInTheDocument();
   });
 
-  it("the viewer's own confirmation offers the withdraw action", async () => {
+  it('the header button sits right after the header text in the tab order', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([approval({ viewerCanApprove: true })]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    const button = await screen.findByRole('button', { name: 'Approve this file' });
+    const header = screen.getByText(/what changes is marked/);
+    expect(button.previousElementSibling).toBe(header);
+    expect(button).not.toHaveAttribute('tabindex');
+  });
+
+  it('two files pending: "Approve all mine" approves both, one after the other', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+        approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+      ]),
+    );
+    approvalsApi.approvePrFile.mockReset();
+    approvalsApi.approvePrFile
+      .mockResolvedValueOnce([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true, isApproved: true }),
+        approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+      ])
+      .mockResolvedValueOnce([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true, isApproved: true }),
+        approval({ path: 'Docs/b.md', viewerCanApprove: true, isApproved: true }),
+      ]);
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    expect(await screen.findByText('Your approval is needed on 2 files')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve all mine' }));
+    await waitFor(() => expect(approvalsApi.approvePrFile).toHaveBeenCalledTimes(2));
+    expect(approvalsApi.approvePrFile).toHaveBeenNthCalledWith(1, 12, 'Docs/a.md');
+    expect(approvalsApi.approvePrFile).toHaveBeenNthCalledWith(2, 12, 'Docs/b.md');
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(screen.queryByText(/Your approval is needed/)).not.toBeInTheDocument();
+  });
+
+  it('none pending for the viewer: no header button, the footer names who it waits on', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({
+          eligibleApprovers: { roles: ['Legal'], users: [{ name: 'Juan', email: 'juan@bevel.software' }] },
+        }),
+      ]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    expect(await screen.findByText('Waiting on Legal, Juan')).toBeInTheDocument();
+    expect(screen.queryByText(/Your approval is needed/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve this file' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approved – Undo' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve all mine' })).not.toBeInTheDocument();
+  });
+
+  it("undo: the viewer's own approval reads Approved – Undo, and pressing it withdraws", async () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([
         approval({
@@ -190,10 +266,97 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
         <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
       </AuthContext.Provider>,
     );
-    fireEvent.click(
-      await screen.findByRole('button', { name: 'Withdraw your confirmation of Docs/a.md' }),
-    );
+    expect(await screen.findByRole('img', { name: 'Approved by you' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Approved – Undo' }));
     await waitFor(() => expect(approvalsApi.unapprovePrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    expect(await screen.findByRole('button', { name: 'Approve this file' })).toBeInTheDocument();
+    expect(screen.getByText('Your approval is needed on 1 file')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Waiting on your approval' })).toBeInTheDocument();
+  });
+
+  it('confirmed by someone else: waits on nobody, but the header still lets the viewer add theirs', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({
+          viewerCanApprove: true,
+          isApproved: true,
+          approvedBy: [
+            { email: 'juan@bevel.software', name: 'Juan', approvedAt: '', isStale: false, isSelfApproval: false },
+          ],
+        }),
+      ]),
+    );
+    render(
+      <AuthContext.Provider
+        value={{ user: { id: 'u1', email: 'olga@bevel.software', name: 'Olga' } } as never}
+      >
+        <ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />
+      </AuthContext.Provider>,
+    );
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Confirmed by Admin' })).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'Waiting on your approval' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Your approval is needed/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve this file' })).toBeInTheDocument();
+  });
+
+  it('files outside the merge gate hold nothing up and name nobody', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', isApproved: true }),
+        // The server says the gate ignores it (not markdown), owner named or not.
+        approval({
+          path: 'assets/shot.png',
+          eligibleApprovers: { roles: ['Legal'], users: [] },
+          inMergeGate: false,
+        }),
+      ]),
+    );
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting on/)).not.toBeInTheDocument();
+    // Nor does the tree's badge on the ignored file.
+    expect(screen.queryByRole('img', { name: /Waiting on/ })).not.toBeInTheDocument();
+  });
+
+  it('Apply records approvals only on files the gate binds', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+        approval({
+          path: 'assets/shot.png',
+          eligibleApprovers: { roles: ['Admin'], users: [] },
+          viewerCanApprove: true,
+          inMergeGate: false,
+        }),
+      ]),
+    );
+    approvalsApi.approvePrFile.mockReset();
+    approvalsApi.approvePrFile.mockResolvedValue([]);
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Bypass approval and apply' }));
+    await waitFor(() => expect(approvalsApi.approvePrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    // The approving loop is over once the merge step is named.
+    expect(await screen.findByRole('button', { name: 'Applying…' })).toBeInTheDocument();
+    expect(approvalsApi.approvePrFile).not.toHaveBeenCalledWith(12, 'assets/shot.png');
+  });
+
+  it('while applying, the approve controls stand down', async () => {
+    const twoPending = detailWith([
+      approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+      approval({ path: 'Docs/b.md', viewerCanApprove: true }),
+    ]);
+    detailMock.fetchPrDetail.mockResolvedValue(twoPending);
+    approvalsApi.approvePrFile.mockReset();
+    approvalsApi.approvePrFile.mockReturnValue(new Promise(() => {}));
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Bypass approval and apply' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Approve this file' })).toBeDisabled(),
+    );
+    expect(screen.getByRole('button', { name: 'Approve all mine' })).toBeDisabled();
   });
 
   it('right-click reverts, with its own confirm; the last file resolves the dialog', async () => {
@@ -233,7 +396,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
   it('no Delete request for non-admins', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    await screen.findByText(/Waiting on approval/);
+    await screen.findByText('Waiting on Admin');
     expect(screen.queryByRole('button', { name: 'Delete request' })).not.toBeInTheDocument();
   });
 
@@ -271,7 +434,7 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
   it('offers no verbs to a viewer who cannot approve the file', async () => {
     detailMock.fetchPrDetail.mockResolvedValue(detailWith([approval({})]));
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
-    await screen.findByText(/Waiting on approval/);
+    await screen.findByText('Waiting on Admin');
     expect(screen.queryByRole('button', { name: 'Accept file' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Revert file' })).not.toBeInTheDocument();
   });

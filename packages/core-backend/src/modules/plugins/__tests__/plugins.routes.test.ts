@@ -5,6 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
@@ -139,7 +141,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
 
   const index =
     opts.index ??
-    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB);
+    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB, new KbPluginSource(new NodeFs()));
 
   const email = opts.email === undefined ? ALI : opts.email;
   const app = express();
@@ -312,6 +314,7 @@ describe('/api/plugins routes', () => {
       writers: { roles: [], users: [] },
       readers: { restricted: true, roles: [], users: [] },
       isPrivate: false,
+      warnings: ['mcpProfile "global" named but no registry could be read'],
     };
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,
@@ -320,7 +323,12 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
     expect(plugins).toHaveLength(1);
-    expect(plugins[0]).toMatchObject({ name: 'gtm', brokenLinks: 2 });
+    expect(plugins[0]).toMatchObject({
+      name: 'gtm',
+      brokenLinks: 2,
+      // What discovery left out reaches the summary as the index said it.
+      warnings: ['mcpProfile "global" named but no registry could be read'],
+    });
   });
 
   it('a DISCOVERABLE plugin (access.md readable, folder not) lists locked with hasRequested from the join CR', async () => {

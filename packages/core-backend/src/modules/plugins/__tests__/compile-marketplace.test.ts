@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -10,6 +12,7 @@ import { SkillService } from '../../skills/skills.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 
 /**
  * Source in, distribution out — for one caller. The real resolver decides
@@ -78,14 +81,26 @@ describe('compileMarketplace', () => {
     await write('Skills/Sales/access.md', '---\n---\nread:\n  - everyone\n');
     await write('Skills/Sales/pitch/SKILL.md', '---\ndescription: Pitch.\n---\n');
 
-    const access = new AccessControlService(workspaceService, KB_DIR);
-    const skills = new SkillService(workspaceService, access, KB_DIR);
-    const links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR);
-    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, {
-      name: 'acme-hexis',
-      owner: 'Acme',
-      knowledgeBaseMcp: { name: 'hexis', url: 'https://kb.acme.com/api/mcp' },
-    });
+    const disk = new NodeFs();
+    const source = new KbPluginSource(disk);
+    const access = new AccessControlService(workspaceService, KB_DIR, disk);
+    const skills = new SkillService(workspaceService, access, KB_DIR, disk);
+    const links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
+    compiler = new MarketplaceCompilerService(
+      workspaceService,
+      access,
+      skills,
+      links,
+      KB_DIR,
+      {
+        name: 'acme-hexis',
+        owner: 'Acme',
+        knowledgeBaseMcp: { name: 'hexis', url: 'https://kb.acme.com/api/mcp' },
+      },
+      source,
+      disk,
+      new NodeGitRunner(),
+    );
   });
   afterEach(() => fs.rm(root, { recursive: true, force: true }));
 
@@ -302,5 +317,68 @@ describe('compileMarketplace', () => {
     // so the compiled plugin has one and the tree stays coherent.
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
     expect(text(tree, 'plugins/gtm/skills/deploy/SKILL.md')).toContain('Ship it.');
+  });
+
+  it("ships the plugin folder's own files beside the skills — not the platform's, not the tools, not a second copy of the skills", async () => {
+    await write('Plugins/GTM/CONVENTIONS.md', '# How we do GTM\n');
+    await write('Plugins/GTM/docs/playbook.md', 'playbook');
+    await write('Plugins/GTM/.bevelignore', 'x');
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const paths = [...tree.files.keys()];
+    expect(text(tree, 'plugins/gtm/CONVENTIONS.md')).toBe('# How we do GTM\n');
+    expect(text(tree, 'plugins/gtm/docs/playbook.md')).toBe('playbook');
+    // The skills folder is copied by NAME once, never as a second tree.
+    expect(paths.filter((p) => p.startsWith('plugins/gtm/skills/outreach/SKILL.md'))).toHaveLength(1);
+    expect(paths.some((p) => p.endsWith('.bevelignore') || p.endsWith('access.md') || p.includes('software.bevel.hexis'))).toBe(false);
+    // The manifests are the compiler's, not the checked-in source's.
+    expect(json(tree, 'plugins/gtm/plugin.json').extensions).toBeUndefined();
+  });
+
+  it('carries what the source manifest says about itself, and every server field it does not judge', async () => {
+    await write(
+      'Plugins/GTM/plugin.json',
+      JSON.stringify({
+        name: 'gtm',
+        version: '2.1.0',
+        description: 'Go to market',
+        author: { name: 'Acme' },
+        keywords: ['sales', 'crm'],
+        interface: { displayName: 'Go To Market', category: 'Sales', brandColor: '#123456' },
+      }),
+    );
+    await write(
+      'Plugins/GTM/mcp.json',
+      JSON.stringify({
+        mcpServers: {
+          local: { type: 'stdio', command: 'npx', args: ['-y', 'x'], startup_timeout_sec: 120 },
+          remote: { type: 'streamable-http', url: 'https://mcp.example', timeout_ms: 5000, note: 'uses ${SECRET}' },
+        },
+      }),
+    );
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(json(tree, 'plugins/gtm/plugin.json')).toMatchObject({ author: { name: 'Acme' }, keywords: ['sales', 'crm'] });
+    expect(json(tree, 'plugins/gtm/.claude-plugin/plugin.json')).toMatchObject({ author: { name: 'Acme' }, keywords: ['sales', 'crm'] });
+    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json')).toMatchObject({
+      author: { name: 'Acme' },
+      interface: { displayName: 'Go To Market', category: 'Sales', brandColor: '#123456' },
+    });
+    const mcp = json(tree, 'plugins/gtm/.mcp.json');
+    expect(mcp.mcpServers.local).toEqual({ type: 'stdio', command: 'npx', args: ['-y', 'x'], startup_timeout_sec: 120 });
+    // A field holding a vault reference is not a client's to see.
+    expect(mcp.mcpServers.remote).toEqual({ type: 'streamable-http', url: 'https://mcp.example', timeout_ms: 5000 });
+  });
+
+  it('a plugin with no presentation block of its own still tells Codex what it is called', async () => {
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ displayName: 'GTM' });
+  });
+
+  it('a partial presentation block keeps what it says and gains the name it does not', async () => {
+    await write(
+      'Plugins/GTM/plugin.json',
+      JSON.stringify({ name: 'gtm', version: '2.1.0', description: 'Go to market', interface: { category: 'Sales' } }),
+    );
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ category: 'Sales', displayName: 'GTM' });
   });
 });

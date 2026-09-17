@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('account-erasure');
 import { eq } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import {
@@ -177,7 +180,7 @@ export class AccountErasureService implements IAccountErasureService {
     // captured inside the transaction).
     for (const cb of postCommit) await cb();
 
-    console.log(`[account-erasure] erased user id=${userId}`);
+    log.info(`erased user id=${userId}`);
     return true;
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type Ref } from 'react';
 import { Loader2 } from 'lucide-react';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { suggestPrincipals } from '../../access/api';
@@ -51,6 +51,8 @@ export interface AddMemberInputProps {
   placeholder?: string;
   /** Layout classes for the row (spacing above it differs per page). */
   className?: string;
+  /** The email field itself — for a page that lands focus on one card's input. */
+  inputRef?: Ref<HTMLInputElement>;
 }
 
 /**
@@ -74,6 +76,7 @@ export function AddMemberInput({
   busy = false,
   placeholder = 'Add member by email',
   className = '',
+  inputRef,
 }: AddMemberInputProps) {
   const [suggestions, setSuggestions] = useState<PersonSuggestion[]>([]);
   const [showSuggest, setShowSuggest] = useState(false);
@@ -168,6 +171,7 @@ export function AddMemberInput({
         }}
       >
         <input
+          ref={inputRef}
           type="email"
           value={value}
           onChange={(e) => {

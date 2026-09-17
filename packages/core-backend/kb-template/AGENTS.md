@@ -221,6 +221,41 @@ Access to any path — reading it as much as writing it — is governed by
 Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
 when access is resolved.
 
+### Roles are pre-set — a "new role" is usually a group
+
+**What a role is.** A role in `roles.yaml` is an app role: a capability the
+platform defines and acts on (`Admin` is one), listed with the people who hold
+it. The set of roles is pre-set by the platform. A role is not a way to name a
+team.
+
+**Agents never create roles.** Add people to a role that already exists, or
+remove them, and nothing more: never add a role name to `roles.yaml`, and never
+rename one — a rename is a delete plus a create. Such a write is refused with a
+422 that names the role and says: app roles are pre-set — add people to
+existing roles, and use a GROUP for a task- or team-scoped set of people.
+Relay that refusal to your user as it stands; do not look for another way to
+write the file.
+
+**Is it really a group?** When someone asks for a "new role", it almost always
+is. It is a group when any of these hold:
+
+- the name says who the people are — a team, a project, a customer, a
+  committee — rather than a capability the platform already has;
+- it would change or disappear when the project ends or the team reshuffles;
+- its purpose is to give those people access to some folders or files.
+
+A request that matches a role that already exists is membership, not a new
+role.
+
+**What to do instead.**
+
+1. If an existing role already carries the capability, add the people to it.
+2. Otherwise make it a group: add or extend the group in `groups.yaml` (or
+   point your user at the app's Groups page), then grant the group in the
+   `access.md` of the folders it should reach.
+3. If your user still needs a role the platform does not have, that is not an
+   edit you can make — say so, and leave the decision to an admin.
+
 ### Direct writes vs change requests
 
 File-level write access decides how a change lands on the default branch:
@@ -423,6 +458,8 @@ Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool
 
 - **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the sign-in uses an OAuth app the owner registers (the provider offers no automatic registration, or the declaration already names a client id). `setup.reason` is present only while something still blocks that sign-in — no declaration yet, or endpoints that could not be discovered — and says what to do.
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
+
+**Tools are served from the default branch only.** An `mcp.json` entry or `.tool` you write on a draft is committed to that draft and nowhere else: it is not listed, not callable and has no sign-in on the Connect page until the draft is merged. After declaring a tool on a draft, call `list_tool_setup` with `branch` set to that draft — `onBranchOnly` names what is still waiting there — and tell the user it goes live once the change request is merged. A tool that stays in `tools` is released, and a restart does not remove it or its sign-ins; if one disappears, check the caller's read access to the file that declares it.
 
 The listing is scoped by the same access controls as everything else: a tool the caller can't READ doesn't appear at all, and `canWrite` means write access **on the file that declares it** — the `.tool` file itself (via its frontmatter `write:`/`owner:` verbs or the `access.md` chain), or the plugin's `mcp.json` for an MCP server (via the plugin's `access.md` chain — `mcp.json` carries no verb list of its own) — NOT any platform role. The people who manage that file are exactly the people who configure its shared secrets. To delegate a `.tool` to someone, add them to that file's `write:`/`owner:` list; to delegate an MCP server, grant them `write` on the plugin in its `access.md` (both are edits you can make via change request). That alone lets them configure it.
 

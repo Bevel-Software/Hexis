@@ -1,4 +1,7 @@
 import { desc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('cr');
 import type {
   FileApprovalState,
   IPullRequestService,
@@ -15,7 +18,8 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
+import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
 const DETAIL_CACHE_TTL_MS = 30_000;
@@ -97,12 +101,19 @@ export class PullRequestService implements IPullRequestService {
    */
   private detailEnricher: PrDetailEnricher | null = null;
 
+  /** Origin + path prefix change-request links are built on; null when none is configured. */
+  private readonly linkBase: string | null;
+
   constructor(
     private readonly db: Database,
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly gitService: IGitService,
-  ) {}
+    /** Configured public frontend address; null keeps `url` relative (with a `urlNote`). */
+    publicFrontendUrl: string | null = null,
+  ) {
+    this.linkBase = changeRequestLinkBase(publicFrontendUrl);
+  }
 
   setDetailEnricher(enricher: PrDetailEnricher): void {
     this.detailEnricher = enricher;
@@ -137,8 +148,9 @@ export class PullRequestService implements IPullRequestService {
       // Provider reviews are gone; the real approval state lives in the detail
       // view (per-file, DB-backed). The summary badge is derived there.
       review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
-      // In-app change-request route; there's no external PR URL to link to.
-      url: `/change-requests/${row.number}`,
+      // The in-app change-request route, absolute when a public address is
+      // configured so an agent can hand it to a person.
+      ...changeRequestLink(row.number, this.linkBase),
     };
   }
 
@@ -154,9 +166,9 @@ export class PullRequestService implements IPullRequestService {
         // Best-effort, but log it: an empty result silently hides a CR from the
         // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
         // shouldn't be invisible.
-        console.warn(
-          `[cr] changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
-          err,
+        log.warn(
+          `changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
+          { err },
         );
         return [] as string[];
       });
@@ -188,7 +200,7 @@ export class PullRequestService implements IPullRequestService {
     loginOrEmail: string,
     opts: { fresh?: boolean } = {},
   ): Promise<PullRequestSummary[]> {
-    const needle = loginOrEmail.trim().toLowerCase();
+    const needle = canonicalEmail(loginOrEmail);
     if (!needle) return [];
     const prs = await this.listOpenPrs(opts);
     const needleIsEmail = needle.includes('@');
@@ -204,7 +216,7 @@ export class PullRequestService implements IPullRequestService {
     email: string,
     opts: { fresh?: boolean } = {},
   ): Promise<PullRequestSummary[]> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalEmail(email);
     if (!normalized) return [];
     const prs = await this.listOpenPrs({ ...opts, workspaceId });
 
@@ -286,7 +298,7 @@ export class PullRequestService implements IPullRequestService {
     if (!row) return null;
 
     const now = Date.now();
-    const viewerKey = opts.viewerEmail ? opts.viewerEmail.trim().toLowerCase() : 'anon';
+    const viewerKey = opts.viewerEmail ? canonicalEmail(opts.viewerEmail) : 'anon';
     const workspaceId = await this.resolveWorkspaceId(opts.workspaceId);
     const cacheKey = `${workspaceId ?? 'global'}:${viewerKey}:${prNumber}`;
 
@@ -339,7 +351,7 @@ export class PullRequestService implements IPullRequestService {
     const [comments, approvals] = this.detailEnricher
       ? await Promise.all([
           this.detailEnricher.listComments(prNumber).catch((err) => {
-            console.warn(`[cr] listComments failed for #${prNumber}:`, err);
+            log.warn(`listComments failed for #${prNumber}:`, { err });
             return [] as PrReviewComment[];
           }),
           this.detailEnricher
@@ -357,7 +369,7 @@ export class PullRequestService implements IPullRequestService {
               // with empty approvals would tell the merge gate "nothing to
               // approve", and a reviewer nothing at all.
               if (err instanceof AccessUnreadableError) throw err;
-              console.warn(`[cr] getApprovalStates failed for #${prNumber}:`, err);
+              log.warn(`getApprovalStates failed for #${prNumber}:`, { err });
               return [] as FileApprovalState[];
             }),
         ])
@@ -386,7 +398,7 @@ export class PullRequestService implements IPullRequestService {
         );
         viewerCanBypassMerge = isAdmin === true;
       } catch (err) {
-        console.warn(`[cr] viewerCanBypassMerge lookup failed for #${prNumber}:`, err);
+        log.warn(`viewerCanBypassMerge lookup failed for #${prNumber}:`, { err });
       }
     }
 

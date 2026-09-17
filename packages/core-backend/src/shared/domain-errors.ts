@@ -196,6 +196,28 @@ export function isMissingRemoteBranchFailure(message: string): boolean {
 }
 
 /**
+ * The caller named a path that resolves outside the workspace it was asked
+ * for. In practice that means an absolute path: a `..` climb is refused one
+ * step earlier, as an invalid path, by the same validator the file verbs run
+ * first.
+ *
+ * 403 carrying the exact message the file verbs answer, because
+ * `WorkspaceService.assertWithinWorkspace` throws a bare `Error` with this
+ * text and `workspace.routes.sendError` maps that text to 403. The lock
+ * service raises this instead of a bare `Error`, because `toHttpError` on the
+ * workflow routes reads the status off the class and would otherwise call it
+ * a 500. Both surfaces then answer identically for the same input. See
+ * `canonicalFileIdentity`.
+ */
+export class PathTraversalError extends WorkflowDomainError {
+  readonly kind = 'path-traversal' as const;
+  constructor() {
+    super('Path traversal detected', 403, { kind: 'path-traversal' });
+    this.name = 'PathTraversalError';
+  }
+}
+
+/**
  * Generic 400 for workflow-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the
@@ -205,6 +227,22 @@ export class WorkflowValidationError extends WorkflowDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
     this.name = 'WorkflowValidationError';
+  }
+}
+
+/**
+ * An archive the caller uploaded that the zip reader cannot open. 422, not
+ * 400: the request is well-formed and the path is fine — the BYTES are not a
+ * readable zip, which is the caller's to fix but not their spelling's.
+ *
+ * A type, because the route used to recognise this by the `Could not read zip
+ * file` prefix its message happens to start with, and a reworded message
+ * would silently have turned it into a 500.
+ */
+export class UnreadableArchiveError extends WorkflowDomainError {
+  constructor(reason: string) {
+    super(`Could not read zip file: ${reason}`, 422, { kind: 'unreadable-archive' });
+    this.name = 'UnreadableArchiveError';
   }
 }
 

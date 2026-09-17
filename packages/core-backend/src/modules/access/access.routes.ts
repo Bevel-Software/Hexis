@@ -1,4 +1,10 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+// The audit lines this file writes have always carried their own tags —
+// `access.grant`, `access.revoke` and their sub-cases — so each keeps it.
+const grantLog = logger('access.grant');
+const revokeLog = logger('access.revoke');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH, pluginManifestName } from '@bevel-software/platform-shared';
 import type {
@@ -222,6 +228,12 @@ export function createAccessRoutes(
     ) {
       throw new AccessMutationError('path must stay inside the KB repo');
     }
+    // One spelling per target, as the file verbs and the edit lock require: a
+    // `./README.md` would reach the resolver as a different chain from
+    // `README.md` (and a `./A/x.md` would skip `A/access.md`).
+    if (repoRelTarget.split('/').some((segment) => segment === '.')) {
+      throw new AccessMutationError("path must not contain '.' segments");
+    }
   }
 
   /**
@@ -237,11 +249,14 @@ export function createAccessRoutes(
     if (!user) return;
 
     const rawPath = req.query.path;
-    if (typeof rawPath !== 'string' || !rawPath) {
+    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
+    // The dialog addresses the repository root as the empty repo-relative path,
+    // so an empty `path` is the root FOLDER — refusing it left the root
+    // dialog unable to re-read its view after a change.
+    if (typeof rawPath !== 'string' || (!rawPath && kind !== 'folder')) {
       res.status(400).json({ error: 'path query parameter is required' });
       return;
     }
-    const kind: TargetKind = req.query.kind === 'folder' ? 'folder' : 'file';
 
     try {
       // Same sanitize/validate the POST routes apply: strip any kbDir prefix and
@@ -317,13 +332,18 @@ export function createAccessRoutes(
 
   /**
    * POST /api/workspace/:id/access/batch
-   * Body: `{ paths: string[] }`. Returns `{ results: { [path]: boolean } }`.
+   * Body: `{ paths: string[], verb?: 'write' | 'owner' }`. Returns
+   * `{ results: { [path]: boolean } }`.
+   *
+   * `verb` defaults to `write`, the question every existing caller asks.
+   * `owner` answers from the `owner:` lists alone — no admin rescue, and a
+   * writer is not an owner — which is what an Owner pill has to mean.
    */
   router.post('/workspace/:id/access/batch', async (req, res) => {
     const user = await requireUser(req, res);
     if (!user) return;
 
-    const paths = (req.body as { paths?: unknown }).paths;
+    const { paths, verb = 'write' } = req.body as { paths?: unknown; verb?: unknown };
     if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) {
       res.status(400).json({ error: 'paths must be an array of strings' });
       return;
@@ -332,9 +352,15 @@ export function createAccessRoutes(
       res.status(400).json({ error: 'paths cannot exceed 500 entries per request' });
       return;
     }
+    if (verb !== 'write' && verb !== 'owner') {
+      res.status(400).json({ error: 'verb must be "write" or "owner"' });
+      return;
+    }
 
     try {
-      const result = await accessControl.canWriteBatch(
+      const batch = verb === 'owner' ? accessControl.canOwnerBatch : accessControl.canWriteBatch;
+      const result = await batch.call(
+        accessControl,
         req.params.id,
         user.email,
         paths as string[],
@@ -775,17 +801,15 @@ export function createAccessRoutes(
       // re-resolve reads the just-written bytes (the async commit's own
       // invalidate is too late for this synchronous response).
       accessControl.invalidate(workspaceId);
-      console.log(
-        `[access.grant] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+      grantLog.info(
+        `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
           `verb=${verb} kind=${kind} target=${repoRelTarget} ` +
           `principalKind=${principal.kind} -> ok`,
       );
       res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
     } catch (err) {
       if (err instanceof AccessDeniedError) {
-        console.warn(
-          `[access.grant.denied] ws=${workspaceId} byUserId=${user.id} -> 403`,
-        );
+        logger('access.grant.denied').warn(`ws=${workspaceId} byUserId=${user.id} -> 403`);
       }
       const { status, body } = toHttpError(err);
       res.status(status).json(body);
@@ -896,8 +920,8 @@ export function createAccessRoutes(
         });
 
         accessControl.invalidate(workspaceId);
-        console.log(
-          `[access.revoke.remove-from-parent] ws=${workspaceId} branch=${branch} ` +
+        logger('access.revoke.remove-from-parent').info(
+          `ws=${workspaceId} branch=${branch} ` +
             `byUserId=${user.id} ancestor=${ancestorDir} target=${repoRelTarget} verb=${verb ?? 'all'} -> ok`,
         );
         res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
@@ -913,8 +937,8 @@ export function createAccessRoutes(
           await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb, revokeOpts);
         });
         accessControl.invalidate(workspaceId);
-        console.log(
-          `[access.revoke.deny-here] ws=${workspaceId} branch=${branch} ` +
+        logger('access.revoke.deny-here').info(
+          `ws=${workspaceId} branch=${branch} ` +
             `byUserId=${user.id} target=${repoRelTarget} verb=${verb ?? 'all'} -> ok`,
         );
         res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
@@ -957,8 +981,8 @@ export function createAccessRoutes(
         const sourcesToCheck: GrantSources = verb ? { [verb]: sources[verb] } : sources;
         const inherited = collectInheritedSources(sourcesToCheck);
         if (inherited.length > 0) {
-          console.log(
-            `[access.revoke.inherited] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+          logger('access.revoke.inherited').info(
+            `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
               `target=${repoRelTarget} ancestors=${inherited.join(',')}`,
           );
           res.status(409).json({
@@ -978,15 +1002,15 @@ export function createAccessRoutes(
       // shows an `ancestor` source). The dialog reads that to chain into
       // "Remove from parent?" with no extra response field needed (the old
       // `stillInherited` shortcut is subsumed by the richer per-verb sources).
-      console.log(
-        `[access.revoke] ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
+      revokeLog.info(
+        `ws=${workspaceId} branch=${branch} byUserId=${user.id} ` +
           `kind=${kind} target=${repoRelTarget} principalKind=${principal.kind} changed=${changed} -> ok`,
       );
       res.json(await resolvedView(workspaceId, repoRelTarget, user.email, kind));
     } catch (err) {
       if (err instanceof AccessDeniedError || err instanceof AccessMutationError) {
-        console.warn(
-          `[access.revoke.denied] ws=${workspaceId} byUserId=${user.id} -> ${
+        logger('access.revoke.denied').warn(
+          `ws=${workspaceId} byUserId=${user.id} -> ${
             err instanceof WorkflowDomainError ? err.status : 500
           }`,
         );
@@ -1127,7 +1151,7 @@ export function createAccessRoutes(
     if (!user) return;
     try {
       const roles = await rolesAdmin.recover(user);
-      console.warn(`[access.roles.recover] roles.yaml recovered byUserId=${user.id}`);
+      logger('access.roles.recover').warn(`roles.yaml recovered byUserId=${user.id}`);
       res.json({ roles });
     } catch (err) {
       const { status, body } = toHttpError(err);

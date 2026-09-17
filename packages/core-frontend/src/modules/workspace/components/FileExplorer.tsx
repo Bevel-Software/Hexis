@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import type { FileTreeEntry, PullRequestSummary } from '@bevel-software/platform-shared';
 import {
+  isProtectedBranch,
   validateFilename,
   KNOWLEDGE_BASE_DIR,
   DATA_DIR,
@@ -36,7 +37,8 @@ import {
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
-import { findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { rootAnchoredPath } from '../utils/pasteLink';
+import { findKbRoot, KB_ROOT_DIRS, treeHasVisibleEntries } from '../utils/fileTree';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT } from '../../../core/events';
@@ -49,7 +51,11 @@ import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/comp
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
+import { fetchFileAccess } from '../../access/api';
+import { TreeActionConfirmDialog, type TreeConfirmRequest } from './TreeActionConfirm';
+import { moveWarnings } from '../utils/treeConfirm';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -71,9 +77,10 @@ const ROW_TONE = (current: boolean) =>
 const indentFor = (depth: number) => 10 + depth * 13;
 
 /**
- * The caret's slot — 13px wide, and rendered EMPTY for a file and for a
- * childless folder. It is what keeps a file's name in line with its siblings'
- * once the icons are gone: the indent is the tree, so it has to survive them
+ * The caret's slot — 13px wide, and rendered EMPTY for a file. Every folder
+ * shows the caret, an empty one included: without it a folder reads as a file.
+ * The slot is what keeps a file's name in line with its siblings' once the
+ * icons are gone: the indent is the tree, so it has to survive them
  * (proto:3571-3572).
  */
 function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
@@ -85,6 +92,37 @@ function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
           className={cn('transition-transform duration-150', open && 'rotate-90')}
         />
       )}
+    </span>
+  );
+}
+
+/** How many trailing characters of a file name always stay on screen. */
+const FILE_NAME_TAIL = 8;
+
+/**
+ * A file's name, truncated in the MIDDLE when it does not fit: the lead is
+ * shortened with an ellipsis and the last `FILE_NAME_TAIL` characters stay —
+ * for an ordinary name that is the extension, the part that says what the
+ * file is. A name that fits reads exactly as before, because the two halves
+ * sit flush against each other.
+ *
+ * The split halves are a picture, so they are hidden from assistive tech; the
+ * whole name is carried once, unsplit, in a visually hidden span. A folder has
+ * no extension to protect and keeps the plain end truncation.
+ */
+function FileName({ name }: { name: string }) {
+  // By code point, so the split never lands inside a surrogate pair.
+  const chars = Array.from(name);
+  if (chars.length <= FILE_NAME_TAIL) return <span className="truncate">{name}</span>;
+  return (
+    <span className="flex min-w-0" data-file-name>
+      <span className="sr-only">{name}</span>
+      <span aria-hidden className="truncate" data-name-lead>
+        {chars.slice(0, -FILE_NAME_TAIL).join('')}
+      </span>
+      <span aria-hidden className="flex-none whitespace-pre" data-name-tail>
+        {chars.slice(-FILE_NAME_TAIL).join('')}
+      </span>
     </span>
   );
 }
@@ -186,6 +224,28 @@ export interface TreeMenuItem {
   onSelect(): void;
 }
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
+
+/**
+ * Ask before a delete or a move — see `TreeActionConfirm`. `TreeChrome` holds
+ * the one open request and renders its dialog; a row outside any chrome has
+ * no one to ask, so the default runs the operation as it always did.
+ */
+const TreeConfirmContext = createContext<(request: TreeConfirmRequest) => void>((request) => {
+  void request.run();
+});
+const useTreeConfirm = () => useContext(TreeConfirmContext);
+
+/**
+ * The row button for a path, found in the DOM. A move is dropped on ANOTHER
+ * row, so the dragged row's ref is not in hand where the drop lands; the path
+ * is. (A pinned folder renders twice — the first match is the one to return to.)
+ */
+function rowForPath(path: string): HTMLElement | null {
+  for (const el of document.querySelectorAll<HTMLElement>('[data-tree-path]')) {
+    if (el.dataset.treePath === path) return el;
+  }
+  return null;
+}
 const useTreeNav = () => useContext(TreeNavContext);
 
 /** Depth-first lookup of a tree entry by its exact relativePath. */
@@ -214,11 +274,18 @@ function ContextMenu({
   returnFocusTo,
   deletable = true,
   extraItems = [],
+  proposed = false,
 }: {
   x: number;
   y: number;
   entry: FileTreeEntry;
   isRoot: boolean;
+  /**
+   * The entry exists only on a change request's branch. Nothing that acts on
+   * THIS branch's copy applies (there is none), so only the path and Manage
+   * access — which follows the file to the proposal — are offered.
+   */
+  proposed?: boolean;
   /** False for a folder the platform owns (a reserved root): no Delete. */
   deletable?: boolean;
   onClose: () => void;
@@ -234,6 +301,7 @@ function ContextMenu({
   const { deleteEntry, unzipHere } = useWorkspace();
   const { isPinned, togglePin, available: pinning } = usePinned();
   const openManageAccess = useManageAccess();
+  const confirm = useTreeConfirm();
   const pinned = isPinned(entry.relativePath);
   const [unzipping, setUnzipping] = useState(false);
   // Outside-click, Escape, and focus return — none of which `MenuPanel`
@@ -249,34 +317,48 @@ function ContextMenu({
   // Only files whose name ends with `.zip` (case-insensitive) get the
   // extraction affordance — matches the OS shell-extension behavior users
   // already know from Windows Explorer / macOS Finder.
-  const isZip = entry.type === 'file' && /\.zip$/i.test(entry.name);
+  const isZip = !proposed && entry.type === 'file' && /\.zip$/i.test(entry.name);
 
   // The one prototype context-menu item the platform has never had
-  // (proto:3948). The page-level `⋯ → Copy path` does not cover it: that only
+  // (proto:3948). The page-level Share `⌄ → Copy path` does not cover it: that only
   // ever reaches the file you have open, never a folder row or an unopened
   // one. A clipboard write can be refused outright (a non-secure origin), and
   // a silent no-op is the worst possible answer to "copy this" — so a refusal
   // surfaces the same way every other failure in this tree does.
+  // The ROOT-ANCHORED form: pasted into a Markdown link it resolves from any
+  // folder, where the bare `knowledge-base/…` resolved against the linking
+  // file's own folder and landed on File not found.
   const handleCopyPath = async () => {
+    const copied = rootAnchoredPath(entry.relativePath);
     try {
-      await navigator.clipboard.writeText(entry.relativePath);
+      await navigator.clipboard.writeText(copied);
       onClose();
     } catch (err) {
       console.error('Failed to copy path:', err);
       onClose();
-      alert(`Couldn't copy the path to the clipboard.\n\n${entry.relativePath}`);
+      alert(`Couldn't copy the path to the clipboard.\n\n${copied}`);
     }
   };
 
-  const handleDelete = async () => {
+  // Delete asks first; Confirm runs the delete exactly as the menu used to.
+  const handleDelete = () => {
     onClose();
-    try {
-      await deleteEntry(entry.relativePath);
-    } catch (err) {
-      console.error('Failed to delete entry:', err);
-      const msg = err instanceof Error ? err.message : String(err);
-      alert(`Failed to delete ${entry.relativePath}:\n${msg}`);
-    }
+    confirm({
+      kind: 'delete',
+      entry,
+      returnFocusTo: () => returnFocusTo?.current ?? null,
+      // The folder it was in — the row itself is gone once the delete lands.
+      focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
+      run: async () => {
+        try {
+          await deleteEntry(entry.relativePath);
+        } catch (err) {
+          console.error('Failed to delete entry:', err);
+          const msg = err instanceof Error ? err.message : String(err);
+          alert(`Failed to delete ${entry.relativePath}:\n${msg}`);
+        }
+      },
+    });
   };
 
   const handleUnzip = async () => {
@@ -352,10 +434,13 @@ function ContextMenu({
           </span>
         </MenuItem>
       )}
-      <MenuItem role="menuitem" onClick={handleCopyPath}>
-        <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
-      </MenuItem>
+      {/* The workspace root has no path worth linking: it would copy `/.`. */}
       {!isRoot && (
+        <MenuItem role="menuitem" onClick={handleCopyPath}>
+          <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
+        </MenuItem>
+      )}
+      {offersManageAccess(entry) && (
         <>
           <div className="my-1 border-t border-line" />
           <MenuItem role="menuitem" onClick={() => { openManageAccess(entry); onClose(); }}>
@@ -525,6 +610,7 @@ export function FileTreeNode({
 }) {
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
+  const confirm = useTreeConfirm();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
@@ -608,9 +694,9 @@ export function FileTreeNode({
   const paddingLeft = indentFor(depth);
   const isRoot = entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
-  // A folder with nothing in it doesn't get a caret, because there is nothing
-  // to open (proto:3565).
-  const hasChildren = (entry.children?.length ?? 0) > 0;
+  // A folder with nothing in it still gets its caret — without one it reads
+  // as a file — and opening it says so with a muted "Empty" row.
+  const isEmpty = (entry.children?.length ?? 0) === 0;
   // Escape inside the context menu hands focus back to the row it came from.
   const rowRef = useRef<HTMLButtonElement>(null);
 
@@ -678,7 +764,27 @@ export function FileTreeNode({
         ) {
           return;
         }
-        moveEntry(sourcePath, newPath);
+        // Every cross-folder move is an access change, so it asks first;
+        // nothing is sent until Confirm.
+        confirm({
+          kind: 'move',
+          sourcePath,
+          targetDir,
+          destinationLabel: targetDir ? entry.name : 'the top level',
+          returnFocusTo: () => rowForPath(sourcePath),
+          // The row it was dropped on stays put; the source row moves away.
+          focusAfterRun: () => rowForPath(entry.relativePath),
+          run: async () => {
+            try {
+              await moveEntry(sourcePath, newPath);
+            } catch (err) {
+              // Same surfacing as rename — a refused move (a folder the caller
+              // may not write) must not read as one that silently reverted.
+              const msg = err instanceof Error ? err.message : String(err);
+              alert(`Failed to move ${name}:\n${msg}`);
+            }
+          },
+        });
         return;
       }
 
@@ -697,7 +803,7 @@ export function FileTreeNode({
       if (files.length === 0) return;
       dispatchUpload({ kind: 'files', files }, targetDir);
     },
-    [entry, isRoot, dispatchUpload, moveEntry],
+    [entry, isRoot, dispatchUpload, moveEntry, confirm],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -807,14 +913,12 @@ export function FileTreeNode({
           <button
             ref={rowRef}
             type="button"
-            // A folder with nothing in it has no caret and nothing to expand,
-            // so it claims neither state: `aria-expanded` is for a control
-            // that can open, and an empty folder cannot.
-            aria-expanded={hasChildren ? isExpanded : undefined}
+            data-tree-path={entry.relativePath}
+            aria-expanded={isExpanded}
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            onClick={() => { if (hasChildren) setUserIntent(!isExpanded); }}
+            onClick={() => setUserIntent(!isExpanded)}
           >
-            <CaretSlot open={isExpanded} show={hasChildren} />
+            <CaretSlot open={isExpanded} show />
             {renaming ? (
               <RenameInput
                 currentName={entry.name}
@@ -881,6 +985,19 @@ export function FileTreeNode({
                 />
               </div>
             )}
+            {isEmpty && !creating && (
+              // Not a row anyone acts on — no path, no focus, no menu — so
+              // keyboard navigation and the context menu never meet it. It
+              // sits where a first child would, name column included.
+              <div
+                data-tree-empty
+                className={cn(ROW_CLASS, 'text-ink-faint')}
+                style={{ paddingLeft: indentFor(depth + 1) }}
+              >
+                <CaretSlot show={false} />
+                <span className="truncate">Empty</span>
+              </div>
+            )}
             {entry.children?.map((child) => (
               <FileTreeNode
                 key={child.relativePath}
@@ -917,30 +1034,49 @@ export function FileTreeNode({
   // A file from the caller's own open change request that does not exist on
   // this branch. Its row is a LINK to the request, not a file: there is no
   // content here to show, so clicking opens the change-request view, and none
-  // of the file affordances (rename, drag, download, context menu) apply —
-  // they would all 404 against a path this branch has never heard of. The
-  // accent colour is the tell that this is proposed, not present.
+  // of the file affordances (rename, drag, download) apply — they would all
+  // 404 against a path this branch has never heard of. The context menu keeps
+  // only what makes sense for a proposal: the path, and Manage access, which
+  // the chrome points at the change request's branch. The accent colour is
+  // the tell that this is proposed, not present.
   const suggestedCr = suggestions.crFor(entry.relativePath);
   if (suggestedCr !== null) {
     return (
-      <button
-        type="button"
-        className={cn(
-          ROW_CLASS,
-          'text-accent hover:bg-hover hover:text-accent-hover',
-          'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+      <>
+        <button
+          ref={rowRef}
+          type="button"
+          data-tree-path={entry.relativePath}
+          className={cn(
+            ROW_CLASS,
+            'text-accent hover:bg-hover hover:text-accent-hover',
+            'focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ink-muted',
+          )}
+          style={{ paddingLeft }}
+          onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
+          onContextMenu={handleContextMenu}
+          title="Proposed by you: opens the change request"
+        >
+          <CaretSlot show={false} />
+          <FileName name={entry.name} />
+          <span
+            aria-hidden
+            className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
+          />
+        </button>
+        {contextMenu && (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            entry={entry}
+            isRoot={false}
+            proposed
+            deletable={false}
+            onClose={() => setContextMenu(null)}
+            returnFocusTo={rowRef}
+          />
         )}
-        style={{ paddingLeft }}
-        onClick={() => suggestions.open(entry.relativePath, suggestedCr)}
-        title="Proposed by you: opens the change request"
-      >
-        <CaretSlot show={false} />
-        <span className="truncate">{entry.name}</span>
-        <span
-          aria-hidden
-          className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
-        />
-      </button>
+      </>
     );
   }
 
@@ -951,6 +1087,7 @@ export function FileTreeNode({
       <button
         ref={rowRef}
         type="button"
+        data-tree-path={entry.relativePath}
         aria-current={isActive}
         className={cn(
           ROW_CLASS,
@@ -999,7 +1136,7 @@ export function FileTreeNode({
             onCancel={() => setRenaming(false)}
           />
         ) : (
-          <span className="truncate">{entry.name}</span>
+          <FileName name={entry.name} />
         )}
         {/* News about a file you are not looking at (proto:692). Amber, not
             the tab dot's accent: on a tab the dot marks the file you have
@@ -1067,18 +1204,114 @@ export function TreeChrome({
   );
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);
+  // `Manage <folder> →` from a proposed file's sheet keeps that file's change
+  // request: the inherited grant it retargets from was read on the request's
+  // branch, so the folder's rules are edited there too — not on the viewed
+  // branch, which the folder path alone would resolve to.
+  const [inheritedProposal, setInheritedProposal] = useState<
+    { number: number; branch: string | null } | undefined
+  >(undefined);
+  const openAccess = useCallback((entry: FileTreeEntry) => {
+    setInheritedProposal(undefined);
+    setAccessTarget(entry);
+  }, []);
+  // A proposed-only file does not exist on the branch being viewed, so its
+  // access can only be edited where it lives: the change request's branch.
+  // Everything else — including a file a request merely modifies, which is a
+  // real row here — keeps the ambient workspace. The branch is null when the
+  // request cannot be resolved; the dialog refuses rather than falling back
+  // to a workspace the file is not on.
+  const accessProposal = useMemo(() => {
+    if (!accessTarget) return undefined;
+    if (inheritedProposal) return inheritedProposal;
+    const crNumber = suggestionOnlyPaths.get(accessTarget.relativePath);
+    if (crNumber === undefined) return undefined;
+    const cr = openChangeRequests
+      .forPath(accessTarget.relativePath)
+      .find((c) => c.number === crNumber);
+    return { number: crNumber, branch: cr?.branch ?? null };
+  }, [accessTarget, inheritedProposal, suggestionOnlyPaths, openChangeRequests]);
+
+  // The one open delete/move confirmation for this tree, stamped with the
+  // workspace it was asked in: its `run` closes over that workspace's
+  // operations, so a switch while it is open drops it rather than letting
+  // Confirm act on a branch the dialog never described.
+  const { workspaceId, kbDirName } = useWorkspace();
+  const [openConfirm, setOpenConfirm] = useState<
+    { request: TreeConfirmRequest; workspaceId: string | null } | null
+  >(null);
+  const confirmRequest =
+    openConfirm && openConfirm.workspaceId === workspaceId ? openConfirm.request : null;
+  const askConfirm = useCallback(
+    (request: TreeConfirmRequest) => setOpenConfirm({ request, workspaceId }),
+    [workspaceId],
+  );
+  // Dropped outright, so switching back does not bring it back either.
+  useEffect(() => {
+    setOpenConfirm((open) => (open && open.workspaceId !== workspaceId ? null : open));
+  }, [workspaceId]);
+  // Whether the caller may write the move's destination: null until known.
+  // The same three short-circuits as `useFileAccess` (and the upload's
+  // suggestion routing): drafts and paths outside the KB are writable
+  // without asking, and a failed lookup warns about nothing — the server
+  // is the gate either way, and the dialog never waits on this.
+  // Keyed by the request it answers, so a stale answer never reaches the next one.
+  const [writableAnswer, setWritableAnswer] = useState<
+    { request: TreeConfirmRequest; canWrite: boolean } | null
+  >(null);
+  const destinationWritable =
+    writableAnswer && writableAnswer.request === confirmRequest ? writableAnswer.canWrite : null;
+  const focusAfterConfirm = useRef<(() => HTMLElement | null) | null>(null);
+  useEffect(() => {
+    if (confirmRequest?.kind !== 'move' || !workspaceId || !kbDirName) return;
+    if (!isProtectedBranch(decodeURIComponent(workspaceId))) return;
+    const prefix = `${kbDirName}/`;
+    if (!confirmRequest.targetDir.startsWith(prefix)) return;
+    let cancelled = false;
+    fetchFileAccess(workspaceId, confirmRequest.targetDir.slice(prefix.length), 'folder')
+      .then((res) => { if (!cancelled) setWritableAnswer({ request: confirmRequest, canWrite: res.canWrite }); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [confirmRequest, workspaceId, kbDirName]);
+  const closeConfirm = (andRun: boolean) => {
+    if (!confirmRequest) return;
+    focusAfterConfirm.current = andRun ? confirmRequest.focusAfterRun : confirmRequest.returnFocusTo;
+    setOpenConfirm(null);
+    if (andRun) void confirmRequest.run();
+  };
+  // Focus goes back to the row once the dialog has unmounted — after the
+  // Dialog's own restore, which would otherwise hand it to the (gone) menu.
+  useEffect(() => {
+    if (confirmRequest || !focusAfterConfirm.current) return;
+    focusAfterConfirm.current()?.focus();
+    focusAfterConfirm.current = null;
+  }, [confirmRequest]);
 
   return (
     <>
+      <TreeConfirmContext.Provider value={askConfirm}>
       <TreeNavContext.Provider value={nav}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
-      <ManageAccessContext.Provider value={setAccessTarget}>
+      <ManageAccessContext.Provider value={openAccess}>
       <SuggestionsContext.Provider value={suggestionsController}>
         {children}
       </SuggestionsContext.Provider>
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
       </TreeNavContext.Provider>
+      </TreeConfirmContext.Provider>
+      {confirmRequest && (
+        <TreeActionConfirmDialog
+          request={confirmRequest}
+          warnings={
+            confirmRequest.kind === 'move'
+              ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
+              : []
+          }
+          onCancel={() => closeConfirm(false)}
+          onConfirm={() => closeConfirm(true)}
+        />
+      )}
       {openSuggestionCr && (
         <ChangeRequestDialog
           cr={openSuggestionCr}
@@ -1091,16 +1324,98 @@ export function TreeChrome({
       )}
       {accessTarget && (
         <ManageAccessDialog
-          key={accessTarget.relativePath}
+          key={`${accessTarget.relativePath}@${accessProposal?.branch ?? ''}`}
           entry={accessTarget}
+          proposal={accessProposal}
           // The dialog is keyed on the path, so pointing it at a parent remounts
-          // it against that folder — the whole retarget is this one setter.
-          onManageAncestor={setAccessTarget}
-          onClose={() => setAccessTarget(null)}
+          // it against that folder, on the same branch the grant was read on.
+          onManageAncestor={(ancestor) => {
+            setInheritedProposal(accessProposal);
+            setAccessTarget(ancestor);
+          }}
+          onClose={() => {
+            setInheritedProposal(undefined);
+            setAccessTarget(null);
+          }}
         />
       )}
     </>
   );
+}
+
+/** Shown when the read filter kept entries out and none are left on screen. */
+export const NOTHING_SHARED_MESSAGE = 'Nothing here is shared with you yet. Ask an admin to grant you access.';
+/** Shown when the knowledge base has nothing in it at all. */
+export const KB_EMPTY_MESSAGE = 'This knowledge base is empty.';
+
+/**
+ * Why a tree has nothing in it, when it has nothing in it. Read is
+ * default-deny, so an empty sidebar has two causes that look identical and
+ * call for different next steps: the caller may read none of what exists
+ * (ask an admin), or nothing exists yet (make something — said only to a
+ * caller who may write at `rootPath`, the surface's root folder).
+ *
+ * Renders nothing while the tree loads and once a single entry is visible.
+ * The Knowledge explorer and the Library's trees both render it, from the
+ * same merged listing, so they give the same answer.
+ */
+export function EmptyTreeNotice({ rootPath }: { rootPath: string | null }) {
+  const { kbDirName } = useWorkspace();
+  const { tree, withheld } = useMergedWorkspaceTree();
+  const empty = tree !== null && !treeHasVisibleEntries(tree, kbDirName);
+  // Asked only when the message would carry the hint: a withheld tree never does.
+  const canWrite = useCanWriteFolder(empty && withheld === 0 ? rootPath : null);
+  if (!empty) return null;
+  if (withheld > 0) {
+    return (
+      <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+        {NOTHING_SHARED_MESSAGE}
+      </div>
+    );
+  }
+  return (
+    <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+      {KB_EMPTY_MESSAGE}
+      {canWrite && (
+        <>
+          {' '}
+          <span data-testid="tree-empty-create-hint">
+            Use New file or New folder on the folder above, or drop files here.
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Whether the caller may write into a workspace-relative folder; false until
+ * known, and on a failed lookup — it decides a hint, never a gate. The same
+ * short-circuits as `useFileAccess`: a path outside the KB and a draft branch
+ * are writable without asking.
+ */
+function useCanWriteFolder(workspacePath: string | null): boolean {
+  const { workspaceId, kbDirName } = useWorkspace();
+  const [answer, setAnswer] = useState<{ key: string; canWrite: boolean } | null>(null);
+  const prefix = kbDirName ? `${kbDirName}/` : null;
+  const key = workspacePath && workspaceId && prefix ? `${workspaceId}|${workspacePath}` : null;
+  // The KB clone's own folder (a tree that predates the split) is the repo
+  // root: inside the KB, and sent as-is — the server reads a bare kbDirName as ''.
+  const isKbRoot = workspacePath !== null && workspacePath === kbDirName;
+  const shortCircuit =
+    key !== null &&
+    ((!isKbRoot && !workspacePath!.startsWith(prefix!)) || !isProtectedBranch(decodeURIComponent(workspaceId!)));
+  useEffect(() => {
+    if (key === null || shortCircuit) return;
+    let cancelled = false;
+    fetchFileAccess(workspaceId!, isKbRoot ? workspacePath! : workspacePath!.slice(prefix!.length), 'folder')
+      .then((res) => { if (!cancelled) setAnswer({ key, canWrite: res.canWrite }); })
+      .catch(() => { if (!cancelled) setAnswer({ key, canWrite: false }); });
+    return () => { cancelled = true; };
+  }, [key, shortCircuit, isKbRoot, workspaceId, workspacePath, prefix]);
+  if (key === null) return false;
+  if (shortCircuit) return true;
+  return answer?.key === key && answer.canWrite;
 }
 
 /**
@@ -1169,7 +1484,7 @@ export function UploadNotices() {
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { openFilePath, dispatchUpload } = useWorkspace();
+  const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
@@ -1378,6 +1693,18 @@ export function FileExplorer() {
         ) : (
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
+        {/* Under the (empty) roots, so the hint's "folder above" is on
+            screen: Knowledge's own folder is where a first page goes. A tree
+            that predates the split starts at the KB clone's folder when it
+            wraps one, as `treeHasVisibleEntries` reads it. */}
+        <EmptyTreeNotice
+          rootPath={
+            sections
+              ? sections.knowledge?.relativePath ?? null
+              : (mergedTree?.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ?? mergedTree)
+                  ?.relativePath ?? null
+          }
+        />
       </div>
     </div>
     </TreeChrome>

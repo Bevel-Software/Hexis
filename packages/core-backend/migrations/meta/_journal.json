@@ -50,6 +50,13 @@
       "when": 1789034558662,
       "tag": "0006_api_tokens_revoked_by",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789406950616,
+      "tag": "0007_github_facade_registered",
+      "breakpoints": true
     }
   ]
 }

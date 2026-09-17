@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService } from '../plugin-links.service.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 
 /**
  * A customer's repository, read as-is: lowercase `skills/` and `plugins/`
@@ -91,13 +93,14 @@ describe('bundle dialect, end to end', () => {
       JSON.stringify({ name: 'finance-kit', sourceSkillRoots: ['skills/departments/business/finance'] }),
     );
 
-    const source = new KbPluginSource();
-    access = new AccessControlService(workspaceService, KB_DIR);
-    skills = new SkillService(workspaceService, access, KB_DIR);
-    tools = new ToolManualService(workspaceService, access, KB_DIR, Date.now, source);
-    links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, Date.now, source);
-    index = new PluginIndexService(workspaceService, access, skills, tools, KB_DIR, Date.now, links, source);
-    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, { name: 'acme', owner: 'Acme' }, source);
+    const disk = new NodeFs();
+    const source = new KbPluginSource(disk);
+    access = new AccessControlService(workspaceService, KB_DIR, disk);
+    skills = new SkillService(workspaceService, access, KB_DIR, disk);
+    tools = new ToolManualService(workspaceService, access, KB_DIR, disk, source);
+    links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
+    index = new PluginIndexService(workspaceService, access, skills, tools, KB_DIR, source, Date.now, links);
+    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, { name: 'acme', owner: 'Acme' }, source, disk, new NodeGitRunner());
     linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, skills, links, KB_DIR);
   });
   afterEach(async () => {

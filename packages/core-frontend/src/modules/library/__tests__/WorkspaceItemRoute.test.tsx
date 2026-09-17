@@ -88,6 +88,8 @@ const CATALOG: LibraryData = {
     },
   ],
   ownedSkills: new Set<string>(),
+  writableSkills: new Set<string>(),
+  ownedTools: new Set<string>(),
   allowedToolsBySkill: new Map(),
   crs: [],
   myCrNumbers: new Set<number>(),

@@ -1,4 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,6 +61,7 @@ describe('PluginIndexService', () => {
       skillService(opts.skills),
       toolService(opts.tools),
       KB_DIR,
+      new KbPluginSource(new NodeFs()),
     );
 
   const kb = () => join(root, wsId, KB_DIR);
@@ -165,6 +168,7 @@ describe('PluginIndexService', () => {
       skillService(skills('Skills/Eng/deploy', 'Skills/Eng/rollback', 'Plugins/Product/roadmap')),
       toolService(),
       KB_DIR,
+      new KbPluginSource(new NodeFs()),
       Date.now,
       links,
     ).catalog();
@@ -202,6 +206,23 @@ describe('PluginIndexService', () => {
       team: false,
       quiet: false,
     });
+  });
+
+  test("carries what discovery left out of a plugin, in that plugin's entry, without the folder prefix", async () => {
+    await pluginDir('GTM');
+    await mkdir(join(kb(), 'Plugins', 'Ado'), { recursive: true });
+    await writeFile(
+      join(kb(), 'Plugins', 'Ado', 'plugin.bundle.json'),
+      JSON.stringify({ name: 'ado', mcpProfile: 'global', sourceSkillRoots: ['../escape'] }),
+    );
+    const catalog = await svc().catalog();
+    const ado = catalog.find((g) => g.name === 'ado')!;
+    expect(ado.warnings).toEqual([
+      'sourceSkillRoots entry "../escape" is not a folder path — ignored',
+      'mcpProfile "global" named but no registry could be read',
+    ]);
+    // Nothing of that is GTM's.
+    expect(catalog.find((g) => g.name === 'gtm')!.warnings).toEqual([]);
   });
 
   test('resolves principals on the plugin folder', async () => {

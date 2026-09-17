@@ -1,4 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('review-workflow');
 import type {
   AuthUser,
   CancelPrResult,
@@ -22,7 +25,7 @@ import {
   WorkflowValidationError,
 } from '../../../shared/domain-errors.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
 import type {
   IReviewWorkflowService,
   MergeGateInput,
@@ -169,7 +172,7 @@ function isAccessConfigPath(p: string): boolean {
  * and any call-site that needs the "does this participate in approvals"
  * question answered consistently.
  */
-function isGateRelevant(a: FileApprovalState): boolean {
+function isGateRelevant(a: Pick<FileApprovalState, 'path' | 'eligibleApprovers'>): boolean {
   const hasEligible =
     a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
   const lower = a.path.toLowerCase();
@@ -270,7 +273,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .insert(prComments)
       .values({
         prNumber,
-        authorEmail: user.email.trim().toLowerCase(),
+        authorEmail: canonicalEmail(user.email),
         authorName: user.name,
         path: input.path ?? null,
         line: input.line ?? null,
@@ -299,7 +302,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
       .limit(1);
     if (existing.length === 0) throw new CommentAuthError('not-found');
-    if (existing[0].authorEmail !== user.email.trim().toLowerCase()) {
+    if (existing[0].authorEmail !== canonicalEmail(user.email)) {
       throw new CommentAuthError('forbidden');
     }
     const [row] = await this.db
@@ -319,7 +322,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       .where(and(eq(prComments.id, commentId), eq(prComments.prNumber, prNumber)))
       .limit(1);
     if (existing.length === 0) throw new CommentAuthError('not-found');
-    if (existing[0].authorEmail !== user.email.trim().toLowerCase()) {
+    if (existing[0].authorEmail !== canonicalEmail(user.email)) {
       throw new CommentAuthError('forbidden');
     }
     await this.db
@@ -378,10 +381,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         // An unreadable tree is not "no eligible writers": that answer would
         // drop every file out of the merge gate. Fail closed instead.
         if (err instanceof AccessUnreadableError) throw err;
-        console.warn(
-          `[review-workflow] eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`,
-          err,
-        );
+        log.warn(`eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`, { err });
       }
 
       if (viewerEmail) {
@@ -395,10 +395,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           if (batch) viewerCanApproveByPath = batch;
         } catch (err) {
           if (err instanceof AccessUnreadableError) throw err;
-          console.warn(
-            `[review-workflow] canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`,
-            err,
-          );
+          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`, { err });
         }
       }
     }
@@ -448,13 +445,14 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           },
         );
 
-      return {
+      const state = {
         path: file.path,
         eligibleApprovers: { roles: eligible.roles, users: eligible.users },
         approvedBy,
         isApproved: hasEligibleApproval,
         viewerCanApprove: viewerCanApproveByPath.get(file.path) === true,
       };
+      return { ...state, inMergeGate: isGateRelevant(state) };
     });
   }
 
@@ -491,7 +489,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     );
     if (canApprove === null) throw new ApprovalAuthError('no-eligible-approvers');
     if (!canApprove) throw new ApprovalAuthError('not-eligible');
-    const callerEmail = user.email.trim().toLowerCase();
+    const callerEmail = canonicalEmail(user.email);
 
     // Unique index on (prNumber, path, approverEmail, headSha) makes this
     // idempotent — `onConflictDoNothing` turns a double-click into a no-op.
@@ -614,7 +612,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
       ]);
     }
 
-    const triggeredByEmail = user.email.trim().toLowerCase();
+    const triggeredByEmail = canonicalEmail(user.email);
     const [logRow] = await this.db
       .insert(prMergeLog)
       .values({
@@ -796,7 +794,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     assertValidPath(path);
     if (!headSha) throw new WorkflowValidationError('head sha is required');
 
-    const callerEmail = user.email.trim().toLowerCase();
+    const callerEmail = canonicalEmail(user.email);
 
     // Only revoke the caller's OWN approval — never someone else's. Filter on
     // (PR, path, approverEmail) without pinning the SHA so a user revoking
