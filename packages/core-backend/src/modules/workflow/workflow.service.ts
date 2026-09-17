@@ -2039,6 +2039,7 @@ export class WorkflowService implements IWorkflowService {
     // Same per-file lock every other editor of this path takes — a concurrent
     // save must not race the restore between write and commit.
     const held: string[] = [];
+    let revertError: { reason: unknown } | null = null;
     try {
       for (const p of reverted) {
         const lockPath = `${this.kbDirName}/${p}`;
@@ -2064,13 +2065,20 @@ export class WorkflowService implements IWorkflowService {
         );
       }
       await this.trackedPush(ws.id, user);
-    } finally {
-      // Committed inline — drop the lock rows directly rather than enqueueing
-      // a duplicate commit through releaseLock.
-      for (const lockPath of held) {
-        await this.fileLocks.release(ws.id, headBranch, lockPath, user);
-      }
+    } catch (err) {
+      revertError = { reason: err };
     }
+    // Committed inline — drop the lock rows directly rather than enqueueing
+    // a duplicate commit through releaseLock. Each is released on its own, on
+    // success and failure alike: one failed release must not leave the other
+    // lock held. The revert's own error wins; otherwise a failed release
+    // still surfaces, as a single release's did.
+    const released = await Promise.allSettled(
+      held.map((lockPath) => this.fileLocks.release(ws.id, headBranch, lockPath, user)),
+    );
+    if (revertError) throw revertError.reason;
+    const failedRelease = released.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failedRelease) throw failedRelease.reason;
     this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);

@@ -1232,6 +1232,12 @@ export class WorkspaceService implements IWorkspaceService {
    * placeholder back into a folder whose delete already enumerated its
    * files), and a delete never starts while a folder under it is being kept.
    * Not re-entrant: take it once, and never around another folder's turn.
+   *
+   * The reach of the guarantee, like {@link withPathTurn}'s: within this
+   * process, over this process's clones. Across instances the workflow lock
+   * rows coordinate — the placeholder write takes its own path's lock, as the
+   * folder delete takes each file's — and each clone's changes meet in git,
+   * as any write into a folder another instance deletes already does.
    */
   async withFolderTurn<T>(workspaceId: string, relativeDir: string, op: () => Promise<T>): Promise<T> {
     assertValidPath(relativeDir);

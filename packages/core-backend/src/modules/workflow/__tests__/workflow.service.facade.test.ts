@@ -710,6 +710,34 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
     expect(result).toEqual({ closed: false, remainingPaths: ['Other/b.md'] });
   });
 
+  it('releases every lock it took even when one release fails, and still reports the failure', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/.gitkeep']),
+      pathExistsAtRef: vi.fn(async (_ws: string, _ref: string, p: string) => p === 'Docs/a.md'),
+    });
+    const { svc, fileLocks } = makeHarness({ git });
+    (fileLocks.release as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('lock store down'));
+
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toThrow('lock store down');
+    expect((fileLocks.release as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2])).toEqual([
+      'knowledge-base/Docs/a.md',
+      'knowledge-base/Docs/.gitkeep',
+    ]);
+  });
+
+  it('releases every lock it took when the revert itself fails, and reports that failure', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/.gitkeep']),
+      pathExistsAtRef: vi.fn(async (_ws: string, _ref: string, p: string) => p === 'Docs/a.md'),
+      commitFile: vi.fn().mockRejectedValue(new Error('commit failed')),
+    });
+    const { svc, fileLocks } = makeHarness({ git });
+    (fileLocks.release as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('lock store down'));
+
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toThrow('commit failed');
+    expect(fileLocks.release).toHaveBeenCalledTimes(2);
+  });
+
   it('never reverts a placeholder when that would leave the folder with nothing', async () => {
     const git = makeRevertGit({
       changedPathsForPr: vi
