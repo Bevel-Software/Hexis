@@ -44,7 +44,13 @@ export interface PullRequestSummary {
   /** Relative paths within `knowledge-base/`. Empty if not yet computed. */
   touchedNodePaths: string[];
   review: PullRequestReviewStatus;
+  /**
+   * Link to the change request: absolute (`<public frontend address>/change-requests/<number>`)
+   * when the deployment has a public address configured, else the in-app relative path.
+   */
   url: string;
+  /** Present when `url` is relative — says how to get absolute links. */
+  urlNote?: string;
 }
 
 export type PrFileStatus =
