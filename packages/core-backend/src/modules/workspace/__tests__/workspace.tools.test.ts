@@ -17,6 +17,7 @@ import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 
@@ -1152,6 +1153,28 @@ describe('office documents and PDFs', () => {
       await fs.mkdir('dir', { recursive: true });
       const dir = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'dir' })).json()) as Record<string, unknown>;
       expect(dir.contentMode).toBeUndefined();
+      expect(dir.kind).toBeUndefined();
+    });
+
+    it('file_stat classifies a file the way read_file does: kind, mime, mimeSource, textEditable', async () => {
+      const base = await start();
+      const stat = async (path: string) =>
+        (await (await post(`${base}/api/agent/tools/file_stat`, { path })).json()) as Record<string, unknown>;
+      // Extensionless UTF-8: read_file returns its text, so stat says text/plain.
+      await fs.writeFile('Sample file', Buffer.from('plain words, no extension\n'));
+      expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'Sample file' })).json()).toMatchObject({ content: 'plain words, no extension\n' });
+      expect(await stat('Sample file')).toMatchObject({ type: 'file', kind: 'text', mime: 'text/plain', mimeSource: 'sniff', textEditable: true });
+      expect(await stat('Sample file')).not.toHaveProperty('mimeNote');
+      await fs.writeFile('plata.pdf', Buffer.from('%PDF-1.4\n'));
+      expect(await stat('plata.pdf')).toMatchObject({ kind: 'document', mime: 'application/pdf', textEditable: false });
+      await seed();
+      expect(await stat('deck.pptx')).toMatchObject({ kind: 'document', mimeSource: 'extension', textEditable: false });
+      expect(await stat('logo.png')).toMatchObject({ kind: 'image', mime: 'image/png', textEditable: false });
+      // Real binary bytes without a known extension: the octet-stream fallback, and a note saying so.
+      await fs.writeFile('Sample blob', Buffer.from([0x00, 0x01, 0xff]));
+      const blob = await stat('Sample blob');
+      expect(blob).toMatchObject({ kind: 'binary', mime: 'application/octet-stream', mimeSource: 'fallback', textEditable: false });
+      expect(blob.mimeNote).toBe(OCTET_STREAM_FALLBACK_NOTE);
     });
 
     it('write_file, write_files and edit_file accept the text file and refuse the other three with binary_not_writable, bytes untouched', async () => {

@@ -2,7 +2,10 @@ import { isUtf8 } from 'node:buffer';
 import { fileExtension } from './doc-extract.types.js';
 import { displayPath, type FileKind, type FileReader, type ReadResult } from './file-reader.js';
 
-/** Minimal extension→mime map for the binary-read notice (fallback: octet-stream). */
+/**
+ * Extension→mime for the binary-read notice and for the `mime` `file_stat`
+ * reports (fallback: octet-stream, or text/plain for sniffed text).
+ */
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -27,9 +30,22 @@ const MIME_BY_EXT: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
   '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.eml': 'message/rfc822',
+  '.msg': 'application/vnd.ms-outlook',
   '.wasm': 'application/wasm',
   '.exe': 'application/vnd.microsoft.portable-executable',
 };
+
+/** The mime `path`'s extension names, or undefined when the table has none. */
+export function extensionMime(path: string): string | undefined {
+  return MIME_BY_EXT[fileExtension(path)];
+}
 
 /**
  * Text is what the fallback reader may hand to the text tools: no NUL byte
@@ -81,10 +97,14 @@ export class TextReader implements FileReader {
     return isTextBytes(bytes) ? bytes.toString('utf8') : null; // skip binary (NUL / invalid UTF-8)
   }
 
+  mimeFor(path: string): string | undefined {
+    return extensionMime(path);
+  }
+
   /** The honest one-line notice returned INSTEAD of raw bytes for unreadable binary content. */
   protected binaryNotice(path: string, sizeBytes: number): string {
     const ext = fileExtension(path);
-    const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+    const mime = extensionMime(path) ?? 'application/octet-stream';
     const zipHint = ext === '.zip' ? ' Use the unzip tool to extract its contents.' : '';
     return `[${displayPath(path)} is a binary file (${mime}, ${sizeBytes} bytes) — not readable as text.${zipHint}]`;
   }
