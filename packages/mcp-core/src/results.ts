@@ -84,18 +84,22 @@ function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: 
  * MCP caller sees the tool's real message instead of a bare "status code 500".
  *
  * A body that also carries a string `code` is a STRUCTURED refusal (e.g.
- * `write-denied`, which says whether and how to propose the change instead):
- * its fields are what the agent acts on, so the whole body follows the
- * sentence as JSON rather than being dropped.
+ * `write-denied`, whose `proposal` names the steps to take instead): it is
+ * returned whole as JSON, because the fields beside `error` are what the
+ * caller acts on.
  */
 export function describeToolFailure(err: unknown): string {
   const data = (err as { response?: { data?: unknown } })?.response?.data;
   if (data && typeof data === 'object') {
     const inner = (data as { error?: unknown }).error;
-    if (typeof inner === 'string' && inner.length > 0) {
-      if (typeof (data as { code?: unknown }).code === 'string') return `${inner}\n${safeJsonText(data)}`;
-      return inner;
+    if (typeof inner === 'string' && typeof (data as { code?: unknown }).code === 'string') {
+      try {
+        return JSON.stringify(data);
+      } catch {
+        return inner;
+      }
     }
+    if (typeof inner === 'string' && inner.length > 0) return inner;
   }
   if (typeof data === 'string' && data.length > 0) return data;
   // Total, like `safeJsonText`: a thrown value whose own `toString` throws

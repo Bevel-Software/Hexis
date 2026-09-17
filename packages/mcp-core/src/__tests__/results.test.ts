@@ -14,11 +14,14 @@ describe('describeToolFailure', () => {
     expect(describeToolFailure({ response: { data: { error: 'no such branch' } } })).toBe('no such branch');
   });
 
-  it('keeps the fields of a structured refusal after its sentence', () => {
-    const data = { error: 'You may not move it.', code: 'write-denied', canPropose: true };
-    const text = describeToolFailure({ response: { data } });
-    expect(text.split('\n')[0]).toBe('You may not move it.');
-    expect(JSON.parse(text.split('\n')[1])).toEqual(data);
+  it('returns a structured refusal (a body with a `code`) whole, so its fields reach the caller', () => {
+    const data = {
+      error: 'You don\'t have permission to write to "kb/a.md".',
+      code: 'write-denied',
+      canPropose: true,
+      proposal: { steps: [{ tool: 'create_branch' }] },
+    };
+    expect(JSON.parse(describeToolFailure({ response: { data } }))).toEqual(data);
   });
 
   it('never throws on a thrown value whose own toString throws', () => {

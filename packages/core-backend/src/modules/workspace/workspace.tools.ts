@@ -21,7 +21,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // Leaf-level shared primitive (same exception `workspace.service.ts` already
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
-import { assertInsideRepo } from '../kb-fs/repo-path.js';
+import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -42,6 +42,7 @@ import {
 } from '@bevel-software/platform-shared';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
+import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
 
 /** The caller's verdict per access verb on one path. */
 interface AccessVerbs {
@@ -149,14 +150,6 @@ const IMAGE_CONVENTION_NOTE =
   ' Images: keep them in an `assets/` folder next to the page that uses them and link them with a relative path, e.g. `![Approval screen](./assets/approval-screen.png)`; the page renders them inline.';
 
 /**
- * The proposal route, on every tool a permission can refuse. Without it an
- * agent reads a denial as a dead end, when the UI would have routed the same
- * action to a change request.
- */
-const PROPOSAL_NOTE =
-  ' Refused for lack of write access, the answer is a `write-denied` error with `canPropose` and, when you may, the exact steps to propose the change instead (create a draft branch, repeat the call there, open a change request).';
-
-/**
  * A path input that names the clone folder. The tools are rooted at the
  * WORKSPACE dir, one level above the git clone, so a path only reaches git
  * when it starts with that folder; an agent that reads `KnowledgeBase/Foo.md`
@@ -168,7 +161,7 @@ const PROPOSAL_NOTE =
  */
 const wsPath = (kbDirName: string, what: string, refused = true): JsonSchema =>
   str(
-    `${what}: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`).` +
+    `${what}: starts with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash (\`/${kbDirName}/…\` is the same path).` +
       (refused ? ' A path without that prefix is outside the repository and is refused.' : ''),
   );
 
@@ -481,62 +474,28 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * The structured `write-denied` answer: what was refused and why, whether
-   * the caller may propose the change instead, and the exact steps. Proposing
-   * needs read access to the path; every denial happens on a protected branch,
-   * and a protected branch is what a change request targets. Nothing is
-   * created here.
+   * The refusal the lock gate itself would raise for a path this tool's own
+   * preflight already found unwritable — same `AccessDeniedError`, same
+   * "Eligible: …" reading, from the same `eligibleWritersAtRef`.
+   *
+   * Raised as that error rather than as a finished body on purpose: every
+   * proposable tool's handler is wrapped in ONE mapping
+   * (`rethrowAsWriteDenial`), which turns an access refusal into the
+   * `write-denied` answer with whether and how to propose instead. Going
+   * through it means a refusal the preflight found and a refusal the gate
+   * found are the same answer in the same shape, and there is one place that
+   * decides what that shape is.
    */
-  const writeDenied = async (
-    branch: string,
-    ctx: ToolContext,
-    path: string,
-    tool: string,
-  ): Promise<ToolError> => {
+  const writeRefusal = async (branch: string, path: string): Promise<AccessDeniedError> => {
     const rel = toKbRelative(path, kbDirName);
     const eligible = rel === null
       ? null
       : await accessControl.eligibleWritersAtRef(workspaceIdForBranch(branch), 'HEAD', rel);
-    const names = [
-      ...(eligible?.roles ?? []),
-      ...(eligible?.users ?? []).map((u) => (u.name ? `${u.name} <${u.email}>` : u.email)),
-    ];
-    const reason = `You don't have permission to write to "${path}". Eligible: ${names.length ? names.join(', ') : 'none'}.`;
-    const readable = (await accessAt(branch, ctx, path)).read;
-    const details: Record<string, unknown> = {
-      code: 'write-denied',
+    return new AccessDeniedError({
       path,
-      reason,
-      canPropose: readable,
-    };
-    if (readable) {
-      details.proposal = {
-        targetBranch: branch,
-        steps: [
-          `create_branch with { name: "<your-email-localpart>/<short-slug>", branch: "${branch}" }`,
-          `call ${tool} again with the same arguments and branch set to the new draft`,
-          `open_change_request with { sourceBranch: <the new draft>, targetBranch: "${branch}", title: <what the change does> }`,
-        ],
-      };
-    } else {
-      details.whyNot = `You can't read "${path}", so you can't propose a change to it either.`;
-    }
-    return new ToolError(reason, 403, details);
-  };
-
-  /** Run a write; a lock-gate permission refusal becomes the structured denial. */
-  const asStructuredDenial = async <T>(
-    branch: string,
-    ctx: ToolContext,
-    tool: string,
-    run: () => Promise<T>,
-  ): Promise<T> => {
-    try {
-      return await run();
-    } catch (err) {
-      if (err instanceof AccessDeniedError) throw await writeDenied(branch, ctx, err.access.path, tool);
-      throw err;
-    }
+      eligibleRoles: eligible?.roles ?? [],
+      eligibleUsers: eligible?.users ?? [],
+    });
   };
 
   /** Whether a workspace-relative path is, or lies inside, a repository's `.git` metadata. */
@@ -741,6 +700,12 @@ export function registerWorkspaceTools(
     outputs?: JsonSchema;
     write: boolean;
     internalOnly?: boolean;
+    /**
+     * A permission refusal from this tool is answered as `write-denied`
+     * (with whether and how to propose the change instead), and the
+     * description says so.
+     */
+    proposable?: boolean;
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
@@ -749,7 +714,7 @@ export function registerWorkspaceTools(
       // Every workspace entrypoint carries the AGENTS.md reminder, appended once
       // here so no tool (especially the read-only ones a session hits first) can
       // miss it.
-      description: spec.description + KB_CONVENTIONS_NOTE,
+      description: spec.description + (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') + KB_CONVENTIONS_NOTE,
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
@@ -764,7 +729,21 @@ export function registerWorkspaceTools(
       path.slice('/api'.length),
       toolAuth,
       ...(spec.internalOnly ? [requireInternalSource] : []),
-      toolHandler(spec.handler, { write: spec.write }),
+      // A leading slash is the root-anchored form Copy path gives and names
+      // the same workspace path — normalised once here, for every path input.
+      toolHandler(
+        spec.proposable
+          ? async (args, ctx) => {
+              try {
+                // Awaited here so a refusal is caught; proposable tools never stream.
+                return await spec.handler(normalizePathArgs(args), ctx);
+              } catch (err) {
+                return rethrowAsWriteDenial(err, { tool: spec.name, branch: args.branch, userEmail: ctx.user.email }, accessControl, kbDirName);
+              }
+            }
+          : (args, ctx) => spec.handler(normalizePathArgs(args), ctx),
+        { write: spec.write },
+      ),
     );
   };
 
@@ -827,7 +806,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Path to read, starting with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
+        path: str(`Path to read, starting with \`${kbDirName}/\` (e.g. \`${kbDirName}/KnowledgeBase/Foo.md\`), with or without a leading slash, or a \`__tool_chain_spill__/…\` ref from a truncated \`call_tool_chain\`.`),
         offset: int('Start character index (default 0).'),
         limit: int('Max characters to return from `offset`.'),
         sessionId: SESSION_ID_INPUT,
@@ -892,7 +871,7 @@ export function registerWorkspaceTools(
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
-        path: str(`Directory to list, starting with \`${kbDirName}/\` (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
+        path: str(`Directory to list, starting with \`${kbDirName}/\`, with or without a leading slash (default: the workspace root, where the repository is the \`${kbDirName}/\` folder).`),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch'],
@@ -1058,7 +1037,7 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         pattern: str('JavaScript regular expression.'),
-        path: str('Subtree to search, or a single file to search on its own (default: whole workspace).'),
+        path: str('Subtree to search, or a single file to search on its own, with or without a leading slash (default: whole workspace).'),
         ignore_case: { type: 'boolean', description: 'Case-insensitive match.' },
         max_results: { type: 'integer', minimum: 1, maximum: 1000, description: 'Cap on matches (default 200).' },
         sessionId: SESSION_ID_INPUT,
@@ -1184,6 +1163,7 @@ export function registerWorkspaceTools(
       required: ['path', 'bytes'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
       // NB: this is a no-op for chat + `ontology_ingest` — it only bites when a
@@ -1235,6 +1215,7 @@ export function registerWorkspaceTools(
       required: ['count'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
       if (files.length === 0) return { count: 0 };
@@ -1282,6 +1263,7 @@ export function registerWorkspaceTools(
       required: ['path', 'replaced'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
@@ -1310,7 +1292,6 @@ export function registerWorkspaceTools(
     description:
       'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Files only: a folder is refused with a pointer to `delete_folder`. ' +
       'A platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) and git metadata are refused.' +
-      PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -1328,6 +1309,7 @@ export function registerWorkspaceTools(
       required: ['path', 'deleted'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // A delete propagates no cross-ontology information (it removes a node, it
       // doesn't carry bytes from elsewhere), so it is NOT ontology-write-gated — it
@@ -1350,8 +1332,8 @@ export function registerWorkspaceTools(
         throw new ToolError(`${onDisk.slice(onDisk.lastIndexOf('/') + 1)} is a platform file and cannot be deleted through the agent tools.`, 400);
       }
       await assertNoSymlinkOnPath(root, path, true);
-      if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeDenied(branch, ctx, path, 'delete_file');
-      await asStructuredDenial(branch, ctx, 'delete_file', () => fs.deleteFile(path));
+      if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
+      await fs.deleteFile(path);
       return { path, deleted: true };
     },
   });
@@ -1364,7 +1346,6 @@ export function registerWorkspaceTools(
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
       'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
       'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it in that same one change, so its files are never left ungoverned part-way; you must be able to write those platform files too.' +
-      PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -1396,6 +1377,7 @@ export function registerWorkspaceTools(
       required: ['path', 'kind', 'descendants', 'allowed'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const path = (a.path as string).replace(/\/+$/, '');
       const branch = a.branch as string;
@@ -1430,7 +1412,7 @@ export function registerWorkspaceTools(
       if (a.dryRun === true) return { ...impact, dryRun: true };
       if (managed !== undefined) throw new ToolError(managed, 400);
       if (linked !== undefined) throw new ToolError(linked, 400);
-      if (blocked.length > 0) throw await writeDenied(branch, ctx, blocked[0], 'delete_folder');
+      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
       if (files.length > 0 && a.confirm !== true) {
         return {
           ...impact,
@@ -1455,9 +1437,7 @@ export function registerWorkspaceTools(
             deletes: string[],
           ): Promise<unknown>;
         };
-        await asStructuredDenial(branch, ctx, 'delete_folder', () =>
-          batch.writeFiles([], `Delete ${path} and its ${files.length} file(s)`, files),
-        );
+        await batch.writeFiles([], `Delete ${path} and its ${files.length} file(s)`, files);
       }
       // Git tracks no folders: once the files are gone, the shells left on
       // disk are swept so the folder stops appearing in listings. Only empty
@@ -1486,6 +1466,7 @@ export function registerWorkspaceTools(
       required: ['path', 'created'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
@@ -1501,7 +1482,6 @@ export function registerWorkspaceTools(
       'Rules: the destination must not exist — a move never overwrites a file or merges into a folder; a platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) is refused with "<name> is a platform file and stays in its folder." — a folder that moves takes its own platform files along, still in their folder; a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`) and git metadata are refused; a move cannot create a platform file or folder at `dest` either (renaming a note to `access.md` is refused); a path through a symbolic link is refused, since links are never followed; on a protected branch you must be able to write both ends — for a folder, every file under it at its old and its new path. ' +
       'Access follows the destination folder. Preflight first: `dryRun: true` changes nothing and answers `{ src, dest, kind, descendants, access: { before, after }, accessChanges, allowed, reason? }` — `access` is your own `{ read, write, download, owner }` at the source and at the destination. ' +
       'A move whose `accessChanges` is true runs only with `confirm: true`; without it the call moves nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm.' +
-      PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -1535,6 +1515,7 @@ export function registerWorkspaceTools(
       required: ['src', 'dest', 'moved'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // Without trailing slashes: every path under a folder is derived from
       // these by prefix, and `filesUnder` names children without the slash.
@@ -1610,7 +1591,7 @@ export function registerWorkspaceTools(
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
       if (collision) throw new ToolError(reason!, 409);
-      if (blocked.length > 0) throw await writeDenied(branch, ctx, blocked[0], 'move_file');
+      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
       if (accessChanges && a.confirm !== true) {
         return {
           ...impact,
@@ -1619,7 +1600,7 @@ export function registerWorkspaceTools(
           message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
         };
       }
-      await asStructuredDenial(branch, ctx, 'move_file', () => fs.moveFile(src, dest));
+      await fs.moveFile(src, dest);
       return { ...impact, moved: true };
     },
   });
@@ -1644,6 +1625,7 @@ export function registerWorkspaceTools(
       required: ['src', 'dest', 'copied'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // A copy CARRIES the source content into the destination — a genuine
       // cross-ontology flow if the two differ — so BOTH endpoints are write-gated.

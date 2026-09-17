@@ -80,6 +80,7 @@ export function createToolHandlerFactory(resolve: ResolveToolContext) {
           return;
         }
         if (err instanceof ToolError && err.details) {
+          // `error` goes last so no detail field can overwrite the message.
           res.status(err.status).json({ ...err.details, error: err.message });
           return;
         }
