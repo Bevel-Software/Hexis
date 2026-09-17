@@ -345,6 +345,25 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     expect(view.readers).toBeDefined();
   });
 
+  it('a file the view cannot READ names the folder — never a field whose writes cannot land', async () => {
+    const get = (rel: string) =>
+      fetch(`${baseUrl}/api/workspace/${encodeURIComponent(WS)}/access?path=${encodeURIComponent(`${KB}/${rel}`)}&kind=file`);
+    // EACCES, EIO: the mutation would read the same bytes and fail too.
+    readFile.mockImplementationOnce(async () => {
+      const err = new Error('EACCES') as NodeJS.ErrnoException;
+      err.code = 'EACCES';
+      throw err;
+    });
+    const denied = await (await get('Sales/Deal.md')).json();
+    expect(denied.governedByFolder).toBe('Sales');
+    expect(denied.readers).toBeDefined();
+
+    // Absence is the one read failure that raises no objection: nothing is
+    // there to govern, and the note is normally about to exist.
+    const absent = await (await get('Sales/NotYet.md')).json();
+    expect(absent).not.toHaveProperty('governedByFolder');
+  });
+
   it('a folder target never asks the content question', async () => {
     const view = await (
       await fetch(

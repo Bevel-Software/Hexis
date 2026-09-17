@@ -216,10 +216,16 @@ export class AccessMutationService {
   /**
    * The same content question, asked by the READ view, which must not fail:
    * true when the file's bytes are text, so it really can hold rules of its
-   * own. A file that cannot be read at all (absent, or a transient failure)
-   * raises no content objection — the read view keeps reporting what it knows
-   * rather than turning a resolvable view into an error. The mutations use
-   * `assertTargetHoldsText`, which rethrows those failures instead.
+   * own.
+   *
+   * ABSENCE is the one failure that answers yes: there is nothing there to
+   * object to, and a target the view is open on is normally about to exist.
+   * Any OTHER read failure (EACCES, EIO) answers NO — the mutations read the
+   * same bytes and would fail on them too, so the view must not offer a field
+   * whose writes cannot land. The dialog degrades to the folder pointer with
+   * the read side intact, which is better than a 500 that shows nothing.
+   * (The mutations use `assertTargetHoldsText`, which rethrows the failure so
+   * the caller sees the real error rather than a refusal.)
    */
   async targetHoldsText(workspaceId: string, repoRelFile: string): Promise<boolean> {
     try {
@@ -228,8 +234,8 @@ export class AccessMutationService {
         this.toWorkspaceRelative(repoRelFile),
       );
       return isTextBytes(bytes);
-    } catch {
-      return true;
+    } catch (err) {
+      return isAbsence(err);
     }
   }
 
