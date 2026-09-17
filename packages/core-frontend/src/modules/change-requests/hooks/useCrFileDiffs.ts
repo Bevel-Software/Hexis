@@ -91,15 +91,28 @@ export function useCrFileDiffs(
   const wanted = relevant.map((c) => `${c.number}|${c.branch}`).join(',');
 
   /**
-   * Everything this generation can still read, and nothing else. Applied as
-   * each answer lands, which is the only moment new keys appear — so the maps
-   * hold the current generation plus, briefly, whatever is still in flight
-   * from the one before it.
+   * Exactly the keys the CURRENT generation reads under. Held in a ref and
+   * refreshed before the reads are started, because the alternative — each
+   * callback testing against the generation it closed over — lets a slow read
+   * from an older generation prune the newer one's answers on arrival, and
+   * the `asked` guard then never fetches them again: a box loading forever.
+   * Anything not in this set is either a generation that has passed or a
+   * request that is no longer on this file, and neither is worth keeping.
    */
-  const live = (k: string) =>
-    k.endsWith(`::${revision}::${staleEpoch}`) || k === mainKey || k.endsWith(`::${staleEpoch}`);
+  const liveKeys = useRef<Set<string>>(new Set());
+  const live = (k: string) => liveKeys.current.has(k);
   const prunedMap = <V,>(m: Map<string, V>) => new Map([...m].filter(([k]) => live(k)));
   const prunedSet = (s: Set<string>) => new Set([...s].filter(live));
+  useEffect(() => {
+    liveKeys.current = new Set([
+      ...relevant.map((cr) => key(cr.number)),
+      ...relevant.map((cr) => forkKey(cr.number)),
+      mainKey,
+    ]);
+    // Declared BEFORE the read effect so it has already run when those reads
+    // are started, and so before any of their answers can arrive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wanted, repoRelativePath, revision, staleEpoch]);
 
   /**
    * No `cancelled` flag — see `useDefaultBranchFile` for why one would deadlock
@@ -120,8 +133,11 @@ export function useCrFileDiffs(
       if (asked.current.has(k)) continue;
       asked.current.add(k);
       readFileOnBranch(cr.branch, repoRelativePath)
-        .then((content) => setContents((m) => prunedMap(m).set(k, content)))
+        .then((content) => {
+          if (live(k)) setContents((m) => prunedMap(m).set(k, content));
+        })
         .catch((err: unknown) => {
+          if (!live(k)) return;
           // A 404 is the branch's own answer that the file is not there: the
           // request DELETES it, and every line removed is exactly its diff.
           if (err instanceof WorkspaceApiError && err.status === 404) {
@@ -141,14 +157,18 @@ export function useCrFileDiffs(
       forkAsked.current.add(fk);
       readFileAtForkPoint(cr.number, null, repoRelativePath)
         .then((read) => {
+          if (!live(fk)) return;
           setForkReads((m) => prunedMap(m).set(fk, read));
           // No fork point (no shared history): main's tip is the only "before"
           // left, and it is read now, under this generation's key.
           if (read.forkSha === null && !mainAsked.current.has(mainKey)) {
             mainAsked.current.add(mainKey);
             readFileOnBranch(DEFAULT_BRANCH, repoRelativePath)
-              .then((content) => setContents((m) => prunedMap(m).set(mainKey, content)))
+              .then((content) => {
+                if (live(mainKey)) setContents((m) => prunedMap(m).set(mainKey, content));
+              })
               .catch((err: unknown) => {
+                if (!live(mainKey)) return;
                 // Absent on main is a real answer: the request adds the file.
                 if (err instanceof WorkspaceApiError && err.status === 404) {
                   setContents((m) => prunedMap(m).set(mainKey, ''));
@@ -159,6 +179,7 @@ export function useCrFileDiffs(
           }
         })
         .catch(() => {
+          if (!live(fk)) return;
           // Same rule for the before side: an unreadable fork point is no
           // claim, and falling back to main would bring back the very
           // "deletions" this reads the fork point to avoid.

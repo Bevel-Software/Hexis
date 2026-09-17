@@ -104,6 +104,30 @@ describe('useCrFileDiffs', () => {
     await waitFor(() => expect(api.readFileAtForkPoint).toHaveBeenCalledTimes(2));
   });
 
+  it('a slow read from a passed generation never erases the current one', async () => {
+    // The first branch read is still out when a request moves. Its answer
+    // arrives last, describing a moment that is over: it must be dropped, and
+    // it must not take the newer answer with it — a box that loses the fresh
+    // read is never told to fetch again, and loads forever.
+    let releaseFirst: (content: string) => void = () => {};
+    api.readFileOnBranch.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseFirst = resolve)),
+    );
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
+    await waitFor(() => expect(api.readFileOnBranch).toHaveBeenCalledTimes(1));
+
+    api.readFileOnBranch.mockResolvedValue('price: 140\nstatus: draft\n');
+    await act(async () => {
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
+    });
+    await waitFor(() => expect(lines(result.current.get(21), 'added')).toEqual(['price: 140']));
+
+    await act(async () => {
+      releaseFirst(PROPOSED);
+    });
+    expect(lines(result.current.get(21), 'added')).toEqual(['price: 140']);
+  });
+
   it('a file the fork point lacks (the request adds it) diffs from empty', async () => {
     api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: 'f'.repeat(40) });
     const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
