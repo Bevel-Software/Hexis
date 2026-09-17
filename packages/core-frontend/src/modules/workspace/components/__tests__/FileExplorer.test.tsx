@@ -1659,7 +1659,7 @@ describe('FileExplorer: an empty tree says why', () => {
     expect(mockAuthFetch).not.toHaveBeenCalled();
   });
 
-  it('an admin still sees "empty" beside the root .bevelignore every knowledge base ships', () => {
+  it('still says "empty" when the only root entry is .bevelignore', () => {
     renderExplorer({ fileTree: seeded([], {}, [fileAt(`${KBD}/.bevelignore`)]), workspaceId: 'alice%2Fdraft' });
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
   });
@@ -1670,6 +1670,15 @@ describe('FileExplorer: an empty tree says why', () => {
     await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
     const url = mockAuthFetch.mock.calls[0][0] as string;
     expect(url).toContain('/access?path=KnowledgeBase&kind=folder');
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
     expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
     expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
   });

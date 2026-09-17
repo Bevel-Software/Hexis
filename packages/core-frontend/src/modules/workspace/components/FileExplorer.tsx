@@ -1399,16 +1399,20 @@ function useCanWriteFolder(workspacePath: string | null): boolean {
   const [answer, setAnswer] = useState<{ key: string; canWrite: boolean } | null>(null);
   const prefix = kbDirName ? `${kbDirName}/` : null;
   const key = workspacePath && workspaceId && prefix ? `${workspaceId}|${workspacePath}` : null;
+  // The KB clone's own folder (a tree that predates the split) is the repo
+  // root: inside the KB, and sent as-is — the server reads a bare kbDirName as ''.
+  const isKbRoot = workspacePath !== null && workspacePath === kbDirName;
   const shortCircuit =
-    key !== null && (!workspacePath!.startsWith(prefix!) || !isProtectedBranch(decodeURIComponent(workspaceId!)));
+    key !== null &&
+    ((!isKbRoot && !workspacePath!.startsWith(prefix!)) || !isProtectedBranch(decodeURIComponent(workspaceId!)));
   useEffect(() => {
     if (key === null || shortCircuit) return;
     let cancelled = false;
-    fetchFileAccess(workspaceId!, workspacePath!.slice(prefix!.length), 'folder')
+    fetchFileAccess(workspaceId!, isKbRoot ? workspacePath! : workspacePath!.slice(prefix!.length), 'folder')
       .then((res) => { if (!cancelled) setAnswer({ key, canWrite: res.canWrite }); })
       .catch(() => { if (!cancelled) setAnswer({ key, canWrite: false }); });
     return () => { cancelled = true; };
-  }, [key, shortCircuit, workspaceId, workspacePath, prefix]);
+  }, [key, shortCircuit, isKbRoot, workspaceId, workspacePath, prefix]);
   if (key === null) return false;
   if (shortCircuit) return true;
   return answer?.key === key && answer.canWrite;
@@ -1480,7 +1484,7 @@ export function UploadNotices() {
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { openFilePath, dispatchUpload } = useWorkspace();
+  const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
@@ -1690,8 +1694,17 @@ export function FileExplorer() {
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
         {/* Under the (empty) roots, so the hint's "folder above" is on
-            screen: Knowledge's own folder is where a first page goes. */}
-        <EmptyTreeNotice rootPath={sections ? sections.knowledge?.relativePath ?? null : mergedTree?.relativePath ?? null} />
+            screen: Knowledge's own folder is where a first page goes. A tree
+            that predates the split starts at the KB clone's folder when it
+            wraps one, as `treeHasVisibleEntries` reads it. */}
+        <EmptyTreeNotice
+          rootPath={
+            sections
+              ? sections.knowledge?.relativePath ?? null
+              : (mergedTree?.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ?? mergedTree)
+                  ?.relativePath ?? null
+          }
+        />
       </div>
     </div>
     </TreeChrome>

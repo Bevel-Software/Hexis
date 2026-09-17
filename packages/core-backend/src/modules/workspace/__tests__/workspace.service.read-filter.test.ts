@@ -175,7 +175,8 @@ describe('WorkspaceService.listFiles — read filter', () => {
       const filter: ReadTreeFilter = async () => new Map();
       const tree = await svc.listFiles(workspaceId, filter);
       expect(tree.children).toEqual([]);
-      expect(tree.withheld).toBeGreaterThan(0);
+      // Every entry below the root, exactly — the root itself is never withheld.
+      expect(tree.withheld).toBe(paths(await svc.listFiles(workspaceId)).length - 1);
     });
   });
 
