@@ -12,6 +12,7 @@ import type {
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -154,7 +155,13 @@ export class PullRequestService implements IPullRequestService {
     };
   }
 
-  /** Cheap touched-paths for a CR row (empty when no workspace exists yet). */
+  /**
+   * Cheap touched-paths for a CR row (empty when no workspace exists yet).
+   * The empty-folder placeholder is never content, so it is not a touched
+   * path on the summary either: it would inflate the file count a list shows
+   * and route a request by a file nobody reviews. `changedPathsForPr` itself
+   * keeps it, for the authoritative empty-request check.
+   */
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
@@ -162,6 +169,7 @@ export class PullRequestService implements IPullRequestService {
     if (!workspaceId) return [];
     return this.gitService
       .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch)
+      .then((paths) => paths.filter((p) => !isFolderPlaceholder(p)))
       .catch((err) => {
         // Best-effort, but log it: an empty result silently hides a CR from the
         // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure

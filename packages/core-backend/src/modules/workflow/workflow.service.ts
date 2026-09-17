@@ -52,7 +52,7 @@ import type {
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { isProtectedBranch, DEFAULT_BRANCH, isFolderPlaceholder } from '@bevel-software/platform-shared';
 import { and, eq, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -170,7 +170,9 @@ const formatWriter = (u: { name: string; email: string }): string =>
  * the overflow is collapsed into a single deduped summary of every eligible
  * approver across the change. This keeps the body bounded regardless of how
  * many files the change touches (see {@link MAX_AFFECTED_PATHS_LISTED}).
- * Returns '' when no path has resolvable eligibility.
+ * Returns '' when no path has resolvable eligibility. The empty-folder
+ * placeholder is never listed or counted: it is not content, and no one
+ * reviews it.
  */
 export function formatAffectedOwnersBlock(
   paths: string[],
@@ -182,6 +184,7 @@ export function formatAffectedOwnersBlock(
   const allUsers = new Map<string, string>(); // email -> display, deduped
   let eligible = 0;
   for (const p of paths) {
+    if (isFolderPlaceholder(p)) continue;
     const info = resolved.get(p);
     if (!info) continue;
     const parts: string[] = [];
@@ -2031,7 +2034,8 @@ export class WorkflowService implements IWorkflowService {
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
     if (remaining.length > 0) {
-      return { closed: false, remainingPaths: remaining };
+      // Answered like the file list: the placeholder is not a remaining file.
+      return { closed: false, remainingPaths: remaining.filter((p) => !isFolderPlaceholder(p)) };
     }
     // Every change declined → the request proposes nothing.
     await this.closeEmptyChangeRequest(number, user);

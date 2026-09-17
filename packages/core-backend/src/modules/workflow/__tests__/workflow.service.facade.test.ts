@@ -669,6 +669,18 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
     expect(db.update).toHaveBeenCalled();
   });
 
+  it('never names a folder placeholder among the remaining files', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi
+        .fn()
+        .mockResolvedValueOnce(['Docs/a.md', 'Docs/b.md', 'Docs/.gitkeep'])
+        .mockResolvedValueOnce(['Docs/b.md', 'Docs/.gitkeep']),
+    });
+    const { svc } = makeHarness({ git });
+    const result = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md');
+    expect(result).toEqual({ closed: false, remainingPaths: ['Docs/b.md'] });
+  });
+
   it('closeEmptyChangeRequest never closes on a FAILED diff', async () => {
     const git = makeRevertGit({
       changedPathsForPr: vi.fn().mockRejectedValue(new Error('git down')),
