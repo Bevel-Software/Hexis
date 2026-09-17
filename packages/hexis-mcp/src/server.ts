@@ -30,6 +30,7 @@ import {
   flattenManualTool,
   toListedTool,
   toolError,
+  retiredToolMessage,
   seedBevelHostedManualVars,
   skillPromptText,
   type ProxiedTool,
@@ -551,7 +552,7 @@ export async function createHexisMcpServer(
           return await dispatchMetaTool(client, name, request.params.arguments ?? {});
         }
         const tool = tools.find((t) => t.mcpName === name);
-        if (!tool) return toolError(`Unknown tool "${name}".`);
+        if (!tool) return toolError(retiredToolMessage(name) ?? `Unknown tool "${name}".`);
         const progressToken = request.params._meta?.progressToken;
         return await dispatchToolCall(client, tool, request.params.arguments ?? {}, (progress, message) =>
           extra.sendNotification({

@@ -72,10 +72,10 @@ export interface ProposeDraftPromptInput {
 /**
  * Seed text the chat composer receives when applying a change request hits
  * conflicts. The agent reads it as a user request to resolve the
- * disagreement and re-apply — keeping the user out of the loop. Phrased in
- * the workspace's plain-language vocabulary; the agent's system prompt
- * already knows the underlying git mechanics (which branches, which paths,
- * `commit_change` + `merge_change_request`).
+ * disagreement, then hand the apply back to the user — an agent proposes and
+ * syncs, a person merges. Phrased in the workspace's plain-language
+ * vocabulary; the agent's system prompt already knows the underlying git
+ * mechanics (which branches, which paths, `commit_change` + `merge_branch`).
  */
 export function buildResolveApplyConflictsPrompt(input: {
   /** The change request number being applied. */
@@ -97,7 +97,7 @@ export function buildResolveApplyConflictsPrompt(input: {
   return [
     `I tried to apply change request #${changeRequestNumber} into \`${base}\` and the two sides have differences that couldn't be reconciled automatically.${pathBlurb}`,
     '',
-    "Please look at each affected file, decide what the merged version should look like for the process to remain consistent, and apply your resolution to the change request's source branch. Then retry applying the change request. If you genuinely can't tell which version should win on a particular file, ask me about that specific case in plain language. But resolve everything you can on your own first.",
+    "Please look at each affected file, decide what the merged version should look like for the process to remain consistent, and apply your resolution to the change request's source branch. Then tell me it's ready, so I can apply the change request again in the app. If you genuinely can't tell which version should win on a particular file, ask me about that specific case in plain language. But resolve everything you can on your own first.",
   ].join('\n');
 }
 

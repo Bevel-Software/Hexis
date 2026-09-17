@@ -213,7 +213,7 @@ export function registerToolManualsTools(
           `${onBranchOnly.map((p) => `\`${p.name}\``).join(', ')} ${onBranchOnly.length === 1 ? 'is' : 'are'} declared on ` +
           `\`${branch}\` only. Tools are served from \`${DEFAULT_BRANCH}\`, so ${onBranchOnly.length === 1 ? 'it stays' : 'they stay'} ` +
           'unlisted, uncallable and without a sign-in until that branch is merged: open a change request with ' +
-          `\`open_change_request\` (target \`${DEFAULT_BRANCH}\`) and get it merged.`,
+          `\`open_change_request\` (target \`${DEFAULT_BRANCH}\`), then ask the user to review and merge it in the app.`,
       };
     }),
   );

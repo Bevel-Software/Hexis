@@ -33,6 +33,7 @@ import type {
   ChangedFile,
   FileApproval,
   FileLock,
+  MergeBranchOutcome,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -518,4 +519,20 @@ export interface IWorkflowService {
     workspaceId: string,
     opts?: { bypass?: boolean },
   ): Promise<MergeChangeRequestOutcome>;
+
+  /**
+   * Merge `sourceBranch` into `targetBranch` directly, authored as `user`,
+   * and publish the target. The agent path for merging branches — it never
+   * lands a change request:
+   *
+   *   - refused (`OpenChangeRequestBlocksMergeError`, naming the request) when
+   *     a change request from `sourceBranch` into `targetBranch` is open; a
+   *     person merges that one in the app. The reverse direction — the target
+   *     into the source, the sync that keeps a draft current — is allowed.
+   *   - refused (`AccessDeniedError`) when `targetBranch` is protected and
+   *     `user` could not commit every file the merge changes directly to it.
+   *
+   * Conflicts write nothing and come back as `conflicts-need-resolution`.
+   */
+  mergeBranch(user: AuthUser, sourceBranch: string, targetBranch: string): Promise<MergeBranchOutcome>;
 }
