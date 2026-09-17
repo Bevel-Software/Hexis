@@ -3,6 +3,9 @@ import { renderKbLayoutPlaceholders } from '@bevel-software/platform-shared';
 import { isAbsence, type EntryStat, type IFsProbe } from '../../../../shared/fs.contract.js';
 import { PREAMBLE_FILE } from '../../../agent-instructions/compose.js';
 import { defaultKbTemplateDir } from '../../../../assets.js';
+import { logger } from '../../../../shared/logging.js';
+
+const log = logger('kb-startup');
 
 /**
  * Required files added AFTER a distribution may have forked the template. A
@@ -116,8 +119,8 @@ export class TemplateSource {
       if (!isAbsence(err) || !PACKAGED_FALLBACK_FILES.has(relPath) || this.templateDir === packaged) {
         throw err;
       }
-      console.warn(
-        `[kb-startup] template-files: the configured KB template has no "${relPath}"; ` +
+      log.warn(
+        `template-files: the configured KB template has no "${relPath}"; ` +
           'using the packaged copy. Add the file to the template to silence this.',
       );
       // The packaged copy, read the same way — it renders its own

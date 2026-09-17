@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('secrets');
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
@@ -108,7 +111,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     try {
       res.json({ secrets: await secretsVault.list(userId) });
     } catch (err) {
-      console.error('[secrets] list failed:', err);
+      log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -236,7 +239,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       );
       res.json({ tools });
     } catch (err) {
-      console.error('[secrets] list tools failed:', err);
+      log.error('list tools failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -318,7 +321,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
 
       res.json({ tools, oauth, toolOAuth });
     } catch (err) {
-      console.error('[secrets] connect/pending failed:', err);
+      log.error('connect/pending failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   });
@@ -574,7 +577,7 @@ export function createSecretsVaultPublicRoutes(deps: SecretsVaultRoutesDeps): ex
       await secretsVault.completeOAuth(state.u, state.i, code, redirectUriFor(deps.publicBackendUrl));
       back(`authorized=${encodeURIComponent(state.i)}`, dest);
     } catch (err) {
-      console.error('[secrets] oauth callback failed:', err instanceof Error ? err.message : String(err));
+      log.error('oauth callback failed:', { err });
       back(`error=${encodeURIComponent('Authorization failed. Check the provider configuration and try again.')}`, dest);
     }
   });
@@ -586,7 +589,7 @@ function mapError(err: unknown, res: express.Response, op: string): void {
   if (err instanceof InvalidSecretError) return void res.status(422).json({ error: err.message });
   if (err instanceof SecretNotFoundError) return void res.status(404).json({ error: err.message });
   if (err instanceof SecretOAuthError) return void res.status(409).json({ error: err.message });
-  console.error(`[secrets] ${op} failed:`, err);
+  log.error(`${op} failed:`, { err });
   res.status(500).json({ error: 'Internal error' });
 }
 

@@ -33,6 +33,9 @@
  */
 
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('locking-fs');
 import {
   LocalFilesystem,
   type LocalFilesystemOptions,
@@ -343,10 +346,7 @@ export class LockingFilesystem extends LocalFilesystem {
             await workflow.releaseLockUntouched(workspaceId, branch, p, user);
           }
         } catch (releaseErr) {
-          console.warn(
-            `[locking-fs] lock release failed for "${p}" during writeFiles:`,
-            releaseErr instanceof Error ? releaseErr.message : releaseErr,
-          );
+          log.warn(`lock release failed for "${p}" during writeFiles:`, { err: releaseErr });
         }
       }
     };
@@ -400,9 +400,7 @@ export class LockingFilesystem extends LocalFilesystem {
         acquired.push(p);
       } else {
         seeds.delete(p);
-        console.warn(
-          `[locking-fs] creator access.md seed skipped for "${p}" — locked by ${result.lock.holderName ?? 'another user'}`,
-        );
+        log.warn(`creator access.md seed skipped for "${p}" — locked by ${result.lock.holderName ?? 'another user'}`);
       }
     }
 
@@ -450,10 +448,7 @@ export class LockingFilesystem extends LocalFilesystem {
           next = apply(current);
         } catch (err) {
           // Plan failed before any bytes moved — the path is untouched.
-          console.warn(
-            `[locking-fs] creator access.md seed failed for "${p}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`creator access.md seed failed for "${p}":`, { err });
           continue;
         }
         if (next === current) continue;
@@ -473,10 +468,7 @@ export class LockingFilesystem extends LocalFilesystem {
           // that double-failure case a prior save's still-queued dirty bytes
           // on this path are lost to the discard — accepted, because the
           // alternative is committing known-corrupt bytes under their name.
-          console.warn(
-            `[locking-fs] creator access.md seed failed for "${p}":`,
-            err instanceof Error ? err.message : err,
-          );
+          log.warn(`creator access.md seed failed for "${p}":`, { err });
           let restored = false;
           try {
             if (existedBefore) {
@@ -492,9 +484,7 @@ export class LockingFilesystem extends LocalFilesystem {
           }
           if (!restored) {
             failedSeedDiscards.add(p);
-            console.warn(
-              `[locking-fs] could not restore pre-seed bytes for "${p}" — releasing with discard`,
-            );
+            log.warn(`could not restore pre-seed bytes for "${p}" — releasing with discard`);
           }
         }
       }
@@ -541,9 +531,7 @@ export class LockingFilesystem extends LocalFilesystem {
           }
         } catch {
           failedSeedDiscards.add(p);
-          console.warn(
-            `[locking-fs] could not roll back seed bytes for "${p}" after a failed batch — releasing with discard`,
-          );
+          log.warn(`could not roll back seed bytes for "${p}" after a failed batch — releasing with discard`);
         }
       }
       // The batch's own dirtied paths (and any failed-restore seed) release
@@ -693,10 +681,7 @@ export class LockingFilesystem extends LocalFilesystem {
       });
       this.lockContext.creatorAccess?.noteAccessFileWritten(this.lockContext.workspaceId);
     } catch (err) {
-      console.warn(
-        `[locking-fs] creator access.md seed failed for "${plan.wsRelPath}":`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`creator access.md seed failed for "${plan.wsRelPath}":`, { err });
     }
   }
 
@@ -715,10 +700,7 @@ export class LockingFilesystem extends LocalFilesystem {
     try {
       return await creatorAccess.planForCreate(workspaceId, user, inputPath, kind);
     } catch (err) {
-      console.warn(
-        `[locking-fs] creator read-grant planning failed for "${inputPath}":`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`creator read-grant planning failed for "${inputPath}":`, { err });
       return null;
     }
   }
@@ -806,10 +788,7 @@ export class LockingFilesystem extends LocalFilesystem {
           await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
         }
       } catch (releaseErr) {
-        console.warn(
-          `[locking-fs] lock release failed for "${inputPath}" after op error:`,
-          releaseErr instanceof Error ? releaseErr.message : releaseErr,
-        );
+        log.warn(`lock release failed for "${inputPath}" after op error:`, { err: releaseErr });
       }
       throw err;
     }

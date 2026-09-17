@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
 import '../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
   DEFAULT_BRANCH,
@@ -109,7 +112,7 @@ export function createPluginCreationRoutes(
         res.status(err.status).json({ error: err.message });
         return;
       }
-      console.error('[plugins] create failed:', err);
+      log.error('create failed:', { err });
       res.status(500).json({ error: 'Failed to create the plugin' });
     }
   });
@@ -129,7 +132,7 @@ export function createPluginCreationRoutes(
         res.status(err.status).json({ error: err.message });
         return;
       }
-      console.error('[plugins] personal-folder ensure failed:', err);
+      log.error('personal-folder ensure failed:', { err });
       res.status(500).json({ error: 'Failed to prepare your personal folder' });
     }
   });
@@ -184,7 +187,7 @@ export function createPluginsRoutes(
           res.status(err.status).json(domainErrorBody(err));
           return;
         }
-        console.error('[plugins] rename failed:', err);
+        log.error('rename failed:', { err });
         res.status(500).json({ error: 'Failed to rename the plugin' });
       }
     });
@@ -232,7 +235,7 @@ export function createPluginsRoutes(
           res.status(err.status).json(domainErrorBody(err));
           return;
         }
-        console.error('[plugins] link operation failed:', err);
+        log.error('link operation failed:', { err });
         res.status(500).json({ error: 'Failed to update the plugin\'s links' });
       }
     };
@@ -300,9 +303,7 @@ export function createPluginsRoutes(
       try {
         mine = await workflow.listChangeRequestsAuthoredBy(email);
       } catch (err) {
-        console.warn(
-          `[plugins] join-request lookup failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        log.warn(`join-request lookup failed: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       const plugins: PluginSummary[] = [];
@@ -331,13 +332,14 @@ export function createPluginsRoutes(
           writers: g.writers,
           readers: g.readers,
           isPrivate: g.isPrivate,
+          warnings: g.warnings,
           hasRequested: joinCr !== null,
           requestNumber: joinCr?.number ?? null,
         });
       }
       res.json({ plugins });
     } catch (err) {
-      console.error('[plugins] failed to list plugins:', err);
+      log.error('failed to list plugins:', { err });
       res.status(500).json({ error: 'Failed to list plugins' });
     }
   });
@@ -403,7 +405,7 @@ export function createPluginsRoutes(
         res.status(err.status).json({ error: err.message });
         return;
       }
-      console.error('[plugins] delete failed:', err);
+      log.error('delete failed:', { err });
       res.status(500).json({ error: 'Failed to delete the plugin' });
     }
   });
@@ -494,7 +496,7 @@ export function createPluginsRoutes(
         res.status(err.status).json(domainErrorBody(err));
         return;
       }
-      console.error('[plugins] failed to open a join request:', err);
+      log.error('failed to open a join request:', { err });
       res.status(500).json({ error: 'Failed to request access' });
     }
   });
@@ -549,7 +551,7 @@ export function createPluginsRoutes(
         requests: await joinRequests.list(joinKeyOf(ctx.plugin), ctx.folder, crs, ctx.user),
       });
     } catch (err) {
-      console.error('[plugins] failed to list join requests:', err);
+      log.error('failed to list join requests:', { err });
       res.status(500).json({ error: 'Failed to list join requests' });
     }
   });
@@ -578,7 +580,7 @@ export function createPluginsRoutes(
       }
       res.json({ closed: await joinRequests.reconcile(joinKeyOf(ctx.plugin), ctx.folder, cr, ctx.user) });
     } catch (err) {
-      console.error('[plugins] failed to reconcile a join request:', err);
+      log.error('failed to reconcile a join request:', { err });
       res.status(500).json({ error: 'Failed to update the request' });
     }
   });

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { logger } from '../shared/logging.js';
 import type { AuthProviderPlugin } from '../modules/auth/auth.routes.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import {
@@ -25,6 +26,9 @@ import { DeploymentSettingsService } from '../modules/settings/deployment-settin
 import { KbSyncService } from '../modules/kb-sync/kb-sync.service.js';
 import { NodeFs } from '../modules/kb-fs/node-fs.js';
 import type { IFsProbe, ITreeWalker } from '../shared/fs.contract.js';
+import type { IGitRunner } from '../shared/git.contract.js';
+import { AdvisoryLease, AdvisoryLock } from '../modules/database/advisory-lock.js';
+import { holdCommitWorkerLease, withStartupTask, type LeaseLoopHandle } from './lifecycle.js';
 
 /** The hosted MCP endpoint at a deployment address, with any userinfo stripped. */
 function mcpEndpointUrl(publicBackendUrl: string): string {
@@ -46,7 +50,7 @@ import { DocExtractService } from '../modules/workspace/file-readers/doc-extract
 import { UuidSessionSink, type ISessionSink } from '../modules/workspace/session-sink.js';
 import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
-import { OidcAuthProvider } from '../modules/auth/oidc-auth-provider.js';
+import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
@@ -81,6 +85,7 @@ import {
 } from '../modules/secrets-vault/index.js';
 import { ConnectionProbeService } from '../modules/connection-probe/index.js';
 import { GitService } from '../modules/workflow/git/git.service.js';
+import { NodeGitRunner } from '../modules/workflow/git/node-git-runner.js';
 import { PullRequestService } from '../modules/workflow/git/pull-request.service.js';
 import { WorkspaceMutex } from '../modules/kb-fs/mutex.js';
 import { assertGitVersion } from '../modules/workflow/git/git-version.js';
@@ -149,6 +154,19 @@ export interface CoreServices {
    * than carrying a `readdir` loop or an errno check of their own.
    */
   disk: ITreeWalker & IFsProbe;
+  /**
+   * Running git — the one runner every module shells out through, carrying
+   * the deployment's deadline. Exposed like `disk` so an overlay's own git
+   * callers run under the same ceiling rather than spawning their own.
+   */
+  gitRunner: IGitRunner;
+  /**
+   * The commit-worker lease loop (see `core/lifecycle.ts`). `held` says
+   * whether THIS process is the one draining the queue; `stop()` is the
+   * shutdown sequence's way of finishing the in-flight commit and handing the
+   * lease to the replacement.
+   */
+  commitWorker: LeaseLoopHandle;
   workspaceService: WorkspaceService;
   /**
    * The KB startup phase (see `startup/on-server-start.ts`): run at the
@@ -319,12 +337,18 @@ export async function createCoreServices(
   const kbDirName = settings.resolve('kbDirName') || 'knowledge-base';
   // The disk: one walk, one probe, for every reader below.
   const disk = new NodeFs();
+  // How git is run, for every module that runs it: one environment, one buffer
+  // ceiling, one error shape, and — the reason it exists — one deadline, so a
+  // git that never returns cannot hold a workspace (and with it the commit
+  // queue) open indefinitely. See `shared/git.contract.ts`.
+  const gitRunner = new NodeGitRunner(config.gitTimeoutMs);
   const workspaceService = new WorkspaceService(
     config.workspacesRoot,
     () => settings.resolve('kbRepoUrl'),
     kbDirName,
     disk,
     () => settings.resolve('gitUsername') || 'x-access-token',
+    gitRunner,
   );
   // The KB startup phase: every seeding, scaffolding and migration concern,
   // run through one runner at the deployment's quiet moments (boot + setup
@@ -361,6 +385,7 @@ export async function createCoreServices(
     seedAdminEmails: [config.adminEmail],
     steps: kbStartupSteps,
     buildSeedTree: buildSeedTree(disk, config.kbTemplateDir, extraDirs, [config.adminEmail]),
+    gitRunner,
   });
   // Shared, workspace-independent store for oversized `call_tool_chain` results,
   // read back via `read_file`. Sibling of `workspacesRoot`, never committed.
@@ -374,9 +399,13 @@ export async function createCoreServices(
   // gate cannot disagree about who the owner is. They did: the owner could
   // open App roles and then be refused the save, with the UI showing
   // them as an admin and the gate saying "Eligible: Admin".
-  const accessControl = new AccessControlService(workspaceService, kbDirName, disk, [
-    config.adminEmail,
-  ]);
+  const accessControl = new AccessControlService(
+    workspaceService,
+    kbDirName,
+    disk,
+    [config.adminEmail],
+    gitRunner,
+  );
   // Creator read-grant on creation: read is default-deny, so every surface
   // that creates KB files/folders (human routes, agent tools, upload apply)
   // consults this planner to keep creations visible to their creator.
@@ -447,6 +476,7 @@ export async function createCoreServices(
     kbDirName,
     workspaceMutex,
     accessControl,
+    gitRunner,
   );
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
@@ -456,6 +486,7 @@ export async function createCoreServices(
     workspaceService,
     accessControl,
     gitService,
+    config.configuredPublicFrontendUrl,
   );
   const diffService = new DiffService(
     workspaceService,
@@ -580,12 +611,14 @@ export async function createCoreServices(
     },
     pluginSource,
     disk,
+    gitRunner,
   );
   // Sibling of the workspaces root, like the spill store: one bare repo, one
   // git namespace per caller (see marketplace-repo.service.ts).
   const marketplaceRepo = new MarketplaceRepoService(
     path.resolve(config.workspacesRoot, '..', 'marketplace.git'),
     marketplaceCompiler,
+    gitRunner,
   );
 
   // Remote sync. Drives the workflow module's per-branch pull-and-announce
@@ -852,16 +885,17 @@ export async function createCoreServices(
   // retry budget AND recovery-agent budget exhausted) the worker emits
   // a `'system'` feedback notice that admins triage out of band.
   //
-  // The orphan-startup sweep runs BEFORE start() so any rows that
-  // previous deploys left as `running` (process crashed mid-commit) get
-  // reset to `pending` before the worker starts claiming. The sweep
-  // also enqueues working-tree dirt that pre-dates the queue (the
-  // existing `target-company-state` orphans).
-  await pendingCommitsService.startupReconcile(
-    workspaceService.knownWorkspaces(),
-    { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
-    { email: recoveryBot.email, name: recoveryBot.name },
-  );
+  // The queue's recovery — rows a dead process left `running` go back to
+  // `pending`, and working-tree dirt that pre-dates the queue is enqueued —
+  // runs under the commit-worker lease, right before the worker starts (see
+  // `withStartupTask` below). At boot, before the lease, it would reset rows
+  // the outgoing process of a redeploy is still committing.
+  const reconcileQueue = () =>
+    pendingCommitsService.startupReconcile(
+      workspaceService.knownWorkspaces(),
+      { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
+      { email: recoveryBot.email, name: recoveryBot.name },
+    );
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
     // The service IS the driver — passed directly rather than wrapped in a
@@ -886,41 +920,39 @@ export async function createCoreServices(
       name: recoveryBot.name,
     },
   });
-  pendingCommitsWorker.start();
+  const leased = withStartupTask(pendingCommitsWorker, reconcileQueue);
+  // Not `start()`: the worker runs only while this process holds the
+  // commit-worker lease. On a redeploy the outgoing container still holds it,
+  // so this one serves requests and declines to drain until that one exits;
+  // then it takes the lease and starts. Two processes draining one shared
+  // clone volume is the failure this prevents — see `core/lifecycle.ts`.
+  const commitWorker = holdCommitWorkerLease(new AdvisoryLease(db, AdvisoryLock.CommitWorker), leased);
 
   // SSO providers. The array REFERENCE is shared with the caller's port — an
   // overlay pushes its own plugins into it after construction (they mount when
-  // the server is built, later). Core contributes the generic OIDC provider
-  // when the env configures one.
+  // the server is built, later). Core contributes the generic OIDC provider.
   const authProviders = ports.authProviders ?? [];
-  // Resolved through settings, so an admin can configure SSO from the setup
-  // screen instead of the environment. Env still wins, so a deployment that
-  // sets these keeps behaving exactly as it did.
-  const oidcCredentials = settings.resolveOidcCredentials();
-  const { issuerUrl: oidcIssuerUrl, clientId: oidcClientId, clientSecret: oidcClientSecret } =
-    oidcCredentials;
-  if (oidcIssuerUrl && oidcClientId && oidcClientSecret) {
-    authProviders.push(
-      new OidcAuthProvider({
-        issuerUrl: oidcIssuerUrl,
-        clientId: oidcClientId,
-        clientSecret: oidcClientSecret,
-        scopes: settings.resolve('oidcScopes') || 'openid profile email',
-        label: settings.resolve('oidcProviderLabel') || 'Single sign-on',
-        publicBackendUrl: config.publicBackendUrl,
-        publicFrontendUrl: config.publicFrontendUrl,
-        cookieSecure: config.publicBackendUrl.startsWith('https'),
-        // A real sign-in proves the configuration this process was built with.
-        // Recorded against those values — under their own key — so it says
-        // nothing about any saved since, and cannot overwrite what was
-        // recorded about them.
-        onSignedIn: async () => {
-          if ((await settings.oidcVerificationOf(oidcCredentials)) === 'verified') return;
-          await settings.recordOidcVerification('verified', oidcCredentials);
-        },
-      }),
-    );
-  }
+  // Registered unconditionally and resolved through settings on every use, so
+  // an admin can configure SSO from the setup screen — or change it — without
+  // a restart; the provider advertises itself only while the configuration is
+  // complete. Env still wins, so a deployment that sets these keeps behaving
+  // exactly as it did.
+  authProviders.push(
+    new OidcAuthProvider({
+      settings: () => oidcSettingsFrom(settings),
+      publicBackendUrl: config.publicBackendUrl,
+      publicFrontendUrl: config.publicFrontendUrl,
+      cookieSecure: config.publicBackendUrl.startsWith('https'),
+      // A real sign-in proves the values that sign-in used. Recorded against
+      // those — under their own key — so it says nothing about any saved
+      // since, and cannot overwrite what was recorded about them.
+      onSignedIn: async ({ issuerUrl, clientId, clientSecret }) => {
+        const credentials = { issuerUrl, clientId, clientSecret };
+        if ((await settings.oidcVerificationOf(credentials)) === 'verified') return;
+        await settings.recordOidcVerification('verified', credentials);
+      },
+    }),
+  );
 
   // Materializer factory for an overlay-provided directory source: every
   // provisioning burst regenerates `synced-groups.yaml` on the default branch
@@ -944,7 +976,7 @@ export async function createCoreServices(
         defaultBranchOf: () => DEFAULT_BRANCH,
       }),
       debounceMs: opts?.debounceMs,
-      log: opts?.log ?? ((message) => console.warn(message)),
+      log: opts?.log ?? ((message) => logger('directory-sync').warn(message)),
     });
   };
   // Groups — the "who you are" principal sets. Manual-mode CRUD on
@@ -962,6 +994,8 @@ export async function createCoreServices(
   return {
     config,
     db,
+    gitRunner,
+    commitWorker,
     disk,
     mcpServerEditService,
     workspaceService,

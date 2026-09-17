@@ -1,4 +1,7 @@
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('directory-sync');
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -127,27 +130,19 @@ export function createSyncedGroupsCommitter(deps: {
                   armed = !(await workflowService.hasUnpushedCommits(workspaceId));
                 }
               } catch (queueErr) {
-                console.warn(
-                  '[directory-sync] could not verify the pending-commit queue:',
-                  queueErr instanceof Error ? queueErr.message : queueErr,
-                );
+                log.warn('could not verify the pending-commit queue:', { err: queueErr });
               }
             } else {
-              console.warn(
-                '[directory-sync] the retry re-arm release failed:',
-                armErr instanceof Error ? armErr.message : armErr,
-              );
+              log.warn('the retry re-arm release failed:', { err: armErr });
             }
           }
           if (!armed) {
-            console.warn(
-              '[directory-sync] synced-groups commit landed, the push needs resolution, and no retry vehicle could be proven — surfacing the failure',
+            log.warn(
+              'synced-groups commit landed, the push needs resolution, and no retry vehicle could be proven — surfacing the failure',
             );
             throw err;
           }
-          console.warn(
-            '[directory-sync] synced-groups commit landed but the push needs resolution — publishing will be retried',
-          );
+          log.warn('synced-groups commit landed but the push needs resolution — publishing will be retried');
           return;
         }
         throw err;

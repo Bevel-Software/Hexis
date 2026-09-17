@@ -93,6 +93,8 @@ export interface PluginSummary {
   readers: ResolvedReaders;
   /** The plugin's access.md says of itself that it is private — see `PluginCatalogEntry.isPrivate`. */
   isPrivate: boolean;
+  /** What discovery left out of this plugin and why — see `PluginCatalogEntry.warnings`. */
+  warnings: string[];
   /**
    * The caller has an OPEN join change request for this plugin (their
    * deterministic join branch has an open CR). Always false for a member.
@@ -134,6 +136,16 @@ export interface PluginCatalogEntry {
    * file makes about itself, not a verdict: `readers` says who can use it.
    */
   isPrivate: boolean;
+  /**
+   * What discovery left out of THIS plugin and why, in plain words: an MCP
+   * server its profile selects that the registry could not keep, a skill
+   * root that is not a folder, a profile that does not exist. Attributed by
+   * folder from the discovery warnings, with the folder prefix removed, so
+   * the plugin's page can list them for the people who can fix the files —
+   * the server log is not where a plugin's owner looks. Empty when nothing
+   * was left out.
+   */
+  warnings: string[];
 }
 
 export interface IPluginIndexService {

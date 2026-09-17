@@ -1,5 +1,8 @@
 import express from 'express';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('setup');
 import {
   DeploymentSettingsService,
   SettingsValidationError,
@@ -29,7 +32,6 @@ import {
 } from '@bevel-software/platform-shared';
 import { failureOf, type GitFailure } from '../../shared/git-failure.js';
 import { redactSecret, urlQuerySecrets } from '../../shared/redact-secret.js';
-import { printable } from '../../shared/printable.js';
 import { listRootFolders, pickListingBranch } from './git-root-folders.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -81,7 +83,17 @@ export function createSetupRoutes(
    * (`isComplete`), so no session can be holding a working clone the phase
    * would race.
    */
-  kbStartupRunner: { runAll(): Promise<void> },
+  kbStartupRunner: {
+    runAll(): Promise<void>;
+    /**
+     * Why the runner's most recent run failed, if it did — including a BOOT
+     * run that survived an unreachable remote. Optional so a minimal mount
+     * (tests, a distribution's own runner) reads as never having failed.
+     */
+    lastFailure?(): string | null;
+    /** That failure classified, for the setup screen; absent, the message is read instead. */
+    lastFailureKind?(): GitFailure | null;
+  },
   /**
    * The remote-sync facts the Deployment page shows beside the sync secret:
    * the address a webhook or pipeline must call, and what the last call did.
@@ -95,7 +107,9 @@ export function createSetupRoutes(
   },
   /**
    * The read+write connection check. Injected so route tests can answer for
-   * the remote; production uses the real one.
+   * the remote; production passes the real one bound to the deployment's git
+   * runner (`repositoryConnectionCheck`), and the default is the same check on
+   * a runner with default settings.
    */
   checkConnection: (connection: RepositoryConnection) => Promise<ConnectionCheck> = checkRepositoryConnection,
   /** The root-folder listing Test connection reports. Injected for the same reason. */
@@ -141,8 +155,21 @@ export function createSetupRoutes(
    * shut, so a retrying save may apply names the admin corrected in between.
    */
   let layoutAppliedBySetup = false;
-  /** The app-gate answer: settings complete AND the KB phase settled clean. */
-  const kbReady = () => isComplete(settings) && kbInit === null && kbInitInFlight === null;
+  /**
+   * A failure the RUNNER itself is standing on — a boot that survived an
+   * unreachable remote. Read live, because the runner's own background retry
+   * clears it without any save passing through here.
+   */
+  const bootFailure = () => kbStartupRunner.lastFailure?.() ?? null;
+  /** The boot failure in the setup screen's terms: the runner's own reading, else one read from its message. */
+  const bootFailureKind = (): GitFailure | null => {
+    const message = bootFailure();
+    if (message === null) return null;
+    return kbStartupRunner.lastFailureKind?.() ?? failureOf(message);
+  };
+  /** The app-gate answer: settings complete AND the KB phase settled clean, whoever ran it. */
+  const kbReady = () =>
+    isComplete(settings) && kbInit === null && kbInitInFlight === null && bootFailure() === null;
 
   const requireAdmin: express.RequestHandler = async (req, res, next) => {
     if (!(await adminAccess.isAdmin(req.userEmail))) {
@@ -181,7 +208,7 @@ export function createSetupRoutes(
       isAdmin: true,
       settings: settings.describe(),
       oidcVerification: await settings.oidcVerification(),
-      ...(kbInit ? { kbInit } : {}),
+      ...(kbInit ? { kbInit } : bootFailure() !== null ? { kbInit: bootFailureKind() } : {}),
       ...(sync ? { sync: { url: sync.url, last: sync.lastSync() } } : {}),
     });
   });
@@ -278,7 +305,7 @@ export function createSetupRoutes(
        * on a re-save of a complete, healthy setup: with the gate open,
        * sessions may be live and that is no longer a quiet moment.
        */
-      if ((!wasComplete || kbInit !== null) && isComplete(settings)) {
+      if ((!wasComplete || kbInit !== null || bootFailure() !== null) && isComplete(settings)) {
         /**
          * The folder names, applied BEFORE the phase for the same reason as
          * the branch model above: they are otherwise applied once at boot, so
@@ -312,15 +339,15 @@ export function createSetupRoutes(
           // The settings ARE saved — only the KB initialization failed. The
           // deployment stays gated (see the status endpoint) until a retry
           // succeeds. Logged in full (scrubbed of the token in effect, which
-          // may be the one this very save stored, and as one printable token),
-          // returned classified — by the classification the runner's failure
-          // carries, read before any scrub rewrote git's words (`failureOf`).
+          // may be the one this very save stored), returned classified — by
+          // the classification the runner's failure carries, read before any
+          // scrub rewrote git's words (`failureOf`).
           const raw = initErr instanceof Error ? initErr.message : String(initErr);
           const msg = redactSecret(raw, [
             settings.resolve('gitToken'),
             ...urlQuerySecrets(settings.resolve('kbRepoUrl')),
           ]);
-          console.error('[setup] KB initialization failed after setup completed:', printable(msg));
+          log.error(`KB initialization failed after setup completed: ${msg}`);
           kbInit = failureOf(initErr);
           res.status(500).json({
             error: 'Settings saved, but the knowledge base could not be initialized.',
@@ -355,7 +382,7 @@ export function createSetupRoutes(
       }
       // Logged in full, returned generic: a driver message here would hand back
       // the schema or the connection string.
-      console.error('[setup] save failed:', err instanceof Error ? err.message : String(err));
+      log.error('save failed:', { err });
       res.status(500).json({ error: 'Could not save these settings.' });
     }
   }
@@ -648,13 +675,9 @@ export function createSetupRoutes(
     } catch (err) {
       // The check answers every refusal it can read as an outcome; a throw is
       // the check itself breaking. Logged scrubbed — git failures have been
-      // known to quote the credential back — as one printable token, and
-      // returned generic.
+      // known to quote the credential back — and returned generic.
       const raw = err instanceof Error ? err.message : String(err);
-      console.error(
-        '[setup] connection check failed:',
-        printable(redactSecret(raw, [token, ...urlQuerySecrets(url)])),
-      );
+      log.error(`connection check failed: ${redactSecret(raw, [token, ...urlQuerySecrets(url)])}`);
       res.status(500).json({ ok: false, error: 'Could not run the connection check.' });
       return;
     }

@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { printable } from '../../shared/printable.js';
+import { logger } from '../../shared/logging.js';
 
+const log = logger('setup');
 const execFileAsync = promisify(execFile);
 
 /** How one `git` invocation is run. Injected by tests; `execFile` otherwise. */
@@ -152,9 +154,10 @@ export async function listRootFolders(
     const text = errorText(err);
     // Git's error text echoes the remote host's response: token scrubbed, and
     // escaped so a hostile host cannot forge or colour the log line.
-    console.warn(
-      '[setup] could not list the repository root folders:',
-      printable((token ? text.replaceAll(token, '***') : text).split('\n')[0]?.slice(0, 200) ?? ''),
+    log.warn(
+      `could not list the repository root folders: ${printable(
+        (token ? text.replaceAll(token, '***') : text).split('\n')[0]?.slice(0, 200) ?? '',
+      )}`,
     );
     return null;
   } finally {

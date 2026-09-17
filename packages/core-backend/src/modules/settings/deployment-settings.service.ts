@@ -1,4 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('settings');
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
@@ -174,8 +177,9 @@ export const CORE_SETTINGS: SettingDef[] = [
   },
 
   /**
-   * Single sign-on. Restart-to-apply because the provider is built once at boot
-   * and pushed into the auth plugin array the server mounts from.
+   * Single sign-on. Applies without a restart: the OIDC provider is mounted
+   * once at boot but reads these on every probe and sign-in, advertising
+   * itself only while issuer, client id and secret are all set.
    */
   {
     key: 'oidcIssuerUrl',
@@ -188,32 +192,27 @@ export const CORE_SETTINGS: SettingDef[] = [
         return 'Enter the issuer URL, e.g. https://login.microsoftonline.com/<tenant>/v2.0';
       }
     },
-    restartToApply: true,
   },
   {
     key: 'oidcClientId',
     envVar: 'OIDC_CLIENT_ID',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcClientSecret',
     envVar: 'OIDC_CLIENT_SECRET',
     section: 'sign-in',
     secret: true,
-    restartToApply: true,
   },
   {
     key: 'oidcScopes',
     envVar: 'OIDC_SCOPES',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcProviderLabel',
     envVar: 'OIDC_PROVIDER_LABEL',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     // Belongs with SSO because SSO is what makes it load-bearing: sign-in
@@ -292,6 +291,10 @@ export interface ResolvedSetting {
  * deployment that has nothing to serve until it is. Nobody is mid-session on a
  * second replica at that moment.
  *
+ * The single sign-on settings are the first to bend that: they apply live, so
+ * on a multi-replica deployment an OIDC change reaches only the replica that
+ * served the save until the others restart.
+ *
  * It stops being acceptable the moment a setting is something an operator
  * changes on a live multi-replica deployment. Adding one means adding
  * invalidation with it — the event bus already carries user-scoped and
@@ -326,9 +329,7 @@ export class DeploymentSettingsService {
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
-          console.warn(
-            `[settings] "${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`,
-          );
+          log.warn(`"${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`);
           continue;
         }
         try {
@@ -337,7 +338,7 @@ export class DeploymentSettingsService {
           // A rotated or mistyped key. Loud, and skipped rather than fatal:
           // one unreadable setting must not stop the server from booting into
           // the screen where it can be fixed.
-          console.error(`[settings] could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
+          log.error(`could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
         }
         continue;
       }

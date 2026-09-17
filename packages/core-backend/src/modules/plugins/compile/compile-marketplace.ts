@@ -1,12 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
+  HEXIS_EXTENSION_NS,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_MCP_FILE,
   PLUGIN_MANIFEST_SCHEMA,
   PLUGIN_MCP_SCHEMA,
   pluginManifestName,
 } from '@bevel-software/platform-shared';
+import { BUNDLE_FILE as BUNDLE_MANIFEST_FILE } from '../discovery/bundle-dialect/bundle.source.js';
 import type { ITreeWalker } from '../../../shared/fs.contract.js';
 import { containsVariableReference } from '../../../shared/variable-refs.js';
 import { judgeMcpServerEntry } from '../../tool-manuals/mcp-json-discovery.js';
@@ -140,6 +142,11 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     displayName: string;
     description?: string;
     version?: string;
+    /** Who wrote it, as the source manifest says — an object or a string. */
+    author?: unknown;
+    keywords?: string[];
+    /** The presentation block a catalogue shows (Codex's `interface`), as the source manifest says. */
+    ui?: Record<string, unknown>;
     skills: SkillSummary[];
     /** Source folder (real plugins only). */
     folder?: string;
@@ -183,11 +190,18 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
       warnings.push(`${plugin.folder}: manifest name "${slug}" is already taken in this marketplace — plugin skipped`);
       continue;
     }
+    const ui = isRecord(manifest?.interface) ? manifest.interface : undefined;
     out.push({
       slug,
       displayName: plugin.displayName,
       description: typeof manifest?.description === 'string' ? manifest.description : undefined,
       version: typeof manifest?.version === 'string' ? manifest.version : undefined,
+      author: isRecord(manifest?.author) || typeof manifest?.author === 'string' ? manifest.author : undefined,
+      keywords:
+        Array.isArray(manifest?.keywords) && manifest.keywords.every((k) => typeof k === 'string')
+          ? (manifest.keywords as string[])
+          : undefined,
+      ui,
       skills: dedup,
       folder: plugin.folder,
       mcp: mcp ?? undefined,
@@ -230,24 +244,43 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
     }
   }
 
-  // 3. Materialise every plugin: the three manifests + copied skill folders.
+  // 3. Materialise every plugin: the plugin folder's own files, the copied
+  //    skill folders, then the three manifests — in that order, so what the
+  //    platform writes wins over a checked-in file of the same name.
   for (const p of out) {
     const base = `plugins/${p.slug}`;
+    // The folder's own files — a CONVENTIONS.md the skills refer to, a
+    // README, reference material — ship beside the skills. What does not:
+    // the platform's own files (rules, the source manifests, `mcp.json`, all
+    // rewritten below), the inline skills (copied by name below), and the
+    // hexis-only `.tool` manuals under their extension folder.
+    if (p.folder) await copyPluginFiles(disk, kbRoot, p.folder, base, put);
+    for (const s of p.skills) {
+      await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
+    }
     const spec: Record<string, unknown> = { $schema: PLUGIN_MANIFEST_SCHEMA, name: p.slug };
     if (p.version) spec.version = p.version;
     if (p.description) spec.description = p.description;
+    if (p.author !== undefined) spec.author = p.author;
+    if (p.keywords) spec.keywords = p.keywords;
     put(`${base}/${PLUGIN_MANIFEST_FILE}`, `${JSON.stringify(spec, null, 2)}\n`);
     const vendor: Record<string, unknown> = { name: p.slug };
     if (p.version) vendor.version = p.version;
     vendor.description = p.description ?? p.displayName;
+    if (p.author !== undefined) vendor.author = p.author;
+    if (p.keywords) vendor.keywords = p.keywords;
     put(`${base}/.claude-plugin/plugin.json`, `${JSON.stringify(vendor, null, 2)}\n`);
-    put(`${base}/.codex-plugin/plugin.json`, `${JSON.stringify(vendor, null, 2)}\n`);
+    // Codex's manifest carries the presentation block: the source's own,
+    // completed with the one thing every plugin can say about itself when
+    // the block does not say it — a partial block is a block, not a reason
+    // to lose the name.
+    const ui: Record<string, unknown> = { ...(p.ui ?? {}) };
+    if (typeof ui.displayName !== 'string' || !ui.displayName.trim()) ui.displayName = p.displayName;
+    const codex: Record<string, unknown> = { ...vendor, interface: ui };
+    put(`${base}/.codex-plugin/plugin.json`, `${JSON.stringify(codex, null, 2)}\n`);
     if (p.mcp) {
       put(`${base}/${PLUGIN_MCP_FILE}`, `${JSON.stringify({ $schema: PLUGIN_MCP_SCHEMA, mcpServers: p.mcp }, null, 2)}\n`);
       put(`${base}/.mcp.json`, `${JSON.stringify({ mcpServers: p.mcp }, null, 2)}\n`);
-    }
-    for (const s of p.skills) {
-      await copySkill(disk, kbRoot, s,`${base}/skills/${s.name}`, put);
     }
   }
 
@@ -347,6 +380,36 @@ export async function compileMarketplace(input: CompileInput): Promise<VirtualTr
 
 // --- helpers ------------------------------------------------------------------
 
+/** The files of a plugin's own folder that are the platform's or another step's to write, never copied as they are. */
+const REWRITTEN_AT_ROOT = new Set([PLUGIN_MANIFEST_FILE, BUNDLE_MANIFEST_FILE, PLUGIN_MCP_FILE]);
+
+/**
+ * Copy a plugin folder's own files under `dest`: everything except the
+ * platform's files (rules, the manifests and `mcp.json` at the root — all
+ * rewritten by the compiler), the inline skills under `skills/` (copied by
+ * name, so a clash resolves the same way everywhere), the hexis extension
+ * folder (`.tool` manuals no other client runs) and `.tool` files anywhere.
+ */
+async function copyPluginFiles(
+  disk: ITreeWalker,
+  kbRoot: string,
+  folder: string,
+  dest: string,
+  put: (rel: string, content: Buffer) => void,
+): Promise<void> {
+  const abs = path.join(kbRoot, folder);
+  for (const rel of await disk.walkFiles(abs, (name) => !NEVER_SHIPPED.has(name) && !name.endsWith('.tool'))) {
+    const top = rel.split('/')[0];
+    if (top === 'skills' || top === HEXIS_EXTENSION_NS) continue;
+    if (!rel.includes('/') && REWRITTEN_AT_ROOT.has(rel)) continue;
+    put(`${dest}/${rel}`, await fs.readFile(path.join(abs, rel)));
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 /** Copy a skill folder (minus what never ships) under `dest`. */
 async function copySkill(
   disk: ITreeWalker,
@@ -401,8 +464,21 @@ function portableMcp(
       leftOut(name, verdict.reason);
       continue;
     }
+    // Fields the judgement does not read (`startup_timeout_sec`, say) ride
+    // along as declared — a client that knows one uses it, one that does
+    // not ignores it — unless they hold a vault reference, which no client
+    // can expand.
+    // Built without a prototype, so a field spelled `__proto__` is a field
+    // that survives to the serialised entry, not a prototype assignment.
+    const extras: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    if (isRecord(raw)) {
+      for (const [key, value] of Object.entries(raw)) {
+        if (JUDGED_KEYS.has(key) || containsVariableReference(JSON.stringify(value))) continue;
+        extras[key] = value;
+      }
+    }
     if (verdict.transport === 'stdio') {
-      out[name] = { ...verdict.entry };
+      out[name] = { ...verdict.entry, ...extras };
       continue;
     }
     const entry: Record<string, unknown> = { type: verdict.entry.type, url: verdict.entry.url };
@@ -417,7 +493,10 @@ function portableMcp(
       }
       if (Object.keys(headers).length > 0) entry.headers = headers;
     }
-    out[name] = entry;
+    out[name] = { ...entry, ...extras };
   }
   return Object.keys(out).length > 0 ? out : null;
 }
+
+/** The server fields the judgement reads and normalises; every other field passes through. */
+const JUDGED_KEYS = new Set(['type', 'url', 'command', 'args', 'env', 'cwd', 'headers']);

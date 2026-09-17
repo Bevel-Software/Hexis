@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('sync');
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import type { IKbSyncService, SyncResult } from './kb-sync.interface.js';
@@ -139,10 +142,10 @@ export function createKbSyncRoutes(deps: KbSyncRouteDeps): express.Router {
     try {
       const result = await deps.kbSync.sync({ branches: selection.branches, by: who });
       const summary = result.results.map((r) => `${r.branch}=${r.outcome}`).join(' ');
-      console.log(`[sync] by ${who} via ${selection.source} for ${asked}: ${result.status} ${summary}`);
+      log.info(`by ${who} via ${selection.source} for ${asked}: ${result.status} ${summary}`);
       res.status(httpStatusFor(result)).json(result);
     } catch (err) {
-      console.error('[sync] unhandled error:', err);
+      log.error('unhandled error:', { err });
       res.status(500).json({ error: 'Internal server error' });
     }
   }

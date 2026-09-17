@@ -803,18 +803,95 @@ describe('FileExplorer rows: the prototype tree', () => {
     expect(row.querySelectorAll('svg')).toHaveLength(0);
   });
 
-  it('gives a childless folder no caret and does not toggle it', async () => {
+  it('gives a childless folder the caret, like any folder', () => {
     renderExplorer({ fileTree: TREE });
+    // Without the caret an empty folder reads as a file.
     const empty = screen.getByText('reports').closest('button')!;
-    expect(empty.querySelectorAll('svg')).toHaveLength(0);
-    // Nothing to open, so no claim about being open: `aria-expanded` is
-    // for a control that can expand — and a click changes nothing.
-    expect(empty).not.toHaveAttribute('aria-expanded');
-    fireEvent.click(empty);
-    expect(empty).not.toHaveAttribute('aria-expanded');
+    expect(empty.querySelectorAll('svg')).toHaveLength(1);
+    expect(empty).toHaveAttribute('aria-expanded');
 
     const withKids = screen.getByText('docs').closest('button')!;
     expect(withKids.querySelectorAll('svg')).toHaveLength(1);
+  });
+
+  it('shows one muted, inert "Empty" row under an open empty folder', () => {
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: 'outer',
+          relativePath: 'outer',
+          type: 'directory',
+          children: [{ name: 'reports', relativePath: 'outer/reports', type: 'directory', children: [] }],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: tree });
+    // Depth 2 starts closed, so nothing says "Empty" until it is opened.
+    const reports = screen.getByText('reports').closest('button')!;
+    expect(reports).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+
+    fireEvent.click(reports);
+    expect(reports).toHaveAttribute('aria-expanded', 'true');
+    const emptyRows = screen.getAllByText('Empty');
+    expect(emptyRows).toHaveLength(1);
+    const emptyRow = emptyRows[0].closest('[data-tree-empty]') as HTMLElement;
+    expect(emptyRow).toHaveClass('text-ink-faint');
+    // A statement, not a row: no controls, no path, nothing to focus.
+    expect(emptyRow.querySelector('button, [tabindex], svg')).toBeNull();
+    expect(emptyRow).not.toHaveAttribute('data-tree-path');
+    // One indent step deeper than the folder, where a first child would sit.
+    expect(emptyRow.style.paddingLeft).toBe(`${parseInt(reports.parentElement!.style.paddingLeft) + 13}px`);
+
+    fireEvent.click(reports);
+    expect(screen.queryByText('Empty')).not.toBeInTheDocument();
+  });
+
+  it('truncates a long file name in the middle, keeping its last 8 characters', () => {
+    const name = 'Sidebar-Rows-Say-What-They-Are.md';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name, relativePath: name, type: 'file' }],
+    };
+    renderExplorer({ fileTree: tree });
+    const row = screen.getByRole('button', { name });
+    const lead = row.querySelector('[data-name-lead]')!;
+    const tail = row.querySelector('[data-name-tail]')!;
+    // The lead is what shrinks behind an ellipsis; the tail never does.
+    expect(lead.textContent).toBe('Sidebar-Rows-Say-What-The');
+    expect(lead).toHaveClass('truncate');
+    expect(tail.textContent).toBe('y-Are.md');
+    expect(tail).toHaveClass('flex-none');
+    expect(tail).not.toHaveClass('truncate');
+    // Together they are the whole name, so a name that fits is unchanged.
+    expect(`${lead.textContent}${tail.textContent}`).toBe(name);
+  });
+
+  it('renders a short file name whole, in one piece', () => {
+    renderExplorer({ fileTree: TREE });
+    const name = screen.getByText('brief.md');
+    expect(name.tagName).toBe('SPAN');
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
+  });
+
+  it('keeps end truncation for a folder name — no extension to protect', () => {
+    const folder = 'a-very-long-folder-name-that-will-not-fit';
+    const tree: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{ name: folder, relativePath: folder, type: 'directory', children: [] }],
+    };
+    renderExplorer({ fileTree: tree });
+    const name = screen.getByText(folder);
+    expect(name).toHaveClass('truncate');
+    expect(name.closest('button')!.querySelector('[data-name-tail]')).toBeNull();
   });
 
   it('marks directory rows with aria-expanded and the open file with aria-current', () => {
@@ -825,7 +902,9 @@ describe('FileExplorer rows: the prototype tree', () => {
   });
 
   // The one prototype context-menu item the platform never had.
-  it('offers Copy path in the context menu and writes the entry path', async () => {
+  // Root-anchored, so the text pasted into a Markdown link opens the file from
+  // any folder rather than resolving against the linking file's own folder.
+  it('offers Copy path in the context menu and writes the root-anchored entry path', async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
@@ -837,7 +916,31 @@ describe('FileExplorer rows: the prototype tree', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
     });
-    expect(writeText).toHaveBeenCalledWith('brief.md');
+    expect(writeText).toHaveBeenCalledWith('/brief.md');
+  });
+
+  it('copies a nested entry as its full root-anchored path', async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    renderExplorer({ fileTree: TREE });
+
+    fireEvent.contextMenu(screen.getByText('a.md'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Copy path/i }));
+    });
+    expect(writeText).toHaveBeenCalledWith('/docs/a.md');
+  });
+
+  it('does not offer Copy path on the workspace root, which would copy "/."', () => {
+    renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(screen.getByText('reports'));
+    expect(screen.getByRole('menuitem', { name: /Copy path/i })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    fireEvent.contextMenu(screen.getAllByText('.')[0]);
+    expect(screen.queryByRole('menuitem', { name: /Copy path/i })).not.toBeInTheDocument();
   });
 
   it('offers Copy path on a folder row too', () => {
@@ -1495,5 +1598,107 @@ describe('FileExplorer: delete and move ask first', () => {
       });
       expect(deleteEntry).not.toHaveBeenCalled();
     });
+  });
+});
+
+/**
+ * Read is default-deny, so an empty explorer has two causes that look the
+ * same: nothing is shared with the caller, or nothing exists yet. The listing
+ * root's `withheld` count tells them apart; the explorer says which, and says
+ * nothing once a single entry is on screen.
+ */
+describe('FileExplorer: an empty tree says why', () => {
+  const KBD = 'knowledge-base';
+  const dirAt = (rel: string, children: FileTreeEntry[] = []): FileTreeEntry => ({
+    name: rel.split('/').pop()!,
+    relativePath: rel,
+    type: 'directory',
+    children,
+  });
+  const fileAt = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
+  /** A seeded knowledge base: the reserved roots, forced visible, with `kb` under KnowledgeBase. */
+  const seeded = (kb: FileTreeEntry[], extra: Partial<FileTreeEntry> = {}, loose: FileTreeEntry[] = []): FileTreeEntry => ({
+    ...dirAt('.', [
+      dirAt(KBD, [
+        dirAt(`${KBD}/KnowledgeBase`, kb),
+        dirAt(`${KBD}/Plugins`),
+        dirAt(`${KBD}/Skills`),
+        ...loose,
+      ]),
+    ]),
+    ...extra,
+  });
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+  afterEach(() => {
+    configureBranchModel({
+      defaultBranch: 'target-company-state',
+      protectedBranches: ['current-company-state', 'target-company-state'],
+    });
+  });
+
+  it('says nothing is shared when entries were withheld and none are visible', () => {
+    renderExplorer({ fileTree: seeded([], { withheld: 12 }) });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent(
+      'Nothing here is shared with you yet. Ask an admin to grant you access.',
+    );
+    expect(screen.queryByText(/This knowledge base is empty/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('says the knowledge base is empty, with the create hint, when nothing was withheld and the caller may write', () => {
+    // A draft branch: writable without asking.
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'alice%2Fdraft' });
+    const notice = screen.getByTestId('tree-empty-notice');
+    expect(notice).toHaveTextContent(/^This knowledge base is empty\./);
+    expect(screen.getByTestId('tree-empty-create-hint')).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing here is shared/)).not.toBeInTheDocument();
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+  });
+
+  it('still says "empty" when the only root entry is .bevelignore', () => {
+    renderExplorer({ fileTree: seeded([], {}, [fileAt(`${KBD}/.bevelignore`)]), workspaceId: 'alice%2Fdraft' });
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+  });
+
+  it('leaves the create hint out when the caller may not write at the root', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(url).toContain('/access?path=KnowledgeBase&kind=folder');
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('asks about the KB clone folder, not the workspace root, for a tree that predates the split', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: false }) });
+    renderExplorer({ fileTree: dirAt('.', [dirAt(KBD)]), workspaceId: 'target-company-state' });
+    await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+    expect(mockAuthFetch.mock.calls[0][0] as string).toContain(`/access?path=${KBD}&kind=folder`);
+    expect(screen.getByTestId('tree-empty-notice')).toHaveTextContent('This knowledge base is empty.');
+    expect(screen.queryByTestId('tree-empty-create-hint')).not.toBeInTheDocument();
+  });
+
+  it('shows the create hint on a protected branch once the root is known writable', async () => {
+    mockAuthFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ canWrite: true }) });
+    renderExplorer({ fileTree: seeded([]), workspaceId: 'target-company-state' });
+    expect(await screen.findByTestId('tree-empty-create-hint')).toBeInTheDocument();
+  });
+
+  it('shows neither message with one visible entry, withheld or not', () => {
+    renderExplorer({ fileTree: seeded([fileAt(`${KBD}/KnowledgeBase/Handbook.md`)], { withheld: 3 }) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+    cleanup();
+    renderExplorer({ fileTree: seeded([dirAt(`${KBD}/KnowledgeBase/Finance`)]) });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+
+  it('shows nothing while the tree is still loading', () => {
+    renderExplorer({ fileTree: null });
+    expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
   });
 });

@@ -37,7 +37,8 @@ import {
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
 import { useWorkspace } from '../state/workspace.context';
-import { findKbRoot, KB_ROOT_DIRS } from '../utils/fileTree';
+import { rootAnchoredPath } from '../utils/pasteLink';
+import { findKbRoot, KB_ROOT_DIRS, treeHasVisibleEntries } from '../utils/fileTree';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT } from '../../../core/events';
@@ -76,9 +77,10 @@ const ROW_TONE = (current: boolean) =>
 const indentFor = (depth: number) => 10 + depth * 13;
 
 /**
- * The caret's slot — 13px wide, and rendered EMPTY for a file and for a
- * childless folder. It is what keeps a file's name in line with its siblings'
- * once the icons are gone: the indent is the tree, so it has to survive them
+ * The caret's slot — 13px wide, and rendered EMPTY for a file. Every folder
+ * shows the caret, an empty one included: without it a folder reads as a file.
+ * The slot is what keeps a file's name in line with its siblings' once the
+ * icons are gone: the indent is the tree, so it has to survive them
  * (proto:3571-3572).
  */
 function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
@@ -90,6 +92,37 @@ function CaretSlot({ open, show }: { open?: boolean; show: boolean }) {
           className={cn('transition-transform duration-150', open && 'rotate-90')}
         />
       )}
+    </span>
+  );
+}
+
+/** How many trailing characters of a file name always stay on screen. */
+const FILE_NAME_TAIL = 8;
+
+/**
+ * A file's name, truncated in the MIDDLE when it does not fit: the lead is
+ * shortened with an ellipsis and the last `FILE_NAME_TAIL` characters stay —
+ * for an ordinary name that is the extension, the part that says what the
+ * file is. A name that fits reads exactly as before, because the two halves
+ * sit flush against each other.
+ *
+ * The split halves are a picture, so they are hidden from assistive tech; the
+ * whole name is carried once, unsplit, in a visually hidden span. A folder has
+ * no extension to protect and keeps the plain end truncation.
+ */
+function FileName({ name }: { name: string }) {
+  // By code point, so the split never lands inside a surrogate pair.
+  const chars = Array.from(name);
+  if (chars.length <= FILE_NAME_TAIL) return <span className="truncate">{name}</span>;
+  return (
+    <span className="flex min-w-0" data-file-name>
+      <span className="sr-only">{name}</span>
+      <span aria-hidden className="truncate" data-name-lead>
+        {chars.slice(0, -FILE_NAME_TAIL).join('')}
+      </span>
+      <span aria-hidden className="flex-none whitespace-pre" data-name-tail>
+        {chars.slice(-FILE_NAME_TAIL).join('')}
+      </span>
     </span>
   );
 }
@@ -287,19 +320,23 @@ function ContextMenu({
   const isZip = !proposed && entry.type === 'file' && /\.zip$/i.test(entry.name);
 
   // The one prototype context-menu item the platform has never had
-  // (proto:3948). The page-level `⋯ → Copy path` does not cover it: that only
+  // (proto:3948). The page-level Share `⌄ → Copy path` does not cover it: that only
   // ever reaches the file you have open, never a folder row or an unopened
   // one. A clipboard write can be refused outright (a non-secure origin), and
   // a silent no-op is the worst possible answer to "copy this" — so a refusal
   // surfaces the same way every other failure in this tree does.
+  // The ROOT-ANCHORED form: pasted into a Markdown link it resolves from any
+  // folder, where the bare `knowledge-base/…` resolved against the linking
+  // file's own folder and landed on File not found.
   const handleCopyPath = async () => {
+    const copied = rootAnchoredPath(entry.relativePath);
     try {
-      await navigator.clipboard.writeText(entry.relativePath);
+      await navigator.clipboard.writeText(copied);
       onClose();
     } catch (err) {
       console.error('Failed to copy path:', err);
       onClose();
-      alert(`Couldn't copy the path to the clipboard.\n\n${entry.relativePath}`);
+      alert(`Couldn't copy the path to the clipboard.\n\n${copied}`);
     }
   };
 
@@ -397,9 +434,12 @@ function ContextMenu({
           </span>
         </MenuItem>
       )}
-      <MenuItem role="menuitem" onClick={handleCopyPath}>
-        <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
-      </MenuItem>
+      {/* The workspace root has no path worth linking: it would copy `/.`. */}
+      {!isRoot && (
+        <MenuItem role="menuitem" onClick={handleCopyPath}>
+          <span className="flex items-center gap-2"><Link2 size={14} />Copy path</span>
+        </MenuItem>
+      )}
       {offersManageAccess(entry) && (
         <>
           <div className="my-1 border-t border-line" />
@@ -654,9 +694,9 @@ export function FileTreeNode({
   const paddingLeft = indentFor(depth);
   const isRoot = entry.relativePath === '.';
   const isPending = pendingUploads.has(entry.relativePath);
-  // A folder with nothing in it doesn't get a caret, because there is nothing
-  // to open (proto:3565).
-  const hasChildren = (entry.children?.length ?? 0) > 0;
+  // A folder with nothing in it still gets its caret — without one it reads
+  // as a file — and opening it says so with a muted "Empty" row.
+  const isEmpty = (entry.children?.length ?? 0) === 0;
   // Escape inside the context menu hands focus back to the row it came from.
   const rowRef = useRef<HTMLButtonElement>(null);
 
@@ -874,14 +914,11 @@ export function FileTreeNode({
             ref={rowRef}
             type="button"
             data-tree-path={entry.relativePath}
-            // A folder with nothing in it has no caret and nothing to expand,
-            // so it claims neither state: `aria-expanded` is for a control
-            // that can open, and an empty folder cannot.
-            aria-expanded={hasChildren ? isExpanded : undefined}
+            aria-expanded={isExpanded}
             className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-            onClick={() => { if (hasChildren) setUserIntent(!isExpanded); }}
+            onClick={() => setUserIntent(!isExpanded)}
           >
-            <CaretSlot open={isExpanded} show={hasChildren} />
+            <CaretSlot open={isExpanded} show />
             {renaming ? (
               <RenameInput
                 currentName={entry.name}
@@ -948,6 +985,19 @@ export function FileTreeNode({
                 />
               </div>
             )}
+            {isEmpty && !creating && (
+              // Not a row anyone acts on — no path, no focus, no menu — so
+              // keyboard navigation and the context menu never meet it. It
+              // sits where a first child would, name column included.
+              <div
+                data-tree-empty
+                className={cn(ROW_CLASS, 'text-ink-faint')}
+                style={{ paddingLeft: indentFor(depth + 1) }}
+              >
+                <CaretSlot show={false} />
+                <span className="truncate">Empty</span>
+              </div>
+            )}
             {entry.children?.map((child) => (
               <FileTreeNode
                 key={child.relativePath}
@@ -1008,7 +1058,7 @@ export function FileTreeNode({
           title="Proposed by you: opens the change request"
         >
           <CaretSlot show={false} />
-          <span className="truncate">{entry.name}</span>
+          <FileName name={entry.name} />
           <span
             aria-hidden
             className="ml-auto h-1.5 w-1.5 flex-none rounded-full bg-accent"
@@ -1086,7 +1136,7 @@ export function FileTreeNode({
             onCancel={() => setRenaming(false)}
           />
         ) : (
-          <span className="truncate">{entry.name}</span>
+          <FileName name={entry.name} />
         )}
         {/* News about a file you are not looking at (proto:692). Amber, not
             the tab dot's accent: on a tab the dot marks the file you have
@@ -1293,6 +1343,81 @@ export function TreeChrome({
   );
 }
 
+/** Shown when the read filter kept entries out and none are left on screen. */
+export const NOTHING_SHARED_MESSAGE = 'Nothing here is shared with you yet. Ask an admin to grant you access.';
+/** Shown when the knowledge base has nothing in it at all. */
+export const KB_EMPTY_MESSAGE = 'This knowledge base is empty.';
+
+/**
+ * Why a tree has nothing in it, when it has nothing in it. Read is
+ * default-deny, so an empty sidebar has two causes that look identical and
+ * call for different next steps: the caller may read none of what exists
+ * (ask an admin), or nothing exists yet (make something — said only to a
+ * caller who may write at `rootPath`, the surface's root folder).
+ *
+ * Renders nothing while the tree loads and once a single entry is visible.
+ * The Knowledge explorer and the Library's trees both render it, from the
+ * same merged listing, so they give the same answer.
+ */
+export function EmptyTreeNotice({ rootPath }: { rootPath: string | null }) {
+  const { kbDirName } = useWorkspace();
+  const { tree, withheld } = useMergedWorkspaceTree();
+  const empty = tree !== null && !treeHasVisibleEntries(tree, kbDirName);
+  // Asked only when the message would carry the hint: a withheld tree never does.
+  const canWrite = useCanWriteFolder(empty && withheld === 0 ? rootPath : null);
+  if (!empty) return null;
+  if (withheld > 0) {
+    return (
+      <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+        {NOTHING_SHARED_MESSAGE}
+      </div>
+    );
+  }
+  return (
+    <div data-testid="tree-empty-notice" role="status" className="px-3 py-2 text-xs text-ink-muted">
+      {KB_EMPTY_MESSAGE}
+      {canWrite && (
+        <>
+          {' '}
+          <span data-testid="tree-empty-create-hint">
+            Use New file or New folder on the folder above, or drop files here.
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Whether the caller may write into a workspace-relative folder; false until
+ * known, and on a failed lookup — it decides a hint, never a gate. The same
+ * short-circuits as `useFileAccess`: a path outside the KB and a draft branch
+ * are writable without asking.
+ */
+function useCanWriteFolder(workspacePath: string | null): boolean {
+  const { workspaceId, kbDirName } = useWorkspace();
+  const [answer, setAnswer] = useState<{ key: string; canWrite: boolean } | null>(null);
+  const prefix = kbDirName ? `${kbDirName}/` : null;
+  const key = workspacePath && workspaceId && prefix ? `${workspaceId}|${workspacePath}` : null;
+  // The KB clone's own folder (a tree that predates the split) is the repo
+  // root: inside the KB, and sent as-is — the server reads a bare kbDirName as ''.
+  const isKbRoot = workspacePath !== null && workspacePath === kbDirName;
+  const shortCircuit =
+    key !== null &&
+    ((!isKbRoot && !workspacePath!.startsWith(prefix!)) || !isProtectedBranch(decodeURIComponent(workspaceId!)));
+  useEffect(() => {
+    if (key === null || shortCircuit) return;
+    let cancelled = false;
+    fetchFileAccess(workspaceId!, isKbRoot ? workspacePath! : workspacePath!.slice(prefix!.length), 'folder')
+      .then((res) => { if (!cancelled) setAnswer({ key, canWrite: res.canWrite }); })
+      .catch(() => { if (!cancelled) setAnswer({ key, canWrite: false }); });
+    return () => { cancelled = true; };
+  }, [key, shortCircuit, isKbRoot, workspaceId, workspacePath, prefix]);
+  if (key === null) return false;
+  if (shortCircuit) return true;
+  return answer?.key === key && answer.canWrite;
+}
+
 /**
  * The upload banners: the last upload's error, or the one non-error notice
  * (it landed on the suggestions branch). Rendered by every tree that can
@@ -1359,7 +1484,7 @@ export function UploadNotices() {
 // contributed explorer items.)
 
 export function FileExplorer() {
-  const { openFilePath, dispatchUpload } = useWorkspace();
+  const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   const [dragOver, setDragOver] = useState(false);
   // Download is now a per-path permission (resolved server-side from the
@@ -1568,6 +1693,18 @@ export function FileExplorer() {
         ) : (
           <FileTreeNode entry={mergedTree} depth={0} />
         )}
+        {/* Under the (empty) roots, so the hint's "folder above" is on
+            screen: Knowledge's own folder is where a first page goes. A tree
+            that predates the split starts at the KB clone's folder when it
+            wraps one, as `treeHasVisibleEntries` reads it. */}
+        <EmptyTreeNotice
+          rootPath={
+            sections
+              ? sections.knowledge?.relativePath ?? null
+              : (mergedTree?.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ?? mergedTree)
+                  ?.relativePath ?? null
+          }
+        />
       </div>
     </div>
     </TreeChrome>

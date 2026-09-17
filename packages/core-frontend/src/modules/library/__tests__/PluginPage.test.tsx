@@ -497,6 +497,25 @@ describe('PluginPage', () => {
     expect(urgent.compareDocumentPosition(tools) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("lists what the plugin's definition left out, in the server's words, and counts it as attention", async () => {
+    dataMock.useLibraryData.mockReturnValue({ ...CATALOG, tools: [connectedTool()] });
+    pluginsMock.listPlugins.mockResolvedValue([
+      gtm({
+        canWrite: true,
+        warnings: [
+          'registry.json: profile "global" selects server "docs", which was left out — args must be a list of strings',
+          'sourceSkillRoots entry "../escape" is not a folder path — ignored',
+        ],
+      }),
+    ]);
+    renderPlugin('GTM');
+    expect(await screen.findByText("2 things in this plugin's definition were left out:")).toBeInTheDocument();
+    expect(screen.getByText(/selects server "docs", which was left out/)).toBeInTheDocument();
+    expect(screen.getByText(/sourceSkillRoots entry/)).toBeInTheDocument();
+    // Not an integration to set up: that banner stays down.
+    expect(screen.queryByText(/integrations? needs? setup/)).not.toBeInTheDocument();
+  });
+
   it("warns about a broken link even when the caller cannot read that skill — the server's count wins", async () => {
     // The manager the missing grant locks out: the skill is NOT in their
     // catalog, so nothing in `items` could say a link is broken. The summary
@@ -631,7 +650,7 @@ describe('PluginPage', () => {
     ]);
     renderPlugin('Finance');
     expect(
-      await screen.findByRole('button', { name: 'Subscribe to its skills and tools' }),
+      await screen.findByRole('button', { name: 'Subscribe to this plugin' }),
     ).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Skills' })).not.toBeInTheDocument();
     // A locked plugin offers no way in at all — not an add door, not a propose one.

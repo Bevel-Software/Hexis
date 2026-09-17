@@ -1,4 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('review-workflow');
 import type {
   AuthUser,
   CancelPrResult,
@@ -169,7 +172,7 @@ function isAccessConfigPath(p: string): boolean {
  * and any call-site that needs the "does this participate in approvals"
  * question answered consistently.
  */
-function isGateRelevant(a: FileApprovalState): boolean {
+function isGateRelevant(a: Pick<FileApprovalState, 'path' | 'eligibleApprovers'>): boolean {
   const hasEligible =
     a.eligibleApprovers.roles.length > 0 || a.eligibleApprovers.users.length > 0;
   const lower = a.path.toLowerCase();
@@ -378,10 +381,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
         // An unreadable tree is not "no eligible writers": that answer would
         // drop every file out of the merge gate. Fail closed instead.
         if (err instanceof AccessUnreadableError) throw err;
-        console.warn(
-          `[review-workflow] eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`,
-          err,
-        );
+        log.warn(`eligibleWritersForPathsAtRef failed for PR #${prNumber} (base=${baseBranch}):`, { err });
       }
 
       if (viewerEmail) {
@@ -395,10 +395,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           if (batch) viewerCanApproveByPath = batch;
         } catch (err) {
           if (err instanceof AccessUnreadableError) throw err;
-          console.warn(
-            `[review-workflow] canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`,
-            err,
-          );
+          log.warn(`canWriteBatchAtRef failed for PR #${prNumber} viewer=${viewerEmail}:`, { err });
         }
       }
     }
@@ -448,13 +445,14 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
           },
         );
 
-      return {
+      const state = {
         path: file.path,
         eligibleApprovers: { roles: eligible.roles, users: eligible.users },
         approvedBy,
         isApproved: hasEligibleApproval,
         viewerCanApprove: viewerCanApproveByPath.get(file.path) === true,
       };
+      return { ...state, inMergeGate: isGateRelevant(state) };
     });
   }
 

@@ -1,4 +1,7 @@
 import { type VariableLoader, VariableLoaderSerializer, Serializer } from '@utcp/sdk';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('secrets-vault');
 import type { ISecretsVaultService } from './secrets-vault.contract.js';
 
 /**
@@ -55,10 +58,7 @@ export class BevelSecretsVariableLoader implements VariableLoader {
     } catch (err) {
       // Log the fault so a backend failure is distinguishable from a merely
       // unset secret (resolve returning null) when troubleshooting.
-      console.error(
-        `[secrets-vault] resolve failed for user=${this.user_id} key=${effectiveKey}:`,
-        err instanceof Error ? err.message : String(err),
-      );
+      log.error(`resolve failed for user=${this.user_id} key=${effectiveKey}:`, { err });
       return null;
     }
   }

@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('teams');
 import { isPersonalPluginDir, isPersonalPluginFolder, pluginOfPath } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import type { ISkillService } from '../skills/skills.contract.js';
@@ -109,7 +112,7 @@ export function createTeamsRoutes(
       }
       res.json({ teams });
     } catch (err) {
-      console.error('[teams] failed to list teams:', err);
+      log.error('failed to list teams:', { err });
       res.status(500).json({ error: 'Failed to list teams' });
     }
   });

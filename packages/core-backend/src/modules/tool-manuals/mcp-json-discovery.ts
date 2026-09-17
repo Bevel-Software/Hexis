@@ -5,6 +5,9 @@ import {
   PLUGINS_DIR,
 } from '@bevel-software/platform-shared';
 import type { ToolManualDescriptor, ToolVariable } from './tool-manuals.contract.js';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('tool-manuals');
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 
@@ -319,7 +322,7 @@ export function descriptorsFromMcpJson(
   try {
     mcp = JSON.parse(mcpJsonText);
   } catch {
-    console.warn(`[tool-manuals] ${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
+    log.warn(`${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MCP_FILE} is not valid JSON — skipped.`);
     return [];
   }
   if (!isRecord(mcp) || !isRecord(mcp.mcpServers)) return [];
@@ -332,8 +335,8 @@ export function descriptorsFromMcpJson(
       // A broken manifest costs the extension data (auth wiring), not the
       // servers themselves — they are still listed, as the spec's own
       // "invalid components are skipped, valid ones load" posture suggests.
-      console.warn(
-        `[tool-manuals] ${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
+      log.warn(
+        `${PLUGINS_DIR}/${pluginFolder}/${PLUGIN_MANIFEST_FILE} is not valid JSON — ` +
           'its mcp-server auth/variable declarations are ignored.',
       );
     }
@@ -345,7 +348,7 @@ export function descriptorsFromMcpJson(
   for (const [name, rawEntry] of Object.entries(mcp.mcpServers)) {
     const verdict = judgeMcpServerEntry(name, rawEntry);
     if (!verdict.ok) {
-      console.warn(`[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ${verdict.reason}.`);
+      log.warn(`skipping mcp server "${name}" in ${mcpJsonPath}: ${verdict.reason}.`);
       continue;
     }
     // Narrowed by the verdict: an entry that passed is a record.
@@ -360,8 +363,8 @@ export function descriptorsFromMcpJson(
     // into outbound requests exactly the same way.
     const reserved = referencesReservedVariable({ raw, ext });
     if (reserved !== null) {
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its declaration (mcp.json ` +
+      log.warn(
+        `skipping mcp server "${name}" in ${mcpJsonPath}: its declaration (mcp.json ` +
           `entry or plugin.json extension) references the reserved variable "${reserved}" — API_URL and ` +
           'CONNECTION_KEY are platform-seeded and may not appear in server declarations.',
       );
@@ -369,8 +372,8 @@ export function descriptorsFromMcpJson(
     }
     const variables = validatedVariables(ext.variables);
     if (variables === null) {
-      console.warn(
-        `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: its plugin.json \`variables\` ` +
+      log.warn(
+        `skipping mcp server "${name}" in ${mcpJsonPath}: its plugin.json \`variables\` ` +
           'declaration is malformed — a dropped declaration would silently re-scope a credential, so ' +
           'the server stays offline until the manifest is fixed.',
       );
@@ -403,8 +406,8 @@ export function descriptorsFromMcpJson(
       try {
         assertSafeFetchUrl(url, { label: `mcp server "${name}" url` });
       } catch (err) {
-        console.warn(
-          `[tool-manuals] skipping mcp server "${name}" in ${mcpJsonPath}: ` +
+        log.warn(
+          `skipping mcp server "${name}" in ${mcpJsonPath}: ` +
             `${err instanceof Error ? err.message : String(err)} (declare it \`local: true\` if it is deliberately private).`,
         );
         continue;

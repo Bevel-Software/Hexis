@@ -15,6 +15,7 @@ import { PluginLinkIndex } from '../plugin-links.js';
 import { PluginLinksService } from '../plugin-links.service.js';
 import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
+import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
 
 /**
  * A customer's repository, read as-is: lowercase `skills/` and `plugins/`
@@ -99,7 +100,7 @@ describe('bundle dialect, end to end', () => {
     tools = new ToolManualService(workspaceService, access, KB_DIR, disk, source);
     links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
     index = new PluginIndexService(workspaceService, access, skills, tools, KB_DIR, source, Date.now, links);
-    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, { name: 'acme', owner: 'Acme' }, source, disk);
+    compiler = new MarketplaceCompilerService(workspaceService, access, skills, links, KB_DIR, { name: 'acme', owner: 'Acme' }, source, disk, new NodeGitRunner());
     linkService = new PluginLinksService(workspaceService, { runPendingCommit: async () => undefined }, access, skills, links, KB_DIR);
   });
   afterEach(async () => {

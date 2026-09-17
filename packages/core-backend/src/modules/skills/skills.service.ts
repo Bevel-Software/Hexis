@@ -1,4 +1,7 @@
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('skills');
 import fs from 'node:fs/promises';
 import { parseDocument } from 'yaml';
 import { DEFAULT_BRANCH, PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
@@ -211,8 +214,8 @@ export class SkillService implements ISkillService {
         a.summary.path.localeCompare(b.summary.path),
     );
     return dedupeById(out, (s) => s.summary.name, (s, id) =>
-      console.warn(
-        `[skills] skipping "${s.summary.path}": id "${id}" is already used by another skill — ` +
+      log.warn(
+        `skipping "${s.summary.path}": id "${id}" is already used by another skill — ` +
           'give it a unique `id`/`name` in its SKILL.md frontmatter.',
       ),
     );

@@ -33,6 +33,9 @@
  */
 
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('creator-access');
 
 import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
@@ -142,8 +145,8 @@ export class CreatorAccessService implements ICreatorAccess {
     // No new directory — a file created directly inside an existing folder.
     // Only markdown can carry a per-file frontmatter grant.
     if (!rel.endsWith('.md')) {
-      console.warn(
-        `[creator-access] cannot grant creator read on "${rel}" — a non-markdown file in a folder without a read grant carries no frontmatter`,
+      log.warn(
+        `cannot grant creator read on "${rel}" — a non-markdown file in a folder without a read grant carries no frontmatter`,
       );
       return null;
     }
@@ -217,8 +220,5 @@ export class CreatorAccessService implements ICreatorAccess {
 }
 
 function warnSkipped(rel: string, err: unknown): void {
-  console.warn(
-    `[creator-access] skipped creator read grant for "${rel}":`,
-    err instanceof Error ? err.message : err,
-  );
+  log.warn(`skipped creator read grant for "${rel}":`, { err });
 }

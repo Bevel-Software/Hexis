@@ -1,12 +1,15 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workspace');
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import type { IGitRunner } from '../../shared/git.contract.js';
+import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import {
   PathTraversalError,
@@ -88,7 +91,13 @@ export class FolderTooLargeError extends Error {
   }
 }
 
-const execFileAsync = promisify(execFile);
+/**
+ * A floor under the git deadline for a clone: a first clone of a large
+ * knowledge base over a slow link legitimately takes minutes, and the port's
+ * default is sized for a running deployment's operations. A configured
+ * ceiling above this applies as configured.
+ */
+const CLONE_TIMEOUT_MS = 600_000;
 
 /**
  * Identity stamped on the per-branch clone's git config. Every workflow
@@ -171,8 +180,12 @@ async function assertConditionalWriteMatches(
  * returns a verdict map keyed by those paths (`path → readable`). Injected by
  * the route from the access service so `WorkspaceService` stays access-agnostic
  * (it gets a function, not the access module). See `modules/access-model/kb-read-filter.ts`.
+ *
+ * `'unlisted'` hides an entry WITHOUT counting it as withheld: a listing
+ * decision (the admin-only `.bevelignore`) rather than content the caller's
+ * read rules keep from them, so it must not tell them something is being kept.
  */
-export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean>>;
+export type ReadTreeFilter = (wsRelPaths: string[]) => Promise<Map<string, boolean | 'unlisted'>>;
 
 export class WorkspaceService implements IWorkspaceService {
   /** Maps branch → absolute directory path. Lazily populated. */
@@ -241,6 +254,13 @@ export class WorkspaceService implements IWorkspaceService {
     private readonly kbDirName: string,
     private readonly disk: ITreeWalker,
     gitUsername: string | (() => string) = 'x-access-token',
+    /**
+     * How git is run — see `shared/git.contract.ts`. The composition root
+     * passes the one runner carrying the deployment's deadline; the default
+     * is the same runner on its default deadline, for a directly constructed
+     * service.
+     */
+    private readonly gitRunner: IGitRunner = new NodeGitRunner(),
   ) {
     this.kbRepoUrl = typeof kbRepoUrl === 'function' ? kbRepoUrl : () => kbRepoUrl;
     this.gitUsername = typeof gitUsername === 'function' ? gitUsername : () => gitUsername;
@@ -419,24 +439,23 @@ export class WorkspaceService implements IWorkspaceService {
     branch: string,
     referenceRepo: string | null,
   ): Promise<void> {
+    // Long enough for a first clone, whatever the configured ceiling says.
+    const timeoutMs = Math.max(this.gitRunner.defaultTimeoutMs, CLONE_TIMEOUT_MS);
     if (referenceRepo) {
       try {
-        await execFileAsync('git', this.gitCloneArgs(targetDir, branch, referenceRepo), {
-          env: { ...process.env },
+        await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch, referenceRepo), {
+          timeoutMs,
         });
         return;
       } catch (err) {
-        console.warn(
-          `[workspace] referenced clone for "${branch}" failed, retrying without reference:`,
-          redactError(err),
-        );
+        log.warn(`referenced clone for "${branch}" failed, retrying without reference:`, {
+          detail: redactError(err),
+        });
         // Clear any partial output so the retry clones into a clean dir.
         await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       }
     }
-    await execFileAsync('git', this.gitCloneArgs(targetDir, branch), {
-      env: { ...process.env },
-    });
+    await this.gitRunner.run(path.dirname(targetDir), this.gitCloneArgs(targetDir, branch), { timeoutMs });
   }
 
   /**
@@ -600,15 +619,12 @@ export class WorkspaceService implements IWorkspaceService {
   private async normalizeCloneConfig(repoDir: string, branch: string): Promise<void> {
     try {
       for (const args of cloneTrackingConfigArgs(branch)) {
-        await execFileAsync('git', ['-C', repoDir, ...args]);
+        await this.gitRunner.run(repoDir, args);
       }
     } catch (err) {
       // One line per branch, not per key: every key writes to the same
       // `.git/config`, so what fails for one fails for all.
-      console.warn(
-        `[workspace] could not normalize the config of the "${branch}" clone:`,
-        redactError(err),
-      );
+      log.warn(`could not normalize the config of the "${branch}" clone:`, { detail: redactError(err) });
     }
     await this.stampCredentialHelper(repoDir, branch);
   }
@@ -649,28 +665,24 @@ export class WorkspaceService implements IWorkspaceService {
       // re-clone that fails on the same validation — masking the real cause.
       // Contain it as a loud non-stamp instead; `normalizeCloneConfig`'s
       // never-throws contract stays true.
-      console.warn(
-        `[workspace] refusing to stamp the credential helper of the "${branch}" clone:`,
-        redactError(err),
-      );
+      log.warn(`refusing to stamp the credential helper of the "${branch}" clone:`, { detail: redactError(err) });
       this.stampedCredentialFingerprint.delete(branch);
       return;
     }
     let stamped = true;
     for (const args of argLists) {
       try {
-        await execFileAsync('git', ['-C', repoDir, ...args]);
+        await this.gitRunner.run(repoDir, args);
       } catch (err) {
         // `--unset-all` with no matching value (exit 5) is the expected no-op
         // for a clone that never carried an app helper; anything else is a
         // real failure.
-        const code = (err as { code?: number } | null)?.code;
+        const code = (err as { exitCode?: number } | null)?.exitCode;
         if (!(args.includes('--unset-all') && code === 5)) {
           stamped = false;
-          console.warn(
-            `[workspace] could not stamp the credential helper of the "${branch}" clone:`,
-            redactError(err),
-          );
+          log.warn(`could not stamp the credential helper of the "${branch}" clone:`, {
+            detail: redactError(err),
+          });
         }
       }
     }
@@ -765,21 +777,18 @@ export class WorkspaceService implements IWorkspaceService {
       await this.runClone(targetDir, branch, reference);
       // Persist longpaths in the cloned repo's config so subsequent
       // checkouts also honor it.
-      await execFileAsync('git', ['-C', targetDir, 'config', 'core.longpaths', 'true']);
+      await this.gitRunner.run(targetDir, ['config', 'core.longpaths', 'true']);
       // Generic bot identity for the clone — every workflow commit
       // overrides via `--author=…` so the real human shows up in
       // `git log`. This is purely the fallback committer.
-      await execFileAsync('git', ['-C', targetDir, 'config', 'user.name', BOT_NAME]);
-      await execFileAsync('git', ['-C', targetDir, 'config', 'user.email', BOT_EMAIL]);
+      await this.gitRunner.run(targetDir, ['config', 'user.name', BOT_NAME]);
+      await this.gitRunner.run(targetDir, ['config', 'user.email', BOT_EMAIL]);
       // Pin the clone to exactly one fetch refspec and one upstream ref for
       // this branch. `git clone -b` already produces that shape; stamping it
       // explicitly means the shape is asserted rather than assumed, and the
       // same call is what repairs an existing clone that drifted.
       await this.normalizeCloneConfig(targetDir, branch);
-      console.log(
-        `[workspace] Cloned ${this.kbDirName} for branch "${branch}"` +
-          (reference ? ' (referenced a sibling clone)' : ''),
-      );
+      log.info(`Cloned ${this.kbDirName} for branch "${branch}"` + (reference ? ' (referenced a sibling clone)' : ''));
       // A fresh clone has already downloaded every ref — tell the git layer
       // so the first `listBranches` skips the redundant implicit `git fetch`.
       // Isolated from the clone-rollback `catch` below: a misbehaving listener
@@ -787,10 +796,9 @@ export class WorkspaceService implements IWorkspaceService {
       try {
         this.onWorkspaceCloned?.(workspaceIdForBranch(branch));
       } catch (listenerErr) {
-        console.error(
-          `[workspace] onWorkspaceCloned listener failed for branch "${branch}":`,
-          redactError(listenerErr),
-        );
+        log.error(`onWorkspaceCloned listener failed for branch "${branch}":`, {
+          detail: redactError(listenerErr),
+        });
       }
     } catch (err) {
       const redacted = redactError(err);
@@ -802,10 +810,10 @@ export class WorkspaceService implements IWorkspaceService {
       // routes answer 410 with the branch named and the browser can say "this
       // branch no longer exists" instead of "something went wrong".
       if (isMissingRemoteBranchFailure(redacted)) {
-        console.log(`[workspace] branch "${branch}" does not exist on origin — nothing to clone`);
+        log.info(`branch "${branch}" does not exist on origin — nothing to clone`);
         throw new RemoteBranchGoneError(branch);
       }
-      console.error(`[workspace] Failed to clone for branch "${branch}":`, redacted);
+      log.error(`Failed to clone for branch "${branch}":`, { detail: redacted });
       throw new Error(`Failed to clone process map: ${redacted}`);
     }
   }
@@ -1013,11 +1021,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     for (const candidate of candidates) {
       try {
-        const { stdout } = await execFileAsync(
-          'git',
-          ['-C', repoDir, 'show', `${candidate}:${relativePath}`],
-          { encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
-        );
+        const { stdout } = await this.gitRunner.run(repoDir, ['show', `${candidate}:${relativePath}`]);
         return stdout;
       } catch {
         // Try next candidate.
@@ -1055,18 +1059,15 @@ export class WorkspaceService implements IWorkspaceService {
     // This driver runs outside the git layer's per-workspace mutex, so it may
     // only run the safe implicit-fetch shape — see `SAFE_IMPLICIT_FETCH_ARGS`
     // in `kb-fs/clone-config.ts` for the full rationale.
-    const promise = execFileAsync(
-      'git',
-      ['-C', repoDir, ...SAFE_IMPLICIT_FETCH_ARGS],
-      { env: { ...process.env } },
-    )
+    const promise = this.gitRunner
+      .run(repoDir, [...SAFE_IMPLICIT_FETCH_ARGS])
       .then(() => {
         this.lastFetchAt.set(repoDir, Date.now());
         this.lastFetchOk.set(repoDir, true);
       })
       .catch((err) => {
         this.lastFetchOk.set(repoDir, false);
-        console.warn('[workspace] git fetch origin failed:', redactError(err));
+        log.warn('git fetch origin failed:', { detail: redactError(err) });
       })
       .finally(() => {
         if (this.inFlightFetches.get(repoDir) === promise) {
@@ -1618,15 +1619,9 @@ export class WorkspaceService implements IWorkspaceService {
     }
     let stdout: string;
     try {
-      ({ stdout } = await execFileAsync('git', ['-C', repoDir, 'status', '--porcelain=v1', '-z'], {
-        encoding: 'utf-8',
-        maxBuffer: 16 * 1024 * 1024,
-      }));
+      ({ stdout } = await this.gitRunner.run(repoDir, ['status', '--porcelain=v1', '-z']));
     } catch (err) {
-      console.warn(
-        `[workspace] orphan scan via git status failed for ${workspaceId}:`,
-        err instanceof Error ? err.message : err,
-      );
+      log.warn(`orphan scan via git status failed for ${workspaceId}:`, { err });
       return [];
     }
     if (!stdout.trim()) return [];
@@ -1695,10 +1690,7 @@ export class WorkspaceService implements IWorkspaceService {
         this.branchDirs.delete(branchForWorkspaceId(entry.name));
         removed.push(entry.name);
       } catch (err) {
-        console.warn(
-          `[workspace] sweep failed for ${entry.name}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`sweep failed for ${entry.name}:`, { err });
       }
     }
     return { removed };
@@ -1799,11 +1791,17 @@ export class WorkspaceService implements IWorkspaceService {
       name: string;
       relativePath: string;
       readable: boolean;
+      /** Hidden by a listing decision, not a read rule: dropping it withholds nothing. */
+      unlisted: boolean;
       children: (FileTreeEntry | DirNode)[];
     }
     const relOf = (abs: string) => path.relative(workspaceRoot, abs).replace(/\\/g, '/');
-    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, children: [] };
+    const top: DirNode = { name: path.basename(root), relativePath: relOf(root) || '.', readable: true, unlisted: false, children: [] };
     const nodes = new Map<string, DirNode>([['', top]]);
+    // Entries the caller's read rules kept out — counted, never named. Only an
+    // entry the filter judged unreadable counts: `.bevelignore`d and `.git`
+    // entries never reach it, and an `'unlisted'` one is kept from no one.
+    let withheld = 0;
 
     await this.disk.walk(root, explorerWalk(), [
       {
@@ -1823,14 +1821,23 @@ export class WorkspaceService implements IWorkspaceService {
           // dropped. No filter → identical to the pre-feature tree (regression-safe).
           const verdict = readFilter && entries.length > 0 ? await readFilter(rels) : null;
           const readable = (rel: string) => verdict === null || verdict.get(rel) === true;
+          const unlisted = (rel: string) => verdict !== null && verdict.get(rel) === 'unlisted';
           entries.forEach((entry, i) => {
             const entryRel = rels[i]!;
             if (entry.isDirectory()) {
-              const child: DirNode = { name: entry.name, relativePath: entryRel, readable: readable(entryRel), children: [] };
+              const child: DirNode = {
+                name: entry.name,
+                relativePath: entryRel,
+                readable: readable(entryRel),
+                unlisted: unlisted(entryRel),
+                children: [],
+              };
               nodes.set(rel ? `${rel}/${entry.name}` : entry.name, child);
               node.children.push(child);
             } else if (readable(entryRel)) {
               node.children.push({ name: entry.name, relativePath: entryRel, type: 'file' });
+            } else if (!unlisted(entryRel)) {
+              withheld++;
             }
           });
         },
@@ -1847,6 +1854,7 @@ export class WorkspaceService implements IWorkspaceService {
         }
         const sub = finish(child);
         if (child.readable || (sub.children?.length ?? 0) > 0) children.push(sub);
+        else if (!child.unlisted) withheld++;
       }
       children.sort((a, b) => {
         if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
@@ -1854,7 +1862,10 @@ export class WorkspaceService implements IWorkspaceService {
       });
       return { name: node.name, relativePath: node.relativePath, type: 'directory', children };
     };
-    return finish(top);
+    const tree = finish(top);
+    // Only when something was withheld, so an unfiltered — or all-readable —
+    // listing stays exactly the tree it always was.
+    return withheld > 0 ? { ...tree, withheld } : tree;
   }
 }
 

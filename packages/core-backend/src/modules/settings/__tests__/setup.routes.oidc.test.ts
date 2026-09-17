@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { IssuerCheck, OidcCheck, OidcConfiguration } from '../oidc-check.js';
-import { OidcAuthProvider } from '../../auth/oidc-auth-provider.js';
+import { OidcAuthProvider, oidcSettingsFrom } from '../../auth/oidc-auth-provider.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
@@ -378,9 +378,8 @@ describe('the verification state', () => {
     await settings.save(FULL, null);
     expect(await settings.oidcVerification()).toBe('unverified');
 
-    // The composition root's wiring: a sign-in through the provider built
-    // from these values records them verified.
-    const credentials = settings.resolveOidcCredentials();
+    // The composition root's wiring: a sign-in through the provider reading
+    // these settings records the values it used as verified.
     const idpFetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith('/.well-known/openid-configuration')) {
@@ -395,14 +394,12 @@ describe('the verification state', () => {
       return new Response('', { status: 404 });
     }) as typeof fetch;
     const oidc = new OidcAuthProvider({
-      ...credentials,
-      scopes: 'openid email',
-      label: 'SSO',
+      settings: () => oidcSettingsFrom(settings),
       publicBackendUrl: 'http://localhost:3001',
       publicFrontendUrl: 'http://localhost:5173',
       cookieSecure: false,
       fetchImpl: idpFetch,
-      onSignedIn: () => settings.recordOidcVerification('verified', credentials),
+      onSignedIn: (used) => settings.recordOidcVerification('verified', used),
     });
     const router = express.Router();
     oidc.mountRoutes(router, {

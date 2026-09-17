@@ -86,6 +86,8 @@ describe('KbPluginSource — bundles', () => {
       version: '1.3.1',
       description: 'What this plugin is for',
       displayName: 'Example Plugin',
+      // The presentation block rides along whole, for the compiled Codex manifest.
+      interface: { displayName: 'Example Plugin', category: 'Productivity' },
     });
     // An unnamed bundle takes its folder's name; a bad root is dropped with a warning.
     expect(byName.get('unnamed')!.linkedRoots).toEqual(['skills/x']);
@@ -102,6 +104,8 @@ describe('KbPluginSource — bundles', () => {
     });
     expect(JSON.parse(example.mcpJsonText!)).toEqual({ mcpServers: example.mcpServers });
     expect(warnings.some((w) => w.includes('unknown server "ghost"'))).toBe(true);
+    // `Jira` and `Confluence` cannot be server names, so both run under their ids — and the author is told.
+    expect(warnings.filter((w) => w.includes('cannot be a server name'))).toHaveLength(2);
     // An empty profile is valid and selects nothing.
     expect(plugins.find((p) => p.name === 'close')!.mcpServers).toBeNull();
   });

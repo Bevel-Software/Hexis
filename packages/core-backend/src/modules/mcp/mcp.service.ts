@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp');
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
@@ -315,8 +318,8 @@ export class McpService {
       // anomaly worth surfacing, since a downstream client would otherwise hide
       // it by rejecting the whole response.
       if (dropped.length) {
-        console.warn(
-          `[mcp] tools/list: serving ${CODE_MODE_META_TOOLS.length + direct.length} tool(s); ` +
+        log.warn(
+          `tools/list: serving ${CODE_MODE_META_TOOLS.length + direct.length} tool(s); ` +
             `dropped ${dropped.length} non-listable: ${dropped.join(', ')}`,
         );
       }
@@ -353,7 +356,7 @@ export class McpService {
           try {
             await this.revokeOAuthAccess(bearer);
           } catch (err) {
-            console.warn('[mcp] failed to reset the caller grant for re-auth:', err);
+            log.warn('failed to reset the caller grant for re-auth:', { err });
           }
         }
         return needsAuth.result;
@@ -412,8 +415,8 @@ export class McpService {
     // see SurfaceLogThrottle for why both halves matter.
     const decision = this.surfaceLog.decide(userId, { tools: tools.length, manuals: manuals.length });
     if (decision.log) {
-      console.log(
-        `[mcp] request surface: user=${userId} tokenId=${tokenId ?? 'none'} — ` +
+      log.info(
+        `request surface: user=${userId} tokenId=${tokenId ?? 'none'} — ` +
           `${tools.length} tool(s) across ${manuals.length} manual(s) in ${totalMs.toFixed(0)}ms ` +
           `(catalog ${catalogMs.toFixed(0)}ms, registration ${(totalMs - catalogMs).toFixed(0)}ms)` +
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
@@ -434,10 +437,7 @@ export class McpService {
     try {
       return composeAgentInstructions(await read());
     } catch (err) {
-      console.warn(
-        '[mcp] could not read mcp-description.md; this request gets the platform header alone:',
-        err instanceof Error ? err.message : err,
-      );
+      log.warn('could not read mcp-description.md; this request gets the platform header alone:', { err });
       return composeAgentInstructions(null);
     }
   }
@@ -477,12 +477,12 @@ export class McpService {
         signal: AbortSignal.timeout(LOOPBACK_TIMEOUT_MS),
       });
       if (!res.ok) {
-        console.error(`[mcp] ${label} loopback failed: HTTP ${res.status} ${await res.text().catch(() => '')}`);
+        log.error(`${label} loopback failed: HTTP ${res.status} ${await res.text().catch(() => '')}`);
         return null;
       }
       return await res.json();
     } catch (err) {
-      console.error(`[mcp] ${label} loopback threw:`, err instanceof Error ? err.message : err);
+      log.error(`${label} loopback threw:`, { err });
       return null;
     }
   }
@@ -518,7 +518,7 @@ export class McpService {
       } catch (err) {
         const name = String((raw as { name?: unknown })?.name ?? '');
         if (isKb) throw err; // the KB manual must be valid — the core toolset depends on it
-        console.warn(`[mcp] skipping manual "${name}": ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`skipping manual "${name}": ${err instanceof Error ? err.message : String(err)}`);
       }
     }
     // Always include the KB manual, even if `all-tools` was unavailable/regressed.
@@ -613,7 +613,7 @@ export class McpService {
         if (!isKb) {
           const recent = this.manualFailures.recentFailure(userId, memoKey);
           if (recent !== undefined) {
-            console.warn(`[mcp] skipping manual "${name}" (recent failure, not retried): ${recent}`);
+            log.warn(`skipping manual "${name}" (recent failure, not retried): ${recent}`);
             return { isKb, ok: true as const };
           }
         }
@@ -640,7 +640,7 @@ export class McpService {
           if (!result.ok) {
             if (isKb) return { isKb, ok: false as const, error: result.error };
             this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
-            console.warn(`[mcp] skipping manual "${name}": ${result.error}`);
+            log.warn(`skipping manual "${name}": ${result.error}`);
           } else if (!isKb) {
             this.manualFailures.clear(userId, memoKey);
           }

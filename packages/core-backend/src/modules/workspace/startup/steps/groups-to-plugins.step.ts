@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { logger } from '../../../../shared/logging.js';
 import {
   HEXIS_EXTENSION_NS,
   HEXIS_TOOLS_DIR,
@@ -19,6 +20,8 @@ import { IGNORE_FILENAME, isAbsence, isSkippedEntry, type IFsProbe, type ITreeWa
 import type { KbBranch, OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 import { withoutIgnoreLine } from './template-files.step.js';
 import { PluginLayout, hasManifestEntry } from './plugin-layout.js';
+
+const log = logger('groups-to-plugins');
 
 // The probes here are `lstat`-based (`exists`, `isDirectory`): SYMLINKS ARE
 // NOT SUPPORTED IN PLUGINS, anywhere, so a link never counts as the thing it
@@ -222,8 +225,8 @@ export class GroupsToPluginsStep implements OnServerStart {
       // state a human needs to look at. The branch contributes no migration
       // ops, only a note (which surfaces in a commit only if the ignore
       // retirement above, or a later step, dirties it).
-      console.warn(
-        `[groups-to-plugins] ${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
+      log.warn(
+        `${branch.name}: both ${LEGACY_GROUPS_DIR}/ and ${PLUGINS_DIR}/ exist — leaving both alone. ` +
           `Merge ${LEGACY_GROUPS_DIR}/ into ${PLUGINS_DIR}/ by hand; nothing is being migrated automatically.`,
       );
       if (changed) branch.note(retiredSubject);
@@ -511,8 +514,8 @@ export class GroupsToPluginsStep implements OnServerStart {
         ? (JSON.parse(renderedManifest) as Record<string, unknown>)
         : await this.disk.readJsonObject(path.join(folderDir, PLUGIN_MANIFEST_FILE));
     if (manifest === null) {
-      console.warn(
-        `[groups-to-plugins] ${branch.name}: ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
+      log.warn(
+        `${branch.name}: ${folderName}/${PLUGIN_MANIFEST_FILE} is missing or unparsable — ` +
           'mcp manuals convert only when they carry NOTHING for the extensions block; any ' +
           'non-portable half (auth headers, variables, a description, or the local-only flag) ' +
           'keeps the manual a `.tool` until the manifest is fixed.',

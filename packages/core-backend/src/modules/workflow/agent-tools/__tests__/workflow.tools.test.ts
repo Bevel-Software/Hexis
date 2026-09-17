@@ -36,7 +36,7 @@ const workflowService = {
   },
   openChangeRequest: async (ws: string, user: { id: string }, body: unknown) => {
     calls.push(['openChangeRequest', ws, user.id, body]);
-    return { number: 7, url: 'http://cr/7' };
+    return { number: 7, url: 'https://bevel.example.com/change-requests/7' };
   },
   createBranch: async (ws: string, name: string) => {
     calls.push(['createBranch', ws, name]);
@@ -48,6 +48,23 @@ const workflowService = {
   },
   releaseLock: async (ws: string, branch: string, path: string) => {
     calls.push(['releaseLock', ws, branch, path]);
+  },
+  getChangeRequestDetail: async (number: number) => ({
+    number,
+    url: `https://bevel.example.com/change-requests/${number}`,
+    headSha: 'head-1',
+    approvals: [],
+    state: 'open',
+    title: 'T',
+    base: 'main',
+  }),
+  mergeChangeRequest: async (number: number) => {
+    calls.push(['mergeChangeRequest', number]);
+    return { kind: 'merged', result: { prNumber: number, sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' } };
+  },
+  postComment: async (number: number, _user: unknown, input: { path?: string }) => {
+    calls.push(['postComment', number, input.path]);
+    return { id: 'c-1' };
   },
 } as never;
 const events = {
@@ -104,6 +121,42 @@ describe('registerWorkflowTools', () => {
     expect(calls).toContainEqual(['commitChange', WS, 'user-A', { summary: 'fix typo', description: undefined }]);
   });
 
+  // A change request's files are repository-relative; the Copy path form
+  // carries the clone folder, which is dropped so the comment lands on the file.
+  it('post_change_request_comment anchors a copied workspace path to the repository-relative file', async () => {
+    const base = await start();
+    for (const path of ['/knowledge-base/KnowledgeBase/Foo.md', 'knowledge-base/KnowledgeBase/Foo.md', 'KnowledgeBase/Foo.md']) {
+      const res = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi', path });
+      expect(res.status, path).toBe(200);
+    }
+    expect(calls.filter((c) => c[0] === 'postComment')).toEqual([
+      ['postComment', 3, 'KnowledgeBase/Foo.md'],
+      ['postComment', 3, 'KnowledgeBase/Foo.md'],
+      ['postComment', 3, 'KnowledgeBase/Foo.md'],
+    ]);
+  });
+
+  // An agent hands the change request's link to a person, so the tools that
+  // act on one by number return its `{ number, url }` beside their own payload.
+  it('post_change_request_comment and merge_change_request return the change request link', async () => {
+    const base = await start();
+    const comment = await post(`${base}/api/agent/tools/post_change_request_comment`, writeTok(), { number: 3, body: 'hi' });
+    expect(comment.status).toBe(200);
+    const commentBody = await comment.json();
+    expect(commentBody).toMatchObject({
+      comment: { id: 'c-1' },
+      changeRequest: { number: 3, url: 'https://bevel.example.com/change-requests/3' },
+    });
+    // A configured address yields an absolute link, so no note rides along.
+    expect(commentBody.changeRequest).not.toHaveProperty('urlNote');
+    const merge = await post(`${base}/api/agent/tools/merge_change_request`, writeTok(), { number: 4 });
+    expect(merge.status).toBe(200);
+    expect(await merge.json()).toEqual({
+      outcome: { kind: 'merged', result: { prNumber: 4, sha: 'sha-1', mergedAt: '2026-09-17T00:00:00Z' } },
+      changeRequest: { number: 4, url: 'https://bevel.example.com/change-requests/4' },
+    });
+  });
+
   it('list_branches takes no branch and lists from any existing clone (repo-global)', async () => {
     const base = await start();
     // No `branch` in the body — the tool is repo-global. It must NOT try to
@@ -122,7 +175,9 @@ describe('registerWorkflowTools', () => {
       title: 'My change',
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ changeRequest: { number: 7 } });
+    expect(await res.json()).toMatchObject({
+      changeRequest: { number: 7, url: 'https://bevel.example.com/change-requests/7' },
+    });
     // The workspace must be derived from the SOURCE branch (not a separate
     // `branch` arg) — encodeURIComponent('me/draft'). Regression guard for the
     // `-b undefined` clone bug when the model omitted `branch`.
@@ -240,6 +295,28 @@ describe('save_file and the repository folder', () => {
     expect(calls).toContainEqual(['releaseLock', WS, WS, 'knowledge-base/KnowledgeBase/Reviews/PR-12.html']);
   });
 
+  it('accepts the root-anchored form Copy path gives, as the same path', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {
+      path: '/knowledge-base/KnowledgeBase/Reviews/PR-12.html',
+      branch: WS,
+    });
+    expect(res.status).toBe(200);
+    expect(calls).toContainEqual(['acquireLock', WS, WS, 'knowledge-base/KnowledgeBase/Reviews/PR-12.html']);
+  });
+
+  it('still refuses a slash-led path outside the repository', async () => {
+    const base = await start();
+    const res = await post(`${base}/api/agent/tools/save_file`, writeTok(), {
+      path: '/KnowledgeBase/Reviews/PR-12.html',
+      branch: WS,
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain('outside the knowledge base repository');
+    expect(calls.some((c) => c[0] === 'acquireLock')).toBe(false);
+  });
+
   it('describes the prefix on its path input', async () => {
     await start();
     const tools = await registryRef!.listInternal();
@@ -247,5 +324,6 @@ describe('save_file and the repository folder', () => {
     // `toolDef` wraps a tool's inputs under a single `body` property.
     const body = (def!.inputs as { properties: { body: { properties: Record<string, { description?: string }> } } }).properties.body;
     expect(body.properties.path.description).toContain('`knowledge-base/`');
+    expect(body.properties.path.description).toContain('with or without a leading slash');
   });
 });
