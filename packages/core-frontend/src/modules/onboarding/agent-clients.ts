@@ -32,8 +32,12 @@ import {
 export interface AgentClient {
   id: 'claude' | 'chatgpt' | 'other' | 'local';
   label: string;
-  /** Where the snippet goes, said as the path through that client's own UI. */
-  hint: string;
+  /**
+   * Where the snippet goes, said as the path through that client's own UI. A
+   * list renders as numbered steps — for a path with enough turns that one
+   * sentence of arrows loses people halfway.
+   */
+  hint: string | string[];
   /** What the copy button carries for this client. */
   snip(mcpUrl: string): string;
 }
@@ -48,10 +52,21 @@ export const AGENT_CLIENTS: AgentClient[] = [
   {
     id: 'chatgpt',
     label: 'ChatGPT',
-    // Developer mode first: it is off by default, and every "Create" button
-    // someone hunts for is behind it. The name is spelled out because, unlike
+    // ChatGPT renamed the page under our feet: as of 2026-09 it is Plugins
+    // (Plugin Management, Browse plugins, Developer Mode), where it used to be
+    // Apps & Connectors with Developer mode under Advanced. Each step names
+    // both, so whichever build someone is on, the words on their screen are in
+    // the steps. Developer Mode comes before Create because it is off by
+    // default and hides that button. The name is spelled out because, unlike
     // Claude, ChatGPT has no link that prefills it.
-    hint: `Settings → Apps & Connectors → Advanced → turn on Developer mode, then Create: name it “${MCP_DISPLAY_NAME}” and paste this.`,
+    hint: [
+      'Open Settings in ChatGPT.',
+      'Open Plugins (called Apps & Connectors in older versions).',
+      'Turn on Developer Mode (under Advanced in older versions).',
+      'Go back and choose Create (or Add).',
+      `Name it “${MCP_DISPLAY_NAME}”.`,
+      'Paste the address below, then save.',
+    ],
     snip: (url) => url,
   },
   {
@@ -66,8 +81,12 @@ export const AGENT_CLIENTS: AgentClient[] = [
   },
   {
     id: 'other',
-    label: 'Other',
-    hint: 'For web and cloud clients that read their servers from a JSON config but can’t run a local process.',
+    label: 'Other tools',
+    // What to DO with the config, not what kind of client reads it: the reader
+    // is a business user for whom "a JSON config" says nothing. The page puts
+    // the bare address right after this, because plenty of tools take a URL
+    // and nothing else.
+    hint: 'For any other AI tool that supports MCP servers. Open the tool’s settings, find MCP servers (also called connectors or integrations), choose add, and paste this configuration. If the tool asks for an address only, paste this instead:',
     snip: (url) => jsonConfigSnippet(url),
   },
 ];

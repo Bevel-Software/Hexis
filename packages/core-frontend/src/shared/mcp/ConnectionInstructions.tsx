@@ -41,8 +41,8 @@ export function AssistantConnectionInstructions({ mcpUrl }: { mcpUrl: string }) 
       </div>
       <p className="text-[11px] text-ink-muted mb-1 leading-snug">
         Or add it by hand and paste this URL — Claude: Settings → Connectors → Add custom
-        connector. ChatGPT: Settings → Apps &amp; Connectors → Advanced → turn on Developer
-        mode, then Create, and name it <span className="font-medium">{MCP_DISPLAY_NAME}</span>.
+        connector. ChatGPT: Settings → Plugins (or Apps &amp; Connectors) → turn on Developer
+        Mode, go back and choose Create (or Add), and name it <span className="font-medium">{MCP_DISPLAY_NAME}</span>.
         When asked to authorize, your browser opens this app to finish connecting.
       </p>
       <CopyBlock label={null} value={mcpUrl} rows={1} />

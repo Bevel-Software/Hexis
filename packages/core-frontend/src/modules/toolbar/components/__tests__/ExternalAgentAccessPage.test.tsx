@@ -738,7 +738,7 @@ describe('the one-click install link', () => {
     const link = screen.getByRole('link', { name: 'Add to ChatGPT' });
     // The whole href, not just the origin: the settings-pane anchor is the
     // only part that makes the link worth clicking.
-    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings/Connectors');
+    expect(link).toHaveAttribute('href', 'https://chatgpt.com/#settings');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('Skills, Tools and Knowledge')).toBeInTheDocument();
