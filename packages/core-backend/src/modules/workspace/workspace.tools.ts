@@ -146,7 +146,11 @@ async function keepFolderOf(
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
-    throw new ToolError(`"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`, 500);
+    const message = `"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`;
+    // The original error keeps its status (a lock held elsewhere stays a 409).
+    if (!(err instanceof Error)) throw new ToolError(message, 500);
+    err.message = message;
+    throw err;
   }
 }
 

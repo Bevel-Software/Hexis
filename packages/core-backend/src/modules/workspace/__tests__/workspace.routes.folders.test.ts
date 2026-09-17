@@ -270,6 +270,23 @@ describe('workspace routes — folders never vanish', () => {
     expect(committed(`${KB}/doomed/sub/.gitkeep`)).toBe(false);
   });
 
+  it('a delete whose placeholder lock is held elsewhere keeps the 409, with the context', async () => {
+    h = await makeHarness();
+    await fs.mkdir(path.join(h.kbDir, 'busy'), { recursive: true });
+    await fs.writeFile(path.join(h.kbDir, 'busy/only.md'), 'x');
+    h.acquireLock.mockImplementation(async (...args: unknown[]) =>
+      args[2] === `${KB}/busy/.gitkeep`
+        ? { acquired: false, lock: { holderName: 'Bob' } as never }
+        : { acquired: true, lock: {} as never },
+    );
+
+    const res = await call('DELETE', `/file?path=${encodeURIComponent(`${KB}/busy/only.md`)}`);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `"${KB}/busy/only.md" was removed, but its folder "${KB}/busy" could not be kept: "${KB}/busy/.gitkeep" is being edited by Bob. Try again in a moment.`,
+    );
+  });
+
   it('a delete whose folder cannot be kept fails, and says the file itself is gone', async () => {
     h = await makeHarness();
     await fs.mkdir(path.join(h.kbDir, 'kept'), { recursive: true });
@@ -348,12 +365,16 @@ describe('WorkspaceService.withFolderTurn', () => {
     const events: string[] = [];
     let open!: () => void;
     const gate = new Promise<void>((r) => (open = r));
+    let started!: () => void;
+    const holdingA = new Promise<void>((r) => (started = r));
     const outer = svc.withFolderTurn(workspaceId, `${KB}/A`, async () => {
       events.push('A start');
+      started();
       await gate;
       events.push('A end');
     });
-    await new Promise((r) => setTimeout(r, 5));
+    // `A` holds its turn before the others ask for theirs.
+    await holdingA;
     const inner = svc.withFolderTurn(workspaceId, `${KB}/A/B`, async () => {
       events.push('A/B');
     });

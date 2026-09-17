@@ -52,7 +52,12 @@ import type {
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH, isFolderPlaceholder } from '@bevel-software/platform-shared';
+import {
+  isProtectedBranch,
+  DEFAULT_BRANCH,
+  isFolderPlaceholder,
+  folderPlaceholderPath,
+} from '@bevel-software/platform-shared';
 import { and, eq, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -1961,6 +1966,29 @@ export class WorkflowService implements IWorkflowService {
    * retired it — a shell of a request pointing at an empty diff serves
    * nobody (see the zero-files dialog state this replaces).
    */
+  /**
+   * The folder placeholder a file's revert takes along, or null. When a
+   * request removed a folder's last file, the placeholder that keeps the
+   * folder came with it (git may even pair them as one rename); reverting the
+   * file alone would leave that hidden placeholder as a change nobody can
+   * see. So it is reverted too — when the request changed it, and only when
+   * that cannot leave the folder with nothing in git: either the file comes
+   * back, or the base had the placeholder to restore.
+   */
+  private async placeholderRevertedWith(
+    workspaceId: string,
+    mergeBase: string,
+    repoRelPath: string,
+    changedPaths: string[],
+  ): Promise<string | null> {
+    if (isFolderPlaceholder(repoRelPath)) return null;
+    const slash = repoRelPath.lastIndexOf('/');
+    const placeholder = folderPlaceholderPath(slash === -1 ? '' : repoRelPath.slice(0, slash));
+    if (!changedPaths.includes(placeholder)) return null;
+    if (await this.git.pathExistsAtRef(workspaceId, mergeBase, repoRelPath)) return placeholder;
+    return (await this.git.pathExistsAtRef(workspaceId, mergeBase, placeholder)) ? placeholder : null;
+  }
+
   async revertChangeRequestFile(
     number: number,
     user: AuthUser,
@@ -2005,30 +2033,43 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowDomainError('These branches share no history to revert to.', 422);
     }
 
+    const placeholder = await this.placeholderRevertedWith(ws.id, mergeBase, repoRelPath, paths);
+    const reverted = placeholder ? [repoRelPath, placeholder] : [repoRelPath];
+
     // Same per-file lock every other editor of this path takes — a concurrent
     // save must not race the restore between write and commit.
-    const lockPath = `${this.kbDirName}/${repoRelPath}`;
-    const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
-    if (!lock.acquired) {
-      throw new WorkflowDomainError(
-        `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
-        409,
-      );
-    }
+    const held: string[] = [];
     try {
-      await this.git.restorePathFromRef(ws.id, mergeBase, repoRelPath);
-      await this.git.commitFile(
-        ws.id,
-        user,
-        repoRelPath,
-        `Revert ${repoRelPath} (declined in change request #${number})`,
-        true, // skipValidator — this restores an already-validated base version
-      );
+      for (const p of reverted) {
+        const lockPath = `${this.kbDirName}/${p}`;
+        const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
+        if (!lock.acquired) {
+          throw new WorkflowDomainError(
+            p === repoRelPath
+              ? `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`
+              : `The folder of ${repoRelPath} is being changed by ${lock.lock.holderName} — try again once the edit settles.`,
+            409,
+          );
+        }
+        held.push(lockPath);
+      }
+      for (const p of reverted) {
+        await this.git.restorePathFromRef(ws.id, mergeBase, p);
+        await this.git.commitFile(
+          ws.id,
+          user,
+          p,
+          `Revert ${p} (declined in change request #${number})`,
+          true, // skipValidator — this restores an already-validated base version
+        );
+      }
       await this.trackedPush(ws.id, user);
     } finally {
-      // Committed inline — drop the lock row directly rather than enqueueing
+      // Committed inline — drop the lock rows directly rather than enqueueing
       // a duplicate commit through releaseLock.
-      await this.fileLocks.release(ws.id, headBranch, lockPath, user);
+      for (const lockPath of held) {
+        await this.fileLocks.release(ws.id, headBranch, lockPath, user);
+      }
     }
     this.prs.invalidateDetailCache(number);
 

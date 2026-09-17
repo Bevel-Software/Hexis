@@ -302,6 +302,20 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/empty.md']);
   });
 
+  it('pathExistsAtRef answers for files and folders at a ref, and false for what is not there', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+    await fs.mkdir(path.join(repo, 'Docs'));
+    await fs.writeFile(path.join(repo, 'Docs/.gitkeep'), '');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'folder']);
+
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'base.md')).resolves.toBe(true);
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'Docs/.gitkeep')).resolves.toBe(true);
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD~1', 'Docs/.gitkeep')).resolves.toBe(false);
+    await expect(git.pathExistsAtRef(workspaceId, 'HEAD', 'missing.md')).resolves.toBe(false);
+  });
+
   /**
    * The per-file revert's two primitives: the merge-base a revert restores
    * from, and the restore itself — byte-exact via git, with "absent at the

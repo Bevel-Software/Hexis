@@ -263,7 +263,8 @@ export function createWorkspaceRoutes(
    *
    * A failure is the request's failure: the removal landed, but a request
    * that answers success would leave a folder that vanishes on the next
-   * clone, which is exactly what this rule forbids.
+   * clone, which is exactly what this rule forbids. It keeps its own status
+   * (a contended placeholder lock is still a 409) and only gains the context.
    */
   async function keepFolderOf(
     workspaceId: string,
@@ -289,7 +290,7 @@ export function createWorkspaceRoutes(
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
-      throw new Error(`"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`);
+      throw withKeptFolderContext(err, `"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`);
     }
   }
 
@@ -1290,6 +1291,17 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
     });
   }
   return out;
+}
+
+/**
+ * The error a failed folder keep answers: the original one — its type,
+ * status and payload decide the response — with `message` saying what
+ * landed and what did not. Anything that is not an Error becomes one.
+ */
+function withKeptFolderContext(err: unknown, message: string): Error {
+  if (!(err instanceof Error)) return new Error(message);
+  err.message = message;
+  return err;
 }
 
 /**

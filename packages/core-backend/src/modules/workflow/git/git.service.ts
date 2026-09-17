@@ -2430,6 +2430,20 @@ export class GitService implements IGitService {
     });
   }
 
+  /** Whether `repoRelativePath` exists (as a file or tree) at `ref`. */
+  async pathExistsAtRef(workspaceId: string, ref: string, repoRelativePath: string): Promise<boolean> {
+    assertValidRelativePath(repoRelativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   /**
    * Restore one path in the working tree (and index) to its content at `ref`;
    * a path ABSENT at `ref` is deleted — the revert of an added file is its
