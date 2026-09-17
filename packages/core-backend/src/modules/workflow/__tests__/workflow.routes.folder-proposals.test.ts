@@ -90,6 +90,8 @@ describe('folder change-request routes', () => {
     'Data/Rep\u0000orts',
     'Data/Rep\norts',
     '-Data',
+    'C:tmp',
+    'c:/Data/Reports',
     `Data/${'x'.repeat(1030)}`,
   ];
 

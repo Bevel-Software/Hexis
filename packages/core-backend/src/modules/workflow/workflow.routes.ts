@@ -36,6 +36,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -574,22 +575,25 @@ export function createWorkflowRoutes(
 
   /**
    * A KB-repo-relative folder from the request, or null (400 sent) when it is
-   * missing, could step outside the repository, or is not a path git could
-   * hold: the same contract as every other path handed to git (no backslash,
-   * no control character, at most 1024 characters, no leading `-`). A
-   * malformed spelling matches no request, so letting it through would
+   * not a path git may be handed. The contract is `assertValidRelativePath`'s
+   * — the one every path reaching git meets (relative, no drive letter, no
+   * backslash, no `.`/`..`, no leading `-`, at most 1024 characters) — plus
+   * what a folder spelling adds: no empty segment and no control character.
+   * A malformed spelling matches no request, so letting it through would
    * answer "nothing to remove" instead of saying the path is wrong.
    */
   function folderParam(raw: unknown, res: express.Response): string | null {
     const folder = typeof raw === 'string' ? raw.replace(/\/+$/, '') : '';
+    let valid = true;
+    try {
+      assertValidRelativePath(folder);
+    } catch {
+      valid = false;
+    }
     if (
-      !folder
-      || folder.length > 1024
-      || folder.startsWith('/')
-      || folder.startsWith('-')
-      || folder.includes('\\')
+      !valid
+      || folder.split('/').includes('')
       || [...folder].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)
-      || folder.split('/').some((s) => s === '' || s === '.' || s === '..')
     ) {
       res.status(400).json({ error: 'path must be a folder inside the knowledge base' });
       return null;
