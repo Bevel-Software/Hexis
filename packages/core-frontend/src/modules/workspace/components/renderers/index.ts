@@ -89,11 +89,16 @@ const fallbackRenderer = TextRenderer;
  */
 const ACCESS_RULES_FILE = 'access.md';
 
-export function getFileRenderer(filePath: string): ComponentType<FileRendererProps> {
+/** The renderer the registry routes this file to; `undefined` when only the fallback would take it. */
+function mappedRenderer(filePath: string): ComponentType<FileRendererProps> | undefined {
   const name = filePath.slice(filePath.lastIndexOf('/') + 1).toLowerCase();
   if (name === ACCESS_RULES_FILE) return TextRenderer;
   const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase();
-  return renderersByExtension[ext] ?? fallbackRenderer;
+  return renderersByExtension[ext];
+}
+
+export function getFileRenderer(filePath: string): ComponentType<FileRendererProps> {
+  return mappedRenderer(filePath) ?? fallbackRenderer;
 }
 
 /**
@@ -103,9 +108,13 @@ export function getFileRenderer(filePath: string): ComponentType<FileRendererPro
  * a name the registry above sends to `TextRenderer` (the access rules file) is
  * YAML that happens to end in `.md`, and a Markdown diff would turn its `#`
  * comments into headings there just as the renderer used to here.
+ *
+ * Only a name the registry routes to `TextRenderer` counts — never the
+ * fallback, which lands on the same component but catches unknown and binary
+ * extensions (a `.zip`, a `.bin`) whose bytes are not text.
  */
 export function rendersAsText(filePath: string): boolean {
-  return getFileRenderer(filePath) === TextRenderer;
+  return mappedRenderer(filePath) === TextRenderer;
 }
 
 /**
