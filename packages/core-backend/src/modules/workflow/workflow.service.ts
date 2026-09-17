@@ -85,6 +85,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -2070,7 +2071,9 @@ export class WorkflowService implements IWorkflowService {
           const ws = await this.workspaceService.getOrCreateForBranch(cr.branch);
           return { cr, touched: await this.git.changedPathsForPr(ws.id, cr.base, cr.branch) };
         } catch (err) {
-          log.warn(`changedPathsForPr failed for #${cr.number} under folder ${folder}:`, { err });
+          log.warn(
+            `changedPathsForPr failed for #${cr.number} under folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
+          );
           throw new WorkflowDomainError(
             `Couldn't read what change request #${cr.number} proposes — try again in a moment.`,
             500,
@@ -2160,7 +2163,9 @@ export class WorkflowService implements IWorkflowService {
       try {
         await this.pullWorkspace(ws.id);
       } catch (err) {
-        log.warn(`pull failed for #${summary.number} before removing folder ${folder}:`, { err });
+        log.warn(
+          `pull failed for #${summary.number} before removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
+        );
         throw new WorkflowDomainError(
           `#${summary.number} could not be brought up to date, so nothing was removed — try again in a moment.`,
           409,
@@ -2180,9 +2185,31 @@ export class WorkflowService implements IWorkflowService {
     }
 
     const held: { wsId: string; branch: string; lockPath: string }[] = [];
+    // Every held lock is let go, each on its own: one failed release must not
+    // keep the rest held until they expire.
     const releaseAll = async () => {
-      for (const h of held.splice(0)) await this.fileLocks.release(h.wsId, h.branch, h.lockPath, user);
+      for (const h of held.splice(0)) {
+        try {
+          await this.fileLocks.release(h.wsId, h.branch, h.lockPath, user);
+        } catch (err) {
+          log.warn(`lock release failed for ${printable(h.lockPath)}: ${printable(sanitizeError(err))}`);
+        }
+      }
     };
+    const toChange = plans.filter((plan) => plan.paths.length > 0 && plan.mergeBase);
+    // Local commits not pushed yet are dropped by resetting the checkout to its
+    // remote — which the pull above made it equal to.
+    const discardUnpushed = async (unpushed: typeof toChange) => {
+      for (const plan of unpushed) {
+        try {
+          await this.git.resetToRemote(plan.wsId, plan.branch);
+        } catch (err) {
+          log.warn(`reset failed for #${plan.number} after a folder removal stopped: ${printable(sanitizeError(err))}`);
+        }
+      }
+    };
+    const pushed: typeof toChange = [];
+    let pushFailure: { plan: (typeof toChange)[number]; err: unknown } | null = null;
     try {
       for (const plan of plans) {
         for (const repoRelPath of plan.paths) {
@@ -2197,29 +2224,59 @@ export class WorkflowService implements IWorkflowService {
           held.push({ wsId: plan.wsId, branch: plan.branch, lockPath });
         }
       }
-      for (const plan of plans) {
-        if (plan.paths.length === 0 || !plan.mergeBase) continue;
-        for (const repoRelPath of plan.paths) {
-          await this.git.restorePathFromRef(plan.wsId, plan.mergeBase, repoRelPath);
-          await this.git.commitFile(
-            plan.wsId,
-            user,
-            repoRelPath,
-            `Revert ${repoRelPath} (folder deleted; removed from change request #${plan.number})`,
-            true, // skipValidator — this restores an already-validated base version
-          );
+      // Every request's restores are committed locally before anything is
+      // pushed, so a failed restore or commit leaves every request as it was.
+      try {
+        for (const plan of toChange) {
+          for (const repoRelPath of plan.paths) {
+            await this.git.restorePathFromRef(plan.wsId, plan.mergeBase!, repoRelPath);
+            await this.git.commitFile(
+              plan.wsId,
+              user,
+              repoRelPath,
+              `Revert ${repoRelPath} (folder deleted; removed from change request #${plan.number})`,
+              true, // skipValidator — this restores an already-validated base version
+            );
+          }
         }
-        await this.trackedPush(plan.wsId, user);
+      } catch (err) {
+        await discardUnpushed(toChange);
+        throw err;
+      }
+      // Pushes are one per remote branch and cannot be made atomic. A failed
+      // push drops its own and every later request's local commits, so the
+      // requests split cleanly into "done" and "untouched", and running the
+      // action again finishes the rest.
+      for (const [i, plan] of toChange.entries()) {
+        try {
+          await this.trackedPush(plan.wsId, user);
+        } catch (err) {
+          await discardUnpushed(toChange.slice(i));
+          pushFailure = { plan, err };
+          break;
+        }
+        pushed.push(plan);
         this.prs.invalidateDetailCache(plan.number);
       }
     } finally {
       await releaseAll();
     }
 
+    if (pushFailure && pushed.length === 0) throw pushFailure.err;
+    const done = pushFailure ? pushed : plans;
     const results: FolderChangeRequestRemoval[] = [];
-    for (const plan of plans) {
+    for (const plan of done) {
       const withdrawn = await this.closeEmptyChangeRequest(plan.number, user);
       results.push({ number: plan.number, removedPaths: plan.paths, withdrawn });
+    }
+    if (pushFailure) {
+      log.warn(
+        `push failed for #${pushFailure.plan.number} removing folder ${printable(folder)}: ${printable(sanitizeError(pushFailure.err))}`,
+      );
+      throw new WorkflowDomainError(
+        `The folder's files were removed from ${pushed.map((plan) => `#${plan.number}`).join(', ')}, but #${pushFailure.plan.number} could not be updated and it and any later requests were left as they were. Run the delete again to finish.`,
+        500,
+      );
     }
     return results;
   }
