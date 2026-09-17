@@ -111,11 +111,22 @@ export function PluginSection({
 export function CardGrid({
   items,
   onOpen,
+  onShare,
   onRemove,
   canRemove,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /**
+   * Open Manage access on a SKILL's own folder — the skill page's `Share`,
+   * from the card's `…` menu. Absent: no card carries a menu.
+   *
+   * Only skills are offered it, and the card's props enforce that: access to a
+   * tool is decided at the plugin that carries it, so a tool has no rules of
+   * its own to open. A PROPOSED skill is left out too — its folder is on a
+   * change request's branch and does not exist on the one the dialog reads.
+   */
+  onShare?(item: LibraryItem): void;
   /**
    * The manager's "remove from this place". Present only when the caller
    * runs the page the grid is on — the pages decide that, not the grid.
@@ -153,7 +164,10 @@ export function CardGrid({
                 kind: 'integration',
                 flavor: item.path.endsWith('/mcp.json') ? 'mcp' : 'utcp',
               } as const)
-            : ({ kind: 'skill' } as const);
+            : ({
+                kind: 'skill',
+                onShare: onShare && !item.pending ? () => onShare(item) : undefined,
+              } as const);
         const card = (
           <LibraryCard
             key={key}
@@ -295,6 +309,7 @@ export function PluginItemSections({
   skillItems,
   toolItems,
   onOpen,
+  onShare,
   onRemove,
   canRemove,
   emptySkills,
@@ -306,6 +321,8 @@ export function PluginItemSections({
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /** See {@link CardGrid} — the skill cards' `Share`. Tools never get one. */
+  onShare?(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
   /** See {@link CardGrid}. */
@@ -352,7 +369,13 @@ export function PluginItemSections({
               emptySkills
             )
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
+            <CardGrid
+              items={skillItems}
+              onOpen={onOpen}
+              onShare={onShare}
+              onRemove={onRemove}
+              canRemove={canRemove}
+            />
           )}
         </PluginSection>
       )}
