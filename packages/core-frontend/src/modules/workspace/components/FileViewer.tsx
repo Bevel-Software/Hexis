@@ -33,6 +33,7 @@ import {
   readFileOnBranch,
 } from '../../change-requests/services/change-requests.api';
 import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
+import { othersPendingBesides } from '../../change-requests/utils/author';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
@@ -1421,6 +1422,7 @@ export function FileViewer() {
                     requests={requestsOnThisFile}
                     canDecide={access.canWrite === true}
                     ownersLabel={ownersLabel}
+                    othersPending={othersPendingBesides(access.owners, auth.user?.email)}
                     onApplied={() => {
                       reloadTabFromDisk(openFilePath).catch(() => {});
                     }}
