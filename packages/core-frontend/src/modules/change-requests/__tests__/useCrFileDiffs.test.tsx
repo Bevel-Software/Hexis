@@ -14,6 +14,7 @@ vi.mock('../services/change-requests.api', () => api);
 
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { PR_STALE_EVENT } from '../../../core/events';
+import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { WorkspaceApiError } from '../../workspace/services/workspace.api';
 
 const PATH = 'Sales/deal.yaml';
@@ -26,13 +27,17 @@ const lines = (d: { kind: string; text: string }[] | null | undefined | 'unreada
   (d === 'unreadable' ? [] : (d ?? [])).filter((l) => l.kind === kind).map((l) => l.text);
 
 beforeEach(() => {
-  api.readFileOnBranch.mockReset().mockResolvedValue(PROPOSED);
+  // The proposal branch answers with its copy; main, when it is read at all,
+  // answers with the tip carrying the later direct edit.
+  api.readFileOnBranch
+    .mockReset()
+    .mockImplementation(async (branch: string) => (branch === DEFAULT_BRANCH ? MAIN_NOW : PROPOSED));
   api.readFileAtForkPoint.mockReset().mockResolvedValue({ content: ORIGINAL, forkSha: 'f'.repeat(40) });
 });
 
 describe('useCrFileDiffs', () => {
   it("diffs from the request's fork point: a later edit on main is not shown as a deletion", async () => {
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
     const d = result.current.get(21)!;
     expect(lines(d, 'removed')).toEqual(['price: 100']);
@@ -47,12 +52,18 @@ describe('useCrFileDiffs', () => {
     // branch copy cached from before the merge, and the box struck through the
     // target's own edit — the failure this test exists for.
     const MERGED_BRANCH = 'price: 120\nstatus: signed\n';
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
     expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100']);
 
-    api.readFileOnBranch.mockResolvedValue(MERGED_BRANCH);
     api.readFileAtForkPoint.mockResolvedValue({ content: MAIN_NOW, forkSha: 'e'.repeat(40) });
+    // Hold the BRANCH copy so the fork point lands first — the order that used
+    // to mix, because the branch side was served from the pre-merge cache and
+    // the target's own newer line read as a deletion.
+    let releaseBranch: (content: string) => void = () => {};
+    api.readFileOnBranch.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseBranch = resolve)),
+    );
     await act(async () => {
       window.dispatchEvent(new Event(PR_STALE_EVENT));
     });
@@ -60,17 +71,21 @@ describe('useCrFileDiffs', () => {
     // Both sides are read again — the branch copy as well as the fork point.
     await waitFor(() => expect(api.readFileOnBranch).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(api.readFileAtForkPoint).toHaveBeenCalledTimes(2));
+    // The fork point has landed and the branch copy has not: the box waits,
+    // rather than showing a diff between two moments.
+    expect(result.current.get(21)).toBeNull();
+
+    await act(async () => {
+      releaseBranch(MERGED_BRANCH);
+    });
     await waitFor(() =>
       expect(lines(result.current.get(21), 'added')).toEqual(['price: 120']),
     );
-    const d = result.current.get(21);
-    expect(lines(d, 'removed')).toEqual(['price: 100']);
-    // Never the target's own line, at any moment after the event.
-    expect(lines(d, 'removed')).not.toContain('status: signed');
+    expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100']);
   });
 
   it('re-reads the fork point when a request moves, not on every revision bump', async () => {
-    const { result, rerender } = renderHook(({ rev }: { rev: number }) => useCrFileDiffs([CR], PATH, MAIN_NOW, rev), {
+    const { result, rerender } = renderHook(({ rev }: { rev: number }) => useCrFileDiffs([CR], PATH, rev), {
       initialProps: { rev: 0 },
     });
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
@@ -91,7 +106,7 @@ describe('useCrFileDiffs', () => {
 
   it('a file the fork point lacks (the request adds it) diffs from empty', async () => {
     api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: 'f'.repeat(40) });
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, null));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
     expect(lines(result.current.get(21), 'removed')).toEqual([]);
     expect(lines(result.current.get(21), 'added')).toEqual(['price: 120', 'status: draft']);
@@ -99,20 +114,48 @@ describe('useCrFileDiffs', () => {
 
   it('branches with no shared history fall back to main — the only text left', async () => {
     api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: null });
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).not.toBeNull());
     expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100', 'status: signed']);
+    // Main is read HERE, under this generation — and only because there was no
+    // fork point to read instead.
+    expect(api.readFileOnBranch).toHaveBeenCalledWith(DEFAULT_BRANCH, PATH);
+  });
+
+  it('never reads main for a request that has a fork point', async () => {
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
+    await waitFor(() => expect(result.current.get(21)).not.toBeNull());
+    expect(api.readFileOnBranch).not.toHaveBeenCalledWith(DEFAULT_BRANCH, PATH);
+  });
+
+  it('a stale event re-reads main too, so an unrelated-history box never pairs two moments', async () => {
+    api.readFileAtForkPoint.mockResolvedValue({ content: null, forkSha: null });
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
+    await waitFor(() => expect(result.current.get(21)).not.toBeNull());
+
+    // Main moved on, and so did the proposal.
+    api.readFileOnBranch.mockImplementation(async (branch: string) =>
+      branch === DEFAULT_BRANCH ? 'price: 100\nstatus: closed\n' : 'price: 140\nstatus: closed\n',
+    );
+    await act(async () => {
+      window.dispatchEvent(new Event(PR_STALE_EVENT));
+    });
+    await waitFor(() =>
+      expect(lines(result.current.get(21), 'added')).toEqual(['price: 140']),
+    );
+    // Against main as it stands NOW: its own 'status: closed' is not a deletion.
+    expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100']);
   });
 
   it('an unreadable fork point says so — never a diff against main, never loading forever', async () => {
     api.readFileAtForkPoint.mockRejectedValue(new Error('503'));
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).toBe('unreadable'));
   });
 
   it('a file the request deletes (absent on its branch) shows every line removed', async () => {
     api.readFileOnBranch.mockRejectedValue(new WorkspaceApiError(404));
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(Array.isArray(result.current.get(21))).toBe(true));
     expect(lines(result.current.get(21), 'removed')).toEqual(['price: 100', 'status: draft']);
     expect(lines(result.current.get(21), 'added')).toEqual([]);
@@ -120,7 +163,7 @@ describe('useCrFileDiffs', () => {
 
   it('an unreadable branch copy says so too', async () => {
     api.readFileOnBranch.mockRejectedValue(new Error('403'));
-    const { result } = renderHook(() => useCrFileDiffs([CR], PATH, MAIN_NOW));
+    const { result } = renderHook(() => useCrFileDiffs([CR], PATH));
     await waitFor(() => expect(result.current.get(21)).toBe('unreadable'));
   });
 });

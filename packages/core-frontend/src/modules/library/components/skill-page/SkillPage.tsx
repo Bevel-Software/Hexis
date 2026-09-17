@@ -428,7 +428,7 @@ export function SkillPage({
   const raw = active === 'SKILL.md' ? rawOnMain : detail.fileContent(active);
 
   /** Every open change request's version of the file on screen. */
-  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(skillCrs, fileRepoPath, revision);
 
   /** The change requests with something to say about THIS file. */
   const boxes = useMemo(

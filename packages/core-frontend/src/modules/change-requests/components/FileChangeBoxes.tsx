@@ -6,7 +6,6 @@ import { useOpenChangeRequests } from '../../workspace/hooks/useOpenChangeReques
 import { PR_STALE_EVENT } from '../../../core/events';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
-import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { isBinaryFile } from '../../workspace/components/renderers';
@@ -67,8 +66,7 @@ export function FileChangeBoxes({
   // Binary files never diff (see the box's `binary` prop) — so never fetch
   // and decode their default-branch bytes either.
   const binary = isBinaryFile(repoRelativePath);
-  const rawOnMain = useDefaultBranchFile(binary ? null : repoRelativePath, revision);
-  const crDiffs = useCrFileDiffs(requests, repoRelativePath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(requests, repoRelativePath, revision);
 
   const resolved = useCallback(() => {
     setApplied(true);
