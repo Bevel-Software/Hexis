@@ -128,13 +128,18 @@ export async function checkOidcIssuer(
   if (!endpoint('authorization_endpoint') || !endpoint('token_endpoint') || !endpoint('userinfo_endpoint')) {
     return { outcome: 'not-oidc', field: 'oidcIssuerUrl', error: NOT_OIDC };
   }
-  // The secret is about to be sent to the token endpoint: never in the clear.
-  if (!isHttps(endpoint('token_endpoint'))) {
-    return {
-      outcome: 'not-oidc',
-      field: 'oidcIssuerUrl',
-      error: 'The provider names a token endpoint that does not use https://.',
-    };
+  // Never in the clear: the secret is about to be sent to the token endpoint,
+  // and every sign-in sends its access token to the userinfo endpoint. A plain
+  // scheme check — no address-range guard (see above).
+  for (const key of ['token_endpoint', 'userinfo_endpoint'] as const) {
+    if (!isHttps(endpoint(key))) {
+      const name = key === 'token_endpoint' ? 'token' : 'userinfo';
+      return {
+        outcome: 'not-oidc',
+        field: 'oidcIssuerUrl',
+        error: `The provider names a ${name} endpoint that does not use https://.`,
+      };
+    }
   }
   return { outcome: 'verified', tokenEndpoint: endpoint('token_endpoint') };
 }

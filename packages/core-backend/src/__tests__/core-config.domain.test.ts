@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CoreConfig, withoutUserinfo } from '../core-config.js';
 
 /**
@@ -123,6 +123,23 @@ describe('CoreConfig — PUBLIC_BACKEND_URL never carries credentials', () => {
   it('strips a proxy user:pass@ once, at parse time, and keeps every other byte', () => {
     process.env.PUBLIC_BACKEND_URL = 'https://proxy:hunter2@Hexis.Example.com:443/base/';
     expect(new CoreConfig().publicBackendUrl).toBe('https://Hexis.Example.com:443/base');
+  });
+
+  it('warns that the credentials were ignored, without ever printing them', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      process.env.PUBLIC_BACKEND_URL = 'https://proxy:hunter2@hexis.example.com';
+      new CoreConfig();
+      const printed = warn.mock.calls.map((args) => args.map(String).join(' ')).join('\n');
+      expect(printed).toMatch(/PUBLIC_BACKEND_URL contains credentials/);
+      expect(printed).not.toMatch(/hunter2|proxy:/);
+      warn.mockClear();
+      process.env.PUBLIC_BACKEND_URL = 'https://hexis.example.com';
+      new CoreConfig();
+      expect(warn.mock.calls.map((args) => args.join(' ')).join('\n')).not.toMatch(/credentials/);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it.each([

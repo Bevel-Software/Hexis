@@ -91,8 +91,11 @@ describe('checkOidcIssuer — discovery', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe(`${issuer}/.well-known/openid-configuration`);
   });
 
-  it('refuses a token endpoint that is not https, so the secret is never sent in the clear', async () => {
-    const fetchImpl = provider(() => json(200, { ...DISCOVERY, token_endpoint: 'http://tokens.example.com/token' }));
+  it.each([
+    ['token_endpoint', 'http://tokens.example.com/token', 'the secret'],
+    ['userinfo_endpoint', 'http://login.example.com/userinfo', 'every access token'],
+  ])('refuses a %s that is not https, so %s is never sent in the clear', async (key, url) => {
+    const fetchImpl = provider(() => json(200, { ...DISCOVERY, [key]: url }), () => json(400, { error: 'invalid_grant' }));
     const result = await checkOidcConfiguration(CONFIG, fetchImpl);
     expect(result).toMatchObject({ outcome: 'rejected', reason: 'not-oidc', field: 'oidcIssuerUrl' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
