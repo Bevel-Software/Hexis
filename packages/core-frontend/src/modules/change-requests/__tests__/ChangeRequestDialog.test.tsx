@@ -319,6 +319,29 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     expect(screen.queryByRole('img', { name: /Waiting on/ })).not.toBeInTheDocument();
   });
 
+  it('Apply records approvals only on files the gate binds', async () => {
+    detailMock.fetchPrDetail.mockResolvedValue(
+      detailWith([
+        approval({ path: 'Docs/a.md', viewerCanApprove: true }),
+        approval({
+          path: 'assets/shot.png',
+          eligibleApprovers: { roles: ['Admin'], users: [] },
+          viewerCanApprove: true,
+          inMergeGate: false,
+        }),
+      ]),
+    );
+    approvalsApi.approvePrFile.mockReset();
+    approvalsApi.approvePrFile.mockResolvedValue([]);
+    render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Bypass approval and apply' }));
+    await waitFor(() => expect(approvalsApi.approvePrFile).toHaveBeenCalledWith(12, 'Docs/a.md'));
+    // The approving loop is over once the merge step is named.
+    expect(await screen.findByRole('button', { name: 'Applying…' })).toBeInTheDocument();
+    expect(approvalsApi.approvePrFile).not.toHaveBeenCalledWith(12, 'assets/shot.png');
+  });
+
   it('while applying, the approve controls stand down', async () => {
     const twoPending = detailWith([
       approval({ path: 'Docs/a.md', viewerCanApprove: true }),
