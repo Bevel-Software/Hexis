@@ -291,13 +291,11 @@ function ViewerApprovalMark({ state }: { state: 'approved' | 'waiting' }) {
 /**
  * The approval STATE, inline after the name — presplit PrApprovalBadge:
  * green ✓ confirmed, amber clock for outdated confirmations, grey clock
- * waiting; nothing at all for files outside the gate (keeps the tree quiet).
+ * waiting; nothing at all for files outside the gate (keeps the tree quiet,
+ * and names no one the gate does not wait on — the footer's rule).
  */
 function ApprovalStateBadge({ approval }: { approval?: FileApprovalState }) {
-  if (!approval) return null;
-  const hasEligible =
-    approval.eligibleApprovers.roles.length > 0 || approval.eligibleApprovers.users.length > 0;
-  if (!hasEligible) return null;
+  if (!approval || !isGateRelevant(approval)) return null;
   const who = [
     ...approval.eligibleApprovers.roles,
     ...approval.eligibleApprovers.users.map((u) => u.name || u.email),

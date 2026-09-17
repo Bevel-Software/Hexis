@@ -310,6 +310,8 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);
     expect(await screen.findByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
     expect(screen.queryByText(/Waiting on/)).not.toBeInTheDocument();
+    // Nor does the tree's badge on the ignored file.
+    expect(screen.queryByRole('img', { name: /Waiting on/ })).not.toBeInTheDocument();
   });
 
   it('while applying, the approve controls stand down', async () => {
