@@ -1,6 +1,6 @@
 import { isUtf8 } from 'node:buffer';
 import { fileExtension } from './doc-extract.types.js';
-import { displayPath, type FileReader, type ReadResult } from './file-reader.js';
+import { displayPath, type FileKind, type FileReader, type ReadResult } from './file-reader.js';
 
 /** Minimal extension→mime map for the binary-read notice (fallback: octet-stream). */
 const MIME_BY_EXT: Record<string, string> = {
@@ -38,7 +38,7 @@ const MIME_BY_EXT: Record<string, string> = {
  * round-trip the original bytes. Checked on the raw bytes, so a large binary
  * is refused without allocating its full decoded string first.
  */
-function isTextBytes(bytes: Buffer): boolean {
+export function isTextBytes(bytes: Buffer): boolean {
   return !bytes.includes(0) && isUtf8(bytes);
 }
 
@@ -55,6 +55,7 @@ export class TextReader implements FileReader {
   /** Fallback reader: matched by the registry's default, not by extension. */
   readonly extensions: readonly string[] = [];
   readonly textEditable: boolean = true;
+  readonly fileKind: FileKind = 'text';
 
   async read(bytes: Buffer, path: string): Promise<ReadResult> {
     return isTextBytes(bytes)
@@ -107,6 +108,7 @@ const MODERN_BY_LEGACY: Record<string, string> = { '.doc': '.docx', '.ppt': '.pp
 export class LegacyOfficeReader extends TextReader {
   override readonly extensions: readonly string[] = ['.doc', '.ppt', '.xls'];
   override readonly textEditable: boolean = false;
+  override readonly fileKind: FileKind = 'document';
 
   /** The write-refusal for the agent text-editing tools (see `assertNotDocumentEdit`). */
   editRefusal(path: string): string {
@@ -127,5 +129,25 @@ export class LegacyOfficeReader extends TextReader {
       `modern format. Convert the document to ${modern} and upload that to read its text, or replace it by ` +
       'uploading a new version.]'
     );
+  }
+}
+
+/**
+ * Extensions that name bytes no text tool may produce: archives, media, fonts,
+ * executables, and the image formats read_file does not return as pictures.
+ * Reads and greps stay the text reader's (a mislabeled `.zip` that holds text
+ * still reads as text, and binary content still gets the one-line notice), but
+ * the write tools refuse them by name — text written to `bundle.zip` can only
+ * ever be a broken archive. Bytes of these kinds arrive through upload, or
+ * travel with copy_file/move_file.
+ */
+export class BinaryReader extends TextReader {
+  override readonly textEditable: boolean = false;
+
+  constructor(
+    override readonly extensions: readonly string[],
+    override readonly fileKind: FileKind,
+  ) {
+    super();
   }
 }
