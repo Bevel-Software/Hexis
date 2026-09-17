@@ -21,6 +21,8 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
+import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
+import { assertNoGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -437,6 +439,38 @@ export function registerWorkspaceTools(
     userEmail: ctx.user.email,
   });
 
+  /**
+   * Refuse a file tool call that names the repository's git folder, in any
+   * input, before any gate, lock or read runs (see `shared/git-internals.ts`).
+   * Every spelling first, then the resolved form against the branch's
+   * workspace, so a link into the folder is refused the same way. A branch
+   * that does not resolve is left for the handler to report; the filesystem
+   * refuses again underneath regardless.
+   */
+  const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
+    const paths: string[] = [];
+    for (const key of ['path', 'src', 'dest', 'destination'] as const) {
+      if (typeof args[key] === 'string') paths.push(args[key]);
+    }
+    if (Array.isArray(args.files)) {
+      for (const f of args.files as unknown[]) {
+        const fp = f && typeof f === 'object' ? (f as Record<string, unknown>).path : undefined;
+        if (typeof fp === 'string') paths.push(fp);
+      }
+    }
+    for (const p of paths) assertNoGitInternalsSegment(p);
+    const onDisk = paths.filter((p) => !spillStore.isSpillRef(p));
+    if (onDisk.length === 0 || typeof args.branch !== 'string' || args.branch === '') return;
+    let fs: LocalFilesystem;
+    try {
+      fs = await ctx.getFilesystem(args.branch);
+    } catch {
+      return;
+    }
+    if (!(fs instanceof GitGuardedFilesystem)) return;
+    for (const p of onDisk) await fs.assertNotGitInternals(p);
+  };
+
   const mount = (spec: {
     name: string;
     description: string;
@@ -471,7 +505,14 @@ export function registerWorkspaceTools(
       ...(spec.internalOnly ? [requireInternalSource] : []),
       // A leading slash is the root-anchored form Copy path gives and names
       // the same workspace path — normalised once here, for every path input.
-      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args), ctx), { write: spec.write }),
+      toolHandler(
+        async (args, ctx) => {
+          const normalized = normalizePathArgs(args);
+          if (spec.fileTool !== false) await assertToolPathsNotGitInternals(normalized, ctx);
+          return spec.handler(normalized, ctx);
+        },
+        { write: spec.write },
+      ),
     );
   };
 
