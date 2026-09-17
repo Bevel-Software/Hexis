@@ -187,7 +187,9 @@ describe('agent writes to roles.yaml check `- group:<Name>` entries against the 
     const refused = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platform Team\n` });
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { error: string }).error).toContain('synced-groups.yaml');
+    expect(await rolesOnDisk()).toBe(CURRENT);
     const landed = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Directory Team\n` });
     expect(landed.status).toBe(200);
+    expect(await rolesOnDisk()).toBe(`${CURRENT}    - group:Directory Team\n`);
   });
 });
