@@ -25,6 +25,10 @@ export class ImageReader implements FileReader {
   readonly textEditable = false;
   readonly fileKind = 'image' as const;
 
+  mimeFor(path: string): string {
+    return imageMimeType(path);
+  }
+
   async read(bytes: Buffer, path: string): Promise<ReadResult> {
     const mime = imageMimeType(path);
     if (bytes.length > IMAGE_MAX_RAW_BYTES) {

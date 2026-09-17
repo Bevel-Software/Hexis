@@ -64,6 +64,12 @@ export interface FileReader {
   /** The kind this reader's extensions name — what a `binary_not_writable` refusal reports. */
   readonly fileKind: FileKind;
   /**
+   * The MIME type this reader's extensions name for `path` — what `file_stat`
+   * reports as `mime` — or undefined when it names none (the fallback reader
+   * on an unknown extension; stat then sniffs the content).
+   */
+  mimeFor?(path: string): string | undefined;
+  /**
    * Format-specific copy for the write-refusal thrown when `textEditable` is
    * false (see `assertNotDocumentEdit` in workspace.tools.ts). Absent = the
    * generic extracted-text/round-trip explanation.
@@ -104,6 +110,11 @@ export class FileReaderRegistry {
         this.byExtension.set(ext, reader);
       }
     }
+  }
+
+  /** Every extension some reader claims (lowercase, with the dot); the fallback owns the rest. */
+  ownedExtensions(): string[] {
+    return [...this.byExtension.keys()];
   }
 
   /** The reader owning `path`'s extension (lowercased by `fileExtension`), or the fallback. */
