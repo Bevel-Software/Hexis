@@ -456,12 +456,13 @@ export function registerWorkflowTools(
     description:
       'Merge a change request into its target branch. Returns `merged` or ' +
       '`conflicts-need-resolution`. Hard blocks (closed, no files, missing approvals) raise an error. ' +
-      '`bypass: true` proceeds despite soft warnings (admin only).',
+      'Every touched file with an eligible approver needs an approval, whatever its type (Markdown, binary, no extension). ' +
+      '`bypass: true` proceeds despite missing approvals (admin only).',
     inputs: {
       type: 'object',
       properties: {
         number: { type: 'integer', minimum: 1, description: 'Change request number.' },
-        bypass: { type: 'boolean', description: 'Proceed despite missing owner approvals on .md files (admin only).' },
+        bypass: { type: 'boolean', description: 'Proceed despite missing owner approvals on any file (admin only).' },
       },
       required: ['number'],
       additionalProperties: false,
