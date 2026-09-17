@@ -2184,6 +2184,29 @@ export class WorkflowService implements IWorkflowService {
       plans.push({ number: summary.number, branch: summary.branch, wsId: ws.id, paths, mergeBase });
     }
 
+    // Requests can share a source branch, and so a workspace and even a file.
+    // The work is grouped per workspace: each file is locked, restored and
+    // committed once, and each branch pushed once.
+    const byWorkspace = new Map<
+      string,
+      { wsId: string; branch: string; plans: typeof plans; paths: { path: string; mergeBase: string }[] }
+    >();
+    for (const plan of plans) {
+      let group = byWorkspace.get(plan.wsId);
+      if (!group) {
+        group = { wsId: plan.wsId, branch: plan.branch, plans: [], paths: [] };
+        byWorkspace.set(plan.wsId, group);
+      }
+      group.plans.push(plan);
+      for (const repoRelPath of plan.paths) {
+        if (!group.paths.some((p) => p.path === repoRelPath)) {
+          group.paths.push({ path: repoRelPath, mergeBase: plan.mergeBase! });
+        }
+      }
+    }
+    const groups = [...byWorkspace.values()];
+    const toChange = groups.filter((g) => g.paths.length > 0);
+
     const held: { wsId: string; branch: string; lockPath: string }[] = [];
     // Every held lock is let go, each on its own: one failed release must not
     // keep the rest held until they expire.
@@ -2196,85 +2219,104 @@ export class WorkflowService implements IWorkflowService {
         }
       }
     };
-    const toChange = plans.filter((plan) => plan.paths.length > 0 && plan.mergeBase);
-    // Local commits not pushed yet are dropped by resetting the checkout to its
-    // remote — which the pull above made it equal to.
-    const discardUnpushed = async (unpushed: typeof toChange) => {
-      for (const plan of unpushed) {
+    // What each checkout's HEAD was before this action committed anything.
+    const before = new Map<string, string | null>();
+    // Undo this action's restores in a checkout that was not pushed: put every
+    // file it touched back as it was at the recorded HEAD, and commit that.
+    // History is never rewritten, so any local work the checkout already had
+    // — unpushed commits, other files — is left exactly as it was.
+    const undo = async (unpushed: typeof toChange) => {
+      for (const group of unpushed) {
+        const at = before.get(group.wsId);
         try {
-          await this.git.resetToRemote(plan.wsId, plan.branch);
+          if (!at) continue;
+          for (const { path: repoRelPath } of group.paths) {
+            await this.git.restorePathFromRef(group.wsId, at, repoRelPath);
+            await this.git.commitFile(
+              group.wsId,
+              user,
+              repoRelPath,
+              `Undo revert of ${repoRelPath} (folder removal stopped)`,
+              true, // skipValidator — this puts back the checkout's own version
+            );
+          }
         } catch (err) {
-          log.warn(`reset failed for #${plan.number} after a folder removal stopped: ${printable(sanitizeError(err))}`);
+          log.warn(
+            `undo failed on ${printable(group.branch)} after a folder removal stopped: ${printable(sanitizeError(err))}`,
+          );
         }
       }
     };
     const pushed: typeof toChange = [];
-    let pushFailure: { plan: (typeof toChange)[number]; err: unknown } | null = null;
+    let pushFailure: { group: (typeof toChange)[number]; err: unknown } | null = null;
     try {
-      for (const plan of plans) {
-        for (const repoRelPath of plan.paths) {
+      for (const group of toChange) {
+        for (const { path: repoRelPath } of group.paths) {
           const lockPath = `${this.kbDirName}/${repoRelPath}`;
-          const lock = await this.fileLocks.acquire(plan.wsId, plan.branch, lockPath, user);
+          const lock = await this.fileLocks.acquire(group.wsId, group.branch, lockPath, user);
           if (!lock.acquired) {
             throw new WorkflowDomainError(
               `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
               409,
             );
           }
-          held.push({ wsId: plan.wsId, branch: plan.branch, lockPath });
+          held.push({ wsId: group.wsId, branch: group.branch, lockPath });
         }
       }
-      // Every request's restores are committed locally before anything is
+      for (const group of toChange) before.set(group.wsId, await this.git.headCommit(group.wsId));
+      // Every checkout's restores are committed locally before anything is
       // pushed, so a failed restore or commit leaves every request as it was.
       try {
-        for (const plan of toChange) {
-          for (const repoRelPath of plan.paths) {
-            await this.git.restorePathFromRef(plan.wsId, plan.mergeBase!, repoRelPath);
+        for (const group of toChange) {
+          const numbers = group.plans.map((plan) => `#${plan.number}`).join(', ');
+          for (const { path: repoRelPath, mergeBase } of group.paths) {
+            await this.git.restorePathFromRef(group.wsId, mergeBase, repoRelPath);
             await this.git.commitFile(
-              plan.wsId,
+              group.wsId,
               user,
               repoRelPath,
-              `Revert ${repoRelPath} (folder deleted; removed from change request #${plan.number})`,
+              `Revert ${repoRelPath} (folder deleted; removed from change request ${numbers})`,
               true, // skipValidator — this restores an already-validated base version
             );
           }
         }
       } catch (err) {
-        await discardUnpushed(toChange);
+        await undo(toChange);
         throw err;
       }
       // Pushes are one per remote branch and cannot be made atomic. A failed
-      // push drops its own and every later request's local commits, so the
-      // requests split cleanly into "done" and "untouched", and running the
-      // action again finishes the rest.
-      for (const [i, plan] of toChange.entries()) {
+      // push undoes its own and every later branch's commits, so the requests
+      // split cleanly into "done" and "untouched", and running the action
+      // again finishes the rest.
+      for (const [i, group] of toChange.entries()) {
         try {
-          await this.trackedPush(plan.wsId, user);
+          await this.trackedPush(group.wsId, user);
         } catch (err) {
-          await discardUnpushed(toChange.slice(i));
-          pushFailure = { plan, err };
+          await undo(toChange.slice(i));
+          pushFailure = { group, err };
           break;
         }
-        pushed.push(plan);
-        this.prs.invalidateDetailCache(plan.number);
+        pushed.push(group);
+        for (const plan of group.plans) this.prs.invalidateDetailCache(plan.number);
       }
     } finally {
       await releaseAll();
     }
 
-    if (pushFailure && pushed.length === 0) throw pushFailure.err;
-    const done = pushFailure ? pushed : plans;
+    const finished = (pushFailure ? pushed : groups).flatMap((group) => group.plans);
+    if (pushFailure && finished.length === 0) throw pushFailure.err;
     const results: FolderChangeRequestRemoval[] = [];
-    for (const plan of done) {
+    for (const plan of finished) {
       const withdrawn = await this.closeEmptyChangeRequest(plan.number, user);
       results.push({ number: plan.number, removedPaths: plan.paths, withdrawn });
     }
     if (pushFailure) {
+      const failed = pushFailure.group.plans.map((plan) => `#${plan.number}`).join(', ');
       log.warn(
-        `push failed for #${pushFailure.plan.number} removing folder ${printable(folder)}: ${printable(sanitizeError(pushFailure.err))}`,
+        `push failed for ${failed} removing folder ${printable(folder)}: ${printable(sanitizeError(pushFailure.err))}`,
       );
       throw new WorkflowDomainError(
-        `The folder's files were removed from ${pushed.map((plan) => `#${plan.number}`).join(', ')}, but #${pushFailure.plan.number} could not be updated and it and any later requests were left as they were. Run the delete again to finish.`,
+        `The folder's files were removed from ${finished.map((plan) => `#${plan.number}`).join(', ')}, but ${failed} could not be updated and it and any later requests were left as they were. Run the delete again to finish.`,
         500,
       );
     }

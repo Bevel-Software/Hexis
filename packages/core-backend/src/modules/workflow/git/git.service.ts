@@ -1849,6 +1849,14 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The workspace's current HEAD commit, or null on an unborn branch. Read
+   * under the workspace mutex, so it never observes a pull-rebase mid-flight.
+   */
+  async headCommit(workspaceId: string): Promise<string | null> {
+    return this.mutex.run(workspaceId, async () => this.revParseOrNull(await this.repoDir(workspaceId), 'HEAD'));
+  }
+
+  /**
    * Hard-reset the workspace's checked-out branch to `origin/<branch>`, fetching
    * first. This is the break-glass primitive behind roles.yaml recovery: it
    * makes the local clone EXACTLY match origin, discarding any local divergence
