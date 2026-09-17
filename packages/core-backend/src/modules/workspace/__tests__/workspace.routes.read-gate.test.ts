@@ -314,7 +314,9 @@ describe('.bevelignore is admin-only in the file tree', () => {
       `${KB}/.bevelignore`,
       `${KB}/Knowledge/Open/a.md`,
     ]);
-    expect(verdict.get(`${KB}/.bevelignore`)).toBe(false);
+    // Unlisted, not denied: hiding it withholds no content, so it never
+    // counts toward the tree's `withheld`.
+    expect(verdict.get(`${KB}/.bevelignore`)).toBe('unlisted');
     // Only that one file — the rest of the tree is untouched.
     expect(verdict.get(`${KB}/Knowledge/Open/a.md`)).toBe(true);
   });
@@ -327,7 +329,7 @@ describe('.bevelignore is admin-only in the file tree', () => {
   /** The stack is hierarchical — a nested one governs its own subtree. */
   it('hides a nested one too, not just the repo-root file', async () => {
     const verdict = await (await treeFilter(false))([`${KB}/KnowledgeBase/Product/.bevelignore`]);
-    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe(false);
+    expect(verdict.get(`${KB}/KnowledgeBase/Product/.bevelignore`)).toBe('unlisted');
   });
 
   /** Basename match, not substring: a file merely NAMED after it stays visible. */

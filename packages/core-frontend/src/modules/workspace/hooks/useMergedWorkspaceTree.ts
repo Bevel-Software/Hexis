@@ -16,6 +16,12 @@ export function useMergedWorkspaceTree(): {
   tree: FileTreeEntry | null;
   /** Paths synthesized from the caller's own requests → the request's number. */
   suggestionOnlyPaths: ReadonlyMap<string, number>;
+  /**
+   * How many entries the server's read filter kept out of the tree — the
+   * listing root's `withheld`, read off the server's own tree because the
+   * overlays below rebuild the root without it. 0 when nothing was.
+   */
+  withheld: number;
 } {
   const { fileTree, kbDirName, pendingUploads } = useWorkspace();
   const serverTree = useMemo(
@@ -79,5 +85,5 @@ export function useMergedWorkspaceTree(): {
     [treeWithSuggestions, kbDirName],
   );
 
-  return { tree, suggestionOnlyPaths };
+  return { tree, suggestionOnlyPaths, withheld: fileTree?.withheld ?? 0 };
 }
