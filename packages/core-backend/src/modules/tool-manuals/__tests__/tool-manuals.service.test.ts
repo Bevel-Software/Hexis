@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { KbPluginSource } from '../../plugins/discovery/kb-plugin-source.js';
 
@@ -610,5 +610,75 @@ describe('ToolManualService', () => {
     const preview = await svc().preview('{ not valid json');
     expect(preview.ok).toBe(false);
     expect(preview.errors?.length).toBeGreaterThan(0);
+  });
+});
+
+describe('ToolManualService.listDeclaredOnlyOnBranch', () => {
+  let root: string;
+  const DRAFT = 'user/add-crm';
+  const draftWs = workspaceIdForBranch(DRAFT);
+
+  /** Cloned here: the default branch, the draft, and `user/gone` (its remote branch since deleted). */
+  const cloned = new Set([wsId, draftWs, workspaceIdForBranch('user/gone')]);
+  const getOrCreateForBranch = vi.fn(async (branch: string) => {
+    if (branch === 'user/gone') throw new Error('branch does not exist');
+    return { id: workspaceIdForBranch(branch) };
+  });
+  const workspaceService = {
+    getOrCreateForBranch,
+    hasBootstrappedWorkspace: async (id: string) => cloned.has(id),
+    getWorkspacePath: async (id: string) => join(root, id),
+  } as unknown as WorkspaceService;
+
+  /** Reads everything on the default branch; on the draft, everything but `Secret Plugin`. */
+  const readGate = {
+    canReadBatch: async (ws: string, _e: string, paths: string[]) =>
+      new Map(paths.map((p) => [p, ws !== draftWs || !p.startsWith('Plugins/Secret Plugin/')])),
+  } as unknown as IAccessControl;
+
+  const writeMcpJson = async (ws: string, plugin: string, servers: string[]) => {
+    const dir = join(root, ws, KB_DIR, 'Plugins', plugin);
+    await mkdir(dir, { recursive: true });
+    const mcpServers = Object.fromEntries(
+      servers.map((s) => [s, { type: 'streamable-http', url: `https://${s.replace(/_/g, '-')}.example.com/mcp` }]),
+    );
+    await writeFile(join(dir, 'mcp.json'), JSON.stringify({ mcpServers }));
+    await writeFile(join(dir, 'plugin.json'), JSON.stringify({ name: plugin.toLowerCase().replace(/ /g, '-') }));
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'tools-branch-'));
+    // Released: `billing`. The draft carries it too (an edit), plus two new servers,
+    // one of them in a plugin the caller cannot read on that branch.
+    await writeMcpJson(wsId, 'Sales', ['billing']);
+    await writeMcpJson(draftWs, 'Sales', ['billing', 'crm']);
+    await writeMcpJson(draftWs, 'Secret Plugin', ['hidden']);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const svc = () => new ToolManualService(workspaceService, readGate, KB_DIR, disk, new KbPluginSource(disk));
+
+  test('names only the readable declarations the default branch does not serve', async () => {
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DRAFT)).toEqual([
+      { name: 'crm', path: 'Plugins/Sales/mcp.json', type: 'mcp' },
+    ]);
+  });
+
+  test('is empty for the default branch itself and for a branch without a workspace', async () => {
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', DEFAULT_BRANCH)).toEqual([]);
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'user/gone')).toEqual([]);
+  });
+
+  test('never bootstraps a branch this process holds no clone of', async () => {
+    getOrCreateForBranch.mockClear();
+    expect(await svc().listDeclaredOnlyOnBranch('user@example.com', 'someone/private-guess')).toEqual([]);
+    expect(getOrCreateForBranch).not.toHaveBeenCalledWith('someone/private-guess');
+  });
+
+  test('the released catalog never includes the draft declaration', async () => {
+    expect((await svc().listAccessible('user@example.com')).map((m) => m.name)).toEqual(['billing']);
   });
 });
