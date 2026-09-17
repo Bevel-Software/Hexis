@@ -103,7 +103,12 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
       getLock: vi.fn(async () => null),
       acquireLock,
       releaseLock: vi.fn(async () => undefined),
-      releaseLockNoCommit: vi.fn(async () => undefined),
+      // Models the real release-without-commit: it discards the path's
+      // working-tree changes, which DELETES a just-uploaded file whose commit
+      // is still queued. A refusal that runs under the lock loses the upload.
+      releaseLockNoCommit: vi.fn(async (_ws: string, _branch: string, wsRel: string) =>
+        fs.rm(path.join(root, wsRel), { force: true }),
+      ),
     } as unknown as WorkflowService;
 
     const app = express();
@@ -207,6 +212,23 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
       expect(writeFile).not.toHaveBeenCalled();
     });
   }
+
+  it('binary bytes saved as .md and shared right after upload: every mutation refuses before the lock, so the upload survives', async () => {
+    // The upload's commit is still queued, so the file exists only in the
+    // working tree; releasing a lock without a commit would discard it.
+    const abs = path.join(root, KB, 'Sales/Fresh.md');
+    await fs.writeFile(abs, BINARIES['Sales/Deck.pptx']);
+    const before = sha(await fs.readFile(abs));
+
+    for (const m of MUTATIONS) {
+      const res = await post(m.route, { path: `${KB}/Sales/Fresh.md`, kind: 'file', principal: ALICE, ...m.extra });
+      expect(res.status, m.name).toBe(422);
+      expect((await res.json()).kind, m.name).toBe('folder-governs-access');
+      expect(sha(await fs.readFile(abs)), m.name).toBe(before);
+    }
+    expect(acquireLock).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+  });
 
   it('a .tool definition carries its own rules, as the resolver reads them', async () => {
     const abs = path.join(root, KB, 'Sales/crm.tool');

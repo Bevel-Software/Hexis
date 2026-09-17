@@ -820,6 +820,8 @@ export function createAccessRoutes(
       await workspaceService.getOrCreateForBranch(branch);
       // Fail-closed gate (BEFORE acquiring the lock).
       await assertCanMutate(workspaceId, branch, user.email, gatePath);
+      // Binary content refuses BEFORE the lock (see assertTargetHoldsText).
+      await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
 
       const editPath = gatePath; // grant edits the same path it gates on
       await withEditLock(workspaceId, branch, editPath, user, async () => {
@@ -961,6 +963,7 @@ export function createAccessRoutes(
       if (mode === 'deny-here') {
         const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
         await assertCanMutate(workspaceId, branch, user.email, gatePath);
+        await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
         await withEditLock(workspaceId, branch, gatePath, user, async () => {
           // Scope the deny to the same verb the user acted on (if any).
           await mutation.denyHere(workspaceId, kind, repoRelTarget, principal, verb, revokeOpts);
@@ -977,6 +980,7 @@ export function createAccessRoutes(
       // ---- default: revoke on the target, classified -----------------------
       const { gatePath } = gateAndEditPaths(kind, repoRelTarget);
       await assertCanMutate(workspaceId, branch, user.email, gatePath);
+      await mutation.assertTargetHoldsText(workspaceId, kind, repoRelTarget);
 
       const editPath = gatePath;
       let changed = false;

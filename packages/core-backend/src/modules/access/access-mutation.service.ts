@@ -190,6 +190,30 @@ export class AccessMutationService {
   }
 
   /**
+   * The CONTENT half of the refusal, for the routes to run BEFORE taking the
+   * edit lock: a file target whose bytes are not text (a binary saved as
+   * `.md`) answers `folder-governs-access` without the lock ever being held.
+   * Refusing inside the lock instead makes the route release it without a
+   * commit, and that release discards the path's working-tree changes — which,
+   * right after an upload whose commit is still queued, deletes the upload.
+   * `readOrEmpty` repeats the check under the lock, in case the bytes changed
+   * in between. Folder targets and missing files pass through untouched (the
+   * mutation reports those as before).
+   */
+  async assertTargetHoldsText(workspaceId: string, kind: TargetKind, repoRelTarget: string): Promise<void> {
+    if (kind !== 'file') return;
+    const { editPath } = this.fileToEdit(kind, repoRelTarget);
+    let bytes: Buffer;
+    try {
+      bytes = await this.workspaceService.readFileBinary(workspaceId, this.toWorkspaceRelative(editPath));
+    } catch (err) {
+      if (isAbsence(err)) return;
+      throw err;
+    }
+    if (!isTextBytes(bytes)) throw folderGovernsAccessError(repoRelTarget);
+  }
+
+  /**
    * Read the to-be-edited file's current text, or '' when it's an expected
    * missing file. An absent file is normal only for a folder (no `access.md`
    * yet); there we swallow ENOENT/ENOTDIR. Every other error — a typoed node
