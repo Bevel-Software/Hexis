@@ -386,6 +386,7 @@ describe('FileViewer', () => {
       owners: EMPTY_ELIGIBLE,
     };
     accessMock.fetchFileAccess.mockClear();
+    readBranchMock.mockImplementation(async () => '');
     // Restore the default "acquire succeeds" behaviour so a per-test 403
     // override doesn't leak into the next test.
     vi.mocked(acquireLockMock).mockImplementation(async () => ({
@@ -887,6 +888,42 @@ describe('FileViewer', () => {
     expect(
       await screen.findByRole('dialog', { name: /Change request: Tighten the wording/ }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * "Waiting on you and N others" counts the people who can APPROVE — the
+   * write: grants — not the owner: list. A file written by Bob and Carl (plus
+   * the inherited Admin role) with no owners must not tell Bob he is the only
+   * one it waits on.
+   */
+  it('counts the other approvers from the write grants, not the owners', async () => {
+    accessMock.result = {
+      canWrite: true,
+      canOwner: false,
+      eligible: {
+        roles: ['Admin'],
+        users: [
+          { name: 'Bob', email: 'bob@example.com' },
+          { name: 'Carl', email: 'carl@example.com' },
+        ],
+      },
+      owners: EMPTY_ELIGIBLE,
+    };
+    // The proposal must actually differ from the file, or the box reads
+    // "Already up to date" and has no verdict to wait on.
+    readBranchMock.mockImplementation((async (branch: string) =>
+      branch.startsWith('suggestions/') ? 'proposed' : 'current') as never);
+    render(
+      <ViewerHarness
+        initialContent="contested"
+        branch="target-company-state"
+        authUser={{ id: 'u-bob', email: 'bob@example.com', name: 'Bob' }}
+        changeRequests={[{ number: 33, title: 'Tighten the wording', who: 'Ali Raza' }]}
+      />,
+    );
+
+    expect(await screen.findByText('Waiting on you and 2 others')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument();
   });
 
   it('says nothing on a file nobody has proposed a change to', () => {

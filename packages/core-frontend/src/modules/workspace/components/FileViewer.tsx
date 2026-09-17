@@ -1422,7 +1422,10 @@ export function FileViewer() {
                     requests={requestsOnThisFile}
                     canDecide={access.canWrite === true}
                     ownersLabel={ownersLabel}
-                    othersPending={othersPendingBesides(access.owners, auth.user?.email)}
+                    // Counted over `eligible` (the write: grants, which are what
+                    // approval rights and the merge gate resolve against), NOT
+                    // `owners` — a file can have writers and no owner: at all.
+                    othersPending={othersPendingBesides(access.eligible, auth.user?.email)}
                     onApplied={() => {
                       reloadTabFromDisk(openFilePath).catch(() => {});
                     }}
