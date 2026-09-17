@@ -58,6 +58,7 @@ import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
+import { ToolDeleteService } from '../modules/tool-manuals/tool-delete.service.js';
 import {
   PluginIndexService,
   PluginProvisionService,
@@ -190,6 +191,8 @@ export interface CoreServices {
    */
   readAgentPreamble: AgentPreambleReader;
   mcpServerEditService: McpServerEditService;
+  /** Deleting one tool — the owner's verb (see ToolDeleteService). */
+  toolDeleteService: ToolDeleteService;
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
@@ -714,6 +717,24 @@ export async function createCoreServices(
   // UTCP client can resolve `${VAR}` from the caller's secrets at tool-call time.
   registerBevelSecretsVariableLoader(secretsVaultService);
 
+  // Deleting ONE tool from its page — the owner's verb, the other end of the
+  // promise that made them the owner. Built here because it is the one service
+  // that spans both halves of a tool: the definition (a `.tool` file or an
+  // mcp.json entry) and the credentials stored under its name, which is why it
+  // can only exist once the vault does.
+  const toolDeleteService = new ToolDeleteService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    toolManualService,
+    skillService,
+    pluginIndexService,
+    pluginSource,
+    secretsVaultService,
+    kbDirName,
+    disk,
+  );
+
   // The credential probe: whether a tool's stored credential actually WORKS, as
   // distinct from whether one is stored. Built here — after the vault and the
   // tool catalog — because a probe needs both: the catalog to know what to
@@ -990,6 +1011,7 @@ export async function createCoreServices(
     commitWorker,
     disk,
     mcpServerEditService,
+    toolDeleteService,
     workspaceService,
     kbStartupRunner,
     settings,

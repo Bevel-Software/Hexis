@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('vault');
-import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, like, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { secrets } from '../database/schema.js';
 import { TokenCrypto } from '../../shared/token-crypto.js';
@@ -16,6 +16,8 @@ import {
   type CreateOAuthSecretInput,
   type OAuthProviderConfig,
   type VariableScopeResolver,
+  type NamespaceSecretCount,
+  isKeyInNamespace,
   InvalidSecretError,
   SecretNotFoundError,
   SecretOAuthError,
@@ -243,6 +245,41 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .returning({ id: secrets.id });
     if (res.length === 0) throw new SecretNotFoundError(key);
     this.notifyMutation(userId);
+  }
+
+  async countNamespace(prefix: string, declared: readonly string[] = []): Promise<NamespaceSecretCount> {
+    return tally(await this.namespaceRows(prefix, declared));
+  }
+
+  async removeNamespace(prefix: string, declared: readonly string[] = []): Promise<NamespaceSecretCount> {
+    const rows = await this.namespaceRows(prefix, declared);
+    if (rows.length === 0) return { keys: 0, signIns: 0 };
+    await this.db.delete(secrets).where(inArray(secrets.id, rows.map((r) => r.id)));
+    // Every tier may have changed: shared rows affect everyone, and each
+    // user whose row went is told on their own.
+    this.notifyMutation(null);
+    for (const userId of new Set(rows.map((r) => r.userId).filter((u): u is string => u !== null))) {
+      this.notifyMutation(userId);
+    }
+    return tally(rows);
+  }
+
+  /**
+   * The rows under a namespace, across every user. `LIKE` narrows in the
+   * database (its `_` and `%` escaped — `_` is in nearly every prefix); the
+   * exact membership rule, which `LIKE` cannot say, is applied here.
+   */
+  private async namespaceRows(
+    prefix: string,
+    declared: readonly string[],
+  ): Promise<{ id: string; key: string; userId: string | null; kind: string }[]> {
+    if (!prefix) return [];
+    const pattern = `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = await this.db
+      .select({ id: secrets.id, key: secrets.key, userId: secrets.userId, kind: secrets.kind })
+      .from(secrets)
+      .where(like(secrets.key, pattern));
+    return rows.filter((r) => isKeyInNamespace(r.key, prefix, declared));
   }
 
   async statusFor(userId: string, keys: string[]): Promise<SecretConfigStatus[]> {
@@ -878,4 +915,10 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 /** PKCE S256: base64url(sha256(verifier)). */
 function sha256base64url(verifier: string): string {
   return createHash('sha256').update(verifier).digest('base64url');
+}
+
+/** A namespace's rows, counted by what a person would call them. */
+function tally(rows: { userId: string | null; kind: string }[]): NamespaceSecretCount {
+  const signIns = rows.filter((r) => r.userId !== null && r.kind === 'oauth').length;
+  return { keys: rows.length - signIns, signIns };
 }
