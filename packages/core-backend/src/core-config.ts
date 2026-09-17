@@ -253,6 +253,14 @@ export class CoreConfig {
    * development.
    */
   readonly publicFrontendUrl: string;
+  /**
+   * The public frontend address when one is actually configured
+   * (`PUBLIC_FRONTEND_URL`, `https://<DOMAIN>`, or a production
+   * `PUBLIC_BACKEND_URL`), else null. Unlike `publicFrontendUrl` it never
+   * falls back to a local default, so a link built from it is one a person
+   * outside the deployment can open.
+   */
+  readonly configuredPublicFrontendUrl: string | null;
 
   constructor() {
     this.port = parseInt(process.env.PORT || '3001', 10);
@@ -414,6 +422,14 @@ export class CoreConfig {
     )
       .trim()
       .replace(/\/+$/, '');
+    // Only an address someone set counts — the localhost fallbacks above are
+    // no link to hand a person. In production an explicit backend origin is
+    // the frontend's too (the backend serves the SPA).
+    const frontendConfigured =
+      Boolean((process.env.PUBLIC_FRONTEND_URL || '').trim()) ||
+      Boolean(domain) ||
+      (this.nodeEnv === 'production' && Boolean((process.env.PUBLIC_BACKEND_URL || '').trim()));
+    this.configuredPublicFrontendUrl = frontendConfigured ? this.publicFrontendUrl : null;
     // Parse-validate so a malformed URL fails at boot rather than producing a
     // broken OAuth redirect later. (We intentionally don't force https / reject
     // localhost in production: local Docker runs prod mode over http://localhost.)
