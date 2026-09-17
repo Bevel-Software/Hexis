@@ -48,6 +48,70 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
     toast(copied ? COPIED_TOAST : COPY_FAILED_TOAST, copied ? 'neutral' : 'danger');
   }
 
+  // Both panels stay mounted (see `AddDialogTabs`): the Skills half holds the
+  // new-skill name an admin may already have typed, and a tab click is not a
+  // reason to lose it.
+  const skillsPanel = (
+    <>
+      <p className="text-ui text-ink-muted">
+        {`It lands in ${name}. Yours alone until you add it to a plugin.`}
+      </p>
+
+      {isAdmin && (
+        <>
+          <NewSkillPanel
+            destination={{ personal: true }}
+            existingSkills={existingSkills}
+            onCreated={onClose}
+          />
+
+          <div className="my-3.5 flex items-center gap-3">
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+            <span className="text-meta text-ink-faint">or</span>
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+          </div>
+        </>
+      )}
+
+      <p className="text-ui text-ink-muted">
+        Tell your agent what you need. It drafts the skill and puts it here.
+      </p>
+
+      <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
+        <p className="font-mono text-detail text-ink">{skillPrompt}</p>
+      </Surface>
+    </>
+  );
+
+  const toolsPanel = (
+    <>
+      {/* The same note as the Skills tab: your own folder has no other
+          owner, so there is no change request to mention. */}
+      <p className="text-ui text-ink-muted">
+        {`It lands in ${name}. Yours alone until you add it to a plugin.`}
+      </p>
+
+      <p className="mt-3 text-ui text-ink-muted">
+        Tell your agent what the tool should do. It drafts the tool and puts it here.
+      </p>
+
+      <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
+        <p className="font-mono text-detail text-ink">{toolPrompt}</p>
+      </Surface>
+
+      {/* A personal folder is an ordinary plugin folder on disk, so it uses the
+          same two locations as any other: `mcp.json` at its root, `.tool`
+          manuals under the reverse-DNS extension directory. */}
+      <p className="mt-3.5 text-ui text-ink-muted">
+        To connect an MCP server, add it to the mcp.json in your own folder.
+      </p>
+      <p className="mt-2 text-ui text-ink-muted">
+        To call an API without an MCP server, add a .tool manual describing it under
+        software.bevel.hexis/tools/ in your own folder.
+      </p>
+    </>
+  );
+
   return (
     <Dialog
       open
@@ -64,62 +128,11 @@ export function PersonalAddDialog({ name, existingSkills, onClose }: PersonalAdd
         </>
       }
     >
-      <AddDialogTabs selected={kind} onSelect={setKind}>
-        {kind === 'skills' ? (
-          <>
-            <p className="text-ui text-ink-muted">
-              {`It lands in ${name}. Yours alone until you add it to a plugin.`}
-            </p>
-
-            {isAdmin && (
-              <>
-                <NewSkillPanel
-                  destination={{ personal: true }}
-                  existingSkills={existingSkills}
-                  onCreated={onClose}
-                />
-
-                <div className="my-3.5 flex items-center gap-3">
-                  <span aria-hidden="true" className="h-px flex-1 bg-line" />
-                  <span className="text-meta text-ink-faint">or</span>
-                  <span aria-hidden="true" className="h-px flex-1 bg-line" />
-                </div>
-              </>
-            )}
-
-            <p className="text-ui text-ink-muted">
-              Tell your agent what you need. It drafts the skill and puts it here.
-            </p>
-
-            <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
-              <p className="font-mono text-detail text-ink">{skillPrompt}</p>
-            </Surface>
-          </>
-        ) : (
-          <>
-            {/* The same note as the Skills tab: your own folder has no other
-                owner, so there is no change request to mention. */}
-            <p className="text-ui text-ink-muted">
-              {`It lands in ${name}. Yours alone until you add it to a plugin.`}
-            </p>
-
-            <p className="mt-3 text-ui text-ink-muted">
-              Tell your agent what the tool should do. It drafts the tool and puts it here.
-            </p>
-
-            <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
-              <p className="font-mono text-detail text-ink">{toolPrompt}</p>
-            </Surface>
-
-            <p className="mt-3.5 text-ui text-ink-muted">
-              To connect an MCP server, add it to the mcp.json in your own folder.
-            </p>
-            <p className="mt-2 text-ui text-ink-muted">
-              To call an API without an MCP server, add a .tool manual describing it to your own folder.
-            </p>
-          </>
-        )}
-      </AddDialogTabs>
+      <AddDialogTabs
+        selected={kind}
+        onSelect={setKind}
+        panels={{ skills: skillsPanel, tools: toolsPanel }}
+      />
     </Dialog>
   );
 }

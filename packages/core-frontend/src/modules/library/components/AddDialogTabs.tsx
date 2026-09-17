@@ -11,8 +11,13 @@ const KINDS: ReadonlyArray<readonly [AddKind, string]> = [
 interface AddDialogTabsProps {
   selected: AddKind;
   onSelect(kind: AddKind): void;
-  /** The selected tab's content. One panel, relabelled by whichever tab is on. */
-  children: ReactNode;
+  /**
+   * One panel per tab. BOTH are rendered — the inactive one is `hidden`, not
+   * unmounted, because the Skills panel holds typed state (the new-skill name,
+   * the link search) and unmounting it on a tab click would throw a draft away
+   * silently.
+   */
+  panels: Record<AddKind, ReactNode>;
 }
 
 /**
@@ -27,7 +32,7 @@ interface AddDialogTabsProps {
  * Same keyboard contract as `SkillFileTabs`: arrows and Home/End move the
  * selection, and focus follows it.
  */
-export function AddDialogTabs({ selected, onSelect, children }: AddDialogTabsProps) {
+export function AddDialogTabs({ selected, onSelect, panels }: AddDialogTabsProps) {
   const baseId = useId();
   const buttons = useRef(new Map<AddKind, HTMLButtonElement>());
 
@@ -63,7 +68,7 @@ export function AddDialogTabs({ selected, onSelect, children }: AddDialogTabsPro
               role="tab"
               id={`${baseId}-tab-${kind}`}
               aria-selected={on}
-              aria-controls={`${baseId}-panel`}
+              aria-controls={`${baseId}-panel-${kind}`}
               tabIndex={on ? 0 : -1}
               ref={(el) => {
                 if (el) buttons.current.set(kind, el);
@@ -82,9 +87,17 @@ export function AddDialogTabs({ selected, onSelect, children }: AddDialogTabsPro
           );
         })}
       </div>
-      <div role="tabpanel" id={`${baseId}-panel`} aria-labelledby={`${baseId}-tab-${selected}`}>
-        {children}
-      </div>
+      {KINDS.map(([kind]) => (
+        <div
+          key={kind}
+          role="tabpanel"
+          id={`${baseId}-panel-${kind}`}
+          aria-labelledby={`${baseId}-tab-${kind}`}
+          hidden={kind !== selected}
+        >
+          {panels[kind]}
+        </div>
+      ))}
     </>
   );
 }

@@ -80,6 +80,104 @@ export function AddToPluginDialog({
     toast(copied ? COPIED_TOAST : COPY_FAILED_TOAST, copied ? 'neutral' : 'danger');
   }
 
+  // Both panels are handed to `AddDialogTabs`, which mounts BOTH and hides the
+  // inactive one. The Skills half owns typed state — the new-skill name and the
+  // link search — and a tab click that unmounted it would silently throw a
+  // half-written draft away.
+  const skillsPanel = (
+    <>
+      <p className="text-ui text-ink-muted">
+        {isAdmin
+          ? canWrite
+            ? `Two ways in. Either way it joins ${name}. Everyone in the plugin gets it the next time their agent connects.`
+            : `Two ways in. Either way it goes to ${name} as a change request, and an owner reviews it before it joins.`
+          : canWrite
+            ? `Use the prompt below to have your agent draft the skill and add it to ${name} for everyone in the plugin.`
+            : `Use the prompt below to have your agent draft the skill and send it to ${name} as a change request for an owner to review.`}
+      </p>
+
+      {/* Linking is the MANAGER's half: it edits this plugin's manifest, and the
+          server refuses anyone else. A non-manager only gets the prompt below. */}
+      {canWrite && linkable && onLinked && (
+        <>
+          <div className="mt-3">
+            <LinkSkillPanel
+              plugin={name}
+              items={linkable}
+              onLinked={() => {
+                onLinked();
+                onClose();
+              }}
+            />
+          </div>
+          <div className="my-3.5 flex items-center gap-3">
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+            <span className="text-meta text-ink-faint">or</span>
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+          </div>
+        </>
+      )}
+
+      {isAdmin && (
+        <>
+          <NewSkillPanel
+            destination={{ parentPath: primaryPath, canWrite }}
+            existingSkills={existingSkills}
+            onCreated={onClose}
+          />
+
+          <div className="my-3.5 flex items-center gap-3">
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+            <span className="text-meta text-ink-faint">or</span>
+            <span aria-hidden="true" className="h-px flex-1 bg-line" />
+          </div>
+        </>
+      )}
+
+      {isAdmin && (
+        <p className="text-ui text-ink-muted">
+          {`Tell your agent what you need. It drafts the skill and adds it to ${name}.`}
+        </p>
+      )}
+
+      <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
+        <p className="font-mono text-detail text-ink">{skillPrompt}</p>
+      </Surface>
+    </>
+  );
+
+  const toolsPanel = (
+    <>
+      {/* The Skills tab's owner-or-change-request note, without its
+          "Two ways in": none of the tool paths below is a form. */}
+      <p className="text-ui text-ink-muted">
+        {canWrite
+          ? `Whichever way you add it, it joins ${name}. Everyone in the plugin gets it the next time their agent connects.`
+          : `Whichever way you add it, it goes to ${name} as a change request, and an owner reviews it before it joins.`}
+      </p>
+
+      <p className="mt-3 text-ui text-ink-muted">
+        {`Tell your agent what the tool should do. It drafts the tool and adds it to ${name}.`}
+      </p>
+
+      <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
+        <p className="font-mono text-detail text-ink">{toolPrompt}</p>
+      </Surface>
+
+      {/* Both locations are the ones the workspace layout defines (shared
+          `kb-layout.ts`): `mcp.json` at the plugin root — the Agent Plugins
+          fixed location — and `.tool` manuals under the reverse-DNS extension
+          directory, which is where the migration writes them and where a
+          reader expects to find them. */}
+      <p className="mt-3.5 text-ui text-ink-muted">
+        {`To connect an MCP server, add it to the mcp.json in the ${name} plugin folder.`}
+      </p>
+      <p className="mt-2 text-ui text-ink-muted">
+        {`To call an API without an MCP server, add a .tool manual describing it to the ${name} plugin's software.bevel.hexis/tools/ folder.`}
+      </p>
+    </>
+  );
+
   return (
     <Dialog
       open
@@ -96,94 +194,11 @@ export function AddToPluginDialog({
         </>
       }
     >
-      <AddDialogTabs selected={kind} onSelect={setKind}>
-        {kind === 'skills' ? (
-          <>
-            <p className="text-ui text-ink-muted">
-              {isAdmin
-                ? canWrite
-                  ? `Two ways in. Either way it joins ${name}. Everyone in the plugin gets it the next time their agent connects.`
-                  : `Two ways in. Either way it goes to ${name} as a change request, and an owner reviews it before it joins.`
-                : canWrite
-                  ? `Use the prompt below to have your agent draft the skill and add it to ${name} for everyone in the plugin.`
-                  : `Use the prompt below to have your agent draft the skill and send it to ${name} as a change request for an owner to review.`}
-            </p>
-
-            {/* Linking is the MANAGER's half: it edits this plugin's manifest, and the
-                server refuses anyone else. A non-manager only gets the prompt below. */}
-            {canWrite && linkable && onLinked && (
-              <>
-                <div className="mt-3">
-                  <LinkSkillPanel
-                    plugin={name}
-                    items={linkable}
-                    onLinked={() => {
-                      onLinked();
-                      onClose();
-                    }}
-                  />
-                </div>
-                <div className="my-3.5 flex items-center gap-3">
-                  <span aria-hidden="true" className="h-px flex-1 bg-line" />
-                  <span className="text-meta text-ink-faint">or</span>
-                  <span aria-hidden="true" className="h-px flex-1 bg-line" />
-                </div>
-              </>
-            )}
-
-            {isAdmin && (
-              <>
-                <NewSkillPanel
-                  destination={{ parentPath: primaryPath, canWrite }}
-                  existingSkills={existingSkills}
-                  onCreated={onClose}
-                />
-
-                <div className="my-3.5 flex items-center gap-3">
-                  <span aria-hidden="true" className="h-px flex-1 bg-line" />
-                  <span className="text-meta text-ink-faint">or</span>
-                  <span aria-hidden="true" className="h-px flex-1 bg-line" />
-                </div>
-              </>
-            )}
-
-            {isAdmin && (
-              <p className="text-ui text-ink-muted">
-                {`Tell your agent what you need. It drafts the skill and adds it to ${name}.`}
-              </p>
-            )}
-
-            <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
-              <p className="font-mono text-detail text-ink">{skillPrompt}</p>
-            </Surface>
-          </>
-        ) : (
-          <>
-            {/* The Skills tab's owner-or-change-request note, without its
-                "Two ways in": none of the tool paths below is a form. */}
-            <p className="text-ui text-ink-muted">
-              {canWrite
-                ? `Whichever way you add it, it joins ${name}. Everyone in the plugin gets it the next time their agent connects.`
-                : `Whichever way you add it, it goes to ${name} as a change request, and an owner reviews it before it joins.`}
-            </p>
-
-            <p className="mt-3 text-ui text-ink-muted">
-              {`Tell your agent what the tool should do. It drafts the tool and adds it to ${name}.`}
-            </p>
-
-            <Surface tone="sunken" radius="md" elevation="none" padded className="mt-2.5">
-              <p className="font-mono text-detail text-ink">{toolPrompt}</p>
-            </Surface>
-
-            <p className="mt-3.5 text-ui text-ink-muted">
-              {`To connect an MCP server, add it to the mcp.json in the ${name} plugin folder.`}
-            </p>
-            <p className="mt-2 text-ui text-ink-muted">
-              {`To call an API without an MCP server, add a .tool manual describing it to the ${name} plugin folder.`}
-            </p>
-          </>
-        )}
-      </AddDialogTabs>
+      <AddDialogTabs
+        selected={kind}
+        onSelect={setKind}
+        panels={{ skills: skillsPanel, tools: toolsPanel }}
+      />
     </Dialog>
   );
 }

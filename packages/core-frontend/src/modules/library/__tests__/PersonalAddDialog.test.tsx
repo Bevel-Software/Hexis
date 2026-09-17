@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import {
   WorkspaceContext,
@@ -115,7 +115,9 @@ describe('PersonalAddDialog', () => {
     const { field } = renderDialog();
     expect(field()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('tabpanel')).getByText(/Yours alone until you add it to a plugin/),
+    ).toBeInTheDocument();
   });
 
   it('creates the skill as PERSONAL. Destination resolution belongs to the api layer', async () => {
@@ -171,17 +173,26 @@ describe('PersonalAddDialog', () => {
     expect(screen.queryByRole('textbox', { name: 'Skill name' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Copy prompt' })).toBeInTheDocument();
     expect(screen.getByText(/Tell your agent what you need/)).toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('tabpanel')).getByText(/Yours alone until you add it to a plugin/),
+    ).toBeInTheDocument();
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
   });
 });
 
+// Both panels stay mounted and the inactive one is hidden, so the Skills half
+// never loses a half-typed name to a tab click. Text assertions are therefore
+// scoped to the visible panel — the note about landing in your own list is
+// worded identically on both tabs.
 describe('PersonalAddDialog: Skills and Tools tabs', () => {
   const SKILL_PROMPT =
     'Help me build a new skill or tool at Bevel. Keep it to myself for now. It goes in my own list, not a plugin.';
   const TOOL_PROMPT =
     'Help me build a new tool at Bevel. Keep it to myself for now. It goes in my own list, not a plugin.';
   const writeText = vi.fn<(text: string) => Promise<void>>();
+
+  /** The visible tabpanel. Role queries skip the hidden one. */
+  const panel = () => screen.getByRole('tabpanel');
 
   beforeEach(() => {
     writeText.mockReset();
@@ -197,7 +208,9 @@ describe('PersonalAddDialog: Skills and Tools tabs', () => {
     renderDialog();
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Skills', 'Tools']);
     expect(screen.getByRole('tab', { name: 'Skills' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText(SKILL_PROMPT)).toBeInTheDocument();
+    expect(panel()).toHaveAccessibleName('Skills');
+    expect(within(panel()).getByText(SKILL_PROMPT)).toBeInTheDocument();
+    expect(screen.getByText(TOOL_PROMPT)).not.toBeVisible();
     expect(screen.getByRole('heading', { name: 'Add a skill or tool' })).toBeInTheDocument();
   });
 
@@ -205,15 +218,20 @@ describe('PersonalAddDialog: Skills and Tools tabs', () => {
     renderDialog();
     fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
 
-    expect(screen.getByText(TOOL_PROMPT)).toBeInTheDocument();
-    expect(screen.queryByText(SKILL_PROMPT)).not.toBeInTheDocument();
-    expect(screen.getByText(/Yours alone until you add it to a plugin/)).toBeInTheDocument();
+    expect(panel()).toHaveAccessibleName('Tools');
+    expect(within(panel()).getByText(TOOL_PROMPT)).toBeInTheDocument();
+    expect(screen.getByText(SKILL_PROMPT)).not.toBeVisible();
     expect(
-      screen.getByText('To connect an MCP server, add it to the mcp.json in your own folder.'),
+      within(panel()).getByText(/Yours alone until you add it to a plugin/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        'To call an API without an MCP server, add a .tool manual describing it to your own folder.',
+      within(panel()).getByText(
+        'To connect an MCP server, add it to the mcp.json in your own folder.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(panel()).getByText(
+        'To call an API without an MCP server, add a .tool manual describing it under software.bevel.hexis/tools/ in your own folder.',
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
@@ -221,5 +239,15 @@ describe('PersonalAddDialog: Skills and Tools tabs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Copy prompt' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(TOOL_PROMPT));
     expect(apiMock.createEmptySkill).not.toHaveBeenCalled();
+  });
+
+  it('keeps a typed skill name across a tab round trip', () => {
+    const { field } = renderDialog();
+    fireEvent.change(field(), { target: { value: 'scratch' } });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Skills' }));
+
+    expect(field()).toHaveValue('scratch');
   });
 });

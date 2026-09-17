@@ -437,7 +437,11 @@ describe('PluginPage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Add a skill or tool to GTM' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/No review step/)).toBeInTheDocument();
+    // The clause is on both the Skills prompt and the hidden Tools one, so
+    // this reads the panel on screen.
+    expect(
+      within(screen.getByRole('tabpanel')).getByText(/No review step/),
+    ).toBeInTheDocument();
     expect(screen.queryByText('Start an empty SKILL.md')).not.toBeInTheDocument();
   });
 
