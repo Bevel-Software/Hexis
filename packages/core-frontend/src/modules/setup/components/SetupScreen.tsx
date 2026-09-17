@@ -963,7 +963,10 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
           </Banner>
         )}
 
-        <form onSubmit={submit} className="mt-8 space-y-10">
+        {/* Named so its submit button can sit outside it, below the
+            Marketplace section: the button is the last thing on the page, but
+            Marketplace is deliberately not part of this form (see below). */}
+        <form id="setup-settings-form" onSubmit={submit} className="mt-8 space-y-10">
           {SECTIONS.map((section) => {
             const fields = editable.filter((s) => s.section === section.id);
             // A section whose every field comes from the environment has
@@ -1112,33 +1115,6 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             </Surface>
           )}
 
-          {/* A rejected connection stops here rather than at the far side of
-              it. Saving these answers would finish setup — the server checks
-              that they are present, not that they work — and open the app onto
-              a repository it cannot reach, which reads as a broken product
-              rather than a wrong token. */}
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={saving || testing || retrying || connectionRejected}
-              // Described by the refusal, so a reader who lands on a button
-              // that will not move is told why rather than left guessing.
-              aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
-            >
-              {saving ? 'Saving…' : 'Save and continue'}
-            </Button>
-            {connectionRejected && (
-              // Not a live region: the test panel above already announced the
-              // host's own words, and the save banner announces a blocked
-              // attempt. This is the label for a button that will not move.
-              <span id="connection-refusal" className="text-meta text-danger">
-                {connectionReadOnly
-                  ? 'That token can read the repository but cannot write to it. Grant write access and test again.'
-                  : 'The repository turned that connection down. Fix it above and test again.'}
-              </span>
-            )}
-          </div>
         </form>
 
         {/* Outside the form: nothing in it is saved by "Save and continue",
@@ -1146,6 +1122,44 @@ export function SetupScreen({ settings, onSaved, variant = 'setup', sync, kbInit
             same section in both variants, so first run and Deployment
             settings cannot drift. */}
         <MarketplaceSection variant={variant} />
+
+        {/* The submit button lives HERE, after Marketplace, though it belongs
+            to the form above — `form=` is what lets those two facts hold at
+            once. It is the last thing on the page because a reader should
+            meet every section, Marketplace included, before the control that
+            leaves the screen; when it sat above Marketplace, the page looked
+            finished while a section was still below it.
+
+            A rejected connection stops here rather than at the far side of
+            it. Saving these answers would finish setup — the server checks
+            that they are present, not that they work — and open the app onto
+            a repository it cannot reach, which reads as a broken product
+            rather than a wrong token. */}
+        <div className="mt-10 flex flex-wrap items-center justify-end gap-3">
+          {connectionRejected && (
+            // Before the button in the DOM so the reason is read first, and
+            // so `justify-end` leaves the button itself at the right edge.
+            // Not a live region: the test panel above already announced the
+            // host's own words, and the save banner announces a blocked
+            // attempt. This is the label for a button that will not move.
+            <span id="connection-refusal" className="text-meta text-danger">
+              {connectionReadOnly
+                ? 'That token can read the repository but cannot write to it. Grant write access and test again.'
+                : 'The repository turned that connection down. Fix it above and test again.'}
+            </span>
+          )}
+          <Button
+            type="submit"
+            form="setup-settings-form"
+            variant="primary"
+            disabled={saving || testing || retrying || connectionRejected}
+            // Described by the refusal, so a reader who lands on a button
+            // that will not move is told why rather than left guessing.
+            aria-describedby={connectionRejected ? 'connection-refusal' : undefined}
+          >
+            {saving ? 'Saving…' : 'Save and continue'}
+          </Button>
+        </div>
 
         {fromEnv.length > 0 && (
           <Surface tone="sunken" radius="md" className="mt-10 p-4">
