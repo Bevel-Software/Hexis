@@ -124,6 +124,7 @@ function detailWith(files: { path: string; status: PrFileStatus; previousPath?: 
       approvedBy: [],
       isApproved: true,
       viewerCanApprove: true,
+      inMergeGate: false,
     })),
     mergeableInBevel: true,
     mergeBlockedReasons: [],

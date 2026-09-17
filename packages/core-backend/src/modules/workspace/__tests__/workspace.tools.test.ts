@@ -12,11 +12,12 @@ import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
 import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
-import { registerWorkspaceTools } from '../workspace.tools.js';
+import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
+import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { isBranchAuthoredBy } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
@@ -985,7 +986,7 @@ describe('office documents and PDFs', () => {
       ['edit_file', { path: 'Inbox/offer.eml', old_string: 'original', new_string: 'changed' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('email file');
       expect(error, tool).toContain('snapshot');
@@ -1031,7 +1032,7 @@ describe('office documents and PDFs', () => {
       ['write_file', { path: 'old.doc', content: 'plain text' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('legacy binary office format');
       expect(error, tool).toContain('.docx');
@@ -1050,7 +1051,7 @@ describe('office documents and PDFs', () => {
       ['edit_file', { path: 'blob.dat', old_string: 'a', new_string: 'b' }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('binary content');
       expect(error, tool).toContain('uploading a new version');
@@ -1085,7 +1086,7 @@ describe('office documents and PDFs', () => {
       ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.ods', content: 'nope' }] }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
-      expect(res.status, tool).toBe(400);
+      expect(res.status, tool).toBe(415);
       const { error } = (await res.json()) as { error: string };
       expect(error, tool).toContain('EXTRACTED text');
       expect(error, tool).toContain('uploading a new version');
@@ -1096,21 +1097,158 @@ describe('office documents and PDFs', () => {
     expect(await readContent(base, 'deck.pptx')).toContain('Original');
   });
 
-  it('the write tools DESCRIBE every refused family — modern, legacy binary, and the upload path — so agents learn before the call', async () => {
+  it('every file tool states the SAME content rule — refused families, the byte tools and the upload path — so agents learn before the call', async () => {
     await start();
     const tools = await toolRegistry.listInternal();
-    for (const name of ['write_file', 'write_files', 'edit_file']) {
+    const fileTools = ['read_file', 'list_files', 'file_stat', 'grep', 'write_file', 'write_files', 'edit_file', 'delete_file', 'mkdir', 'move_file', 'copy_file', 'unzip'];
+    for (const name of fileTools) {
       const def = tools.find((t) => t.name === name);
       expect(def, name).toBeDefined();
+      // One constant, verbatim — the description is what tools_info returns.
+      expect(def!.description, name).toContain(CONTENT_RULE);
+      expect(def!.description, name).toContain('`binary_not_writable`');
+      expect(def!.description, name).toContain('copy_file, move_file, delete_file and unzip act on bytes of any kind');
+      expect(def!.description, name).toContain('`request_upload_token` + `apply_upload`');
+      expect(def!.description, name).toContain('`contentMode`');
       // Modern extractable formats…
       expect(def!.description, name).toContain('.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf');
       // …email files (extractions too, so the same refusal applies)…
       expect(def!.description, name).toContain('.eml/.msg');
       // …the legacy binary family the refusal also covers…
       expect(def!.description, name).toContain('.doc/.ppt/.xls');
-      // …and the replace-by-upload way out.
-      expect(def!.description, name).toContain('uploading a new version');
     }
+    // The shell is not a file tool: it does not carry the rule.
+    expect(tools.find((t) => t.name === 'execute_command')!.description).not.toContain(CONTENT_RULE);
+  });
+
+  describe('binary capability contract: a text file, a document, an image and a zip', () => {
+    const PNG = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const zipBytes = (): Buffer => {
+      const z = new AdmZip();
+      z.addFile('inner.md', Buffer.from('# inner\n'));
+      return z.toBuffer();
+    };
+    /** Seed the four kinds; returns each path with its exact bytes and expected answers. */
+    const seed = async () => {
+      const files = [
+        { path: 'notes.md', bytes: Buffer.from('hello text\n'), mode: 'text', kind: null },
+        { path: 'deck.pptx', bytes: pptx([['Original']]), mode: 'document', kind: 'document' },
+        { path: 'logo.png', bytes: PNG, mode: 'binary', kind: 'image' },
+        { path: 'bundle.zip', bytes: zipBytes(), mode: 'binary', kind: 'archive' },
+      ] as const;
+      for (const f of files) await fs.writeFile(f.path, f.bytes);
+      return files;
+    };
+    const onDisk = async (path: string) => Buffer.from(await readFile(join(tempDir, path)));
+    interface Refusal { error: string; kind: string; fileKind: string; useInstead: string[] }
+    const expectRefusal = async (res: Response, fileKind: string, label: string) => {
+      expect(res.status, label).toBe(415);
+      const body = (await res.json()) as Refusal;
+      expect(body.kind, label).toBe('binary_not_writable');
+      expect(body.fileKind, label).toBe(fileKind);
+      expect(body.useInstead, label).toEqual(['upload', 'copy_file', 'move_file']);
+      // The prose names the kind and the alternatives too, for a caller that only sees the message.
+      expect(body.error, label).toContain(`this file's kind is ${fileKind};`);
+      expect(body.error, label).toContain('upload');
+      expect(body.error, label).toContain('copy_file / move_file');
+    };
+
+    it('file_stat reports contentMode text | document | binary', async () => {
+      const base = await start();
+      for (const f of await seed()) {
+        const stat = (await (await post(`${base}/api/agent/tools/file_stat`, { path: f.path })).json()) as Record<string, unknown>;
+        expect(stat.type, f.path).toBe('file');
+        expect(stat.contentMode, f.path).toBe(f.mode);
+      }
+      // Binary content under a text name is binary: write_file would refuse it.
+      await fs.writeFile('blob.dat', Buffer.from([0x00, 0xff]));
+      const blob = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'blob.dat' })).json()) as Record<string, unknown>;
+      expect(blob.contentMode).toBe('binary');
+      // A directory has no content mode.
+      await fs.mkdir('dir', { recursive: true });
+      const dir = (await (await post(`${base}/api/agent/tools/file_stat`, { path: 'dir' })).json()) as Record<string, unknown>;
+      expect(dir.contentMode).toBeUndefined();
+      expect(dir.kind).toBeUndefined();
+    });
+
+    it('file_stat classifies a file the way read_file does: kind, mime, mimeSource, textEditable', async () => {
+      const base = await start();
+      const stat = async (path: string) =>
+        (await (await post(`${base}/api/agent/tools/file_stat`, { path })).json()) as Record<string, unknown>;
+      // Extensionless UTF-8: read_file returns its text, so stat says text/plain.
+      await fs.writeFile('Sample file', Buffer.from('plain words, no extension\n'));
+      expect(await (await post(`${base}/api/agent/tools/read_file`, { path: 'Sample file' })).json()).toMatchObject({ content: 'plain words, no extension\n' });
+      expect(await stat('Sample file')).toMatchObject({ type: 'file', kind: 'text', mime: 'text/plain', mimeSource: 'sniff', textEditable: true });
+      expect(await stat('Sample file')).not.toHaveProperty('mimeNote');
+      // The filesystem's own mimeType (a second extension table: octet-stream
+      // here) is not passed through, so nothing in the answer contradicts `mime`.
+      expect((await fs.stat('Sample file')).mimeType).toBeDefined();
+      await fs.writeFile('notes.md', Buffer.from('# notes\n'));
+      await fs.mkdir('folder', { recursive: true });
+      for (const p of ['Sample file', 'notes.md', 'folder']) {
+        expect(await stat(p), p).not.toHaveProperty('mimeType');
+      }
+      expect(await stat('notes.md')).toMatchObject({ kind: 'text', mime: 'text/plain' });
+      await fs.writeFile('plata.pdf', Buffer.from('%PDF-1.4\n'));
+      expect(await stat('plata.pdf')).toMatchObject({ kind: 'document', mime: 'application/pdf', textEditable: false });
+      await seed();
+      expect(await stat('deck.pptx')).toMatchObject({ kind: 'document', mimeSource: 'extension', textEditable: false });
+      expect(await stat('logo.png')).toMatchObject({ kind: 'image', mime: 'image/png', textEditable: false });
+      // Real binary bytes without a known extension: the octet-stream fallback, and a note saying so.
+      await fs.writeFile('Sample blob', Buffer.from([0x00, 0x01, 0xff]));
+      const blob = await stat('Sample blob');
+      expect(blob).toMatchObject({ kind: 'binary', mime: 'application/octet-stream', mimeSource: 'fallback', textEditable: false });
+      expect(blob.mimeNote).toBe(OCTET_STREAM_FALLBACK_NOTE);
+    });
+
+    it('write_file, write_files and edit_file accept the text file and refuse the other three with binary_not_writable, bytes untouched', async () => {
+      const base = await start();
+      // The plain test filesystem has no batch commit; give it one that lands
+      // each write, so the text batch must actually SUCCEED past the gate.
+      (fs as unknown as { writeFiles: (writes: { path: string; content: string }[]) => Promise<void> }).writeFiles = async (writes) => {
+        for (const w of writes) await fs.writeFile(w.path, w.content);
+      };
+      const files = await seed();
+      for (const f of files) {
+        const write = await post(`${base}/api/agent/tools/write_file`, { path: f.path, content: 'plain text' });
+        const batch = await post(`${base}/api/agent/tools/write_files`, { files: [{ path: f.path, content: 'plain text' }] });
+        const edit = await post(`${base}/api/agent/tools/edit_file`, { path: f.path, old_string: 'a', new_string: 'b' });
+        if (f.kind === null) {
+          expect(write.status, f.path).toBe(200);
+          expect(batch.status, f.path).toBe(200);
+          // Content is now 'plain text', so 'a' is found once.
+          expect(edit.status, f.path).toBe(200);
+          expect((await onDisk(f.path)).toString('utf8')).toBe('plbin text');
+          continue;
+        }
+        await expectRefusal(write, f.kind, `write_file ${f.path}`);
+        await expectRefusal(batch, f.kind, `write_files ${f.path}`);
+        await expectRefusal(edit, f.kind, `edit_file ${f.path}`);
+        expect((await onDisk(f.path)).equals(f.bytes), f.path).toBe(true);
+      }
+      // Creating a NEW image or zip by text is refused the same way — nothing lands.
+      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: 'new.png', content: 'x' }), 'image', 'new.png');
+      await expectRefusal(await post(`${base}/api/agent/tools/write_file`, { path: 'new.zip', content: 'x' }), 'archive', 'new.zip');
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: 'new.png' })).status).not.toBe(200);
+    });
+
+    it('copy_file and move_file carry every kind byte-for-byte', async () => {
+      const base = await start();
+      for (const f of await seed()) {
+        const copied = await post(`${base}/api/agent/tools/copy_file`, { src: f.path, dest: `copies/${f.path}` });
+        expect(copied.status, f.path).toBe(200);
+        expect((await onDisk(`copies/${f.path}`)).equals(f.bytes), `copy ${f.path}`).toBe(true);
+        const moved = await post(`${base}/api/agent/tools/move_file`, { src: f.path, dest: `moved/${f.path}` });
+        expect(moved.status, f.path).toBe(200);
+        expect((await onDisk(`moved/${f.path}`)).equals(f.bytes), `move ${f.path}`).toBe(true);
+      }
+      // The moved zip is still a real archive: unzip reads it as bytes.
+      const z = new AdmZip(await onDisk('moved/bundle.zip'));
+      expect(z.getEntry('inner.md')?.getData().toString('utf8')).toBe('# inner\n');
+    });
   });
 
   it('the page-writing tools say where images go, so an agent writes the link a page will render', async () => {
@@ -1568,7 +1706,7 @@ describe('preflight for moves and deletes', () => {
 
       const run = await call(base, 'move_file', args);
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Locked/deal.md'), canPropose: true });
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/deal.md'), canPropose: true });
       expect(run.body.reason).toContain('Eligible: Admin');
       // `reason` is what the refusal said; `error` is the sentence the agent
       // reads, which carries it plus the invitation to propose.
@@ -1592,7 +1730,7 @@ describe('preflight for moves and deletes', () => {
       expect(dry.body.reason).toContain('sealed.md');
       const run = await call(base, 'move_file', { ...args, confirm: true });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Sales/archive/nested/sealed.md'), canPropose: true });
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/archive/nested/sealed.md'), canPropose: true });
       expect(await exists(KB('Sales/archive/nested/sealed.md'))).toBe(true);
       expect(await exists(args.dest)).toBe(false);
     });
@@ -1630,7 +1768,7 @@ describe('preflight for moves and deletes', () => {
       expect(newSide.body.reason).toContain(KB('Sales/moved/nested/'));
       const run = await call(base, 'move_file', { src: KB('Sales/archive'), dest: KB('Sales/moved'), confirm: true });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied' });
+      expect(run.body).toMatchObject({ kind: 'write-denied' });
       expect(await exists(KB('Sales/archive/nested/old.md'))).toBe(true);
     });
 
@@ -1649,7 +1787,7 @@ describe('preflight for moves and deletes', () => {
       const base = await seeded();
       const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Secret/deal.md'), confirm: true });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied', canPropose: false });
+      expect(run.body).toMatchObject({ kind: 'write-denied', canPropose: false });
       expect(run.body.proposal).toBeUndefined();
       expect(run.body.cannotProposeReason).toContain('you cannot read this path');
     });
@@ -1718,7 +1856,7 @@ describe('preflight for moves and deletes', () => {
       expect((await call(base, 'delete_folder', { path: KB('Locked'), dryRun: true })).body).toMatchObject({ allowed: false });
       const run = await call(base, 'delete_folder', { path: KB('Locked'), confirm: true });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied', canPropose: true });
+      expect(run.body).toMatchObject({ kind: 'write-denied', canPropose: true });
       expect(await exists(KB('Locked/rules.md'))).toBe(true);
     });
 
@@ -1746,7 +1884,7 @@ describe('preflight for moves and deletes', () => {
       const base = await seeded();
       const run = await call(base, 'delete_file', { path: KB('Locked/rules.md') });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Locked/rules.md'), canPropose: true });
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Locked/rules.md'), canPropose: true });
       expect(run.body.proposal.steps.map((s: { tool: string }) => s.tool)).toContain('delete_file');
     });
     it('a refusal from the lock gate itself (rules changed after the preflight) is the structured denial too', async () => {
@@ -1756,7 +1894,7 @@ describe('preflight for moves and deletes', () => {
       };
       const run = await call(base, 'delete_file', { path: KB('Sales/deal.md') });
       expect(run.status).toBe(403);
-      expect(run.body).toMatchObject({ code: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
+      expect(run.body).toMatchObject({ kind: 'write-denied', path: KB('Sales/deal.md'), canPropose: true });
     });
   });
 
@@ -2115,7 +2253,7 @@ describe('a write refused for permissions says whether and how to propose it', (
 
     expect(status).toBe(403);
     expect(json).toMatchObject({
-      code: 'write-denied',
+      kind: 'write-denied',
       path: DENIED,
       reason: 'Eligible: Sales Lead; Owner <owner@x>.',
       canPropose: true,
@@ -2168,7 +2306,7 @@ describe('a write refused for permissions says whether and how to propose it', (
     denyWrites();
     const { status, json } = await call(base, 'write_file', CALLS[0][1]);
     expect(status).toBe(403);
-    expect(json).toMatchObject({ code: 'write-denied', path: DENIED, canPropose: false });
+    expect(json).toMatchObject({ kind: 'write-denied', path: DENIED, canPropose: false });
     expect(json.proposal).toBeUndefined();
     expect(json.cannotProposeReason).toBe('Proposing is not available: you cannot read this path.');
     expect(json.error).toContain('you cannot read this path');
@@ -2179,7 +2317,7 @@ describe('a write refused for permissions says whether and how to propose it', (
     const base = await start('write', ac);
     denyWrites();
     const { json } = await call(base, 'write_file', { ...CALLS[0][1], branch: 'someone/draft' });
-    expect(json).toMatchObject({ code: 'write-denied', canPropose: false });
+    expect(json).toMatchObject({ kind: 'write-denied', canPropose: false });
     expect(json.cannotProposeReason).toContain('not a branch that accepts change requests');
   });
 
@@ -2188,7 +2326,7 @@ describe('a write refused for permissions says whether and how to propose it', (
     const base = await start('write', ac);
     denyWrites();
     const { json } = await call(base, 'write_file', CALLS[0][1]);
-    expect(json).toMatchObject({ code: 'write-denied', canPropose: false });
+    expect(json).toMatchObject({ kind: 'write-denied', canPropose: false });
     expect(json.proposal).toBeUndefined();
   });
 

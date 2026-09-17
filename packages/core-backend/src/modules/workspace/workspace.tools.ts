@@ -29,7 +29,8 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
-import { displayPath, type FileReaderRegistry } from './file-readers/file-reader.js';
+import { displayPath, type FileKind, type FileReaderRegistry } from './file-readers/file-reader.js';
+import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
@@ -192,24 +193,60 @@ interface DocGrepState {
 }
 
 /**
- * The write-refusal for office documents/PDFs on the agent TEXT-editing tools
- * (write_file / write_files / edit_file). `read_file` returns an EXTRACTION
- * for these types — their reader declares `textEditable: false` — so an agent
- * that "read" one and writes text back would
- * silently destroy the real document. Uploads and the plain HTTP write routes
- * are untouched — humans replacing a document is exactly the right move — and
- * `unzip` stays the raw-access escape hatch.
+ * THE binary capability contract, stated once and appended (in `mount`) to
+ * every file tool's description — which is also what `tools_info` returns.
+ * The split it states is enforced by the reader registry: the text tools
+ * refuse what their reader marks not `textEditable` (and binary content under
+ * any name) with a `binary_not_writable` refusal; the byte tools never look.
+ */
+export const CONTENT_RULE =
+  ' Content rule (the same on every file tool): read_file returns text for text files and extracted text for documents (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf, .eml/.msg); write_file, write_files and edit_file accept TEXT only — they refuse documents, images, archives and other binary files (legacy .doc/.ppt/.xls included) with kind `binary_not_writable`, naming the file\'s kind and the tool to use instead; copy_file, move_file, delete_file and unzip act on bytes of any kind; new binary content arrives through upload (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app). file_stat reports `contentMode` (`text` | `document` | `binary`) so you can decide before acting.';
+
+/** What a `binary_not_writable` refusal points to, in the order to try them. */
+const BINARY_USE_INSTEAD = ['upload', 'copy_file', 'move_file'] as const;
+
+/**
+ * The ONE refusal the text tools give for content they must not write: status
+ * 415, kind `binary_not_writable`, the file's kind, and the tools to use
+ * instead — upload for new bytes, copy_file/move_file for bytes already in
+ * the workspace. `explanation` is the format-specific why.
+ */
+function binaryNotWritable(fileKind: FileKind, explanation: string): ToolError {
+  return new ToolError(
+    `${explanation} [binary_not_writable: this file's kind is ${fileKind}; write_file, write_files and edit_file accept text only. ` +
+      'Use upload for new bytes (`request_upload_token` + `apply_upload` where offered, otherwise Upload in the app), ' +
+      'or copy_file / move_file to place bytes that are already in the workspace.]',
+    415,
+    { kind: 'binary_not_writable', fileKind, useInstead: [...BINARY_USE_INSTEAD] },
+  );
+}
+
+/** The generic why, for a reader without format-specific refusal copy. */
+const KIND_EXPLANATION: Record<FileKind, (path: string) => string> = {
+  text: (p) => `"${p}" cannot be written as text.`,
+  document: (p) =>
+    `"${p}" is an office document/PDF. read_file returns EXTRACTED text for it — not the file's real ` +
+    'content — so text written back cannot round-trip and would corrupt the document. To change it, ' +
+    'replace the document by uploading a new version.',
+  image: (p) => `"${p}" is an image. Its content is bytes, and text written to it could only produce a broken picture.`,
+  archive: (p) => `"${p}" is an archive. Its content is bytes, and text written to it could only produce a broken archive.`,
+  binary: (p) => `"${p}" is a binary file. Its content is bytes, and text written to it could only produce a broken file.`,
+};
+
+/**
+ * The write-refusal by FORMAT on the agent TEXT-editing tools (write_file /
+ * write_files / edit_file): documents (read_file returns an EXTRACTION, so
+ * text written back would silently destroy the real document), images,
+ * archives and other binary formats — every reader that declares
+ * `textEditable: false`. Uploads and the plain HTTP write routes are
+ * untouched — humans replacing a file is exactly the right move — and the
+ * byte tools (copy/move/delete/unzip) never ask.
  */
 function assertNotDocumentEdit(readers: FileReaderRegistry, path: string): void {
   const reader = readers.readerFor(path);
   if (reader.textEditable) return;
-  throw new ToolError(
-    reader.editRefusal?.(path) ??
-      `"${path}" is an office document/PDF. read_file returns EXTRACTED text for it — not the file's real ` +
-        'content — so text written back cannot round-trip and would corrupt the document. To change it, ' +
-        'replace the document by uploading a new version.',
-    400,
-  );
+  const shown = displayPath(path);
+  throw binaryNotWritable(reader.fileKind, reader.editRefusal?.(shown) ?? KIND_EXPLANATION[reader.fileKind](shown));
 }
 
 /**
@@ -244,7 +281,7 @@ async function assertNotBinaryOverwrite(
     throw err;
   }
   const refusal = reader.editRefusalForExisting(existing, path);
-  if (refusal !== null) throw new ToolError(refusal, 400);
+  if (refusal !== null) throw binaryNotWritable('binary', refusal);
   return existing;
 }
 
@@ -706,15 +743,22 @@ export function registerWorkspaceTools(
      * description says so.
      */
     proposable?: boolean;
+    /** False for a tool that is not a file tool (the shell), which the content rule does not describe. */
+    fileTool?: boolean;
     handler: ToolHandler;
   }): void => {
     const path = `/api/agent/tools/${spec.name}`;
     const def = toolDef({
       name: spec.name,
-      // Every workspace entrypoint carries the AGENTS.md reminder, appended once
-      // here so no tool (especially the read-only ones a session hits first) can
-      // miss it.
-      description: spec.description + (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') + KB_CONVENTIONS_NOTE,
+      // Every workspace entrypoint carries the AGENTS.md reminder, every file
+      // tool the one content rule, and every tool a permission can refuse the
+      // proposal route — appended once here so no tool (especially the
+      // read-only ones a session hits first) can miss them.
+      description:
+        spec.description +
+        (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
+        (spec.fileTool === false ? '' : CONTENT_RULE) +
+        KB_CONVENTIONS_NOTE,
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
@@ -907,7 +951,8 @@ export function registerWorkspaceTools(
   mount({
     name: 'file_stat',
     description:
-      'Get a file/directory\'s metadata without reading content: `name`, `type`, `size`, … plus what you may do with it. ' +
+      'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
+      ' Every entry also reports what you may DO with it. ' +
       '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
       '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
       'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
@@ -946,6 +991,24 @@ export function registerWorkspaceTools(
         },
         descendants: int('Folders only: files under it at any depth.'),
         descendantsTruncated: { type: 'boolean', description: 'Folders only: true when counting stopped at the cap.' },
+        contentMode: {
+          type: 'string',
+          enum: ['text', 'document', 'binary'],
+          description: 'Files only: what the file tools can do with the content — `text` (read/write/edit as text), `document` (read extracts; replace by upload), `binary` (bytes: copy/move/delete; replace by upload).',
+        },
+        kind: {
+          type: 'string',
+          enum: ['text', 'document', 'image', 'binary'],
+          description: 'Files only: what the file is, as read_file treats it (archives are `binary`; `mime` names them).',
+        },
+        mime: str('Files only: the MIME type — named by the extension, `text/plain` for text content, else `application/octet-stream`.'),
+        mimeSource: {
+          type: 'string',
+          enum: ['extension', 'sniff', 'fallback'],
+          description: 'Files only: where `mime` came from. `fallback` means no type was detected.',
+        },
+        textEditable: { type: 'boolean', description: 'Files only: whether write_file/write_files/edit_file accept this file as it is now.' },
+        mimeNote: str('Present when `mimeSource` is `fallback`: says the MIME type is a fallback, not a detected type.'),
       },
       required: ['managed', 'movable', 'deletable', 'access'],
       additionalProperties: true,
@@ -973,6 +1036,10 @@ export function registerWorkspaceTools(
         }
         throw err;
       }
+      // The filesystem's own `mimeType` comes from a second extension table
+      // (octet-stream for an extensionless text file) and would contradict
+      // `mime` below, so it is never passed through.
+      delete stat.mimeType;
       const kind = stat.type === 'directory' ? 'folder' : 'file';
       const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
       const access = await accessAt(branch, ctx, p);
@@ -1022,8 +1089,21 @@ export function registerWorkspaceTools(
       if (kind === 'folder') {
         out.descendants = files.length;
         if (truncated) out.descendantsTruncated = true;
+        return out;
       }
-      return out;
+      // A FILE also reports what the file tools can do with its content. The
+      // mode is decided by the same registry the write gates consult, so what
+      // stat reports is what write_file will do. Only a reader whose answer
+      // depends on the bytes (the text fallback) costs a read — one full read,
+      // the same one write_file/edit_file already pay on the same file. A
+      // head-only sniff would be cheaper but wrong: invalid UTF-8 or a NUL
+      // anywhere makes the write gate refuse, so stat must judge the same
+      // bytes or it would report `text` for a file the write then refuses.
+      // `kind` and `mime` come from that same reader too, so stat never calls
+      // a file binary that read_file returns as text.
+      const reader = readers.readerFor(p);
+      const bytes = needsContent(reader) ? asBytes(await fs.readFile(p)) : undefined;
+      return { ...out, ...fileTypeOf(reader, p, bytes) };
     },
   });
 
@@ -1143,7 +1223,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'write_file',
     description:
-      'Write (create or overwrite) a workspace file. The change is committed + pushed as you. Returns `{ path, bytes }`. Refuses document formats: Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) and email files (.eml/.msg), whose reads are text EXTRACTIONS that cannot round-trip, and legacy binary Office files (.doc/.ppt/.xls), which cannot be extracted at all; replace such a file by uploading a new version instead.' +
+      'Write (create or overwrite) a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes }`.' +
       IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1185,9 +1265,8 @@ export function registerWorkspaceTools(
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
       'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`; all ' +
       'are created/overwritten and committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Refuses document formats: ' +
-      'Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) and email files (.eml/.msg), whose reads are text EXTRACTIONS that cannot ' +
-      'round-trip, and legacy binary Office files (.doc/.ppt/.xls); replace such a file by uploading a new version instead. Returns `{ count }`.' +
+      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Text files only; one refused ' +
+      'file refuses the whole batch. Returns `{ count }`.' +
       IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1242,7 +1321,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'edit_file',
     description:
-      'Replace an exact string in a workspace file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you. Refuses document formats: Office/OpenDocument files and PDFs (.docx/.pptx/.xlsx/.odt/.odp/.ods/.pdf) and email files (.eml/.msg), whose reads are text EXTRACTIONS that cannot round-trip, and legacy binary Office files (.doc/.ppt/.xls), which cannot be extracted at all; replace such a file by uploading a new version instead.' +
+      'Replace an exact string in a workspace TEXT file. `old_string` must appear exactly once unless `replace_all`. Committed + pushed as you.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
@@ -1712,6 +1791,7 @@ export function registerWorkspaceTools(
       'Run a shell command in the workspace directory. Returns `{ stdout, stderr, exitCode }` (output capped). Use for git status/log, grep/rg, build/test commands.' +
       ONTOLOGY_BOUNDARY_NOTE,
     internalOnly: true,
+    fileTool: false,
     inputs: {
       type: 'object',
       properties: {

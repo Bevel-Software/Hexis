@@ -27,6 +27,7 @@ function approval(overrides: Partial<FileApprovalState>): FileApprovalState {
     approvedBy: [],
     isApproved: false,
     viewerCanApprove: false,
+    inMergeGate: true,
     ...overrides,
   };
 }

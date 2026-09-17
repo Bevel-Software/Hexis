@@ -76,11 +76,33 @@ const commentSchema: JsonSchema = {
   required: ['id', 'author', 'body', 'headSha', 'createdAt'],
 };
 
+const changeRequestUrlSchema: JsonSchema = {
+  type: 'string',
+  description:
+    'Link a person can open: absolute (`https://<public address>/change-requests/<number>`) when the deployment ' +
+    'has a public address configured, else the relative in-app path (with `urlNote`).',
+};
+const changeRequestUrlNoteSchema: JsonSchema = { type: 'string', description: 'Present only when `url` is relative — how to get absolute links.' };
+
+/** The link to a change request, for a tool whose payload is not the change request itself. */
+const changeRequestLinkSchema: JsonSchema = {
+  type: 'object',
+  properties: { number: { type: 'integer' }, url: changeRequestUrlSchema, urlNote: changeRequestUrlNoteSchema },
+  required: ['number', 'url'],
+};
+
+/** `{ number, url, urlNote? }` of a change request summary or detail. */
+function linkOf(cr: { number: number; url: string; urlNote?: string }): { number: number; url: string; urlNote?: string } {
+  return { number: cr.number, url: cr.url, ...(cr.urlNote ? { urlNote: cr.urlNote } : {}) };
+}
+
 const changeRequestDetailSchema: JsonSchema = {
   type: 'object',
   description: 'Full change-request detail (aliased from the underlying pull request).',
   properties: {
     number: { type: 'integer' },
+    url: changeRequestUrlSchema,
+    urlNote: changeRequestUrlNoteSchema,
     title: { type: 'string' },
     body: { type: 'string' },
     author: { type: 'object', properties: { login: { type: 'string' }, name: { type: 'string' } }, required: ['login'] },
@@ -90,7 +112,7 @@ const changeRequestDetailSchema: JsonSchema = {
     comments: { type: 'array', items: commentSchema },
     approvals: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Per-file approval state, one entry per file in `files`.' },
   },
-  required: ['number', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
+  required: ['number', 'url', 'title', 'body', 'headSha', 'baseSha', 'files', 'comments', 'approvals'],
   additionalProperties: true,
 };
 
@@ -392,8 +414,11 @@ export function registerWorkflowTools(
     },
     outputs: {
       type: 'object',
-      properties: { comment: { ...commentSchema, description: 'The posted review comment.' } },
-      required: ['comment'],
+      properties: {
+        comment: { ...commentSchema, description: 'The posted review comment.' },
+        changeRequest: { ...changeRequestLinkSchema, description: 'The change request commented on.' },
+      },
+      required: ['comment', 'changeRequest'],
     },
     write: true,
     // Keyed by change-request number, not a draft — the workspace is only a
@@ -422,7 +447,7 @@ export function registerWorkflowTools(
         { body: args.body as string, path, line, parentId: typeof args.parentId === 'string' ? args.parentId : undefined },
         detail.headSha,
       );
-      return { comment };
+      return { comment, changeRequest: linkOf(detail) };
     },
   });
 
@@ -443,8 +468,11 @@ export function registerWorkflowTools(
     },
     outputs: {
       type: 'object',
-      properties: { outcome: mergeOutcomeSchema },
-      required: ['outcome'],
+      properties: {
+        outcome: mergeOutcomeSchema,
+        changeRequest: { ...changeRequestLinkSchema, description: 'The change request merged, or awaiting conflict resolution.' },
+      },
+      required: ['outcome', 'changeRequest'],
     },
     write: true,
     // Keyed by change-request number, not a draft — the workspace is only a
@@ -472,7 +500,7 @@ export function registerWorkflowTools(
         workspaceId,
         { bypass: args.bypass === true },
       );
-      return { outcome };
+      return { outcome, changeRequest: linkOf(detail) };
     },
   });
 

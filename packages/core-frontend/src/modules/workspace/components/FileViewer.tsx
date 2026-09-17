@@ -33,6 +33,7 @@ import {
   readFileOnBranch,
 } from '../../change-requests/services/change-requests.api';
 import { FileChangeBoxes } from '../../change-requests/components/FileChangeBoxes';
+import { othersPendingBesides } from '../../change-requests/utils/author';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { formatEligible } from '../../access/hooks/useFileAccess';
 import { PR_STALE_EVENT } from '../../../core/events';
@@ -1421,6 +1422,21 @@ export function FileViewer() {
                     requests={requestsOnThisFile}
                     canDecide={access.canWrite === true}
                     ownersLabel={ownersLabel}
+                    // Counted over `eligible` (the write: grants, which are what
+                    // approval rights and the merge gate resolve against), NOT
+                    // `owners` — a file can have writers and no owner: at all.
+                    // Only when those grants were actually loaded: a draft, a
+                    // non-KB path or a failed lookup default-allows with an
+                    // EMPTY list, which would claim the viewer is the only one.
+                    // Nor mid-lookup: the hook keeps the PREVIOUS file's grants
+                    // while the next file's lookup is in flight.
+                    othersPending={
+                      !access.error &&
+                      !access.loading &&
+                      (access.eligible.roles.length > 0 || access.eligible.users.length > 0)
+                        ? othersPendingBesides(access.eligible, auth.user?.email)
+                        : undefined
+                    }
                     onApplied={() => {
                       reloadTabFromDisk(openFilePath).catch(() => {});
                     }}

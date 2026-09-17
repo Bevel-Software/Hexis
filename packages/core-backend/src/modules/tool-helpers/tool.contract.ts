@@ -70,17 +70,15 @@ export type ToolHandler = (
  * A failure a tool handler can throw to choose its own HTTP status. The route
  * maps any thrown value with a numeric `status` to that code — covering this
  * and `AgentAskService`'s `AgentAskError`.
+ *
+ * `details` are machine-readable fields sent beside `error` in the response
+ * body (e.g. `{ kind: 'binary_not_writable', fileKind, useInstead }`), so a
+ * caller can branch on the refusal instead of parsing its prose.
  */
 export class ToolError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    /**
-     * Structured fields sent beside `error` in the response body, for a
-     * refusal the caller should act on rather than only read (e.g. a
-     * `write-denied` that says how to propose the change instead). Never put
-     * request arguments or credentials here: the body goes back verbatim.
-     */
     readonly details?: Record<string, unknown>,
   ) {
     super(message);

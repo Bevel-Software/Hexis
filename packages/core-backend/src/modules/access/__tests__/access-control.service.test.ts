@@ -182,8 +182,9 @@ describe('AccessControlService', () => {
     // read is granted via the implicit owner→read fold, not an explicit `read: everyone`.
     expect(await svc.canRead(workspaceId, 'nobody@example.com', 'Knowledge/Foo.md')).toBe(true);
 
+    // Admin is listed too: the root write floor holds it whatever the root says.
     const writers = await svc.eligibleWriters(workspaceId, 'Knowledge/Foo.md');
-    expect(writers.roles).toEqual(['everyone']);
+    expect(writers.roles).toEqual(['Admin', 'everyone']);
   });
 
   it('deny everyone can narrow a non-read public grant', async () => {
@@ -1112,14 +1113,19 @@ describe('AccessControlService', () => {
     });
 
     /**
-     * The rescue is exactly two files wide. It is not a general grant: the
-     * owner is admitted to the hardcoded `write` overrides and to nothing
-     * else, so ordinary content still answers to the access tree.
+     * Beyond the two rescue files, the owner gets exactly what the Admin role
+     * gets: the root write floor, and nothing a nearer rule takes away. Read
+     * and download still answer to the access tree.
      */
-    it('gets no ordinary write from being the owner', async () => {
+    it('gets write only through the root floor, never past a subfolder that excludes Admin', async () => {
       const ws = await seeded();
+      const { repo } = await seedWorkspace(root, workspaceId);
+      await writeFile(repo, 'HR/access.md', '---\nwrite:\n  - deny Admin\n---\n');
       const svc = new AccessControlService(ws, PROCESS_MAP_DIR, new NodeFs(), [OWNER]);
-      expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+      expect(await svc.canWrite(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(true);
+      expect(await svc.canWrite(workspaceId, OWNER, 'HR/Salaries.md')).toBe(false);
+      expect(await svc.canRead(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
+      expect(await svc.canDownload(workspaceId, OWNER, 'Knowledge/Foo.md')).toBe(false);
     });
 
     it('is matched case-insensitively, like every other email here', async () => {

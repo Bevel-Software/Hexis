@@ -82,24 +82,32 @@ function isMcpImageBlockObject(value: unknown): value is { type: 'image'; data: 
  * HTTP protocol surfaces a non-2xx as an axios-style error whose `.response.data`
  * is the REST endpoint's JSON body (`{ error: "..." }`). Pull that out so the
  * MCP caller sees the tool's real message instead of a bare "status code 500".
- *
- * A body that also carries a string `code` is a STRUCTURED refusal (e.g.
- * `write-denied`, whose `proposal` names the steps to take instead): it is
- * returned whole as JSON, because the fields beside `error` are what the
- * caller acts on.
  */
 export function describeToolFailure(err: unknown): string {
   const data = (err as { response?: { data?: unknown } })?.response?.data;
   if (data && typeof data === 'object') {
-    const inner = (data as { error?: unknown }).error;
-    if (typeof inner === 'string' && typeof (data as { code?: unknown }).code === 'string') {
-      try {
-        return JSON.stringify(data);
-      } catch {
-        return inner;
-      }
+    let inner: unknown;
+    try {
+      inner = (data as { error?: unknown }).error;
+    } catch {
+      inner = undefined;
     }
-    if (typeof inner === 'string' && inner.length > 0) return inner;
+    if (typeof inner === 'string' && inner.length > 0) {
+      // A typed refusal (`{ error, kind, … }`) keeps its machine-readable
+      // fields: an MCP caller sees only this string, and `kind` is what it
+      // branches on. Every read of `data` past `.error` runs under the guard,
+      // so a throwing getter or Proxy cannot escape this catch path; details
+      // that do not serialise (a cycle, a BigInt) degrade via `safeJsonText`
+      // rather than dropping `kind`.
+      try {
+        const details: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+        delete details.error;
+        if (typeof (details as { kind?: unknown }).kind === 'string') return `${inner} ${safeJsonText(details)}`;
+      } catch {
+        // fall through to the plain message
+      }
+      return inner;
+    }
   }
   if (typeof data === 'string' && data.length > 0) return data;
   // Total, like `safeJsonText`: a thrown value whose own `toString` throws
