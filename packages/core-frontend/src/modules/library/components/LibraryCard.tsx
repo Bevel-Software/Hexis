@@ -1,5 +1,7 @@
+import { ExternalLink, Users } from 'lucide-react';
 import { Badge, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
+import { ItemMenuFrame } from './ItemActionsMenu';
 import { StatusDot } from './StatusDot';
 import { ToolLogo } from './ToolLogo';
 import type { AttentionStatus, GemState } from '../utils/status';
@@ -11,7 +13,18 @@ import type { AttentionStatus, GemState } from '../utils/status';
  */
 export type LibraryCardProps = LibraryCardCommonProps &
   (
-    | { kind: 'skill'; flavor?: never }
+    | {
+        kind: 'skill';
+        flavor?: never;
+        /**
+         * Open Manage access on the skill's own folder — the skill page's
+         * `Share`, offered from the card. Absent when the surface the card is
+         * on cannot address that folder (the KB directory has not resolved) or
+         * the skill has none yet (a proposal lives on a branch), and the card
+         * then carries no menu at all.
+         */
+        onShare?(): void;
+      }
     | {
         kind: 'integration';
         /**
@@ -20,6 +33,13 @@ export type LibraryCardProps = LibraryCardCommonProps &
          * capability sets, so the card says which one this is.
          */
         flavor: 'mcp' | 'utcp';
+        /**
+         * Never. Access to a tool is decided at the plugin that carries it, so
+         * a tool card has nothing of its own to share. Stated in the type, so a
+         * caller that tries is a compile error rather than a card that grew a
+         * menu nobody meant it to have.
+         */
+        onShare?: never;
       }
   );
 
@@ -63,11 +83,16 @@ const STATUS_INK: Record<GemState, string> = {
 /**
  * One gallery card — the prototype's `.card` (line 158).
  *
- * The whole card is one `<button>` that opens the item, which is why there is
- * no ⓘ affordance any more: it used to exist because the card body was spent
- * on toggling loadout membership, so opening needed its own target. With the
- * loadout gone the card has a single action, and a card with a single action
- * should not have two controls.
+ * The whole card BODY is one `<button>` that opens the item — the ⓘ affordance
+ * that used to sit beside it is gone, because it only existed while the body
+ * was spent on toggling loadout membership and opening needed its own target.
+ *
+ * The one control that did earn a place back is the `…` menu, and only on a
+ * card that has a second verb to offer: Share is a decision about who else can
+ * see the skill, and the index is where a reader is looking at the skill they
+ * want to share. It is a SIBLING of the card button, never a child — a button
+ * inside a button is not markup — which is what `ItemMenuFrame` exists to
+ * arrange. A card with no `onShare` is the card this file has always rendered.
  *
  * The two-line clamp on the description is load-bearing, not cosmetic. Skill
  * descriptions run to full paragraphs, so without it a card grows to whatever
@@ -85,6 +110,7 @@ export function LibraryCard({
   pending,
   lifecycle,
   onOpen,
+  onShare,
   flavor,
 }: LibraryCardProps) {
   /**
@@ -109,7 +135,7 @@ export function LibraryCard({
       ? status
       : null;
 
-  return (
+  const card = (
     <Surface
       as="button"
       type="button"
@@ -198,5 +224,30 @@ export function LibraryCard({
         </span>
       )}
     </Surface>
+  );
+
+  // A TOOL card is the card this file has always rendered, frame and all: what
+  // a tool shares is decided at the plugin that carries it, so there is no
+  // second verb here and never will be. Deciding on `kind` rather than on
+  // whether a Share happens to have arrived yet is what keeps the markup of a
+  // card stable across the loads beneath it — see `ItemMenuFrame`.
+  if (kind === 'integration') return card;
+
+  return (
+    <ItemMenuFrame
+      label={name}
+      actions={
+        onShare
+          ? [
+              { label: 'Open', icon: <ExternalLink size={14} />, onSelect: onOpen },
+              // Below the rule, as access is in the file tree's menu and the
+              // nav's: it changes who else can be here, not what is here.
+              { label: 'Share', icon: <Users size={14} />, onSelect: onShare, separated: true },
+            ]
+          : []
+      }
+    >
+      {card}
+    </ItemMenuFrame>
   );
 }
