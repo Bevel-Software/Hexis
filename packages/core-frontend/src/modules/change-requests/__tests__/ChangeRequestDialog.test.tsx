@@ -92,6 +92,7 @@ const approval = (over: Partial<FileApprovalState>): FileApprovalState => ({
   approvedBy: [],
   isApproved: false,
   viewerCanApprove: false,
+  inMergeGate: true,
   ...over,
 });
 
@@ -303,8 +304,12 @@ describe('ChangeRequestDialog: the apply gate and the per-file verbs', () => {
     detailMock.fetchPrDetail.mockResolvedValue(
       detailWith([
         approval({ path: 'Docs/a.md', isApproved: true }),
-        // Not markdown: the gate ignores it even with an owner named.
-        approval({ path: 'assets/shot.png', eligibleApprovers: { roles: ['Legal'], users: [] } }),
+        // The server says the gate ignores it (not markdown), owner named or not.
+        approval({
+          path: 'assets/shot.png',
+          eligibleApprovers: { roles: ['Legal'], users: [] },
+          inMergeGate: false,
+        }),
       ]),
     );
     render(<ChangeRequestDialog cr={CR} onClose={() => {}} onResolved={() => {}} />);

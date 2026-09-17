@@ -24,7 +24,7 @@ import { hasFileViewer, isBinaryFile } from '../../workspace/components/renderer
 import { BranchFileDownload, BranchFilePreview } from './BranchFilePreview';
 import { MarkdownDiffViewer } from '../../review/components/MarkdownDiffViewer';
 import { CrFileTree, type CrTreeFileState } from './CrFileTree';
-import { hasOwnApproval, isGateRelevant } from '../utils/approval';
+import { hasOwnApproval } from '../utils/approval';
 
 /**
  * Extra context for the file list — NOT a filter. The dialog always shows
@@ -389,7 +389,7 @@ export function ChangeRequestDialog({
   const canApply =
     detail !== null &&
     detail.approvals.length > 0 &&
-    detail.approvals.filter(isGateRelevant).every((a) => a.isApproved || a.viewerCanApprove) &&
+    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
     detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
 
   /** Approve / revert verbs — approve from the file header and the footer, revert from the tree. */
@@ -490,7 +490,7 @@ export function ChangeRequestDialog({
       (detail?.approvals ?? [])
         .filter(
           (a) =>
-            isGateRelevant(a) && a.viewerCanApprove && !a.isApproved && changedFiles.has(a.path),
+            a.inMergeGate && a.viewerCanApprove && !a.isApproved && changedFiles.has(a.path),
         )
         .map((a) => a.path),
     [detail, changedFiles],
@@ -503,7 +503,7 @@ export function ChangeRequestDialog({
   const waitingOn = useMemo(() => {
     const names = new Set<string>();
     for (const a of detail?.approvals ?? []) {
-      if (!isGateRelevant(a) || a.isApproved || a.viewerCanApprove) continue;
+      if (!a.inMergeGate || a.isApproved || a.viewerCanApprove) continue;
       for (const r of a.eligibleApprovers.roles) names.add(r);
       for (const u of a.eligibleApprovers.users) names.add(u.name || u.email);
     }
@@ -526,7 +526,7 @@ export function ChangeRequestDialog({
   const allApproved =
     detail !== null &&
     detail.approvals.length > 0 &&
-    detail.approvals.filter(isGateRelevant).every((a) => a.isApproved);
+    detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved);
 
   /** Admin-only: delete the request and its branch, with an armed confirm. */
   const [deleteArmed, setDeleteArmed] = useState(false);

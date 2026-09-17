@@ -162,6 +162,13 @@ export interface FileApprovalState {
    */
   isApproved: boolean;
   /**
+   * Whether the merge gate binds this file at all — the backend's one
+   * relevance rule, stamped per file so clients read the verdict instead of
+   * re-deriving it. False files neither warn nor block a merge, so no surface
+   * should count them as pending or name anyone to wait on.
+   */
+  inMergeGate: boolean;
+  /**
    * Pre-computed for the requesting viewer: would `approveFile` accept their
    * click? True iff their email resolves to `write` on this path under the
    * access tree at `origin/<baseBranch>`. The frontend uses this to gate the

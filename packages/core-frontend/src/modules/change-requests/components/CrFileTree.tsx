@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
-import { hasOwnApproval, isGateRelevant } from '../utils/approval';
+import { hasOwnApproval } from '../utils/approval';
 
 /**
  * The change request's files as a TREE — the Knowledge sidebar's visual
@@ -209,7 +209,7 @@ function Level({
           ? null
           : hasOwnApproval(file.approval, currentUserEmail)
             ? 'approved'
-            : file.approval && isGateRelevant(file.approval) && !file.approval.isApproved
+            : file.approval?.inMergeGate && !file.approval.isApproved
               ? 'waiting'
               : null;
         return (
@@ -295,7 +295,7 @@ function ViewerApprovalMark({ state }: { state: 'approved' | 'waiting' }) {
  * and names no one the gate does not wait on — the footer's rule).
  */
 function ApprovalStateBadge({ approval }: { approval?: FileApprovalState }) {
-  if (!approval || !isGateRelevant(approval)) return null;
+  if (!approval?.inMergeGate) return null;
   const who = [
     ...approval.eligibleApprovers.roles,
     ...approval.eligibleApprovers.users.map((u) => u.name || u.email),

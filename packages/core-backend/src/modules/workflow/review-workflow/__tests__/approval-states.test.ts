@@ -358,6 +358,26 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
+    expect(states[0].inMergeGate).toBe(false);
+  });
+
+  it('stamps each file with the gate\'s own relevance verdict', async () => {
+    const svc = makeService([], {
+      'Knowledge/Foo.md': ALICE_ELIGIBLE,
+      'assets/shot.png': ALICE_ELIGIBLE,
+      'roles.yaml': ALICE_ELIGIBLE,
+    });
+    const states = await svc.getApprovalStates(
+      1,
+      [file({ path: 'Knowledge/Foo.md' }), file({ path: 'assets/shot.png' }), file({ path: 'roles.yaml' })],
+      HEAD,
+      BASE,
+      null,
+      'ws-1',
+    );
+    // Markdown and access config with an eligible approver bind the gate;
+    // other files do not, owner or no owner.
+    expect(states.map((s) => s.inMergeGate)).toEqual([true, false, true]);
   });
 
   it('flags self-approval via the authorId hash marker', async () => {
