@@ -275,22 +275,64 @@ describe('useOpenChangeRequests', () => {
     expect(result.current.minePaths.get('knowledge-base/Data/Other/keep.md')).toBe(12);
   });
 
+  /**
+   * The retraction and the refetch it starts happen in the same tick — and,
+   * often, the same millisecond. The clock is frozen here so that case is not
+   * luck: ordering them by `Date.now()` kept the folder hidden forever.
+   */
   it('lets a later answer show a retracted folder’s paths again when the server still has them', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_789_600_000_000);
+    try {
+      const mine = pr({ number: 12, touchedNodePaths: ['Data/Reports/proposed.md'] });
+      api.listMyChangeRequests.mockResolvedValue([mine]);
+      const { result } = renderIt();
+      await waitFor(() =>
+        expect(result.current.minePaths.has('knowledge-base/Data/Reports/proposed.md')).toBe(true),
+      );
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent('bevel:suggestions-retracted', { detail: { folder: 'Data/Reports' } }),
+        );
+      });
+      expect(result.current.minePaths.has('knowledge-base/Data/Reports/proposed.md')).toBe(false);
+      // The refetch started after the retraction is the truth, whatever it says.
+      await waitFor(() =>
+        expect(result.current.minePaths.has('knowledge-base/Data/Reports/proposed.md')).toBe(true),
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('keeps a retracted folder hidden from an answer to a fetch that started before the retraction', async () => {
     const mine = pr({ number: 12, touchedNodePaths: ['Data/Reports/proposed.md'] });
+    api.listOpenChangeRequests.mockResolvedValue([]);
     api.listMyChangeRequests.mockResolvedValue([mine]);
     const { result } = renderIt();
     await waitFor(() =>
       expect(result.current.minePaths.has('knowledge-base/Data/Reports/proposed.md')).toBe(true),
     );
+    // A stale-event fetch leaves first and answers late, with the old list.
+    let staleAll!: (v: PullRequestSummary[]) => void;
+    let staleMine!: (v: PullRequestSummary[]) => void;
+    api.listOpenChangeRequests.mockReturnValueOnce(new Promise((r) => { staleAll = r; }));
+    api.listMyChangeRequests.mockReturnValueOnce(new Promise((r) => { staleMine = r; }));
+    act(() => {
+      window.dispatchEvent(new Event('bevel:pr-stale'));
+    });
+    // The retraction's own refetch never answers in this test.
+    api.listOpenChangeRequests.mockReturnValue(new Promise(() => {}));
+    api.listMyChangeRequests.mockReturnValue(new Promise(() => {}));
     act(() => {
       window.dispatchEvent(
         new CustomEvent('bevel:suggestions-retracted', { detail: { folder: 'Data/Reports' } }),
       );
     });
-    // The refetch started after the retraction is the truth, whatever it says.
-    await waitFor(() =>
-      expect(result.current.minePaths.has('knowledge-base/Data/Reports/proposed.md')).toBe(true),
-    );
+    await act(async () => {
+      staleAll([]);
+      staleMine([mine]);
+    });
+    expect(result.current.minePaths.has('knowledge-base/Data/Reports/proposed.md')).toBe(false);
   });
 
   it('issues ONE request however many consumers read it', async () => {

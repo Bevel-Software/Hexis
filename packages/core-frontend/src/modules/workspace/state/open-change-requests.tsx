@@ -70,14 +70,21 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
    * The other direction: folders whose proposed files the client just took
    * out of every request (a folder delete). Paths under one are hidden until
    * BOTH lists have answered from a fetch that started after the retraction —
-   * `answeredFrom` holds each list's latest answered start time.
+   * `answeredFrom` holds each list's latest answered start. Ordered by a
+   * counter, not the clock: the retraction and its refetch happen in the same
+   * tick, and two equal `Date.now()` stamps would keep the folder hidden
+   * after the refetch answered. (The server has finished removing the files
+   * before the event fires, so any fetch that starts later is the truth.)
    */
   const [retracted, setRetracted] = useState<{ prefix: string; at: number }[]>([]);
   const [answeredFrom, setAnsweredFrom] = useState({ all: 0, mine: 0 });
 
   useEffect(() => {
     let cancelled = false;
+    /** Strictly increasing order of retractions and fetch starts. */
+    let order = 0;
     const load = (opts: { fresh?: boolean } = {}) => {
+      const startedOrder = ++order;
       // When THIS fetch left the building — only a fetch that STARTED after
       // an announcement may declare its request gone. The announce and the
       // stale event fire in the same tick, so a same-tick fresh fetch can
@@ -88,7 +95,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         .then((data) => {
           if (cancelled) return;
           setRequests(data);
-          setAnsweredFrom((prev) => ({ ...prev, all: Math.max(prev.all, startedAt) }));
+          setAnsweredFrom((prev) => ({ ...prev, all: Math.max(prev.all, startedOrder) }));
         })
         .catch((err) => {
           // A queue that cannot load is not an error state on a page about a
@@ -101,7 +108,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
           if (cancelled) return;
           const open = data.filter((c) => c.state === 'open');
           setMine(open);
-          setAnsweredFrom((prev) => ({ ...prev, mine: Math.max(prev.mine, startedAt) }));
+          setAnsweredFrom((prev) => ({ ...prev, mine: Math.max(prev.mine, startedOrder) }));
           // Reconcile: an announced entry whose every path the real list now
           // carries has been overtaken; one whose request is GONE (declined,
           // merged, withdrawn elsewhere) must not haunt the tree either — but
@@ -144,7 +151,8 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       const folder = (e as CustomEvent<{ folder?: unknown }>).detail?.folder;
       if (typeof folder !== 'string' || !folder) return;
       const prefix = `${folder.replace(/\/+$/, '')}/`;
-      setRetracted((prev) => [...prev.filter((r) => r.prefix !== prefix), { prefix, at: Date.now() }]);
+      const at = ++order;
+      setRetracted((prev) => [...prev.filter((r) => r.prefix !== prefix), { prefix, at }]);
       // An announced proposal under the folder is gone too.
       setAnnounced((prev) =>
         prev.map((a) => ({

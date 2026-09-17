@@ -117,7 +117,9 @@ export function TreeActionConfirmDialog({
     return (
       <Dialog
         open
-        size="md"
+        // Three unwrappable actions side by side: at `md` the footer ran wider
+        // than the dialog and pushed Cancel past its left edge.
+        size="lg"
         onClose={onCancel}
         title="Delete folder"
         footer={
