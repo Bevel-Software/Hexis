@@ -12,6 +12,7 @@ import type {
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -2304,8 +2305,12 @@ export class GitService implements IGitService {
       // land. Filter it from the review surface entirely; the neutralisation
       // reads the raw refs itself and is unaffected. Both lists are filtered
       // IN STEP so the index-zip below stays aligned.
-      if (statuses.some((s) => s.path === 'roles.yaml')) {
-        const keep = statuses.map((s) => s.path !== 'roles.yaml');
+      // The empty-folder placeholder is filtered the same way: it is never
+      // content, so it is not a file to review or approve. It still merges
+      // with the rest, and `changedPathsForPr` keeps it, so a request that
+      // only creates a folder is not mistaken for an empty one and closed.
+      if (statuses.some((s) => s.path === 'roles.yaml' || isFolderPlaceholder(s.path))) {
+        const keep = statuses.map((s) => s.path !== 'roles.yaml' && !isFolderPlaceholder(s.path));
         statuses = statuses.filter((_, i) => keep[i]);
         if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
       }

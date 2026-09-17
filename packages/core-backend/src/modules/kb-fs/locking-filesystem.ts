@@ -23,7 +23,10 @@
  *     The agent must delete entries individually via `deleteFile`.
  *   - `mkdir` followed by a `.gitkeep` write is the canonical way to land
  *     "create empty folder" as a one-file change — the locking write of
- *     `.gitkeep` carries the commit.
+ *     `.gitkeep` carries the commit. The same placeholder keeps a folder
+ *     whose last file was deleted or moved out: `delete_file` / `move_file`
+ *     write it through `writeFile` here (see `keepFolderOf` in the tools),
+ *     because a folder exists until it is deleted explicitly.
  *
  * Path conventions: Mastra's `inputPath` is workspace-relative (e.g.
  * `knowledge-base/Knowledge/Foo.md`) — the same shape the human
@@ -607,8 +610,7 @@ export class LockingFilesystem extends LocalFilesystem {
     // Recursive directory removal would commit N file deletions in one
     // change — violates the one-change-per-file invariant. Force the
     // caller to delete files one at a time; each `deleteFile` lands as
-    // its own change. The empty parent directory disappears with the
-    // last file (git doesn't track empty folders).
+    // its own change.
     throw new Error(
       'Recursive directory removal is not supported through the lock-aware filesystem. ' +
         'Delete files individually so each removal lands as its own change.',

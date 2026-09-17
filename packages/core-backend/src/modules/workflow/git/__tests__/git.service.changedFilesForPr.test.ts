@@ -226,6 +226,33 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
   });
 
   /**
+   * The empty-folder placeholder is never content, so the change-request file
+   * list does not show it, at any depth, and the +/- counts stay aligned. The
+   * touched paths keep it: a request that only creates a folder is not empty,
+   * and must not be closed as if it were.
+   */
+  it('excludes the folder placeholder from the changed-file list but not the touched paths', async () => {
+    const { repo } = await seedWorkspace(root, workspaceId);
+    await runGit(repo, ['checkout', '-b', 'alice/new-folders']);
+    await fs.mkdir(path.join(repo, 'Reports/Empty'), { recursive: true });
+    await fs.writeFile(path.join(repo, 'Reports/Empty/.gitkeep'), '');
+    await fs.writeFile(path.join(repo, 'Reports/.gitkeep'), '');
+    await fs.writeFile(path.join(repo, 'Reports/q3.md'), 'one\ntwo\nthree\n');
+    await runGit(repo, ['add', '-A']);
+    await runGit(repo, ['commit', '-m', 'folders']);
+    await runGit(repo, ['push', '-u', 'origin', 'alice/new-folders']);
+
+    const git = new GitService(stubWorkspaceService(workspaceId, repo), new WorkflowHooks(), 'knowledge-base');
+
+    const files = await git.changedFilesForPr(workspaceId, 'current-company-state', 'alice/new-folders');
+    expect(files.map((f) => f.path)).toEqual(['Reports/q3.md']);
+    expect(files[0].additions).toBe(3);
+
+    const paths = await git.changedPathsForPr(workspaceId, 'current-company-state', 'alice/new-folders');
+    expect(paths.sort()).toEqual(['Reports/.gitkeep', 'Reports/Empty/.gitkeep', 'Reports/q3.md']);
+  });
+
+  /**
    * The per-file revert's two primitives: the merge-base a revert restores
    * from, and the restore itself — byte-exact via git, with "absent at the
    * merge-base" meaning deletion (the revert of an added file).

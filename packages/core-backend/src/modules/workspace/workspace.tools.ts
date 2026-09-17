@@ -33,6 +33,10 @@ import { contentModeOf } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
+import { folderPlaceholderPath, isFolderPlaceholder } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('workspace-tools');
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */
 interface DirEntry {
@@ -94,6 +98,36 @@ async function filterReadableEntries(
     const wsPath = dir ? `${dir}/${e.name}` : e.name;
     return verdict.get(wsPath) === true;
   });
+}
+
+/**
+ * Drop the empty-folder placeholder from a directory listing: it keeps a
+ * folder alive in git and is never content (see `placeholder.ts`).
+ */
+function withoutPlaceholder(entries: DirEntry[]): DirEntry[] {
+  return entries.filter((e) => e.type === 'directory' || !isFolderPlaceholder(e.name));
+}
+
+/**
+ * Keep the folder a removal just emptied. A folder exists until it is deleted
+ * explicitly, so when deleting or moving out its last entry leaves it empty it
+ * gets the placeholder, written through the same filesystem (the agent's
+ * lock-aware one commits it) within the same tool call. Only folders inside
+ * the repository qualify, never the clone folder itself. The removal already
+ * landed and is what the caller asked for, so a failure here is logged rather
+ * than reported as a failed delete.
+ */
+async function keepFolderOf(fs: LocalFilesystem, removedPath: string, kbDirName: string): Promise<void> {
+  const trimmed = removedPath.replace(/^\/+/, '').replace(/\/+$/, '');
+  const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
+  if (!dir.startsWith(`${kbDirName}/`)) return;
+  try {
+    if ((await fs.readdir(dir)).length > 0) return;
+    await fs.writeFile(folderPlaceholderPath(dir), '');
+  } catch (err) {
+    if (isAbsence(err)) return;
+    log.warn(`could not keep the folder "${dir}" after removing "${removedPath}":`, { err });
+  }
 }
 
 /**
@@ -380,6 +414,7 @@ async function grepWalk(
   for (const e of entries) {
     if (out.length >= max) return;
     if (e.name === '.git' || e.name === 'node_modules') continue;
+    if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
       await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
@@ -626,7 +661,7 @@ export function registerWorkspaceTools(
       const dir = (a.path as string) || '';
       await recordOntologyRead(sessionOntologyGate, ctx, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
-      const entries = (await fs.readdir(dir || '.')) as DirEntry[];
+      const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
       return { path: a.path ?? '', entries: filtered };
     },
@@ -667,8 +702,18 @@ export function registerWorkspaceTools(
       const p = a.path as string;
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
+      // Nothing there is a 404, and the placeholder — never content — gets
+      // exactly that answer.
+      const nothingThere = () => new ToolError(`There is no file or directory at "${displayPath(p)}".`, 404);
+      if (isFolderPlaceholder(p)) throw nothingThere();
       const fs = await ctx.getFilesystem(a.branch as string);
-      const stat = await fs.stat(p);
+      let stat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        stat = await fs.stat(p);
+      } catch (err) {
+        if (isAbsence(err)) throw nothingThere();
+        throw err;
+      }
       if (stat.type !== 'file') return stat;
       // The mode is decided by the same registry the write gates consult, so
       // what stat reports is what write_file will do. Only a reader whose
@@ -739,7 +784,14 @@ export function registerWorkspaceTools(
       const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       // The empty root is the workspace itself — always a directory, and never
       // worth a stat.
-      const kind = searchRoot === '' ? 'directory' : await searchRootKind(fs, searchRoot);
+      // A placeholder named on its own is searched as what it is to every
+      // other tool: nothing.
+      const kind =
+        searchRoot === ''
+          ? 'directory'
+          : isFolderPlaceholder(searchRoot)
+            ? 'missing'
+            : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
       if (kind === 'directory') {
@@ -941,7 +993,7 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'delete_file',
-    description: 'Delete a workspace file. Committed + pushed as you.' + ONTOLOGY_BOUNDARY_NOTE,
+    description: 'Delete a workspace file. Committed + pushed as you. Its folder stays, even when this was its last file.' + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -965,14 +1017,17 @@ export function registerWorkspaceTools(
       // DOES apply though: a dashboard-only run must not delete graph `.md` nodes.
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await recordOntologyRead(sessionOntologyGate, ctx, a.path as string);
-      await (await ctx.getFilesystem(a.branch as string)).deleteFile(a.path as string);
+      const fs = await ctx.getFilesystem(a.branch as string);
+      await fs.deleteFile(a.path as string);
+      // Deleting content is not deleting structure: an emptied folder stays.
+      await keepFolderOf(fs, a.path as string, kbDirName);
       return { path: a.path, deleted: true };
     },
   });
 
   mount({
     name: 'mkdir',
-    description: 'Create a directory (recursive). An empty dir gets a `.gitkeep` so it persists in git.' + ONTOLOGY_BOUNDARY_NOTE,
+    description: 'Create a directory (recursive). It lists as an empty folder and persists in git until it is deleted explicitly.' + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1026,7 +1081,10 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
-      await (await ctx.getFilesystem(a.branch as string)).moveFile(a.src as string, a.dest as string);
+      const fs = await ctx.getFilesystem(a.branch as string);
+      await fs.moveFile(a.src as string, a.dest as string);
+      // Moving the last file out leaves its folder in place, like a delete.
+      await keepFolderOf(fs, a.src as string, kbDirName);
       return { src: a.src, dest: a.dest, moved: true };
     },
   });

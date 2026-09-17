@@ -6,7 +6,13 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  validateRelativePath,
+  validateFilename,
+  DEFAULT_BRANCH,
+  FOLDER_PLACEHOLDER,
+  isFolderPlaceholder,
+} from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
@@ -1328,7 +1334,7 @@ export class WorkspaceService implements IWorkspaceService {
     await fs.mkdir(absolutePath, { recursive: true });
     const entries = await fs.readdir(absolutePath);
     if (entries.length === 0) {
-      await fs.writeFile(path.join(absolutePath, '.gitkeep'), '', 'utf-8');
+      await fs.writeFile(path.join(absolutePath, FOLDER_PLACEHOLDER), '', 'utf-8');
     }
   }
 
@@ -1879,7 +1885,7 @@ export class WorkspaceService implements IWorkspaceService {
  */
 function explorerWalk(): TreeWalkOptions {
   return {
-    skip: (e) => (e.name === '.git' && e.isDirectory()) || (e.name === '.gitkeep' && e.isFile()),
+    skip: (e) => (e.name === '.git' && e.isDirectory()) || (isFolderPlaceholder(e.name) && e.isFile()),
     ignore: true,
     unreadable: 'throw',
   };

@@ -8,7 +8,13 @@ import { printable } from '../../shared/printable.js';
 import type { IAdminAccessService } from '../admin/admin.interface.js';
 import express from 'express';
 import type { AuthUser, IWorkflowService } from '@bevel-software/platform-shared';
-import { DEFAULT_BRANCH, KNOWLEDGE_DIR, canonicalRelativePath, reservedRootDirNames } from '@bevel-software/platform-shared';
+import {
+  DEFAULT_BRANCH,
+  KNOWLEDGE_DIR,
+  canonicalRelativePath,
+  folderPlaceholderPath,
+  reservedRootDirNames,
+} from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkspaceService } from './workspace.service.js';
@@ -239,6 +245,42 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
     }
     return result;
+  }
+
+  /**
+   * Keep the folder a removal just emptied. A folder exists until it is
+   * deleted explicitly, so when deleting a file (or a subfolder), or moving
+   * one out, leaves its parent empty, the parent gets the placeholder in its
+   * own lock cycle — committed like any other save, within the same request.
+   * Only folders inside the repository qualify, never the clone folder
+   * itself. The removal already landed and is what the caller asked for, so a
+   * failure here is logged rather than turned into a failed delete.
+   */
+  async function keepFolderOf(
+    workspaceId: string,
+    user: AuthUser,
+    removedPath: string,
+    options?: { skipFsTreeEvent?: boolean },
+  ): Promise<void> {
+    const trimmed = removedPath.replace(/\/+$/, '');
+    const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
+    if (!dir.startsWith(`${kbDirName}/`)) return;
+    try {
+      const absolute = path.resolve(await workspaceService.getWorkspacePath(workspaceId), dir);
+      if ((await fs.readdir(absolute)).length > 0) return;
+      // `createDirectory` drops the placeholder into a folder that is empty
+      // at the moment it looks, so a file landing in between wins.
+      await withLock(
+        workspaceId,
+        user,
+        folderPlaceholderPath(dir),
+        () => workspaceService.createDirectory(workspaceId, dir),
+        options,
+      );
+    } catch (err) {
+      if (isAbsence(err)) return;
+      log.warn(`could not keep the folder "${dir}" after removing "${removedPath}":`, { err });
+    }
   }
 
   /**
@@ -836,9 +878,11 @@ export function createWorkspaceRoutes(
         // serially in the worker; user perception is unchanged because
         // the disk-side delete is what other sessions see via
         // `fs-tree-changed`.
-        // Sweep the now-empty directory subtree off disk. Git doesn't track
-        // empty folders, so there's nothing to commit; this is just disk
-        // hygiene so the file tree stops showing the empty containers.
+        // This is the EXPLICIT folder delete — the one operation that removes
+        // a folder — so the walk above deleted the placeholders too, and the
+        // now-empty directory subtree is swept off disk. Git doesn't track
+        // empty folders, so there's nothing more to commit; this is disk
+        // hygiene so the file tree stops showing the deleted containers.
         //
         // This MUST recurse: a folder that held *subfolders* still has those
         // (now-empty) subdirectory shells on disk after the per-file deletes,
@@ -856,6 +900,8 @@ export function createWorkspaceRoutes(
           // are what's load-bearing.
           log.warn(`dir cleanup skipped for "${filePath}":`, { err: rmErr });
         }
+        // The folder that HELD the deleted one was not asked to go.
+        await keepFolderOf(id, user, filePath, { skipFsTreeEvent: true });
         // Single tree-refresh signal for the whole batch (we suppressed
         // the per-file ones via `skipFsTreeEvent`).
         eventBus.emit({ kind: 'fs-tree-changed', workspaceId: id, branch });
@@ -863,6 +909,8 @@ export function createWorkspaceRoutes(
         return;
       }
       await withLock(id, user, filePath, () => workspaceService.deleteFile(id, filePath));
+      // Deleting content is not deleting structure: an emptied folder stays.
+      await keepFolderOf(id, user, filePath);
       res.json({ status: 'deleted' });
     } catch (err) {
       sendError(res, err);
@@ -917,6 +965,8 @@ export function createWorkspaceRoutes(
           workspaceService.moveEntry(id, oldPath, newPath),
         ),
       );
+      // Moving the last entry out leaves its folder in place, like a delete.
+      await keepFolderOf(id, user, oldPath);
       res.json({ status: 'moved' });
     } catch (err) {
       sendError(res, err);
