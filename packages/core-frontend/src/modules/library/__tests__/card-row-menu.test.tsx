@@ -20,7 +20,10 @@ import { MemoryRouter } from 'react-router-dom';
  * (`PluginsSidebarMenu`); what the keyboard cases here prove is the part this
  * menu added, which is the INSIDE of it: opening lands focus on the first
  * verb, the arrows walk the items, and the two other ways out that leave the
- * focused node unmounted — Tab, and picking a verb — hand focus back too.
+ * focused node unmounted hand focus back too — Tab, and picking a verb whose
+ * action opens nothing of its own. A verb that DOES open something (Share's
+ * dialog) or navigates (Open) hands focus on from there, and that is the
+ * destination's to own, not the menu's.
  */
 
 const svc = vi.hoisted(() => ({ requestPluginAccess: vi.fn() }));
@@ -221,22 +224,19 @@ describe('a skill card', () => {
   });
 
   /**
-   * Every other way OUT of the menu, which all end with the focused node
-   * unmounted: Tab (the menu closes and carries on) and picking a verb whose
-   * action opens nothing that takes focus for itself. Focus left on a removed
-   * node restarts the next Tab at the top of the document.
+   * Tab is the way out of the menu that Escape's handback does not cover: the
+   * menu closes and the focused node goes with it, and focus left on a removed
+   * node restarts the next Tab at the top of the document. The OTHER way —
+   * picking a verb — is proved on a row, where a verb exists whose real action
+   * opens nothing (see `Subscribe`); Share's own action mounts the
+   * Manage-access dialog, and THAT is what takes focus after a pick here.
    */
-  it('hands focus back to the "…" when the menu is tabbed out of, or picked from', () => {
+  it('hands focus back to the "…" when the menu is tabbed out of', () => {
     card({ onShare: vi.fn() });
     const dots = trigger('rfi');
 
     fireEvent.click(dots);
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Tab' });
-    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
-    expect(document.activeElement).toBe(dots);
-
-    fireEvent.click(dots);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }));
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     expect(document.activeElement).toBe(dots);
   });
@@ -271,6 +271,26 @@ describe('a plugin row', () => {
     fireEvent.click(trigger('GTM'));
     expect(items()).toEqual(['Open', 'Requested']);
     expect(screen.getByRole('menuitem', { name: 'Requested' })).toBeDisabled();
+  });
+
+  /**
+   * The pick that opens NOTHING, which is the case the menu has to answer for
+   * itself: Subscribe sends a request and leaves the row exactly where it was,
+   * so there is no dialog to take focus and no page to navigate to. Only the
+   * service is stubbed here — the verb runs its own handler — so focus landing
+   * anywhere but the "…" would show up.
+   */
+  it('hands focus back to the "…" after a verb that opens nothing', async () => {
+    rows([entry({ member: false, summary: summary({ canRead: false }) })], vi.fn());
+    const dots = trigger('GTM');
+
+    fireEvent.click(dots);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Subscribe' }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(dots);
+    // And it stays there once the request answers and the row re-renders.
+    await vi.waitFor(() => expect(screen.getByText('Requested')).toBeInTheDocument());
+    expect(document.activeElement).toBe(trigger('GTM'));
   });
 
   it('states Requested from the start for a plugin already asked about', () => {
