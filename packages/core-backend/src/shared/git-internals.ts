@@ -58,6 +58,14 @@ export function assertNoGitInternalsSegment(inputPath: unknown): void {
   if (hasGitInternalsSegment(inputPath)) throw new GitInternalsError();
 }
 
+const errCode = (err: unknown): unknown => (err as { code?: unknown })?.code;
+
+/** `null` for "nothing resolvable here" (absent, or a link loop); every other filesystem error is rethrown. */
+function nullWhenUnresolvable(err: unknown): null {
+  if (isAbsence(err) || errCode(err) === 'ELOOP') return null;
+  throw err;
+}
+
 /** Dangling links followed by hand before the chain counts as a loop (Linux's own limit). */
 const MAX_LINK_HOPS = 40;
 
@@ -72,17 +80,21 @@ async function resolvedRealPath(absolutePath: string): Promise<string | null> {
   const rest: string[] = [];
   let hops = 0;
   for (;;) {
-    const real = await fs.realpath(existing).catch((err: unknown) => {
-      if (isAbsence(err) || (err as { code?: unknown })?.code === 'ELOOP') return null;
-      throw err;
-    });
+    const real = await fs.realpath(existing).catch(nullWhenUnresolvable);
     if (real !== null) return path.join(real, ...rest);
-    const target = hops < MAX_LINK_HOPS ? await fs.readlink(existing).catch(() => null) : null;
+    // EINVAL is "not a link": nothing to follow. Any other failure — a
+    // permission error, say — is thrown, never guessed past lexically.
+    const target =
+      hops < MAX_LINK_HOPS
+        ? await fs.readlink(existing).catch((err: unknown) => (errCode(err) === 'EINVAL' ? null : nullWhenUnresolvable(err)))
+        : null;
     if (target !== null) {
-      hops++;
-      const parent = await fs.realpath(path.dirname(existing)).catch(() => path.dirname(existing));
-      existing = path.resolve(parent, target);
-      continue;
+      const parent = await fs.realpath(path.dirname(existing)).catch(nullWhenUnresolvable);
+      if (parent !== null) {
+        hops++;
+        existing = path.resolve(parent, target);
+        continue;
+      }
     }
     const up = path.dirname(existing);
     if (up === existing) return null;

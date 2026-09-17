@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GIT_INTERNALS_MESSAGE, GitInternalsError } from '../domain-errors.js';
 import { assertNotGitInternals, hasGitInternalsSegment } from '../git-internals.js';
 
@@ -63,6 +63,7 @@ describe('assertNotGitInternals — the resolved form', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -81,6 +82,21 @@ describe('assertNotGitInternals — the resolved form', () => {
       await expect(assertNotGitInternals(root, p)).rejects.toBeInstanceOf(GitInternalsError);
     },
   );
+
+  it.each(['readlink', 'realpath of the link folder'])('a %s failure that is not absence is thrown, never guessed past', async (which) => {
+    const denied = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    if (which === 'readlink') {
+      vi.spyOn(fs, 'readlink').mockRejectedValue(denied);
+    } else {
+      const realpath = fs.realpath.bind(fs);
+      const kbDir = await realpath(path.join(root, 'knowledge-base'));
+      vi.spyOn(fs, 'realpath').mockImplementation((async (p: string) => {
+        if (p === path.join(root, 'knowledge-base') || p === kbDir) throw denied;
+        return realpath(p);
+      }) as typeof fs.realpath);
+    }
+    await expect(assertNotGitInternals(root, 'knowledge-base/dangling')).rejects.toMatchObject({ code: 'EACCES' });
+  });
 
   it('a link loop is no refusal of its own, and does not hang', async () => {
     await expect(assertNotGitInternals(root, 'knowledge-base/loop-a')).resolves.toBeUndefined();
