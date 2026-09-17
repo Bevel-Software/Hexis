@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
 // The node-id lookup behind the canonical-URL redirect, so a test can say a
@@ -89,6 +89,14 @@ function LocationProbe() {
   return <div aria-label="pathname">{location.pathname}</div>;
 }
 
+/** Stands in for a file-tree click: navigates to a clean file URL. */
+function TreeClickProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" aria-label="tree-click-bar" onClick={() => navigate('/workspace/main/Knowledge/Bar.md')} />
+  );
+}
+
 function renderAt(
   url: string,
   opts: { git?: GitContextValue; workspace?: WorkspaceContextValue; canonicalize?: boolean } = {},
@@ -143,6 +151,7 @@ function renderAt(
           <Route path="/workspace/:branch/*" element={<FileRoute canonicalize={opts.canonicalize} />} />
         </Routes>
         <LocationProbe />
+        <TreeClickProbe />
       </Tree>
     </MemoryRouter>
   );
@@ -542,6 +551,16 @@ describe('FileRoute: ?trace=files diagnostics', () => {
     await waitFor(() => {
       const waits = traceCalls(info).filter((c) => c.event === 'wait:no-workspace');
       expect(waits.at(-1)?.fields).toMatchObject({ bootstrapError: { branch: 'main', status: 500 } });
+    });
+
+    // A file click while the workspace is still missing logs the new URL.
+    fireEvent.click(screen.getByLabelText('tree-click-bar'));
+    await waitFor(() => {
+      const waits = traceCalls(info).filter((c) => c.event === 'wait:no-workspace');
+      expect(waits.at(-1)?.fields).toMatchObject({
+        url: '/workspace/main/Knowledge/Bar.md',
+        pathFromUrl: 'Knowledge/Bar.md',
+      });
     });
   });
 

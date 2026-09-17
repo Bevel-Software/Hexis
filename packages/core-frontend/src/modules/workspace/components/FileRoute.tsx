@@ -170,11 +170,13 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
 
   // Trace only: a failed first bootstrap leaves `workspaceId` null and changes
   // only `bootstrapError`, which the effect below does not re-run on (and must
-  // not: a re-run cancels an in-flight hydration). Log that wait from here.
+  // not: a re-run cancels an in-flight hydration). Log that wait from here, and
+  // again for each file click made while it lasts, so the console names the
+  // URL that stayed blank.
   useEffect(() => {
     if (!workspaceId) trace('wait:no-workspace');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, workspace.bootstrapError, traceOn]);
+  }, [workspaceId, workspace.bootstrapError, location.pathname, traceOn]);
 
   useEffect(() => {
     if (!workspaceId) return;
