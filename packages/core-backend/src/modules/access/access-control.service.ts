@@ -11,6 +11,8 @@ import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type {
   IAccessControl,
+  AccessDecision,
+  AccessDecisionSource,
   AccessTargetKind,
   GrantPrincipal,
   GrantSource,
@@ -550,11 +552,40 @@ function hasPermissionResolved(
   relativePath: string,
   fileOwn?: OwnEntries | null,
 ): boolean {
+  return decidePermissionResolved(model, verb, userEmail, relativePath, fileOwn).allowed;
+}
+
+/**
+ * WHAT decided one caller's verdict: `hasPermissionResolved` with its reasoning
+ * kept. `scope` is the scope whose entry settled it (null for the hardcoded
+ * admin rescues and for default-deny); `via` is the tier that matched and `key`
+ * the principal key it matched on (the caller's email, a role/group/plugin
+ * key, or `everyone`). `hasPermissionResolved` IS this function's `allowed`,
+ * so an explanation can never disagree with the gate.
+ */
+interface PermissionDecision {
+  allowed: boolean;
+  scope: AccessScope | null;
+  via: 'email' | 'principal' | 'everyone' | 'admin-rescue' | 'default-deny';
+  key?: string;
+}
+
+function decidePermissionResolved(
+  model: AccessModel,
+  verb: Verb,
+  userEmail: string,
+  relativePath: string,
+  fileOwn?: OwnEntries | null,
+): PermissionDecision {
   const email = canonicalEmail(userEmail);
 
   if (verb === 'write') {
-    if (relativePath === 'roles.yaml') return isAdminEmail(model, email);
-    if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) return true;
+    if (relativePath === 'roles.yaml') {
+      return { allowed: isAdminEmail(model, email), scope: null, via: 'admin-rescue' };
+    }
+    if (isAccessMdPath(relativePath) && isAdminEmail(model, email)) {
+      return { allowed: true, scope: null, via: 'admin-rescue' };
+    }
   }
 
   const userRoles = principalKeysOf(model, email);
@@ -563,31 +594,33 @@ function hasPermissionResolved(
   for (const scope of scopes) {
     // Tier 1 — direct email entry is the most specific verdict at this scope.
     const direct = scope.byEmail.get(email);
-    if (direct) return direct === 'grant';
+    if (direct) return { allowed: direct === 'grant', scope, via: 'email', key: email };
 
     // Tier 2 — the caller's roles. A grant via any one of them wins over a deny
     // via another at this same scope (a `deny Engineer` doesn't undo an
     // unrelated `Admin` grant).
     if (userRoles && userRoles.size) {
-      let grant = false;
-      let deny = false;
+      let granted: string | undefined;
+      let denied: string | undefined;
       for (const r of userRoles) {
         const s = scope.byRole.get(r);
-        if (s === 'denied') deny = true;
-        else if (s === 'grant') grant = true;
+        if (s === 'denied') denied ??= r;
+        else if (s === 'grant') granted ??= r;
       }
-      if (grant) return true;
-      if (deny) return false;
+      if (granted !== undefined) return { allowed: true, scope, via: 'principal', key: granted };
+      if (denied !== undefined) return { allowed: false, scope, via: 'principal', key: denied };
     }
 
     // Tier 3 — the built-in `everyone` role (derived: a public plugin
     // principal granted here counts, see `AccessScope.everyone`).
-    if (scope.everyone) return scope.everyone === 'grant';
+    if (scope.everyone) {
+      return { allowed: scope.everyone === 'grant', scope, via: 'everyone', key: EVERYONE_CANONICAL };
+    }
 
     // No verdict at this scope — fall through to the next (farther) one.
   }
 
-  return false;
+  return { allowed: false, scope: null, via: 'default-deny' };
 }
 
 /**
@@ -617,6 +650,47 @@ function scopeToGrantSource(
   const ownPath = kind === 'folder' ? ownAccessMdForFolder(relativePath) : null;
   if (ownPath !== null && path === ownPath) return { kind: 'direct' };
   return { kind: 'ancestor', path };
+}
+
+/**
+ * Where a scope's rules live, as the place a person edits: a folder (the
+ * directory of its `access.md`) or the target's own frontmatter.
+ */
+function decisionSourceOf(
+  scope: AccessScope,
+  kind: AccessTargetKind,
+  relativePath: string,
+): AccessDecisionSource {
+  if (scope.source.kind === 'own') return { kind: 'frontmatter', path: relativePath, inherited: false };
+  const folder = path.posix.dirname(scope.source.path);
+  const dir = folder === '.' ? '' : folder;
+  const grant = scopeToGrantSource(scope, kind, relativePath);
+  return { kind: 'folder', path: dir, inherited: grant.kind === 'ancestor' };
+}
+
+/** A resolver decision in the terms `explainAccess` reports. */
+function explainDecision(
+  model: AccessModel,
+  decision: PermissionDecision,
+  kind: AccessTargetKind,
+  relativePath: string,
+): AccessDecision {
+  const source = decision.scope ? decisionSourceOf(decision.scope, kind, relativePath) : null;
+  const base = { allowed: decision.allowed, source };
+  switch (decision.via) {
+    case 'admin-rescue':
+    case 'default-deny':
+      return { ...base, via: decision.via, principal: null };
+    case 'email':
+      return { ...base, via: 'person', principal: decision.key ?? null };
+    case 'everyone':
+      return { ...base, via: 'everyone', principal: EVERYONE_CANONICAL };
+    case 'principal': {
+      const key = decision.key ?? '';
+      const record = model.roles.byCanonical.get(key);
+      return { ...base, via: record?.kind ?? 'role', principal: record?.displayName ?? key };
+    }
+  }
 }
 
 /**
@@ -1331,6 +1405,27 @@ export class AccessControlService implements IAccessControl {
         opts?.tokenMatch,
       );
       if (sources.length > 0) out[verb] = sources;
+    }
+    return out;
+  }
+
+  async explainAccess(
+    workspaceId: string,
+    userEmail: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<Record<Verb, AccessDecision>> {
+    const model = await this.loadModel(workspaceId);
+    // The same own-entries read `canRead`/`canWrite`/… make, whatever the
+    // kind: a directory simply has none.
+    const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    const out = {} as Record<Verb, AccessDecision>;
+    for (const verb of KNOWN_VERBS) {
+      const machineOwned = verb === 'write' ? this.machineOwnedWriteRule(userEmail, relativePath) : null;
+      out[verb] =
+        machineOwned !== null
+          ? { allowed: machineOwned, source: null, via: 'machine-owned', principal: null }
+          : explainDecision(model, decidePermissionResolved(model, verb, userEmail, relativePath, own), kind, relativePath);
     }
     return out;
   }

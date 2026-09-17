@@ -11,7 +11,6 @@ import type {
   IAccessControl,
   GrantPrincipal,
   GrantSources,
-  ResolvedPrincipal,
 } from './access-control.interface.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId, workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -36,6 +35,7 @@ import {
   type Verb,
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
+import { resolveAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
@@ -567,75 +567,13 @@ export function createAccessRoutes(
   }
 
   /** The full resolved-access view returned after a successful mutation. */
-  async function resolvedView(
+  function resolvedView(
     workspaceId: string,
     repoRelTarget: string,
     userEmail: string,
     kind: TargetKind,
   ) {
-    const [canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders] =
-      await Promise.all([
-        accessControl.canRead(workspaceId, userEmail, repoRelTarget),
-        accessControl.canWrite(workspaceId, userEmail, repoRelTarget),
-        accessControl.canDownload(workspaceId, userEmail, repoRelTarget),
-        accessControl.canOwner(workspaceId, userEmail, repoRelTarget),
-        accessControl.eligibleWriters(workspaceId, repoRelTarget),
-        accessControl.eligibleReaders(workspaceId, repoRelTarget),
-        accessControl.eligibleOwners(workspaceId, repoRelTarget),
-        accessControl.eligibleDownloaders(workspaceId, repoRelTarget),
-      ]);
-
-    // Per-principal, per-verb origin (direct / ancestor — MECE over editable
-    // files). Keyed `u:<email>` / `r:<role>` / `g:<group>` to match the
-    // dialog's row keys, so each row can show where its access comes from and
-    // which verbs are removable here. Groups get their OWN `g:` namespace: a
-    // group and a role sharing a name are DIFFERENT principals (bare token vs
-    // `role/<name>`), and one shared `r:` entry could only describe one of
-    // them. Each kind resolves through the token spelling that IS that
-    // principal — a group through its bare token (group-first precedence), a
-    // role through its explicit `role/<name>` alias (correct whether or not a
-    // group shadows the name; the built-in `everyone` keeps its bare spelling,
-    // it has no alias). A row whose verbs resolve only via a
-    // group/everyone/rescue has no source (the verb is absent) and renders
-    // non-actionable. Built over the union of every principal in the four
-    // eligible lists (kinded `principals`, with the name-only `roles` list as
-    // the all-roles fallback).
-    const collectives = new Map<string, ResolvedPrincipal>();
-    for (const list of [eligible, readers, owners, downloaders]) {
-      const kinded =
-        list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
-      for (const p of kinded) {
-        const key = `${p.kind === 'group' ? 'g' : p.kind === 'plugin' ? 'p' : 'r'}:${p.name.toLowerCase()}`;
-        if (!collectives.has(key)) collectives.set(key, p);
-      }
-    }
-    const userSet = new Map<string, { name: string; email: string }>();
-    for (const u of [...eligible.users, ...readers.users, ...owners.users, ...downloaders.users]) {
-      if (!userSet.has(u.email.toLowerCase())) userSet.set(u.email.toLowerCase(), u);
-    }
-    const sources: Record<string, Awaited<ReturnType<IAccessControl['grantSources']>>> = {};
-    await Promise.all([
-      ...[...collectives.entries()].map(async ([key, p]) => {
-        const token =
-          p.kind === 'role' && canonicalRoleName(p.name) !== EVERYONE_CANONICAL
-            ? `${ROLE_TOKEN_PREFIX}${p.name}`
-            : p.name;
-        sources[key] = await accessControl.grantSources(workspaceId, kind, repoRelTarget, {
-          kind: 'role',
-          role: token,
-        });
-      }),
-      ...[...userSet.values()].map(async (u) => {
-        sources[`u:${u.email.toLowerCase()}`] = await accessControl.grantSources(
-          workspaceId,
-          kind,
-          repoRelTarget,
-          { kind: 'user', email: u.email },
-        );
-      }),
-    ]);
-
-    return { canRead, canWrite, canDownload, canOwner, eligible, readers, owners, downloaders, sources };
+    return resolveAccessView(accessControl, workspaceId, repoRelTarget, userEmail, kind);
   }
 
   /**

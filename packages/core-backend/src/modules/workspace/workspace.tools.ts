@@ -24,7 +24,8 @@ import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
+import { accessRoster, resolveAccessView } from '../access/access-view.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
@@ -437,6 +438,47 @@ export function registerWorkspaceTools(
     userEmail: ctx.user.email,
   });
 
+  /** A repo-relative path in the workspace-relative form every tool speaks. */
+  const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
+  const sourceToWs = (s: AccessDecisionSource | null) => (s ? { ...s, path: toWs(s.path) } : null);
+
+  /**
+   * `file_stat`'s `access` block: the caller's verdicts from the resolver the
+   * gates use, and — only for someone who may write the path's access rules,
+   * the same gate the Manage access dialog's grant route applies — the roster
+   * that dialog lists.
+   */
+  const explainAccessAt = async (branch: string, ctx: ToolContext, p: string, kind: AccessTargetKind) => {
+    const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
+    const rel = norm === kbDirName ? '' : toKbRelative(norm, kbDirName);
+    if (rel === null) {
+      return { self: null, roster: null, rosterReason: `"${p}" is outside the \`${kbDirName}/\` repository, so no access rules apply to it.` };
+    }
+    if (!accessControl.explainAccess) throw new ToolError('Access explanation is not available on this server.', 501);
+    const workspaceId = workspaceIdForBranch(branch);
+    const email = ctx.user.email;
+    const explained = await accessControl.explainAccess(workspaceId, email, kind, rel);
+    const self = Object.fromEntries(
+      Object.entries(explained).map(([verb, d]) => [verb, { ...d, source: sourceToWs(d.source) }]),
+    );
+    const rulesPath = kind === 'folder' ? (rel ? `${rel}/access.md` : 'access.md') : rel;
+    if (!(await accessControl.canWrite(workspaceId, email, rulesPath))) {
+      return {
+        self,
+        roster: null,
+        rosterReason: `You cannot change who has access here (no write on ${toWs(rulesPath)}), so only your own access is shown.`,
+      };
+    }
+    const roster = accessRoster(await resolveAccessView(accessControl, workspaceId, rel, email, kind), kind, rel);
+    const rosterWs = Object.fromEntries(
+      Object.entries(roster).map(([verb, entries]) => [
+        verb,
+        entries.map((e) => ({ ...e, sources: e.sources.map((s) => ({ ...s, path: toWs(s.path) })) })),
+      ]),
+    );
+    return { self, roster: rosterWs };
+  };
+
   const mount = (spec: {
     name: string;
     description: string;
@@ -642,6 +684,11 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         path: wsPath(kbDirName, 'Path'),
+        access: {
+          type: 'boolean',
+          description:
+            'Also explain access (default false): `access.self` is your own read/write/download/owner verdicts, each with the folder rules or file frontmatter that decided it and whether that is inherited; `access.roster` lists who holds each verb and where each grant is written, given only when you can manage this path\'s access (otherwise null, with `access.rosterReason`).',
+        },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -659,6 +706,11 @@ export function registerWorkspaceTools(
           enum: ['text', 'document', 'binary'],
           description: 'Files only: what the file tools can do with the content — `text` (read/write/edit as text), `document` (read extracts; replace by upload), `binary` (bytes: copy/move/delete; replace by upload).',
         },
+        access: {
+          type: 'object',
+          description:
+            'Only with `access: true`. `self.<verb>` (read, write, download, owner) is `{ allowed, source, via, principal }`: `source` is `{ kind: folder | frontmatter, path, inherited }` (null when no rule decided it — default-deny, admin rescue or a machine-owned file); `via` is `person`, `group`, `role`, `plugin`, `everyone`, `admin-rescue`, `machine-owned` or `default-deny`. `roster.<verb>` lists `{ kind: group | role | plugin | person, name, email?, sources }` as the Manage access dialog does, or is null with `rosterReason` when you cannot manage this path\'s access. Paths start with the repository folder.',
+        },
       },
       additionalProperties: true,
     },
@@ -669,7 +721,11 @@ export function registerWorkspaceTools(
       await assertCanRead(readGateFor(a.branch as string, ctx), p);
       const fs = await ctx.getFilesystem(a.branch as string);
       const stat = await fs.stat(p);
-      if (stat.type !== 'file') return stat;
+      const withAccess = async <T extends object>(out: T) =>
+        a.access === true
+          ? { ...out, access: await explainAccessAt(a.branch as string, ctx, p, stat.type === 'file' ? 'file' : 'folder') }
+          : out;
+      if (stat.type !== 'file') return withAccess(stat);
       // The mode is decided by the same registry the write gates consult, so
       // what stat reports is what write_file will do. Only a reader whose
       // answer depends on the bytes (the text fallback) costs a read — one
@@ -679,7 +735,7 @@ export function registerWorkspaceTools(
       // bytes or it would report `text` for a file the write then refuses.
       const reader = readers.readerFor(p);
       const bytes = reader.textEditable && reader.editRefusalForExisting ? asBytes(await fs.readFile(p)) : undefined;
-      return { ...stat, contentMode: contentModeOf(reader, bytes) };
+      return withAccess({ ...stat, contentMode: contentModeOf(reader, bytes) });
     },
   });
 
