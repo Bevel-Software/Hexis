@@ -687,11 +687,16 @@ export function registerWorkspaceTools(
     const files: string[] = [];
     const links: string[] = [];
     let truncated = false;
-    // Past the cap the walk goes on, recording links only: a link anywhere
-    // decides whether the folder can be deleted, so a capped count must not
-    // hide one.
+    // The cap STOPS the walk, so a caller that passes one does bounded work on
+    // a folder of any size. It is the deciding caller's job to make a
+    // truncated answer a refusal rather than a guess: `file_stat`, the only
+    // capped caller, answers `movable`/`deletable` false once `truncated` is
+    // set, which covers the link it may not have reached. The tools that act —
+    // `delete_folder`, `move_file` — pass no cap and see every file and every
+    // link, because they must judge all of them.
     const walk = async (d: string): Promise<void> => {
       for (const e of (await fs.readdir(d)) as DirEntry[]) {
+        if (truncated) return;
         const child = `${d.replace(/\/+$/, '')}/${e.name}`;
         if (e.name === '.git') continue;
         if (e.type === 'directory' && !e.isSymlink) {
@@ -699,7 +704,10 @@ export function registerWorkspaceTools(
         } else {
           if (e.isSymlink) links.push(child);
           if (files.length < cap) files.push(child);
-          else truncated = true;
+          else {
+            truncated = true;
+            return;
+          }
         }
       }
     };
@@ -923,7 +931,7 @@ export function registerWorkspaceTools(
       'Get a file/directory\'s metadata without reading content: `name`, `type`, `size`, … plus what you may do with it. ' +
       '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
       '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
-      'For a folder, `descendants` is the number of files under it at any depth (counting stops at 10000 and `descendantsTruncated` says so). ' +
+      'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
       'Call this before a move or delete to see what it would touch.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -993,21 +1001,37 @@ export function registerWorkspaceTools(
       // Judged on the same paths move_file and delete_folder judge: a folder
       // move or delete touches every file under it, so a file its own rules
       // deny you makes the folder neither movable nor deletable, however
-      // writable the folder is. The walk is the one those tools run (uncapped);
-      // only the reported count stops at the cap.
-      const { files, links } = kind === 'folder' ? await filesUnder(fs, p) : { files: [p], links: [] as string[] };
+      // writable the folder is.
+      //
+      // Two bounds, because this is a READ tool the description tells agents
+      // to call before every move and delete, and the folder it is asked about
+      // may be the repository root:
+      //   - a platform item or a path through a link is already not movable
+      //     and not deletable, so no access verdict is asked for any file
+      //     under it (the count below is a plain directory walk);
+      //   - the walk stops at the cap, and a truncated walk answers
+      //     `movable`/`deletable` false rather than judging part of a folder
+      //     and calling it the whole (`delete_folder`'s dry run, which walks
+      //     uncapped, remains the authority for a folder that large).
+      const decided = managed || link;
+      const { files, links, truncated } =
+        kind === 'folder'
+          ? await filesUnder(fs, p, DESCENDANTS_CAP)
+          : { files: [p], links: [] as string[], truncated: false };
       const judged = kind === 'folder' ? [p, ...files] : [p];
-      const writable = (await writeBlocked(branch, ctx, judged)).length === 0;
+      const writable = decided ? false : (await writeBlocked(branch, ctx, judged)).length === 0;
       // A restricted run (see IRoutineWritePolicy) is refused per file by both tools.
-      const policyAllows = files.every((file) => {
-        try {
-          writePolicy.assertPathWritable(ctx.sessionId, file);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      const open = !managed && !link && writable && policyAllows;
+      const policyAllows =
+        !decided &&
+        files.every((file) => {
+          try {
+            writePolicy.assertPathWritable(ctx.sessionId, file);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+      const open = !decided && !truncated && writable && policyAllows;
       const out: Record<string, unknown> = {
         ...stat,
         managed,
@@ -1017,8 +1041,8 @@ export function registerWorkspaceTools(
         access,
       };
       if (kind === 'folder') {
-        out.descendants = Math.min(files.length, DESCENDANTS_CAP);
-        if (files.length > DESCENDANTS_CAP) out.descendantsTruncated = true;
+        out.descendants = files.length;
+        if (truncated) out.descendantsTruncated = true;
       }
       return out;
     },
@@ -1335,11 +1359,11 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_folder',
     description:
-      'Delete a workspace FOLDER and every file under it, at any depth; each file lands as its own committed + pushed change as you, then the empty folder is removed. ' +
+      'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
       'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
-      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it, deleted last, so the rest of its files stay governed by them until they are gone; you must be able to write those platform files too.' +
+      'The folder\'s own platform files (`access.md`, `.bevelignore`) go with it in that same one change, so its files are never left ungoverned part-way; you must be able to write those platform files too.' +
       PROPOSAL_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1415,15 +1439,25 @@ export function registerWorkspaceTools(
           message: `Nothing was deleted: "${path}" holds ${files.length} ${files.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
         };
       }
-      // The folder's platform files go last: the deletes land one commit at a
-      // time, and an `access.md` removed first would leave every file still
-      // waiting its turn ungoverned should the run stop part-way.
-      const ordered = [
-        ...files.filter((f) => managedReason(f, 'file') === undefined),
-        ...files.filter((f) => managedReason(f, 'file') !== undefined),
-      ];
-      for (const f of ordered) {
-        await asStructuredDenial(branch, ctx, 'delete_folder', () => fs.deleteFile(f));
+      // ONE commit for the whole folder. `write: true` guarantees a
+      // LockingFilesystem here, and its `writeFiles` takes every path's lock
+      // BEFORE touching disk, deletes inside those locks and commits the set
+      // as a single change (fail-closed: a refusal commits nothing). A folder
+      // therefore never half-disappears, and its own `access.md` needs no
+      // ordering trick to keep the rest governed on the way — nothing lands
+      // until all of it does. Structural cast, as `write_files` does, to avoid
+      // importing the workflow-internal class here.
+      if (files.length > 0) {
+        const batch = fs as unknown as {
+          writeFiles(
+            writes: { path: string; content: string }[],
+            summary: string,
+            deletes: string[],
+          ): Promise<unknown>;
+        };
+        await asStructuredDenial(branch, ctx, 'delete_folder', () =>
+          batch.writeFiles([], `Delete ${path} and its ${files.length} file(s)`, files),
+        );
       }
       // Git tracks no folders: once the files are gone, the shells left on
       // disk are swept so the folder stops appearing in listings. Only empty

@@ -77,6 +77,19 @@ async function start(
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
+  // `LockingFilesystem.writeFiles` is what the real `delete_folder` and
+  // `write_files` land through — one lock cycle over every path, then one
+  // commit. A plain LocalFilesystem has no such method, so stand in for its
+  // DISK effect (the commit half has no counterpart here: this harness never
+  // commits) and let the tools be exercised end to end.
+  (fs as unknown as Record<string, unknown>).writeFiles = async (
+    writes: { path: string; content: string }[],
+    _summary: string,
+    deletes: string[] = [],
+  ) => {
+    for (const w of writes) await fs.writeFile(w.path, w.content);
+    for (const p of deletes) await fs.deleteFile(p);
+  };
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
   writePolicy = new RoutineWritePolicyService();
@@ -1729,19 +1742,33 @@ describe('preflight for moves and deletes', () => {
       expect((await call(base, 'file_stat', { path: KB('Sales/sub') })).body).toMatchObject({ descendants: 0 });
     });
 
-    it('a folder\'s own access.md goes with it, deleted after every other file', async () => {
+    it('a folder\'s own access.md goes with it, in the same single change as every other file', async () => {
       const base = await seeded();
       await fs.writeFile(KB('Sales/archive/access.md'), '---\nread: everyone\n---\n');
-      const order: string[] = [];
-      const deleteFile = fs.deleteFile.bind(fs);
-      fs.deleteFile = async (p: string, o?: never) => {
-        order.push(p);
-        return deleteFile(p, o);
+      // The batch is what makes the folder land all-or-nothing, so assert the
+      // shape the tool hands the filesystem: ONE call carrying every file,
+      // the folder's own access.md among them. Ordering within it is no
+      // longer a property — nothing is committed until all of it is.
+      const batches: string[][] = [];
+      const fsAny = fs as unknown as Record<string, unknown>;
+      const writeFiles = fsAny.writeFiles as (w: unknown[], s: string, d: string[]) => Promise<void>;
+      fsAny.writeFiles = async (w: unknown[], s: string, d: string[] = []) => {
+        batches.push([...d]);
+        return writeFiles(w, s, d);
       };
+
       const run = await call(base, 'delete_folder', { path: KB('Sales/archive'), confirm: true });
+
       expect(run.body).toMatchObject({ deleted: true, descendants: 4 });
-      expect(order).toHaveLength(4);
-      expect(order.at(-1)).toBe(KB('Sales/archive/access.md'));
+      expect(batches).toHaveLength(1);
+      expect([...batches[0]].sort()).toEqual([
+        KB('Sales/archive/access.md'),
+        KB('Sales/archive/nested/old.md'),
+        KB('Sales/archive/nested/older.md'),
+        KB('Sales/archive/top.md'),
+      ]);
+      expect(await exists(KB('Sales/archive/access.md'))).toBe(false);
+      expect(await exists(KB('Sales/archive'))).toBe(false);
     });
 
     it('a restricted run is judged on the files a folder delete or move would write, not the folder path', async () => {
