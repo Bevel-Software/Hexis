@@ -228,6 +228,12 @@ export function createAccessRoutes(
     ) {
       throw new AccessMutationError('path must stay inside the KB repo');
     }
+    // One spelling per target, as the file verbs and the edit lock require: a
+    // `./README.md` would reach the resolver as a different chain from
+    // `README.md` (and a `./A/x.md` would skip `A/access.md`).
+    if (repoRelTarget.split('/').some((segment) => segment === '.')) {
+      throw new AccessMutationError("path must not contain '.' segments");
+    }
   }
 
   /**
@@ -554,16 +560,11 @@ export function createAccessRoutes(
   ): Promise<void> {
     const writable = await accessControl.canWrite(workspaceId, userEmail, gatePath);
     if (!writable) {
-      const [eligible, callerPrincipals] = await Promise.all([
-        accessControl.eligibleWriters(workspaceId, gatePath),
-        accessControl.heldPrincipals(workspaceId, userEmail),
-      ]);
+      const eligible = await accessControl.eligibleWriters(workspaceId, gatePath);
       throw new AccessDeniedError({
         path: gatePath,
         eligibleRoles: eligible.roles,
         eligibleUsers: eligible.users,
-        eligiblePrincipals: eligible.principals,
-        callerPrincipals,
       });
     }
     // On a protected branch, write is admin-only for access.md/roles.yaml. The

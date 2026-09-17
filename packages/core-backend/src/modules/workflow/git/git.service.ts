@@ -415,16 +415,11 @@ export class GitService implements IGitService {
     if (!result) return; // bootstrap: no config at ref → default-allow
     for (const p of paths) {
       if (!result.get(p)) {
-        const [eligible, callerPrincipals] = await Promise.all([
-          this.accessControl.eligibleWritersAtRef(workspaceId, ref, p),
-          this.accessControl.heldPrincipals(workspaceId, userEmail, ref),
-        ]);
+        const eligible = await this.accessControl.eligibleWritersAtRef(workspaceId, ref, p);
         throw new AccessDeniedError({
           path: p,
           eligibleRoles: eligible?.roles ?? [],
           eligibleUsers: eligible?.users ?? [],
-          eligiblePrincipals: eligible?.principals,
-          callerPrincipals,
         });
       }
     }

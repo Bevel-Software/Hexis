@@ -436,6 +436,27 @@ function principalKeysOf(model: AccessModel, email: string): Set<string> | undef
   return new Set([...(own ?? []), ...pub]);
 }
 
+/** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
+const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
+
+/**
+ * Add to `keys` what holding them confers on top: every plugin principal
+ * expanded from one of the keys, and the public keys every caller holds.
+ */
+function addDerivedKeys(model: AccessModel, keys: Set<string>): Set<string> {
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
+    for (const source of principal.sourceKeys) {
+      if (keys.has(source)) {
+        keys.add(key);
+        break;
+      }
+    }
+  }
+  for (const key of model.roles.publicKeys ?? []) keys.add(key);
+  return keys;
+}
+
 /**
  * Every principal key that being in `group` confers — the group's OWN key,
  * the roles that list the group (`group:<Name>` in roles.yaml), the plugin
@@ -458,17 +479,7 @@ function principalKeysOfGroup(model: AccessModel, group: string): Set<string> | 
   }
   // Plugin principals were expanded from role/group entries; a plugin that
   // admits the group, or a role the group is folded into, admits the group.
-  for (const [key, principal] of model.roles.byCanonical) {
-    if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
-    for (const source of principal.sourceKeys) {
-      if (keys.has(source)) {
-        keys.add(key);
-        break;
-      }
-    }
-  }
-  for (const key of model.roles.publicKeys ?? []) keys.add(key);
-  return keys;
+  return addDerivedKeys(model, keys);
 }
 
 /** The key set of a caller who holds nothing: `hasPermissionForKeys` then answers as `everyone`. */
@@ -505,9 +516,6 @@ function hasPermissionForKeys(
   return adminFloor;
 }
 
-/** The explicit key of the Admin ROLE — never the bare token, which a same-named group may own. */
-const ADMIN_ROLE_KEY = `${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`;
-
 /**
  * Whether a scope sits at the Admin write floor: the repository root's own
  * `access.md`, or the own frontmatter of a file directly in the root (those
@@ -526,7 +534,7 @@ function isAdminEmail(model: AccessModel, email: string): boolean {
   // Check the explicit `role/admin` alias, NOT the bare token: bare-name
   // precedence is group-first, so a group that happens to be named "Admin"
   // owns the bare key — and its members must never inherit the capability.
-  return !!roles && roles.has(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+  return !!roles && roles.has(ADMIN_ROLE_KEY);
 }
 
 /**
@@ -838,22 +846,14 @@ function principalKeysOfToken(model: AccessModel, token: string): Set<string> {
   const record = model.roles.byCanonical.get(token);
   if (record?.kind === 'group') return principalKeysOfGroup(model, token) ?? new Set([token]);
   const keys = new Set<string>([token]);
-  if (record) {
-    for (const [key, principal] of model.roles.byCanonical) {
-      if (principal === record) keys.add(key);
-    }
-    for (const [key, principal] of model.roles.byCanonical) {
-      if (principal.kind !== 'plugin' || !principal.sourceKeys) continue;
-      for (const source of principal.sourceKeys) {
-        if (keys.has(source)) {
-          keys.add(key);
-          break;
-        }
-      }
-    }
+  if (!record) {
+    for (const key of model.roles.publicKeys ?? []) keys.add(key);
+    return keys;
   }
-  for (const key of model.roles.publicKeys ?? []) keys.add(key);
-  return keys;
+  for (const [key, principal] of model.roles.byCanonical) {
+    if (principal === record) keys.add(key);
+  }
+  return addDerivedKeys(model, keys);
 }
 
 function eligibleHoldersResolved(
@@ -918,7 +918,7 @@ function eligibleHoldersResolved(
     // Look the Admin ROLE up via its explicit alias — the bare key may be
     // owned by a same-named group under group-first precedence. The override
     // is the ROLE's capability, so the row's kind is 'role' regardless.
-    const adminRole = model.roles.byCanonical.get(`${ROLE_TOKEN_PREFIX}${ADMIN_CANONICAL}`);
+    const adminRole = model.roles.byCanonical.get(ADMIN_ROLE_KEY);
     addPrincipal(adminRole ? adminRole.displayName : ADMIN_CANONICAL, 'role');
   }
 
@@ -1617,11 +1617,7 @@ export class AccessControlService implements IAccessControl {
     workspaceId: string,
     ref: string,
     relativePath: string,
-  ): Promise<{
-    principals?: ResolvedPrincipal[];
-    roles: string[];
-    users: { name: string; email: string }[];
-  } | null> {
+  ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null> {
     if (relativePath === SYNCED_GROUPS_YAML) {
       // Machine-owned — see machineOwnedWriteRule.
       return {
@@ -1636,31 +1632,9 @@ export class AccessControlService implements IAccessControl {
     return eligibleHoldersResolved(loaded.model, 'write', relativePath, own);
   }
 
-  async heldPrincipals(workspaceId: string, userEmail: string, ref?: string): Promise<ResolvedPrincipal[]> {
-    let model: AccessModel;
-    if (ref === undefined) {
-      model = await this.loadModel(workspaceId);
-    } else {
-      const loaded = await this.loadModelAtRef(workspaceId, ref);
-      if (!loaded) return [];
-      model = loaded.model;
-    }
-    const email = canonicalEmail(userEmail);
-    // Keyed by kind + name: a role and a group may share a display name, and
-    // holding one is not holding the other.
-    const byIdentity = new Map<string, ResolvedPrincipal>();
-    const add = (name: string, kind: ResolvedPrincipal['kind']) =>
-      byIdentity.set(`${kind}\0${name.toLowerCase()}`, { name, kind });
-    for (const key of model.roles.byEmail.get(email) ?? []) {
-      const record = model.roles.byCanonical.get(key);
-      if (record && record.kind !== 'plugin') add(record.displayName, record.kind ?? 'role');
-    }
-    if (model.deploymentOwners.has(email)) {
-      add(model.roles.byCanonical.get(ADMIN_ROLE_KEY)?.displayName ?? ADMIN_CANONICAL, 'role');
-    }
-    return [...byIdentity.values()].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
-    );
+  async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
+    const model = await this.loadModel(workspaceId);
+    return isAdminEmail(model, canonicalEmail(userEmail));
   }
 
   async eligibleWritersForPathsAtRef(

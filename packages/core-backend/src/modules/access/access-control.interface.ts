@@ -438,20 +438,15 @@ export interface IAccessControl {
     workspaceId: string,
     ref: string,
     relativePath: string,
-  ): Promise<{
-    principals?: ResolvedPrincipal[];
-    roles: string[];
-    users: { name: string; email: string }[];
-  } | null>;
+  ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null>;
 
   /**
-   * The roles and groups `userEmail` holds, with their kind — the Admin role
-   * for the deployment owner — read from the working-tree model, or from the
-   * model at `ref` when given (empty when no rules resolve there). Feeds
-   * `AccessDeniedError.callerPrincipals`, so a denial never names a principal
-   * the caller already holds as the way in.
+   * Whether `userEmail` holds the Admin write floor at the repository root —
+   * a member of the Admin role or the deployment owner — in the working-tree
+   * model. The share dialog asks before restricting a PERSON's write at the
+   * root: the floor keeps it, so the deny could only be rolled back.
    */
-  heldPrincipals(workspaceId: string, userEmail: string, ref?: string): Promise<ResolvedPrincipal[]>;
+  holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
 
   /**
    * Batched: resolve eligible writers + expanded emails for a list of paths
