@@ -60,6 +60,7 @@ function stubWorkspace(workspaceDir: string): WorkspaceService {
   const resolve = (wsRel: string) => path.join(workspaceDir, wsRel);
   return {
     getWorkspacePath: async () => workspaceDir,
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: async () => ({}) as unknown,
     readFile: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel), 'utf-8'),
     readFileBinary: async (_id: string, wsRel: string) => fs.readFile(resolve(wsRel)),

@@ -93,6 +93,7 @@ async function makeHarness(opts: {
   } as unknown as IAccessControl;
 
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const v = files.get(wsRel);

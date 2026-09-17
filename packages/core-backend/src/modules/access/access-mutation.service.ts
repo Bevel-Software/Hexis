@@ -214,6 +214,26 @@ export class AccessMutationService {
   }
 
   /**
+   * The same content question, asked by the READ view, which must not fail:
+   * true when the file's bytes are text, so it really can hold rules of its
+   * own. A file that cannot be read at all (absent, or a transient failure)
+   * raises no content objection — the read view keeps reporting what it knows
+   * rather than turning a resolvable view into an error. The mutations use
+   * `assertTargetHoldsText`, which rethrows those failures instead.
+   */
+  async targetHoldsText(workspaceId: string, repoRelFile: string): Promise<boolean> {
+    try {
+      const bytes = await this.workspaceService.readFileBinary(
+        workspaceId,
+        this.toWorkspaceRelative(repoRelFile),
+      );
+      return isTextBytes(bytes);
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * Read the to-be-edited file's current text, or '' when it's an expected
    * missing file. An absent file is normal only for a folder (no `access.md`
    * yet); there we swallow ENOENT/ENOTDIR. Every other error — a typoed node

@@ -92,6 +92,7 @@ describe('access routes on a proposal branch (real git)', () => {
     const dirOf = (id: string) => dirFor(branchForWorkspaceId(id));
     const workspaceService = {
       getWorkspacePath: async (id: string) => dirOf(id),
+      withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
       getOrCreateForBranch: async (branch: string) => ({ id: workspaceIdForBranch(branch), kbDirName: KB }),
       readFile: async (id: string, wsRel: string) => fs.readFile(path.join(dirOf(id), wsRel), 'utf-8'),
       readFileBinary: async (id: string, wsRel: string) => fs.readFile(path.join(dirOf(id), wsRel)),

@@ -116,9 +116,12 @@ export interface AccessResponse {
   sources: Record<string, GrantSources>;
   /**
    * Present for a file that cannot carry frontmatter (a PDF, a deck, an
-   * image): the repo-relative folder (`''` for the root) whose rules govern
-   * it. Such a file has no per-file rules, and the mutation routes refuse it
-   * with `folder-governs-access`.
+   * image — or binary bytes saved under a note's name, which the server
+   * judges by reading them): the repo-relative folder (`''` for the root)
+   * whose rules govern it. Such a file has no per-file rules, and the
+   * mutation routes refuse it with `folder-governs-access`. THE server's
+   * ruling: the dialog follows this field rather than re-deciding from the
+   * path, so the sheet and the routes can never disagree.
    */
   governedByFolder?: string;
 }

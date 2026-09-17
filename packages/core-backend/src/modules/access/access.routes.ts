@@ -10,6 +10,7 @@ import {
   isProtectedBranch,
   DEFAULT_BRANCH,
   pluginManifestName,
+  FOLDER_GOVERNS_ACCESS_KIND,
 } from '@bevel-software/platform-shared';
 import type {
   IAccessControl,
@@ -63,6 +64,19 @@ function toHttpError(err: unknown): { status: number; body: Record<string, unkno
 /** Shared non-empty-string coercion; 400s render as RolesAdminError-family. */
 function requireNonEmptyString(value: unknown, field: string): string {
   return sharedRequireNonEmptyString(value, field);
+}
+
+/**
+ * Is this the "the folder governs this file" refusal? It is the one mutation
+ * failure that is guaranteed to have written nothing — it is thrown as the
+ * file is read — so the lock it holds must be released without discarding the
+ * path (see `withEditLock`).
+ */
+function isFolderGovernsRefusal(err: unknown): boolean {
+  return (
+    err instanceof AccessMutationError &&
+    err.payload?.kind === FOLDER_GOVERNS_ACCESS_KIND
+  );
 }
 
 export function createAccessRoutes(
@@ -659,8 +673,14 @@ export function createAccessRoutes(
     // A file that cannot carry frontmatter has no rules of its own: name the
     // folder whose rules govern it (repo-relative, `''` for the root), which
     // is where the mutation routes point too.
+    // Content counts as much as the name: bytes that are not text (a binary
+    // saved as `.md`) are refused by the mutations too, so the view must say
+    // so — otherwise the dialog offers a field whose every write answers 422.
     const governedByFolder =
-      kind === 'file' && !fileCarriesAccessRules(repoRelTarget) ? governingFolderOf(repoRelTarget) : undefined;
+      kind === 'file' &&
+      (!fileCarriesAccessRules(repoRelTarget) || !(await mutation.targetHoldsText(workspaceId, repoRelTarget)))
+        ? governingFolderOf(repoRelTarget)
+        : undefined;
 
     return {
       canRead,
@@ -681,6 +701,14 @@ export function createAccessRoutes(
    * under the lock) → release (enqueues the commit + push out of band). Mirrors
    * the human-save `withLock` so protected-branch enforcement + commit-as-user
    * are inherited. On op failure, release WITHOUT committing partial bytes.
+   *
+   * The whole sequence takes the path's TURN first, exactly as `PUT /file`
+   * does (turn outside, lock inside — the same order, so the two can never
+   * wait on each other). The mutation re-reads the file under the lock and
+   * refuses binary content; without the turn an upload landing between that
+   * read and the write would be overwritten by frontmatter, or would arrive
+   * just after the read and turn a refusal into a discard of the upload. The
+   * write inside takes the same turn re-entrantly.
    */
   async function withEditLock(
     workspaceId: string,
@@ -690,6 +718,20 @@ export function createAccessRoutes(
     op: () => Promise<void>,
   ): Promise<void> {
     const wsEditPath = `${kbDirName}/${editPath}`;
+    return workspaceService.withPathTurn(workspaceId, wsEditPath, () =>
+      lockAndRun(workspaceId, branch, wsEditPath, editPath, user, op),
+    );
+  }
+
+  /** The acquire → op → release half of {@link withEditLock}, inside the turn. */
+  async function lockAndRun(
+    workspaceId: string,
+    branch: string,
+    wsEditPath: string,
+    editPath: string,
+    user: AuthUser,
+    op: () => Promise<void>,
+  ): Promise<void> {
     const existing = await workflowService.getLock(workspaceId, branch, wsEditPath);
     if (existing && existing.holderUserId === user.id) {
       // Caller already holds the lock (mid-edit) — write without touching it.
@@ -719,7 +761,16 @@ export function createAccessRoutes(
       await op();
     } catch (err) {
       try {
-        await workflowService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+        // A refusal wrote NOTHING, so the release must leave the disk alone:
+        // `releaseLockNoCommit` discards the path's working-tree changes, and
+        // right after an upload whose commit is still queued that deletes the
+        // upload. Every other failure may have left partial bytes, so it keeps
+        // the discarding release.
+        if (isFolderGovernsRefusal(err)) {
+          await workflowService.releaseLockUntouched(workspaceId, branch, wsEditPath, user);
+        } else {
+          await workflowService.releaseLockNoCommit(workspaceId, branch, wsEditPath, user);
+        }
       } catch {
         /* best-effort */
       }

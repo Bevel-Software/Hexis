@@ -61,7 +61,14 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
   let readFile: ReturnType<typeof vi.fn>;
   let writeFile: ReturnType<typeof vi.fn>;
   let acquireLock: ReturnType<typeof vi.fn>;
+  let releaseLockNoCommit: ReturnType<typeof vi.fn>;
+  let releaseLockUntouched: ReturnType<typeof vi.fn>;
   let mutation: AccessMutationService;
+  /** How many path turns are open right now, and on which paths (stub-tracked). */
+  let turnDepth: number;
+  let turnedPaths: string[];
+  let depthAtRead: number[];
+  let depthAtWrite: number[];
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-folder-governs-'));
@@ -72,11 +79,31 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     }
     await fs.writeFile(path.join(root, KB, 'Sales/Deal.md'), '---\nnodeType: process\n---\n# Deal\n');
 
-    readFile = vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(root, wsRel)));
-    writeFile = vi.fn(async (_id: string, wsRel: string, content: string) =>
-      fs.writeFile(path.join(root, wsRel), content, 'utf-8'),
-    );
+    readFile = vi.fn(async (_id: string, wsRel: string) => {
+      depthAtRead.push(turnDepth);
+      return fs.readFile(path.join(root, wsRel));
+    });
+    writeFile = vi.fn(async (_id: string, wsRel: string, content: string) => {
+      depthAtWrite.push(turnDepth);
+      return fs.writeFile(path.join(root, wsRel), content, 'utf-8');
+    });
+    // The real service queues one mutation at a time per path here, and the
+    // upload takes the same turn; what the stub records is whether the
+    // read-check-write sequence ran INSIDE a turn on the edited path.
+    turnDepth = 0;
+    turnedPaths = [];
+    depthAtRead = [];
+    depthAtWrite = [];
     const workspaceService = {
+      withPathTurn: async (_id: string, p: string, op: () => Promise<unknown>) => {
+        turnedPaths.push(p);
+        turnDepth += 1;
+        try {
+          return await op();
+        } finally {
+          turnDepth -= 1;
+        }
+      },
       getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
       readFile: vi.fn(async (_id: string, wsRel: string) => fs.readFile(path.join(root, wsRel), 'utf-8')),
       readFileBinary: readFile,
@@ -99,16 +126,21 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     mutation = new AccessMutationService(workspaceService, accessControl, KB);
 
     acquireLock = vi.fn(async () => ({ acquired: true, lock: {} }));
+    // Models the real release-without-commit: it discards the path's
+    // working-tree changes, which DELETES a just-uploaded file whose commit
+    // is still queued. A refusal that runs under the lock loses the upload.
+    releaseLockNoCommit = vi.fn(async (_ws: string, _branch: string, wsRel: string) =>
+      fs.rm(path.join(root, wsRel), { force: true }),
+    );
+    // The third release shape: the caller held the lock and touched nothing,
+    // so disk and commit queue are left exactly as they are.
+    releaseLockUntouched = vi.fn(async () => undefined);
     const workflowService = {
       getLock: vi.fn(async () => null),
       acquireLock,
       releaseLock: vi.fn(async () => undefined),
-      // Models the real release-without-commit: it discards the path's
-      // working-tree changes, which DELETES a just-uploaded file whose commit
-      // is still queued. A refusal that runs under the lock loses the upload.
-      releaseLockNoCommit: vi.fn(async (_ws: string, _branch: string, wsRel: string) =>
-        fs.rm(path.join(root, wsRel), { force: true }),
-      ),
+      releaseLockNoCommit,
+      releaseLockUntouched,
     } as unknown as WorkflowService;
 
     const app = express();
@@ -230,6 +262,38 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     expect(writeFile).not.toHaveBeenCalled();
   });
 
+  it('an upload that lands after the pre-lock check is refused under the lock, and the release leaves it alone', async () => {
+    // The race: the pre-lock check reads text, an upload replaces the bytes,
+    // and the mutation reads the binary under the lock. The refusal must not
+    // reach the discarding release — that would delete the upload it refused
+    // to touch.
+    const abs = path.join(root, KB, 'Sales/Raced.md');
+    await fs.writeFile(abs, BINARIES['Sales/Deck.pptx']);
+    const before = sha(await fs.readFile(abs));
+    readFile.mockImplementationOnce(async () => Buffer.from('# A note, for now\n'));
+
+    const res = await post('grant', { path: `${KB}/Sales/Raced.md`, kind: 'file', verb: 'read', principal: ALICE });
+
+    expect(res.status).toBe(422);
+    expect((await res.json()).kind).toBe('folder-governs-access');
+    expect(acquireLock).toHaveBeenCalled(); // it did get past the pre-lock check
+    expect(releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(releaseLockUntouched).toHaveBeenCalled();
+    expect(sha(await fs.readFile(abs))).toBe(before);
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it('reads and writes a note inside the turn on its path, where an upload cannot interleave', async () => {
+    const res = await post('grant', { path: `${KB}/Sales/Deal.md`, kind: 'file', verb: 'read', principal: ALICE });
+
+    expect(res.status).toBe(200);
+    expect(turnedPaths).toContain(`${KB}/Sales/Deal.md`);
+    // The write, and the read it was spliced from, both inside the turn.
+    expect(depthAtWrite).not.toHaveLength(0);
+    expect(depthAtWrite.every((d) => d > 0)).toBe(true);
+    expect(depthAtRead.filter((d) => d > 0)).not.toHaveLength(0);
+  });
+
   it('a .tool definition carries its own rules, as the resolver reads them', async () => {
     const abs = path.join(root, KB, 'Sales/crm.tool');
     await fs.writeFile(abs, '---\nname: crm\ndescription: CRM lookup\n---\n');
@@ -267,6 +331,28 @@ describe('access mutations on a file that cannot carry frontmatter', () => {
     expect(binary.readers).toBeDefined();
     const note = await (await get('Sales/Deal.md')).json();
     expect(note).not.toHaveProperty('governedByFolder');
+  });
+
+  it('the read view names the folder for binary content saved as .md — the name alone would not', async () => {
+    // Otherwise the dialog offers a field whose every write answers 422.
+    await fs.writeFile(path.join(root, KB, 'Sales/Fake.md'), BINARIES['Sales/Report.pdf']);
+    const view = await (
+      await fetch(
+        `${baseUrl}/api/workspace/${encodeURIComponent(WS)}/access?path=${encodeURIComponent(`${KB}/Sales/Fake.md`)}&kind=file`,
+      )
+    ).json();
+    expect(view.governedByFolder).toBe('Sales');
+    expect(view.readers).toBeDefined();
+  });
+
+  it('a folder target never asks the content question', async () => {
+    const view = await (
+      await fetch(
+        `${baseUrl}/api/workspace/${encodeURIComponent(WS)}/access?path=${encodeURIComponent(`${KB}/Sales`)}&kind=folder`,
+      )
+    ).json();
+    expect(view).not.toHaveProperty('governedByFolder');
+    expect(readFile).not.toHaveBeenCalled();
   });
 
   it('a Markdown note still takes a file-level grant (the harness does see writes)', async () => {
