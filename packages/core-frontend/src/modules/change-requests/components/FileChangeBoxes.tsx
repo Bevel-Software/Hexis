@@ -6,7 +6,6 @@ import { useOpenChangeRequests } from '../../workspace/hooks/useOpenChangeReques
 import { PR_STALE_EVENT } from '../../../core/events';
 import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
-import { useDefaultBranchFile } from '../hooks/useFileOnBranch';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { isBinaryFile } from '../../workspace/components/renderers';
@@ -38,8 +37,8 @@ export interface FileChangeBoxesProps {
  * text become that text?") is unanswerable without the text, which is why
  * this is not a banner pointing at a review queue somewhere else.
  *
- * Owns the whole decision loop: per-request diffs against the default
- * branch, Approve (approvals → merge → wait for the outcome event),
+ * Owns the whole decision loop: per-request diffs from each request's fork
+ * point (see `useCrFileDiffs`), Approve (approvals → merge → wait for the outcome event),
  * Decline, the author's Withdraw, and "Read the whole change" opening the
  * shared {@link ChangeRequestDialog}. Resolutions dispatch
  * {@link PR_STALE_EVENT} so the tree dots, the tabs and this very list
@@ -67,8 +66,7 @@ export function FileChangeBoxes({
   // Binary files never diff (see the box's `binary` prop) — so never fetch
   // and decode their default-branch bytes either.
   const binary = isBinaryFile(repoRelativePath);
-  const rawOnMain = useDefaultBranchFile(binary ? null : repoRelativePath, revision);
-  const crDiffs = useCrFileDiffs(requests, repoRelativePath, rawOnMain, revision);
+  const crDiffs = useCrFileDiffs(requests, repoRelativePath, revision);
 
   const resolved = useCallback(() => {
     setApplied(true);
@@ -125,7 +123,8 @@ export function FileChangeBoxes({
         // `[]` is the diff hook's "overtaken" answer — the proposal and the
         // file now say the same thing — distinct from `null`, which only
         // means a side has not arrived yet.
-        const fileDiff = crDiffs.get(cr.number) ?? null;
+        const read = crDiffs.get(cr.number) ?? null;
+        const fileDiff = read === 'unreadable' ? null : read;
         return (
           <ChangeBox
             key={cr.number}
@@ -139,6 +138,7 @@ export function FileChangeBoxes({
             canDecide={canDecide}
             diff={fileDiff}
             binary={binary}
+            unreadable={read === 'unreadable'}
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}

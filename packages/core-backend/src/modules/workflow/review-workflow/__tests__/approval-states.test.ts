@@ -234,6 +234,19 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
+    // Empty because it could not be resolved — not because nobody may write.
+    expect(states[0].eligibilityResolved).toBe(false);
+  });
+
+  it('a failed eligibility lookup is marked unresolved, not "outside the gate"', async () => {
+    const svc = makeService([], {});
+    const access = (svc as unknown as { accessControl: IAccessControl }).accessControl;
+    access.eligibleWritersForPathsAtRef = async () => {
+      throw new Error('git show timed out');
+    };
+    const states = await svc.getApprovalStates(1, [file({ path: 'Knowledge/Foo.md' })], HEAD, BASE, null, 'ws-1');
+    expect(states[0].eligibleApprovers.roles).toEqual([]);
+    expect(states[0].eligibilityResolved).toBe(false);
   });
 
   it('marks a file approved when an eligible approver has a non-stale approval', async () => {
@@ -359,6 +372,8 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
     expect(states[0].inMergeGate).toBe(false);
+    // The tree answered: nobody may write it, so it truly is outside the gate.
+    expect(states[0].eligibilityResolved).toBe(true);
   });
 
   it('stamps each file with the gate\'s own relevance verdict', async () => {

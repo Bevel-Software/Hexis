@@ -99,7 +99,7 @@ export class PullRequestService implements IPullRequestService {
    */
   private detailCache = new Map<
     string,
-    { at: number; headSha: string; value: PullRequestDetail }
+    { at: number; headSha: string; baseSha: string; value: PullRequestDetail }
   >();
 
   /**
@@ -355,6 +355,10 @@ export class PullRequestService implements IPullRequestService {
     let baseSha = '';
     let headSha = '';
     let files: PullRequestFile[] = [];
+    let forkPoint: { mergeBaseSha: string | null; behind: boolean } = {
+      mergeBaseSha: null,
+      behind: false,
+    };
     if (workspaceId) {
       const shas = await this.gitService.resolvePrShas(
         workspaceId,
@@ -377,6 +381,9 @@ export class PullRequestService implements IPullRequestService {
         row.sourceBranch,
         { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
       );
+      // Pinned to the same two commits as the file list, so "needs updating"
+      // and the diff it qualifies can never describe different heads.
+      forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
     }
 
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
@@ -385,7 +392,9 @@ export class PullRequestService implements IPullRequestService {
       !opts.fresh &&
       cached &&
       now - cached.at < DETAIL_CACHE_TTL_MS &&
-      cached.headSha === headSha
+      cached.headSha === headSha &&
+      // The target moving on changes `behind` without touching the head.
+      cached.baseSha === baseSha
     ) {
       return cached.value;
     }
@@ -461,6 +470,14 @@ export class PullRequestService implements IPullRequestService {
       viewerWritesAllFiles: approvals.length > 0 && approvals.every((a) => a.viewerCanApprove),
     });
 
+    const viewerCanUpdate = computeViewerCanUpdate({
+      state: summary.state,
+      authorId: summary.authorId,
+      viewerEmail: opts.viewerEmail,
+      viewerCanBypassMerge,
+      approvals,
+    });
+
     const detail: PullRequestDetail = {
       ...summary,
       body: row.body,
@@ -474,13 +491,21 @@ export class PullRequestService implements IPullRequestService {
       mergeWarnings: gate.warnings,
       viewerCanBypassMerge,
       viewerCanCancel,
+      mergeBaseSha: forkPoint.mergeBaseSha,
+      behind: summary.state === 'open' && forkPoint.behind,
+      viewerCanUpdate,
     };
 
     // A patch-less detail is an internal read; it must not be served to the
     // next client poll as if it were the full one. Nor may a read a mutation
     // overtook: its row predates that mutation.
     if (opts.patches !== false && generation === this.cacheGeneration) {
-      this.detailCache.set(cacheKey, { at: now, headSha: detail.headSha, value: detail });
+      this.detailCache.set(cacheKey, {
+        at: now,
+        headSha: detail.headSha,
+        baseSha: detail.baseSha,
+        value: detail,
+      });
     }
     return detail;
   }
@@ -542,6 +567,38 @@ export function computeViewerCanCancel(input: {
   return viewerIsAuthor || input.viewerCanBypassMerge || input.viewerWritesAllFiles;
 }
 
+/**
+ * Pure predicate for `viewerCanUpdate` — who may merge a request's target
+ * into it. The request's author (it is their proposal to bring up to date)
+ * and anyone who may apply it, by the merge gate's own reading: every file
+ * the gate binds (`isGateRelevant`) already approved or approvable by this
+ * viewer — files outside the gate (`inMergeGate: false`) need nobody's
+ * approval to apply, so they cannot withhold Update either — or an admin, who
+ * may apply over missing approvals. That exemption holds only for a file whose
+ * approvers were actually resolved (`eligibilityResolved`): when the access
+ * tree could not be read, every file reads as outside the gate, and that
+ * emptiness must not become a grant — Update fails closed. Fail-closed on no viewer, and nothing but an open request can be
+ * updated. The update route enforces exactly this.
+ */
+export function computeViewerCanUpdate(input: {
+  state: PullRequestState;
+  authorId: string | undefined;
+  viewerEmail: string | undefined;
+  viewerCanBypassMerge: boolean;
+  approvals: FileApprovalState[];
+}): boolean {
+  if (input.state !== 'open') return false;
+  if (!input.viewerEmail) return false;
+  const viewerIsAuthor = !!(input.authorId && input.authorId === hashEmail(input.viewerEmail));
+  const viewerMayApply =
+    input.approvals.length > 0 &&
+    input.approvals.every(
+      (a) => (a.eligibilityResolved === true && !a.inMergeGate) || a.isApproved || a.viewerCanApprove,
+    );
+  return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
+}
+
 export const __testing = {
   computeViewerCanCancel,
+  computeViewerCanUpdate,
 };

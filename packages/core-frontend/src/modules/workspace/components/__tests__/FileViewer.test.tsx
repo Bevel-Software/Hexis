@@ -85,6 +85,9 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: myCrsMock,
   readFileOnBranch: readBranchMock,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 
 // The access sheet is a 1200-line dialog with its own suite and its own

@@ -251,4 +251,25 @@ export interface IGitService {
    * summaries and owner routing.
    */
   changedPathsForPr(workspaceId: string, baseBranch: string, headBranch: string): Promise<string[]>;
+
+  /**
+   * A change request's fork point (merge base of the two resolved commits)
+   * and whether the target has commits the proposal does not contain. No
+   * fetch: `at` is what `resolvePrShas` just returned.
+   */
+  forkPointForPr(
+    workspaceId: string,
+    at: { baseSha: string; headSha: string },
+  ): Promise<{ mergeBaseSha: string | null; behind: boolean }>;
+
+  /**
+   * A file's content at a change request's fork point — a commit that must
+   * be on `baseBranch`'s history. `null` when the path did not exist there.
+   */
+  readFileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    relativePath: string,
+  ): Promise<string | null>;
 }

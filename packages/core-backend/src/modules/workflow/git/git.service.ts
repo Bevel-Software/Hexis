@@ -31,6 +31,7 @@ import {
 } from '../../kb-fs/branch-name.js';
 import {
   BranchAuthorshipError,
+  WorkflowDomainError,
   WorkflowValidationError,
   ProtectedBranchError,
   PullRebaseConflictError,
@@ -38,6 +39,7 @@ import {
   isMissingRemoteBranchFailure,
 } from '../../../shared/domain-errors.js';
 import {
+  GitRunError,
   isGitTimeout,
   redactGitToken,
   type GitRunOptions,
@@ -2238,8 +2240,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
       const [{ stdout: baseSha }, { stdout: headSha }] = await Promise.all([
         this.git(cwd, ['rev-parse', baseRef]),
         this.git(cwd, ['rev-parse', headRef]),
@@ -2288,8 +2290,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     if (!opts.at) await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = opts.at ? opts.at.baseSha : await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = opts.at ? opts.at.headSha : await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = opts.at ? opts.at.baseSha : await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = opts.at ? opts.at.headSha : await this.resolvePublishedBranchRef(cwd, headBranch);
       const range = `${baseRef}...${headRef}`; // three-dot = changes on head since merge-base
 
       const [{ stdout: nameStatusOut }, { stdout: numstatOut }] = await Promise.all([
@@ -2377,8 +2379,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
       const { stdout } = await this.git(cwd, [
         'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
       ]);
@@ -2416,8 +2418,8 @@ export class GitService implements IGitService {
     const cwd = await this.repoDir(workspaceId);
     await this.fetchPrRefs(cwd, baseBranch, headBranch);
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolveBranchRef(cwd, baseBranch);
-      const headRef = await this.resolveBranchRef(cwd, headBranch);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
       try {
         const { stdout } = await this.git(cwd, ['merge-base', baseRef, headRef]);
         return stdout.trim() || null;
@@ -2427,6 +2429,83 @@ export class GitService implements IGitService {
         if ((err as { exitCode?: number }).exitCode === 1) return null;
         throw err;
       }
+    });
+  }
+
+  /**
+   * Where a change request forked from its target, and whether the target has
+   * moved on since — for the two commits a detail read has ALREADY resolved
+   * (no fetch, no ref resolution, same contract as `changedFilesForPr`'s `at`).
+   *
+   * `mergeBaseSha` is the "before" every file in the request is read against,
+   * so an edit made on the target after the proposal never shows as something
+   * the proposal deletes. `behind` is true when the target holds commits the
+   * proposal does not (`head..base` is non-empty) — the proposal needs
+   * updating before its diff and its eventual merge describe the same text.
+   * No shared history: `mergeBaseSha: null`, and `behind` stays honest (the
+   * target certainly has commits the proposal lacks).
+   */
+  async forkPointForPr(
+    workspaceId: string,
+    at: { baseSha: string; headSha: string },
+  ): Promise<{ mergeBaseSha: string | null; behind: boolean }> {
+    for (const sha of [at.baseSha, at.headSha]) {
+      if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+        throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+      }
+    }
+    const cwd = await this.repoDir(workspaceId);
+    return this.mutex.run(workspaceId, async () => {
+      let mergeBaseSha: string | null = null;
+      try {
+        const { stdout } = await this.git(cwd, ['merge-base', at.baseSha, at.headSha]);
+        mergeBaseSha = stdout.trim() || null;
+      } catch (err) {
+        // Exit 1 is git's "no common ancestor"; anything else is infra.
+        if ((err as { exitCode?: number }).exitCode !== 1) throw err;
+      }
+      const { stdout: count } = await this.git(cwd, [
+        'rev-list', '--count', `${at.headSha}..${at.baseSha}`,
+      ]);
+      return { mergeBaseSha, behind: Number.parseInt(count.trim(), 10) > 0 };
+    });
+  }
+
+  /**
+   * One file as it stood at a change request's fork point — the "before" side
+   * of the request dialog's diff. `sha` must be a commit on the target
+   * branch's published history (`origin/<baseBranch>`); anything else is
+   * refused, so this can never become a read of an arbitrary commit. `null`
+   * means the path did not exist at the fork point (the request adds it).
+   */
+  async readFileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    relativePath: string,
+  ): Promise<string | null> {
+    assertValidBranchName(baseBranch);
+    assertValidRelativePath(relativePath);
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) {
+      throw new WorkflowValidationError(`invalid commit sha: ${sha}`);
+    }
+    const repoRelativePath = this.stripRepoPrefix(relativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
+      try {
+        await this.git(cwd, ['merge-base', '--is-ancestor', sha, baseRef]);
+      } catch (err) {
+        if ((err as { exitCode?: number }).exitCode === 1) {
+          throw new WorkflowDomainError(
+            `That commit is not part of "${baseBranch}" — it is not this request's fork point.`,
+            404,
+          );
+        }
+        throw err;
+      }
+      await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
+      return this.readFileAtRef(workspaceId, sha, repoRelativePath);
     });
   }
 
@@ -2557,6 +2636,31 @@ export class GitService implements IGitService {
     return relativePath.startsWith(`${this.kbDirName}/`)
       ? relativePath.slice(this.kbDirName.length + 1)
       : relativePath;
+  }
+
+  /**
+   * `resolveBranchRef` with the preference reversed: the PUBLISHED ref
+   * (`origin/<branch>`, just fetched by `fetchPrRefs`) before the local head.
+   * A change request is a pair of published branches, and a clone's local
+   * copy of the OTHER branch is whatever it was when the clone last touched
+   * it — in a proposal's own workspace the local target is typically the
+   * target as of the fork. Reading that made every request look up to date
+   * and diffed it against a stale target. A local-only branch still resolves.
+   */
+  private async resolvePublishedBranchRef(cwd: string, branch: string): Promise<string> {
+    for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
+      try {
+        await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
+        return ref;
+      } catch (err) {
+        // Only git's own "no such ref" (exit 1 under --quiet) moves on to the
+        // next candidate. A deadline or any other failure is not that answer:
+        // skipping past it would pick the stale local copy, or call a real
+        // branch unknown.
+        if (!(err instanceof GitRunError) || err.timedOut || err.exitCode !== 1) throw err;
+      }
+    }
+    throw new WorkflowValidationError(`unknown branch: ${branch}`);
   }
 
   /**

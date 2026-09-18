@@ -582,13 +582,16 @@ describe('WorkflowService — a refusal clears when a change makes it obsolete',
       {},
       {
         git: {
+          pull: vi.fn(async () => ({ treeChanged: false })),
           mergeFromOrigin: vi.fn(async () => {
             onMerge(store.row);
             return { kind: 'merged', alreadyUpToDate: false };
           }),
           push: vi.fn(async () => undefined),
         } as unknown as Partial<GitService>,
-        prs: { getPrDetail: vi.fn(async () => ({ state: 'open', branch: 'bo/suggestions', base: 'main' })) },
+        prs: {
+          getPrDetail: vi.fn(async () => ({ state: 'open', branch: 'bo/suggestions', base: 'main', viewerCanUpdate: true })),
+        },
       },
     );
     return { ...store, svc, emitted };
@@ -715,6 +718,7 @@ describe('PullRequestService — lastApplyFailure on the request', () => {
     const git = {
       resolvePrShas: async () => ({ baseSha: 'b', headSha: 'h' }),
       changedFilesForPr: async () => [],
+      forkPointForPr: async () => ({ mergeBaseSha: 'b', behind: false }),
     } as unknown as GitService;
     const svc = new RealPullRequestService(
       db,
@@ -772,7 +776,11 @@ describe('PullRequestService — a read the refusal overtook is not cached', () 
       db,
       { findAnyWorkspaceId: async () => 'ws' } as unknown as WorkspaceService,
       { canWriteAtRef: async () => false } as unknown as IAccessControl,
-      { resolvePrShas: async () => ({ baseSha: 'b', headSha: 'h' }), changedFilesForPr: async () => [] } as unknown as GitService,
+      {
+        resolvePrShas: async () => ({ baseSha: 'b', headSha: 'h' }),
+        changedFilesForPr: async () => [],
+        forkPointForPr: async () => ({ mergeBaseSha: 'b', behind: false }),
+      } as unknown as GitService,
     );
 
     const stale = svc.getPrDetail(7, { viewerEmail: 'bo@example.com' });

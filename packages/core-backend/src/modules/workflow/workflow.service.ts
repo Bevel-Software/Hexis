@@ -822,6 +822,23 @@ export class WorkflowService implements IWorkflowService {
     return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
   }
 
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null> {
+    return this.git.readFileAtForkPoint(workspaceId, baseBranch, sha, path);
+  }
+
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    return this.git.mergeBaseForPr(workspaceId, baseBranch, headBranch);
+  }
+
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string> {
     return this.git.diffFileAtCommit(workspaceId, path, sha);
   }
@@ -1822,6 +1839,12 @@ export class WorkflowService implements IWorkflowService {
    * automatically — they're pinned to the head SHA, and any new commit on
    * source drops the per-file approval gate (handled by the existing
    * approval staleness check). No special bookkeeping needed here.
+   *
+   * Authority: the request's author, or anyone who may apply it — the
+   * detail's `viewerCanUpdate`, computed for THIS caller, so the button and
+   * the enforcement read one predicate. A conflicting merge is aborted
+   * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
+   * is exactly what it was.
    */
   async updateFromTarget(
     workspaceId: string,
@@ -1841,9 +1864,29 @@ export class WorkflowService implements IWorkflowService {
         { kind: 'change-request-not-open', state: detail.state },
       );
     }
-    // Taken BEFORE the head moves: only a refusal recorded earlier describes
-    // the revision this replaces (see `clearApplyFailure`).
+    if (!detail.viewerCanUpdate) {
+      throw new WorkflowDomainError(
+        'Only the author of this change request, or someone who may apply it, can update it.',
+        403,
+      );
+    }
+    // Taken BEFORE the head moves (the pull below can move it too): only a
+    // refusal recorded earlier describes the revision this replaces (see
+    // `clearApplyFailure`).
     const headMovedAfter = new Date();
+    // Freshen the source checkout first, and let a failure stop the Update:
+    // merging onto a head behind its own origin branch would leave a local
+    // merge commit that then cannot push, stranding it in the workspace. A
+    // rebase conflict hands the stranded saves to recovery, as every other
+    // pull does, before the refusal reaches the caller.
+    try {
+      await this.pullWorkspace(workspaceId);
+    } catch (err) {
+      if (err instanceof PullRebaseConflictError) {
+        await this.queuePullConflictRecovery(workspaceId, err, user);
+      }
+      throw err;
+    }
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,
