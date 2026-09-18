@@ -18,6 +18,7 @@ import { McpServerEditError, type McpServerEditService, type McpServerWrite } fr
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
 import '../tool-auth/tool-auth.middleware.js'; // Express Request augmentation (req.toolAuth)
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
 
 /** Resolve a connection-key/internal-token user id to its email (per-caller ACL). */
 export type ResolveUserEmail = (userId: string) => Promise<string | undefined>;
@@ -146,7 +147,7 @@ export function createToolManualsAgentRoutes(
       // Only an absent folder is a non-event; anything else (EACCES, EIO)
       // silently missing from the archive would hand the client an
       // incomplete plugin stamped as success — so a hole is the error.
-      await disk.walk(pluginDir, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+      await disk.walk(pluginDir, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
         {
           onFile(dir, name) {
             rels.push(dir ? `${dir}/${name}` : name);

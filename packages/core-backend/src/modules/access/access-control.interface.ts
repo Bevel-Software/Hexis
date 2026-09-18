@@ -84,13 +84,13 @@ export interface IAccessControl {
   /**
    * True iff `userEmail` may READ `relativePath` per the current access tree.
    *
-   * `read` is **default-deny**: a path with no effective `read:`, `write:`, or
-   * `owner:` grant is not readable. To make content public, declare the
-   * built-in role `everyone` under `read:`. Resolution is closeness-first then
-   * tier (email > role > everyone within a scope), folding `write:`/`owner:` in
-   * as implicit read grants (grant-only — a write/owner denial never strips a
-   * read grant). No admin rescue. The file viewer, embed surface, and the
-   * agent's read tools all gate on this.
+   * `read` is **default-deny**: a path with no effective `read:`, `write:`,
+   * `download:` or `owner:` grant is not readable. To make content public,
+   * declare the built-in role `everyone` under `read:`. Resolution is
+   * closeness-first then tier (email > role > everyone within a scope), folding
+   * `write:`/`download:`/`owner:` in as implicit read grants (grant-only — a
+   * write/download/owner denial never strips a read grant). No admin rescue.
+   * The file viewer, embed surface, and the agent's read tools all gate on this.
    */
   canRead(workspaceId: string, userEmail: string, relativePath: string): Promise<boolean>;
 
@@ -158,7 +158,9 @@ export interface IAccessControl {
    * `access.md`'s `download:` list. Independent of `write` — granting
    * write does NOT imply download, mirroring the way the verbs are
    * separately listed in access.md. An `owner:` grant DOES imply download
-   * (owner is a superset of write + download).
+   * (owner is a superset of write + download). The reverse fold holds one
+   * level down: a `download:` grant confers `read` (see `canRead`), so a
+   * download-only grantee can open the file as well as save it.
    *
    * No admin override (unlike `canWrite` on `access.md` / `roles.yaml`,
    * which admin-rescues). Admins are only granted download if an
@@ -232,8 +234,9 @@ export interface IAccessControl {
    * false only when `read: everyone` applies without an effective user-level
    * denial — the node is readable by all signed-in users. The lists name the
    * principals (roles + direct users) granted read whether or not the node
-   * is public, with owners folded in (an `owner:` grant confers read); on a
-   * public node they include what makes it public. `publicVia` names the
+   * is public, with writers, downloaders and owners folded in (a `write:`,
+   * `download:` or `owner:` grant confers read); on a public node they
+   * include what makes it public. `publicVia` names the
    * PUBLIC plugin principals granted read here — principals every signed-in
    * user holds — so a caller can tell public-through-a-plugin from a literal
    * `everyone` grant. The lists may be empty for a default-denied path.
@@ -439,6 +442,14 @@ export interface IAccessControl {
     ref: string,
     relativePath: string,
   ): Promise<{ roles: string[]; users: { name: string; email: string }[] } | null>;
+
+  /**
+   * Whether `userEmail` holds the Admin write floor at the repository root —
+   * a member of the Admin role or the deployment owner — in the working-tree
+   * model. The share dialog asks before restricting a PERSON's write at the
+   * root: the floor keeps it, so the deny could only be rolled back.
+   */
+  holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
 
   /**
    * Batched: resolve eligible writers + expanded emails for a list of paths

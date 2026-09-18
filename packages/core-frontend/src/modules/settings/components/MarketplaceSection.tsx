@@ -9,8 +9,11 @@ import {
 interface Props {
   /**
    * Where the section stands. `setup` is the first-run screen, where it is
-   * optional and can be skipped; `settings` is Deployment settings, where it
-   * waits for whenever an admin gets to it.
+   * marked Optional and an admin simply walks past it; `settings` is
+   * Deployment settings, where it waits for whenever an admin gets to it.
+   * There is no skip control: nothing waits on this section either way, so a
+   * button to decline it only added a decision the admin does not have to
+   * make. Same as single sign-on, which is left blank to be ignored.
    */
   variant: 'setup' | 'settings';
 }
@@ -32,7 +35,6 @@ export function MarketplaceSection({ variant }: Props) {
   // Controlled, both attributes together: the credentials wait on `open`, and
   // the element must not be able to disagree with the state gating them.
   const [open, setOpen] = useState(false);
-  const [skipped, setSkipped] = useState(false);
   const [registered, setRegistered] = useState<boolean | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -74,28 +76,6 @@ export function MarketplaceSection({ variant }: Props) {
     }
   };
 
-  if (skipped) {
-    return (
-      <Surface
-        as="section"
-        tone="surface"
-        radius="lg"
-        elevation="card"
-        className="mt-10 p-6"
-        data-testid="marketplace-deployment-section"
-      >
-        <div className="flex flex-wrap items-center gap-3">
-          <p className="text-detail text-ink-muted">
-            Marketplace skipped. It is in Deployment settings whenever you want it.
-          </p>
-          <Button type="button" variant="outline" size="sm" onClick={() => setSkipped(false)}>
-            Set it up now
-          </Button>
-        </div>
-      </Surface>
-    );
-  }
-
   return (
     <Surface
       as="section"
@@ -120,16 +100,6 @@ export function MarketplaceSection({ variant }: Props) {
           agent access tells people an admin still has to set it up. Claude Code and Codex need none
           of this.
         </p>
-        {variant === 'setup' && (
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <Button type="button" variant="outline" size="sm" onClick={() => setSkipped(true)}>
-              Skip for now
-            </Button>
-            <span className="text-meta text-ink-faint">
-              Nothing else waits on it; it stays in Deployment settings.
-            </span>
-          </div>
-        )}
       </div>
 
       <details

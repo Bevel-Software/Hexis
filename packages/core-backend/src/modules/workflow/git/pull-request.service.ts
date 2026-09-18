@@ -113,6 +113,13 @@ export class PullRequestService implements IPullRequestService {
   /** Origin + path prefix change-request links are built on; null when none is configured. */
   private readonly linkBase: string | null;
 
+  /**
+   * Bumped by every invalidation. A read captures it before touching the DB and
+   * caches its result only if it is unchanged afterwards — otherwise a read that
+   * started before a mutation could republish the pre-mutation row for a TTL.
+   */
+  private cacheGeneration = 0;
+
   constructor(
     private readonly db: Database,
     private readonly workspaceService: WorkspaceService,
@@ -160,6 +167,16 @@ export class PullRequestService implements IPullRequestService {
       // The in-app change-request route, absolute when a public address is
       // configured so an agent can hand it to a person.
       ...changeRequestLink(row.number, this.linkBase),
+      // Only an OPEN request can still be retried, so only it reports a refusal.
+      lastApplyFailure:
+        row.state === 'open' && row.applyFailureReason && row.applyFailedAt
+          ? {
+              reason: row.applyFailureReason,
+              conflicts: row.applyFailureConflicts === true,
+              at: row.applyFailedAt.toISOString(),
+              byName: row.applyFailedByName ?? '',
+            }
+          : null,
     };
   }
 
@@ -209,6 +226,7 @@ export class PullRequestService implements IPullRequestService {
     if (!opts.fresh && cached && now - cached.at < LIST_PR_CACHE_TTL_MS) {
       return cached.value;
     }
+    const generation = this.cacheGeneration;
     const rows = await this.db
       .select()
       .from(changeRequests)
@@ -217,7 +235,9 @@ export class PullRequestService implements IPullRequestService {
     const summaries = await Promise.all(
       rows.map((row) => this.summaryOf(row, workspaceId)),
     );
-    this.cachedList.set(cacheKey, { at: now, value: summaries });
+    if (generation === this.cacheGeneration) {
+      this.cachedList.set(cacheKey, { at: now, value: summaries });
+    }
     return summaries;
   }
 
@@ -320,6 +340,7 @@ export class PullRequestService implements IPullRequestService {
     if (!Number.isInteger(prNumber) || prNumber <= 0) {
       throw new WorkflowValidationError('PR number must be a positive integer');
     }
+    const generation = this.cacheGeneration;
     const row = await this.findRow(prNumber);
     if (!row) return null;
 
@@ -456,8 +477,9 @@ export class PullRequestService implements IPullRequestService {
     };
 
     // A patch-less detail is an internal read; it must not be served to the
-    // next client poll as if it were the full one.
-    if (opts.patches !== false) {
+    // next client poll as if it were the full one. Nor may a read a mutation
+    // overtook: its row predates that mutation.
+    if (opts.patches !== false && generation === this.cacheGeneration) {
       this.detailCache.set(cacheKey, { at: now, headSha: detail.headSha, value: detail });
     }
     return detail;
@@ -469,6 +491,7 @@ export class PullRequestService implements IPullRequestService {
    * cancel, comment). Keeps the cache-busting plumbing internal to this service.
    */
   invalidateDetailCache(prNumber: number): void {
+    this.cacheGeneration++;
     const suffix = `:${prNumber}`;
     for (const key of this.detailCache.keys()) {
       if (key.endsWith(suffix)) this.detailCache.delete(key);
@@ -482,6 +505,7 @@ export class PullRequestService implements IPullRequestService {
    * that tree makes them stale without touching any one request.
    */
   invalidateListCache(): void {
+    this.cacheGeneration++;
     this.cachedList.clear();
   }
 

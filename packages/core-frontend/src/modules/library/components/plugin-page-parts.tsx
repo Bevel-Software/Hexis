@@ -111,11 +111,22 @@ export function PluginSection({
 export function CardGrid({
   items,
   onOpen,
+  onShare,
   onRemove,
   canRemove,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /**
+   * Open Manage access on a SKILL's own folder — the skill page's `Share`,
+   * from the card's `…` menu. Absent: no card carries a menu.
+   *
+   * Only skills are offered it, and the card's props enforce that: access to a
+   * tool is decided at the plugin that carries it, so a tool has no rules of
+   * its own to open. A PROPOSED skill is left out too — its folder is on a
+   * change request's branch and does not exist on the one the dialog reads.
+   */
+  onShare?(item: LibraryItem): void;
   /**
    * The manager's "remove from this place". Present only when the caller
    * runs the page the grid is on — the pages decide that, not the grid.
@@ -147,13 +158,20 @@ export function CardGrid({
         // edits — not the transport: a `.tool` manual whose call template is
         // `type: mcp` still edits as a UTCP manual, so the path suffix is the
         // authoritative signal, not the tool's `type` metadata.
+        // Whether THIS card carries a `…`, which the remove overlay below has
+        // to know: both are corner controls on the same card, and two things
+        // pinned to the same corner is one thing you cannot click.
+        const menued = item.kind === 'skill' && !!onShare && !item.pending;
         const kindProps =
           item.kind === 'integration'
             ? ({
                 kind: 'integration',
                 flavor: item.path.endsWith('/mcp.json') ? 'mcp' : 'utcp',
               } as const)
-            : ({ kind: 'skill' } as const);
+            : ({
+                kind: 'skill',
+                onShare: menued ? () => onShare!(item) : undefined,
+              } as const);
         const card = (
           <LibraryCard
             key={key}
@@ -191,8 +209,12 @@ export function CardGrid({
               title={`Remove ${item.name}`}
               onClick={() => onRemove(item)}
               className={cn(
-                'absolute right-1.5 top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
+                'absolute top-1.5 rounded-sm border border-line bg-surface p-1 text-ink-faint',
                 'opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover/removable:opacity-100',
+                // The overflow `…` keeps the corner — that is where every menu
+                // in this product lives — so Remove steps left of it on a card
+                // that has one, and keeps the corner on a card that does not.
+                menued ? 'right-8' : 'right-1.5',
               )}
             >
               <Trash2 size={13} />
@@ -295,6 +317,7 @@ export function PluginItemSections({
   skillItems,
   toolItems,
   onOpen,
+  onShare,
   onRemove,
   canRemove,
   emptySkills,
@@ -306,6 +329,8 @@ export function PluginItemSections({
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
   onOpen(item: LibraryItem): void;
+  /** See {@link CardGrid} — the skill cards' `Share`. Tools never get one. */
+  onShare?(item: LibraryItem): void;
   /** See {@link CardGrid} — present only when the caller manages this place. */
   onRemove?(item: LibraryItem): void;
   /** See {@link CardGrid}. */
@@ -352,7 +377,13 @@ export function PluginItemSections({
               emptySkills
             )
           ) : (
-            <CardGrid items={skillItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
+            <CardGrid
+              items={skillItems}
+              onOpen={onOpen}
+              onShare={onShare}
+              onRemove={onRemove}
+              canRemove={canRemove}
+            />
           )}
         </PluginSection>
       )}

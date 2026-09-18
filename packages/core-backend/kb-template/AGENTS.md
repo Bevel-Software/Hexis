@@ -210,6 +210,14 @@ Access to any path — reading it as much as writing it — is governed by
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
   stray line of prose silently changes which block governs the folder.
+- **The verbs nest.** `owner` sits over `write` and `download`; `write` and
+  `download` each sit over `read` — anyone who may edit a node, or save a copy
+  of it, may also view it. `write` and `download` say nothing about each other.
+  The nesting is GRANT-ONLY: a grant of a higher verb confers the lower ones,
+  but `deny write` or `deny download` says nothing about `read` and never
+  strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
+  open the node as well as download it, and a `deny download` beside an
+  inherited read leaves her able to open it but not save it.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
@@ -217,6 +225,15 @@ Access to any path — reading it as much as writing it — is governed by
   never overridable by an `access.md`.
 - **`access.md` files are picked up at any depth**, so a folder can tighten or
   widen what it inherited from its parent.
+- **Per-file rules exist for Markdown notes only.** A note (`.md`, lowercase)
+  may name verbs in its own frontmatter, and those rules apply to that one
+  note. (A `.tool` definition keeps the access verbs in its own YAML the same
+  way.) Every other file (a PDF, a presentation, a spreadsheet, an image, any
+  binary, a `.markdown` or `.MD` file, or binary content saved as `.md`)
+  takes its folder's rules: sharing it on its own is refused with
+  `folder-governs-access`, naming the folder. To change who
+  can open such a file, change its folder's `access.md`, or move the file to a
+  folder whose rules fit.
 
 Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
 when access is resolved.

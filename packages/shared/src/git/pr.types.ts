@@ -51,6 +51,32 @@ export interface PullRequestSummary {
   url: string;
   /** Present when `url` is relative — says how to get absolute links. */
   urlNote?: string;
+  /**
+   * The most recent apply attempt that did not land, while the request is
+   * still open — so its author and every other viewer see the refusal the
+   * person who clicked Apply saw. Replaced by a newer refusal; null or
+   * absent when there is nothing to report.
+   */
+  lastApplyFailure?: ChangeRequestApplyFailure | null;
+}
+
+/**
+ * What refused an apply: the merge gate (approvals it still waits on), git
+ * (conflicts with the target), or anything else (a push, the roles.yaml guard,
+ * an internal error). Decides which later change makes the refusal obsolete.
+ */
+export type ChangeRequestApplyFailureKind = 'gate' | 'conflicts' | 'error';
+
+/** Why the last apply of a change request failed, as persisted on the request. */
+export interface ChangeRequestApplyFailure {
+  /** Human-readable reason, credentials already redacted. */
+  reason: string;
+  /** True when git refused the merge on conflicts with the target. */
+  conflicts: boolean;
+  /** ISO timestamp of the failed attempt. */
+  at: string;
+  /** Display name of whoever attempted the apply. */
+  byName: string;
 }
 
 export type PrFileStatus =
