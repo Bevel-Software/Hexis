@@ -79,8 +79,12 @@ export const AGENT_CLIENTS: AgentClient[] = [
     // nvm's `npx` on PATH: the configuration is correct and the client still
     // reports that npx was not found. The way out is a substitution the
     // READER makes in their own copy, which is why the snippet itself stays
-    // the plain `npx` that works everywhere else.
-    hint: 'For Claude Code, Claude Desktop, Cursor, Windsurf, Cline and any agent that runs on your machine: everything the hosted address gives, plus your plugins’ local-only tools. Needs Node 22 or 24. The first time it starts, your browser opens so you can sign in. If the client reports that npx was not found, it was launched from the Dock or a desktop icon and cannot see your shell’s PATH — run `which npx` in a terminal and put the full path it prints in place of "npx" in the configuration below.',
+    // the plain `npx` that works everywhere else. The absolute path alone is
+    // not always enough: `npx` is a script whose `#!/usr/bin/env node` line
+    // hits the SAME gap, so the PATH sentence has to name that second failure
+    // and its fix (the client config's own "env") rather than stop at the
+    // first.
+    hint: 'For Claude Code, Claude Desktop, Cursor, Windsurf, Cline and any agent that runs on your machine: everything the hosted address gives, plus your plugins’ local-only tools. Needs Node 22.13+ or 24. The first time it starts, your browser opens so you can sign in. If the client reports that npx was not found, it was launched from the Dock or a desktop icon and cannot see your shell’s PATH — run `which npx` in a terminal (`where npx` in PowerShell) and put the full path it prints in place of "npx" in the configuration below; if it then reports `env: node: No such file or directory`, that folder holds `node` too, so add it to the configuration’s "env" PATH.',
     // The passed endpoint is deliberately unused: the local server takes the
     // WORKSPACE address and asks it for the MCP endpoint itself
     // (`GET /api/config`), so the URL every other client pastes is the wrong

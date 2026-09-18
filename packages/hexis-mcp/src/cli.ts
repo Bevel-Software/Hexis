@@ -43,7 +43,11 @@ async function main(): Promise<void> {
   // instead — which is also why `server.js` is imported DYNAMICALLY below and
   // why this sits after `--help`/`--version`, the two things worth answering
   // on any runtime.
-  const unsupported = preflight();
+  // `requireNativeSandbox`: here, unlike for an embedding host, a sandbox that
+  // does not even resolve is a crash one statement away — the import below
+  // pulls in code-mode, whose module-level `isolated-vm` import would throw
+  // ERR_MODULE_NOT_FOUND as a stack trace instead of a sentence.
+  const unsupported = preflight({ requireNativeSandbox: true });
   if (unsupported) {
     process.stderr.write(`${unsupported}\n`);
     process.exitCode = 1;

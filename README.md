@@ -336,9 +336,10 @@ each seeing only what its user's role allows.
 Agents that run on your own machine can instead start the workspace as a **local**
 MCP server (`npx -y @bevel-software/hexis-mcp`), which adds your plugins'
 local-only tools to everything the hosted endpoint serves. That command needs
-**Node 22 or 24** — the majors its sandbox ships a prebuilt binary for — and a
-client launched from the Dock or a desktop icon may not see `npx` on PATH at
-all: run `which npx` and use the full path it prints as the `"command"`. See
+**Node 22.13+ or 24** — the versions its sandbox ships a prebuilt binary for —
+and a client launched from the Dock or a desktop icon may not see `npx` on PATH
+at all: run `which npx` (`where npx` on Windows) and use the full path it
+prints as the `"command"`. See
 [Troubleshooting](docs/troubleshooting.md#desktop-agents-the-local-mcp-server).
 </details>
 

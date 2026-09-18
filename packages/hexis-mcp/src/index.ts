@@ -73,12 +73,17 @@ export {
   type HexisMcpHandle,
 } from './server.js';
 export {
+  SUPPORTED_NODE,
   SUPPORTED_NODE_MAJORS,
+  enginesRange,
+  supportedNodePhrase,
   preflight,
   nodeMajor,
   unsupportedNodeSentence,
   nativeSandboxSentence,
+  missingNativeSandboxSentence,
   loadNativeSandbox,
   type PreflightOptions,
   type NativeSandboxProbe,
+  type SupportedNode,
 } from './preflight.js';

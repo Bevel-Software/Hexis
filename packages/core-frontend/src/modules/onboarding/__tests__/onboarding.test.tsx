@@ -450,7 +450,7 @@ describe('WelcomePage', () => {
   it('warns Desktop agents about Node and PATH, leaving the snippet on bare npx', async () => {
     mountPage();
     await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
-    expect(screen.getByText(/Needs Node 22 or 24/)).toBeInTheDocument();
+    expect(screen.getByText(/Needs Node 22\.13\+ or 24/)).toBeInTheDocument();
     expect(screen.getByText(/cannot see your shell’s PATH/)).toBeInTheDocument();
     expect(screen.getByText(/run `which npx` in a terminal/)).toBeInTheDocument();
     const snippet = screen.getByText(/mcpServers/).textContent!;

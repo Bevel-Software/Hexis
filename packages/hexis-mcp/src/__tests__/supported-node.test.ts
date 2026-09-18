@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SUPPORTED_NODE_MAJORS } from '../preflight.js';
+import { SUPPORTED_NODE, SUPPORTED_NODE_MAJORS, enginesRange, supportedNodePhrase } from '../preflight.js';
 
 /**
  * ONE list of supported Node majors, said in four places.
@@ -27,24 +27,25 @@ function engines(packageJsonPath: string): string {
   return pkg.engines?.node ?? '';
 }
 
-/**
- * The range that says EXACTLY these majors — one `>=M <M+1` clause each. Not
- * `>=22 <25`: that would promise Node 23, which has no binary and would put a
- * C++ compile on the user's machine.
- */
-function expectedRange(majors: readonly number[], floors: Record<number, string> = {}): string {
-  return majors.map((m) => `>=${floors[m] ?? m} <${m + 1}`).join(' || ');
-}
-
 describe('the supported Node majors', () => {
   it('are the ones isolated-vm ships prebuilt binaries for', () => {
     expect([...SUPPORTED_NODE_MAJORS]).toEqual([22, 24]);
   });
 
-  it('are what `engines` promises, in both published packages', () => {
+  it('carry the floor `engines` publishes, not just the major', () => {
     // The 22.13 floor predates this range and stays: `pdfjs-dist` needs it,
-    // and the repo's `.nvmrc` is that line.
-    const range = expectedRange(SUPPORTED_NODE_MAJORS, { 22: '22.13' });
+    // and the repo's `.nvmrc` is that line. It lives in `SUPPORTED_NODE` so
+    // the preflight refuses 22.5 — the version `engines` already excludes —
+    // instead of starting on it.
+    expect(SUPPORTED_NODE.map((n) => n.floor)).toEqual(['22.13', '24']);
+  });
+
+  it('are what `engines` promises, in both published packages', () => {
+    // One `>=floor <major+1` clause each, never a single span: `>=22 <25`
+    // would promise Node 23, which has no binary and would put a C++ compile
+    // on the user's machine.
+    const range = enginesRange();
+    expect(range).toBe('>=22.13 <23 || >=24 <25');
     expect(engines(join(pkgDir, 'package.json'))).toBe(range);
     expect(engines(join(repoRoot, 'packages', 'mcp-core', 'package.json'))).toBe(range);
   });
@@ -54,15 +55,29 @@ describe('the CI matrix', () => {
   const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'test.yml'), 'utf-8');
 
   it('runs the hexis-mcp suite on each supported major, and only those', () => {
-    const matrix = /^\s*node: \[([^\]]*)\]\s*$/m.exec(workflow);
-    expect(matrix, 'no `node: [...]` matrix in .github/workflows/test.yml').not.toBeNull();
+    // Scoped to THIS job, not to the file: another job growing a `node: [...]`
+    // matrix of its own would otherwise be what this assertion reads, and a
+    // drift here would pass on the strength of an unrelated list.
+    const job = hexisMcpJob();
+    const matrix = /^\s*node: \[([^\]]*)\]\s*$/m.exec(job);
+    expect(matrix, 'no `node: [...]` matrix in the hexis-mcp job of .github/workflows/test.yml').not.toBeNull();
     const majors = matrix![1]!.split(',').map((v) => Number(v.trim()));
     expect(majors).toEqual([...SUPPORTED_NODE_MAJORS]);
   });
 
+  /**
+   * The `hexis-mcp:` job's own text. It is the last job in the file; if one
+   * is ever added after it, this takes too much — so it asserts the job is
+   * there rather than silently reading the whole workflow.
+   */
+  function hexisMcpJob(): string {
+    const at = workflow.indexOf('\n  hexis-mcp:');
+    expect(at, 'no `hexis-mcp` job in .github/workflows/test.yml').toBeGreaterThan(-1);
+    return workflow.slice(at);
+  }
+
   it('runs this package as that matrix job', () => {
-    const job = workflow.slice(workflow.indexOf('\n  hexis-mcp:'));
-    expect(job, 'no `hexis-mcp` job in .github/workflows/test.yml').not.toBe('');
+    const job = hexisMcpJob();
     expect(job).toContain('node-version: ${{ matrix.node }}');
     expect(job).toContain('--filter @bevel-software/hexis-mcp');
     expect(job).toContain('run test');
@@ -77,10 +92,8 @@ describe('the CI matrix', () => {
  * pinned here alongside `engines` and the CI matrix.
  */
 describe('the documentation', () => {
-  /** `Node 22 or 24` — the phrase the preflight sentence and the UI both use. */
-  const phrase = `Node ${SUPPORTED_NODE_MAJORS.slice(0, -1).join(', ')} or ${
-    SUPPORTED_NODE_MAJORS[SUPPORTED_NODE_MAJORS.length - 1]
-  }`;
+  /** `Node 22.13+ or 24` — the phrase the preflight sentence and the UI both use. */
+  const phrase = `Node ${supportedNodePhrase()}`;
 
   const docs = {
     "the package's own README, which is the npm page": join(pkgDir, 'README.md'),

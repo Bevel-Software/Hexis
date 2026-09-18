@@ -238,7 +238,7 @@ describe('the interactive tab: Claude and ChatGPT first, each family on its own 
     const desktop = screen
       .getByText('Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar')
       .closest('details') as HTMLElement;
-    expect(within(desktop).getByText(/Needs Node 22 or 24/)).toBeInTheDocument();
+    expect(within(desktop).getByText(/Needs Node 22\.13\+ or 24/)).toBeInTheDocument();
     expect(within(desktop).getByText(/cannot see your shell's PATH/)).toBeInTheDocument();
     expect(within(desktop).getByText('which npx')).toBeInTheDocument();
     // The snippet still spawns the bare `npx`, for every client that can find it.

@@ -31,6 +31,7 @@ import {
   toListedTool,
   toolError,
   seedBevelHostedManualVars,
+  printable,
   skillPromptText,
   type ProxiedTool,
   type SkillSummary,
@@ -58,6 +59,30 @@ import { closeRenewal } from './renewal.js';
 
 /** Reported on `initialize`; the version is stamped at build time by the package. */
 const SERVER_NAME = 'hexis-mcp';
+
+/**
+ * How long `shutdown()` waits for background discovery to come to rest
+ * before closing anyway.
+ *
+ * Discovery stops at its phase boundaries, but a phase already in flight is
+ * not cancellable: a deployment fetch runs to its own timeout, a credential
+ * swap drains for up to 15s. Shorter than teardown.ts's SHUTDOWN_GRACE_MS on
+ * purpose — the CLI's watchdog is the last resort for a hang, and this cap
+ * has to expire INSIDE it to be the thing that acts first.
+ */
+export const DISCOVERY_SHUTDOWN_GRACE_MS = 5_000;
+
+/**
+ * A timer that does not, by existing, keep this process alive. The bounded
+ * wait below races a promise against one of these, and the loser's timer
+ * would otherwise hold the event loop open for its full delay after teardown
+ * had already finished — a server that exits five seconds late looks hung.
+ */
+function unrefSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms).unref?.();
+  });
+}
 
 /**
  * Build one UTCP client over both halves of the catalog.
@@ -607,8 +632,14 @@ export async function createHexisMcpServer(
     () => {},
     async (err: unknown) => {
       discoveryError = err instanceof Error ? err.message : String(err);
+      // `printable`, because this reason came off the network: a deployment
+      // (or a proxy in front of it) chose the text, and interpolated raw a
+      // newline in it would start a line of its own in the operator log and an
+      // ANSI escape would paint their terminal. The CLIENT-facing copies below
+      // keep the reason verbatim — they travel inside a JSON-RPC string, where
+      // it is already data rather than a line.
       console.error(
-        `[hexis-mcp] tool discovery failed: ${discoveryError} ` +
+        `[hexis-mcp] tool discovery failed: ${printable(discoveryError)} ` +
           'The server stays connected and answers tools/list with this notice; restart it once the cause is fixed.',
       );
       // Whatever got built before the failure — including any stdio children
@@ -644,9 +675,28 @@ export async function createHexisMcpServer(
     // every remaining phase boundary stops; this waits for it to come to
     // rest, because closing the client while it is still registering manuals
     // is how a spawned child ends up with nobody left to close it. `ready`
-    // never rejects, so it cannot throw teardown off course. cli.ts bounds
-    // the whole exit with its own watchdog, for a phase that never returns.
-    await ready;
+    // never rejects, so it cannot throw teardown off course.
+    //
+    // BOUNDED, though: the phase boundaries stop discovery, the phase IN
+    // FLIGHT does not stop — a fetch runs to its own AbortSignal.timeout, a
+    // credential swap drains for up to 15s — and an embedding host calling
+    // `shutdown()` would wait out all of it. (cli.ts has its own watchdog;
+    // a library caller has none, which is who this cap is for.) Past the cap
+    // we close anyway, and whatever discovery builds AFTER that is released
+    // when it does come to rest — `releaseDiscovered` is idempotent and
+    // re-reads `client`, so the late call frees a late child rather than
+    // double-closing an early one.
+    const settledInTime = await Promise.race([
+      ready.then(() => true),
+      unrefSleep(DISCOVERY_SHUTDOWN_GRACE_MS).then(() => false),
+    ]);
+    if (!settledInTime) {
+      console.error(
+        `[hexis-mcp] tool discovery was still in flight ${DISCOVERY_SHUTDOWN_GRACE_MS}ms into shutdown; ` +
+          'closing now and releasing whatever it finishes building.',
+      );
+      void ready.then(() => releaseDiscovered().catch(() => {}));
+    }
     // One await, not a loop: whatever holds the gate finishes, and anything
     // queued behind it now finds `closed` and registers nothing. The gate
     // promise never rejects, so this cannot throw teardown off course.
@@ -672,6 +722,13 @@ export async function createHexisMcpServer(
       // toolset is what a tool-less workspace looks like, and a client that
       // shows one gives its reader nothing to act on.
       if (discoveryError !== null) return { tools: [discoveryNoticeTool(discoveryError)] };
+      // Shutdown can land DURING discovery: every phase boundary then returns
+      // early, which is a clean return — no error, and `tools` still empty.
+      // Answering that with an empty listing would show the reader exactly
+      // what a correctly configured, tool-less workspace shows, which is the
+      // look the notice above exists to prevent. The truth is the same one
+      // the call handler gives: this server is going away.
+      if (closed) throw new McpError(ErrorCode.ConnectionClosed, 'hexis-mcp is shutting down.');
       return { tools: listedTools(tools) };
     });
 
