@@ -278,13 +278,21 @@ export interface IWorkflowService {
    * `releaseLockUntouched`) — `releaseLock` rejects rather than ever enqueue
    * a commit for a hold that was never allowed to write. Internal callers
    * only; never plumbed from a route.
+   *
+   * `opts.platformRestore` CLAIMS that this acquire is the destination side of
+   * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
+   * `.bevelignore`, `AGENTS.md`). It is a claim, not an authorisation: the
+   * implementation re-asks the access module
+   * (`canRestorePlatformFile`) whether this caller may land this exact path,
+   * and only a yes lets the acquire past the write gate. No other path and no
+   * non-admin gains anything by passing it.
    */
   acquireLock(
     workspaceId: string,
     branch: string,
     path: string,
     user: AuthUser,
-    opts?: { coordination?: boolean },
+    opts?: { coordination?: boolean; platformRestore?: boolean },
   ): Promise<AcquireLockResult>;
   /** Heartbeat to keep an acquired lock alive past its current TTL. */
   heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;

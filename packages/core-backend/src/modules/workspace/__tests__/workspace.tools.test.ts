@@ -2007,6 +2007,34 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(true);
     });
 
+    it('every one of the four platform files gets the same sentence, and the agent never gets the admin restore', async () => {
+      // The agent move tool has no exception: the recovery move is a person's,
+      // made as an admin, and an agent is neither.
+      const base = await seeded();
+      await fs.writeFile(KB('roles.yaml'), 'roles: {}\n');
+      await fs.writeFile(KB('AGENTS.md'), 'agents\n');
+      await fs.writeFile(KB('.bevelignore'), '*.tmp\n');
+      await fs.writeFile(KB('Misplaced/access.md'), '---\nread: everyone\n---\n');
+      const cases: [string, string][] = [
+        [KB('access.md'), KB('Sales/access.md')],
+        [KB('roles.yaml'), KB('Sales/roles.yaml')],
+        [KB('.bevelignore'), KB('Sales/.bevelignore')],
+        [KB('AGENTS.md'), KB('Sales/AGENTS.md')],
+        // Including the one an admin WOULD be allowed to make from the UI.
+        [KB('Misplaced/access.md'), KB('access.md')],
+      ];
+      for (const [src, dest] of cases) {
+        const name = src.slice(src.lastIndexOf('/') + 1);
+        const sentence = `${name} is a platform file and stays in its folder.`;
+        expect((await call(base, 'move_file', { src, dest, dryRun: true })).body)
+          .toMatchObject({ allowed: false, reason: sentence });
+        const run = await call(base, 'move_file', { src, dest, confirm: true });
+        expect(run.status).toBe(400);
+        expect(run.body.error).toBe(sentence);
+        expect(await exists(src)).toBe(true);
+      }
+    });
+
     it('an existing destination is refused, never overwritten', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Sales/archive/top.md') };

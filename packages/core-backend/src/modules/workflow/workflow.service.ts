@@ -897,6 +897,11 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     userEmail: string,
     targetPath: string,
+    /**
+     * The caller says this write is an admin putting a misplaced platform file
+     * back. Checked, never taken on trust — see `acquireLock`'s `opts`.
+     */
+    platformRestore = false,
   ): Promise<void> {
     // The lock route passes workspace-relative paths
     // (`knowledge-base/GTM/.../Foo.md`), but the access model is keyed by
@@ -918,6 +923,16 @@ export class WorkflowService implements IWorkflowService {
     );
     if (!result) return; // no config at ref → default-allow (bootstrap)
     if (result.get(repoRelative)) return;
+    // The one write allowed past a destination that denies it: an admin
+    // putting a platform file back where the platform reads it. The access
+    // module decides — a repository whose root `access.md` is the file that
+    // went missing denies everyone, including the admin who would restore it.
+    if (
+      platformRestore &&
+      (await this.accessControl.canRestorePlatformFile(workspaceId, userEmail, repoRelative))
+    ) {
+      return;
+    }
     const eligible = await this.accessControl.eligibleWritersAtRef(
       workspaceId,
       `HEAD`,
@@ -949,7 +964,7 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     rawPath: string,
     user: AuthUser,
-    opts?: { coordination?: boolean },
+    opts?: { coordination?: boolean; platformRestore?: boolean },
   ): Promise<AcquireLockResult> {
     const targetPath = canonicalFileIdentity(rawPath);
     // **Permission check at lock acquisition, not at commit time.** Under the
@@ -980,7 +995,13 @@ export class WorkflowService implements IWorkflowService {
     if (isProtectedBranch(branch) && !opts?.coordination) {
       // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
       // eligible-writers payload so the frontend can render a useful refusal.
-      await this.assertCanWriteAtPath(workspaceId, branch, user.email, targetPath);
+      await this.assertCanWriteAtPath(
+        workspaceId,
+        branch,
+        user.email,
+        targetPath,
+        opts?.platformRestore === true,
+      );
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {

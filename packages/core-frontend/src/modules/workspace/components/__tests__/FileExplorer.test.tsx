@@ -1717,12 +1717,20 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(moveEntry).not.toHaveBeenCalled();
     });
 
-    it('warns that a platform-managed file is read differently once moved', async () => {
-      renderExplorer({ fileTree: TREE });
-      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
-      expect(screen.getByRole('note')).toHaveTextContent(
-        'access.md is a platform-managed file; moving it changes how the platform reads it.',
-      );
+    it('never asks about a platform file: the move is refused, not confirmed', async () => {
+      // There used to be a warning here ("moving it changes how the platform
+      // reads it") on a move the dialog then went ahead with. Moving one out
+      // of its folder breaks the workspace, so it is not a choice to confirm.
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const { moveEntry } = renderExplorer({ fileTree: TREE });
+        await dropOn('Sales', `${KB}/KnowledgeBase/Legal/access.md`);
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(moveEntry).not.toHaveBeenCalled();
+        expect(alertSpy).toHaveBeenCalledWith('access.md is a platform file and stays in its folder.');
+      } finally {
+        alertSpy.mockRestore();
+      }
     });
 
     it('warns when the move crosses from one root into another', async () => {
@@ -2218,5 +2226,126 @@ describe('FileExplorer: an empty tree says why', () => {
   it('shows nothing while the tree is still loading', () => {
     renderExplorer({ fileTree: null });
     expect(screen.queryByTestId('tree-empty-notice')).not.toBeInTheDocument();
+  });
+});
+
+// The sidebar refuses a platform file's drag and its rename itself, with the
+// sentence the server refuses with. It is not a second opinion: the same
+// predicate decides on both sides (`@bevel-software/platform-shared`), so the
+// tree can answer without a round trip and cannot answer differently.
+describe('FileExplorer: platform files stay put', () => {
+  const DRAG_MIME = 'application/x-workspace-path';
+  const KB = 'knowledge-base';
+  const sentence = (name: string) => `${name} is a platform file and stays in its folder.`;
+
+  const file = (p: string): FileTreeEntry => ({
+    name: p.slice(p.lastIndexOf('/') + 1),
+    relativePath: p,
+    type: 'file',
+  });
+
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          file(`${KB}/access.md`),
+          file(`${KB}/roles.yaml`),
+          file(`${KB}/.bevelignore`),
+          file(`${KB}/AGENTS.md`),
+          // Read from the repository root and nowhere else, so a nested one
+          // is ordinary content — the server says the same.
+          file(`${KB}/Handbook/AGENTS.md`),
+          file(`${KB}/Handbook/notes.md`),
+          { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+
+  const PLATFORM = ['access.md', 'roles.yaml', '.bevelignore', 'AGENTS.md'];
+
+  let alertSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    alertSpy.mockRestore();
+  });
+
+  function row(name: string): HTMLElement {
+    return screen.getAllByText(name)[0].closest('button')!;
+  }
+
+  it.each(PLATFORM)('%s cannot be dragged: the row refuses to start one', (name) => {
+    renderExplorer({ fileTree: TREE });
+    expect(row(name)).toHaveAttribute('draggable', 'false');
+  });
+
+  it.each(PLATFORM)('a drop carrying %s is refused with the sentence, and nothing is sent', async (name) => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: (t: string) => (t === DRAG_MIME ? `${KB}/${name}` : ''),
+          files: [],
+        },
+      });
+    });
+    expect(alertSpy).toHaveBeenCalledWith(sentence(name));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it.each(PLATFORM)('the Rename action on %s says the sentence and opens nothing', async (name) => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    fireEvent.contextMenu(row(name));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).toHaveAttribute('aria-disabled', 'true');
+    expect(rename).toHaveAttribute('title', sentence(name));
+    await act(async () => {
+      fireEvent.click(rename);
+    });
+    // No rename box: the row still shows its name, and nothing was sent.
+    expect(screen.getAllByText(name)[0]).toBeInTheDocument();
+    expect(moveEntry).not.toHaveBeenCalled();
+  });
+
+  it('an ordinary file is untouched: it drags, and Rename is on offer', async () => {
+    const { moveEntry } = renderExplorer({ fileTree: TREE });
+    expect(row('notes.md')).toHaveAttribute('draggable', 'true');
+    fireEvent.contextMenu(row('notes.md'));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).not.toHaveAttribute('aria-disabled');
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: (t: string) => (t === DRAG_MIME ? `${KB}/Handbook/notes.md` : ''),
+          files: [],
+        },
+      });
+    });
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('Move notes.md to Sales?');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+    });
+    expect(moveEntry).toHaveBeenCalledWith(`${KB}/Handbook/notes.md`, `${KB}/Sales/notes.md`);
+  });
+
+  it('a nested AGENTS.md is content, not a platform file: it drags like any other row', () => {
+    renderExplorer({ fileTree: TREE });
+    // Both rows are named AGENTS.md; the nested one is the second.
+    const rows = screen.getAllByText('AGENTS.md').map((n) => n.closest('button')!);
+    const nested = rows.find((r) => r.getAttribute('data-tree-path') === `${KB}/Handbook/AGENTS.md`);
+    expect(nested).toHaveAttribute('draggable', 'true');
   });
 });

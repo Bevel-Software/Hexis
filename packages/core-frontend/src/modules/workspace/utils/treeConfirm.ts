@@ -1,14 +1,28 @@
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import { isPlatformFile, platformFileRefusal, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { KB_ROOT_DIRS } from './fileTree';
 
 // What the tree's delete and move confirmations say — see
 // `components/TreeActionConfirm.tsx` for the dialog that says it.
 
-/** The files the platform reads as configuration, not content. */
-const PLATFORM_MANAGED_FILES = new Set(['agents.md', 'roles.yaml', 'access.md']);
-
-export function isPlatformManagedFile(name: string): boolean {
-  return PLATFORM_MANAGED_FILES.has(name.toLowerCase());
+/**
+ * Why this row may not be renamed, moved or dragged — the same sentence the
+ * server refuses with — or null when it may.
+ *
+ * Judged on the path's REPO-relative form, because that is what the platform
+ * reads: `roles.yaml` and `AGENTS.md` count at the repository root only, so a
+ * nested file of either name is ordinary content and stays draggable. Outside
+ * the KB clone, and before `kbDirName` is known, nothing is refused here — the
+ * server is the gate and says the same sentence.
+ */
+export function platformFileMoveRefusal(
+  wsRelativePath: string,
+  kbDirName: string | null,
+): string | null {
+  if (!kbDirName) return null;
+  const prefix = `${kbDirName}/`;
+  if (!wsRelativePath.startsWith(prefix)) return null;
+  const repoRelative = wsRelativePath.slice(prefix.length);
+  return isPlatformFile(repoRelative) ? platformFileRefusal(repoRelative) : null;
 }
 
 /**
@@ -81,9 +95,10 @@ export function moveWarnings(opts: {
   if (opts.canWrite === false) {
     warnings.push(`You can't write to ${opts.destinationLabel} — the move will be refused.`);
   }
-  if (isPlatformManagedFile(name)) {
-    warnings.push(`${name} is a platform-managed file; moving it changes how the platform reads it.`);
-  }
+  // No platform-file warning here: a platform file no longer reaches this
+  // dialog at all. Moving one out of its folder breaks the workspace, so the
+  // tree refuses it outright (`platformFileMoveRefusal`) instead of offering
+  // it as something to confirm.
   const from = rootOf(opts.sourcePath, opts.kbDirName);
   const to = rootOf(opts.targetDir ? `${opts.targetDir}/${name}` : name, opts.kbDirName);
   if (from && to && from !== to) {

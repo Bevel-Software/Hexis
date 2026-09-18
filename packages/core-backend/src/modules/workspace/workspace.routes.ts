@@ -13,6 +13,9 @@ import {
   KNOWLEDGE_DIR,
   canonicalRelativePath,
   folderPlaceholderPath,
+  isPlatformFile,
+  isRootPlatformFile,
+  platformFileRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
 import { FolderTooLargeError, type ReadTreeFilter } from './workspace.service.js';
@@ -160,7 +163,16 @@ export function createWorkspaceRoutes(
      * `skipPush` option is gone — under the queue model commits +
      * pushes happen out of band in the worker, not inline here.)
      */
-    options?: { skipFsTreeEvent?: boolean },
+    options?: {
+      skipFsTreeEvent?: boolean;
+      /**
+       * This acquire is the destination side of an admin putting a misplaced
+       * platform file back. Passed straight to `acquireLock`, which VERIFIES
+       * it against the access module rather than believing it — see the
+       * `IWorkflowService.acquireLock` contract.
+       */
+      platformRestore?: boolean;
+    },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
     // If the caller already holds the lock, do NOT acquire-and-release
@@ -196,7 +208,9 @@ export function createWorkspaceRoutes(
       eventBus.emit({ kind: 'fs-tree-changed', workspaceId, branch });
       return result;
     }
-    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user);
+    const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user, {
+      platformRestore: options?.platformRestore === true,
+    });
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
       const err: Error & { status?: number } = new Error(
@@ -974,6 +988,32 @@ export function createWorkspaceRoutes(
     const user = await requireUser(req, res);
     if (!user) return;
     try {
+      // A platform file stays in the folder the platform reads it from —
+      // rename, move and drag all arrive here, and all three are refused.
+      // Moving one out is not a choice to confirm: once the root has no
+      // `access.md`, write on the root denies everyone and the move that
+      // would undo it is the move the gate refuses.
+      //
+      // The single exception is that repair: an admin putting a misplaced
+      // copy BACK. It is a restore only when the source is not already where
+      // the platform reads it — otherwise "move the root's access.md into a
+      // folder that has none" would qualify, which is the bug itself spelled
+      // as its own rescue. `canRestorePlatformFile` decides the rest.
+      const oldRel = toKbRelative(oldPath, kbDirName);
+      const newRel = toKbRelative(newPath, kbDirName);
+      let platformRestore = false;
+      if (oldRel !== null && isPlatformFile(oldRel)) {
+        const name = oldRel.slice(oldRel.lastIndexOf('/') + 1);
+        platformRestore =
+          !isRootPlatformFile(oldRel) &&
+          newRel !== null &&
+          newRel.slice(newRel.lastIndexOf('/') + 1) === name &&
+          (await accessControl.canRestorePlatformFile(id, user.email, newRel));
+        if (!platformRestore) {
+          res.status(409).json({ error: platformFileRefusal(oldRel) });
+          return;
+        }
+      }
       // Move = rename on disk + commit on both sides. We lock-and-release
       // the destination first (commits the new file's appearance), then
       // lock-and-release the source path (commits its deletion). Two
@@ -994,10 +1034,24 @@ export function createWorkspaceRoutes(
       // not a single merge-style rename commit, but git's log/blame
       // rename detection still groups them visually after the fact.
       const [firstLock, secondLock] = oldPath < newPath ? [oldPath, newPath] : [newPath, oldPath];
-      await withLock(id, user, firstLock, () =>
-        withLock(id, user, secondLock, () =>
-          workspaceService.moveEntry(id, oldPath, newPath),
-        ),
+      // Only the DESTINATION side carries the restore claim. The source is an
+      // ordinary write the caller must already hold: the exception exists so a
+      // file can land where the platform reads it, not so an admin can take
+      // one out of a folder that denies them.
+      const restoreAt = (p: string) => ({ platformRestore: platformRestore && p === newPath });
+      await withLock(
+        id,
+        user,
+        firstLock,
+        () =>
+          withLock(
+            id,
+            user,
+            secondLock,
+            () => workspaceService.moveEntry(id, oldPath, newPath),
+            restoreAt(secondLock),
+          ),
+        restoreAt(firstLock),
       );
       // Moving the last entry out leaves its folder in place, like a delete.
       await keepFolderOf(id, user, oldPath);

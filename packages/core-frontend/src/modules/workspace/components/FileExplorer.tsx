@@ -64,7 +64,7 @@ import {
   type FolderProposals,
   type TreeConfirmRequest,
 } from './TreeActionConfirm';
-import { moveWarnings } from '../utils/treeConfirm';
+import { moveWarnings, platformFileMoveRefusal } from '../utils/treeConfirm';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -336,6 +336,7 @@ function ContextMenu({
   onCreateFile,
   onCreateFolder,
   onRename,
+  renameRefusal = null,
   onDownload,
   returnFocusTo,
   deletable = true,
@@ -358,6 +359,12 @@ function ContextMenu({
   onCreateFile?: () => void;
   onCreateFolder?: () => void;
   onRename?: () => void;
+  /**
+   * Why Rename is not on offer for this row — a platform file stays in its
+   * folder, and a rename is a move. The item is still drawn and still
+   * reachable: an affordance that vanishes teaches nobody why.
+   */
+  renameRefusal?: string | null;
   onDownload?: () => void;
   /** The surface's own items for this entry — see `TreeNav.menuItems`. */
   extraItems?: TreeMenuItem[];
@@ -586,7 +593,19 @@ function ContextMenu({
         </MenuItem>
       )}
       {!isRoot && onRename && (
-        <MenuItem role="menuitem" onClick={() => { onRename(); onClose(); }}>
+        <MenuItem
+          role="menuitem"
+          // Same shape as a denied Download: `aria-disabled`, so the reason
+          // stays reachable by mouse AND keyboard, with activation refused
+          // here rather than by taking the item out of the tab order.
+          aria-disabled={renameRefusal ? true : undefined}
+          title={renameRefusal ?? undefined}
+          onClick={() => {
+            if (renameRefusal) return;
+            onRename();
+            onClose();
+          }}
+        >
           <span className="flex items-center gap-2"><Pencil size={14} />Rename</span>
         </MenuItem>
       )}
@@ -737,8 +756,14 @@ export function FileTreeNode({
    */
   absent?: boolean;
 }) {
-  const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
+  const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, kbDirName, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
+  /**
+   * Why this row cannot be renamed, moved or dragged, or null when it can.
+   * A platform file is refused here with the sentence the server refuses
+   * with — the tree says it without a round trip, and says the same thing.
+   */
+  const platformRefusal = platformFileMoveRefusal(entry.relativePath, kbDirName);
   const confirm = useTreeConfirm();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
@@ -912,11 +937,11 @@ export function FileTreeNode({
 
   // ── Drag source (internal reorder) ──
   const handleDragStart = useCallback((e: React.DragEvent) => {
-    if (isRoot || reserved) { e.preventDefault(); return; }
+    if (isRoot || reserved || platformRefusal) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, isRoot, reserved]);
+  }, [entry.relativePath, isRoot, reserved, platformRefusal]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -943,6 +968,15 @@ export function FileTreeNode({
           targetDir === sourcePath ||
           targetDir.startsWith(sourcePath + '/')
         ) {
+          return;
+        }
+        // The dragged row is a platform file: refused here, with the server's
+        // sentence, and nothing is sent. The row itself is not draggable, so
+        // this catches a drag begun before the tree knew the path's shape
+        // (a drop is the last moment the answer is still cheap).
+        const refusal = platformFileMoveRefusal(sourcePath, kbDirName);
+        if (refusal) {
+          alert(refusal);
           return;
         }
         // Every cross-folder move is an access change, so it asks first;
@@ -984,7 +1018,7 @@ export function FileTreeNode({
       if (files.length === 0) return;
       dispatchUpload({ kind: 'files', files }, targetDir);
     },
-    [entry, isRoot, dispatchUpload, moveEntry, confirm],
+    [entry, isRoot, dispatchUpload, moveEntry, confirm, kbDirName],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1278,7 +1312,7 @@ export function FileTreeNode({
           isPending && 'cursor-progress',
         )}
         style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
-        draggable={!renaming && !isPending}
+        draggable={!renaming && !isPending && !platformRefusal}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onClick={() => { if (!renaming && !isPending) nav.open(entry.relativePath); }}
@@ -1339,6 +1373,7 @@ export function FileTreeNode({
           isRoot={false}
           onClose={() => setContextMenu(null)}
           onRename={() => setRenaming(true)}
+          renameRefusal={platformRefusal}
           onDownload={handleDownload}
           extraItems={nav.menuItems?.(entry)}
           returnFocusTo={rowRef}

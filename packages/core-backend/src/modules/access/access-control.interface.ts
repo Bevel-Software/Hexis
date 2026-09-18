@@ -508,6 +508,29 @@ export interface IAccessControl {
   holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
 
   /**
+   * Whether `userEmail` may put a misplaced platform file back at
+   * `destinationRelativePath` — the ONE write that is allowed to land on a
+   * destination whose own rules would refuse it.
+   *
+   * A repository whose `access.md` or `roles.yaml` was moved out of the root
+   * is one nobody can repair through the app: the root then resolves to
+   * default-deny and the move that would fix it is the move the gate refuses.
+   * So an admin (the `Admin` role or the deployment owner) may move a file
+   * named `roles.yaml`, `.bevelignore` or `AGENTS.md` into the repository
+   * root, and a file named `access.md` into a folder that has none.
+   *
+   * Narrow on purpose, and the narrowness lives here rather than in the
+   * caller: false for any other path, for any other destination, and for
+   * anyone who is not an admin. It grants no write anywhere else, and it is
+   * asked only about where a move LANDS — never about what a move takes away.
+   */
+  canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean>;
+
+  /**
    * Batched: resolve eligible writers + expanded emails for a list of paths
    * at a specific ref in one model load. Returns null with the same
    * semantics as `eligibleWritersAtRef` (ref unresolvable).

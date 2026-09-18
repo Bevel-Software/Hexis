@@ -21,6 +21,7 @@ import type {
 } from './access-control.interface.js';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
   pluginIdentityOf,
+  platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
@@ -1735,6 +1736,44 @@ export class AccessControlService implements IAccessControl {
   async holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean> {
     const model = await this.loadModel(workspaceId);
     return isAdminEmail(model, canonicalEmail(userEmail));
+  }
+
+  async canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean> {
+    const target = platformRestoreDestination(destinationRelativePath);
+    if (target === null) return false;
+    const email = canonicalEmail(userEmail);
+
+    let admin: boolean;
+    try {
+      admin = isAdminEmail(await this.loadModel(workspaceId), email);
+    } catch {
+      // The repository this rescue exists for is exactly the one whose
+      // `roles.yaml` may be the file that went missing, and `loadModel`
+      // throws when it cannot be read. With no model to ask, the deployment
+      // owner is the only admin left — and they are the person who sets
+      // `ADMIN_EMAIL`, so admitting them concedes nothing they did not have.
+      admin = this.deploymentOwners.has(email);
+    }
+    if (!admin) return false;
+    if (target.kind === 'root') return true;
+
+    // An `access.md` goes back only into a folder that has none. Into a folder
+    // that already has one it would not be a restore but a rule change wearing
+    // a move's clothes — and the destination's own rules would be the thing it
+    // bypassed the write gate to overwrite.
+    const repoDir = await this.repoDir(workspaceId);
+    try {
+      await fs.stat(path.join(repoDir, target.dir, 'access.md'));
+      return false;
+    } catch (err) {
+      if (isAbsence(err)) return true;
+      // Anything other than genuine absence is not an answer: fail closed.
+      return false;
+    }
   }
 
   async eligibleWritersForPathsAtRef(

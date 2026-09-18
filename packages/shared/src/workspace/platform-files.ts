@@ -63,3 +63,43 @@ export function platformFolderRefusal(repoRelativeDir: string): string {
     ? 'The repository root is a platform folder and cannot be moved or deleted.'
     : `${norm}/ is a platform folder and cannot be moved or deleted.`;
 }
+
+/**
+ * Whether the platform file at `repoRelativePath` sits directly in the
+ * repository root — the copy every one of the four is read from there, and so
+ * never the misplaced one: it is the copy a restore puts back. A nested
+ * `access.md` or `.bevelignore` is a platform file too, but it layers on top
+ * of the root's rather than standing in for it, which is why moving the
+ * ROOT's copy into a folder is a move out and not a restore.
+ */
+export function isRootPlatformFile(repoRelativePath: string): boolean {
+  return PLATFORM_FILES.has(normalize(repoRelativePath));
+}
+
+/**
+ * The place a misplaced platform file is allowed to be put back, when
+ * `repoRelativeDestination` names one, and null when it does not.
+ *
+ * `roles.yaml`, `.bevelignore` and `AGENTS.md` are read from the repository
+ * root and nowhere else, so their one required location is the root.
+ * `access.md` governs whatever folder it sits in, so a folder that has none
+ * is a place one is missing from — WHETHER the folder has one is a fact about
+ * the disk, which this pure predicate does not know and the caller checks
+ * (see `AccessControlService.canRestorePlatformFile`).
+ */
+export type PlatformRestoreDestination =
+  | { name: string; kind: 'root' }
+  | { name: string; kind: 'folder-without-access-md'; dir: string };
+
+export function platformRestoreDestination(
+  repoRelativeDestination: string,
+): PlatformRestoreDestination | null {
+  const norm = normalize(repoRelativeDestination);
+  const name = baseName(norm);
+  if (!PLATFORM_FILES.has(name)) return null;
+  if (name === 'access.md') {
+    const slash = norm.lastIndexOf('/');
+    return { name, kind: 'folder-without-access-md', dir: slash === -1 ? '' : norm.slice(0, slash) };
+  }
+  return norm === name ? { name, kind: 'root' } : null;
+}
