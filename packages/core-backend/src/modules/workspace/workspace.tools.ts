@@ -33,6 +33,7 @@ import { fileTypeOf, needsContent } from './file-readers/content-mode.js';
 import { createFileReaderRegistry } from './file-readers/file-reader.registry.js';
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
+import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
 
 /** A directory entry as returned by `LocalFilesystem.readdir`. */
 interface DirEntry {
@@ -444,6 +445,12 @@ export function registerWorkspaceTools(
     outputs?: JsonSchema;
     write: boolean;
     internalOnly?: boolean;
+    /**
+     * A permission refusal from this tool is answered as `write-denied`
+     * (with whether and how to propose the change instead), and the
+     * description says so.
+     */
+    proposable?: boolean;
     /** False for a tool that is not a file tool (the shell), which the content rule does not describe. */
     fileTool?: boolean;
     handler: ToolHandler;
@@ -451,10 +458,15 @@ export function registerWorkspaceTools(
     const path = `/api/agent/tools/${spec.name}`;
     const def = toolDef({
       name: spec.name,
-      // Every workspace entrypoint carries the AGENTS.md reminder, and every
-      // file tool the one content rule, appended once here so no tool
-      // (especially the read-only ones a session hits first) can miss them.
-      description: spec.description + (spec.fileTool === false ? '' : CONTENT_RULE) + KB_CONVENTIONS_NOTE,
+      // Every workspace entrypoint carries the AGENTS.md reminder, every file
+      // tool the one content rule, and every tool a permission can refuse the
+      // proposal route — appended once here so no tool (especially the
+      // read-only ones a session hits first) can miss them.
+      description:
+        spec.description +
+        (spec.proposable ? PROPOSAL_ROUTE_NOTE : '') +
+        (spec.fileTool === false ? '' : CONTENT_RULE) +
+        KB_CONVENTIONS_NOTE,
       path,
       inputs: spec.inputs,
       outputs: spec.outputs,
@@ -471,7 +483,24 @@ export function registerWorkspaceTools(
       ...(spec.internalOnly ? [requireInternalSource] : []),
       // A leading slash is the root-anchored form Copy path gives and names
       // the same workspace path — normalised once here, for every path input.
-      toolHandler((args, ctx) => spec.handler(normalizePathArgs(args), ctx), { write: spec.write }),
+      toolHandler(
+        spec.proposable
+          ? async (args, ctx) => {
+              try {
+                // Awaited here so a refusal is caught; proposable tools never stream.
+                return await spec.handler(normalizePathArgs(args), ctx);
+              } catch (err) {
+                return rethrowAsWriteDenial(
+                  err,
+                  { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
+                  accessControl,
+                  kbDirName,
+                );
+              }
+            }
+          : (args, ctx) => spec.handler(normalizePathArgs(args), ctx),
+        { write: spec.write },
+      ),
     );
   };
 
@@ -838,6 +867,7 @@ export function registerWorkspaceTools(
       required: ['path', 'bytes'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
       // NB: this is a no-op for chat + `ontology_ingest` — it only bites when a
@@ -888,6 +918,7 @@ export function registerWorkspaceTools(
       required: ['count'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
       if (files.length === 0) return { count: 0 };
@@ -935,6 +966,7 @@ export function registerWorkspaceTools(
       required: ['path', 'replaced'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       assertNotDocumentEdit(readers, a.path as string);
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
@@ -977,6 +1009,7 @@ export function registerWorkspaceTools(
       required: ['path', 'deleted'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // A delete propagates no cross-ontology information (it removes a node, it
       // doesn't carry bytes from elsewhere), so it is NOT ontology-write-gated — it
@@ -1008,6 +1041,7 @@ export function registerWorkspaceTools(
       required: ['path', 'created'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
@@ -1036,6 +1070,7 @@ export function registerWorkspaceTools(
       required: ['src', 'dest', 'moved'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // A move CARRIES the source content into the destination — a genuine
       // cross-ontology flow if the two differ — so BOTH endpoints are write-gated
@@ -1070,6 +1105,7 @@ export function registerWorkspaceTools(
       required: ['src', 'dest', 'copied'],
     },
     write: true,
+    proposable: true,
     handler: async (a, ctx: ToolContext) => {
       // A copy CARRIES the source content into the destination — a genuine
       // cross-ontology flow if the two differ — so BOTH endpoints are write-gated.
