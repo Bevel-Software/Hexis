@@ -1,4 +1,4 @@
-import { branchAuthorLocalpart, isProtectedBranch } from '@bevel-software/platform-shared';
+import { branchAuthorLocalpart, isProtectedBranch, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { ToolError } from '../tool-helpers/tool.contract.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';
@@ -62,15 +62,20 @@ function reasonOf(err: AccessDeniedError): string {
  * `john-doe/`, and the agent could not delete the draft it was told to make.
  *
  * A caller whose address yields no usable localpart (the helper answers null
- * rather than inventing one) gets `agent/…`: a name they cannot own either,
- * but no derivation could give them one, and the step's note says any unused
- * name on the convention works.
+ * rather than inventing one) is given a draft under their own
+ * `suggestions/<who>-<id8>/` prefix instead — the platform's second
+ * authorship convention, the one the propose flow files under. It is keyed
+ * by the user id as well as the address, so it exists for every signed-in
+ * caller, and `isOwnSuggestionsBranch` recognises it as theirs: whichever
+ * convention supplies the name, the draft is one the caller can later
+ * manage and delete.
  */
-function draftNameFor(email: string, path: string): string {
-  const local = branchAuthorLocalpart(email) ?? 'agent';
+function draftNameFor(user: { email: string; id: string }, path: string): string {
+  const local = branchAuthorLocalpart(user.email);
+  const prefix = local !== null ? `${local}/` : suggestionsBranchPrefixFor(user);
   const base = path.split('/').filter(Boolean).pop() ?? 'change';
   const slug = base.toLowerCase().replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'change';
-  return `${local}/propose-${slug}`;
+  return `${prefix}propose-${slug}`;
 }
 
 /**
@@ -98,7 +103,7 @@ export function proposalTitleFor(path: string): string {
  */
 export async function writeDenial(
   err: AccessDeniedError,
-  input: { tool: string; branch: string; userEmail: string },
+  input: { tool: string; branch: string; userEmail: string; userId: string },
   accessControl: IAccessControl,
   kbDirName: string,
 ): Promise<ToolError> {
@@ -123,7 +128,7 @@ export async function writeDenial(
   }
   if (!readable) return refuse('Proposing is not available: you cannot read this path.');
 
-  const draft = draftNameFor(input.userEmail, path);
+  const draft = draftNameFor({ email: input.userEmail, id: input.userId }, path);
   const details: WriteDeniedDetails = {
     ...base,
     canPropose: true,
@@ -159,7 +164,7 @@ export async function writeDenial(
 /** Rethrow a permission refusal as `write-denied`; anything else passes through untouched. */
 export async function rethrowAsWriteDenial(
   err: unknown,
-  input: { tool: string; branch: unknown; userEmail: string },
+  input: { tool: string; branch: unknown; userEmail: string; userId: string },
   accessControl: IAccessControl,
   kbDirName: string,
 ): Promise<never> {
