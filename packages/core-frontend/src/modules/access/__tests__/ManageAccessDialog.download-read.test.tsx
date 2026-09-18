@@ -123,10 +123,10 @@ describe('ManageAccessDialog: Download carries Read', () => {
   it('Everyone picked with Can download alone: one public read grant, no failure', async () => {
     const user = userEvent.setup();
     // `everyone` is public-read only (the backend refuses any other verb), so
-    // the dialog clamps it to read and says so standingly while the chip is
-    // up. Download-only used to be the one pick that clamped to NOTHING and
-    // failed after the fact; now that Download carries Read it clamps like
-    // every other pick.
+    // the dialog clamps it to read and says so plainly, up front, while the
+    // chip is up. Download-only used to be the one pick that clamped to
+    // NOTHING and failed after the fact; now that Download carries Read it
+    // clamps like every other pick.
     api.suggestPrincipals.mockResolvedValue({
       roles: ['everyone'],
       groups: [],

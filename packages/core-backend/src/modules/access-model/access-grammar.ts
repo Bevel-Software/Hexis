@@ -65,6 +65,13 @@ export const EVERYONE_DISPLAY = 'Everyone';
  * confers the lower verb, but a superset *denial* does not — `deny write` and
  * `deny download` say nothing about `read`, so neither ever strips a separate
  * read grant. The target verb itself contributes both its grants and its denials.
+ *
+ * THIS TABLE IS THE ONLY COPY. Every place that folds verbs calls it:
+ * `resolveAtPath`, the plugin roster synthesis in `plugin-principals.ts` that
+ * decides who lands in `plugin/<slug>/read`, and `personal-spaces.step.ts`
+ * asking whether a space is already open. A second fold written out by hand
+ * somewhere else is how one of them comes to disagree with resolution about
+ * the same file — add a verb here, not there.
  */
 export function sourceVerbsFor(verb: Verb): Verb[] {
   switch (verb) {
