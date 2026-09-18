@@ -11,6 +11,7 @@ import {
   deleteUserVar,
 } from '../services/tool-secrets.api';
 import { startToolOAuth } from '../services/connect.api';
+import { announceToolCredentialsChanged } from '../../../core/events';
 
 /**
  * Configure one tool's secrets, split by who provisions each variable:
@@ -27,6 +28,18 @@ import { startToolOAuth } from '../services/connect.api';
 export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onChanged: () => void }) {
   const adminVars = tool.variables.filter((v) => v.scope === 'admin');
   const userVars = tool.variables.filter((v) => v.scope === 'user');
+
+  /**
+   * Every write in this panel funnels through here, which is why the Library
+   * is told from the panel rather than from each of its three hosts (the
+   * Secrets page, the `.tool` editor's sidebar, and whatever mounts it next):
+   * a host that forgot would leave the cards and the plugin banners reading
+   * the state from before the save until a browser reload.
+   */
+  const changed = () => {
+    announceToolCredentialsChanged();
+    onChanged();
+  };
 
   if (tool.variables.length === 0) {
     return (
@@ -62,7 +75,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           configured={(v) => v.adminConfigured}
           onSave={(v, value) => setAdminVar(tool.slug, v.name, value)}
           onDelete={(v) => deleteAdminVar(tool.slug, v.name)}
-          onChanged={onChanged}
+          onChanged={changed}
         />
       )}
       {userVars.length > 0 && (
@@ -80,7 +93,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           configured={(v) => v.userConfigured}
           onSave={(v, value) => setUserVar(tool.slug, v.name, value)}
           onDelete={(v) => deleteUserVar(tool.slug, v.name)}
-          onChanged={onChanged}
+          onChanged={changed}
         />
       )}
     </div>
