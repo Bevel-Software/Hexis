@@ -27,7 +27,9 @@ import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../share
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import type { IAccessControl } from '../access/access-control.interface.js';
+import type { AccessDecisionSource, AccessTargetKind, IAccessControl } from '../access/access-control.interface.js';
+import { accessRoster, resolveAccessView } from '../access/access-view.js';
+import { accessMdPathForFolder, fileCarriesAccessRules, governingFolderOf } from '../access/access-mutation.service.js';
 import { toKbRelative, resolveReadableMap } from '../access-model/kb-read-filter.js';
 import type { SpillStore } from './spill-store.js';
 import type { DocExtractService } from './file-readers/doc-extract.service.js';
@@ -524,6 +526,54 @@ export function registerWorkspaceTools(
     workspaceId: workspaceIdForBranch(branch),
     userEmail: ctx.user.email,
   });
+
+  /** A repo-relative path in the workspace-relative form every tool speaks. */
+  const toWs = (rel: string): string => (rel ? `${kbDirName}/${rel}` : kbDirName);
+  const sourceToWs = (s: AccessDecisionSource | null) => (s ? { ...s, path: toWs(s.path) } : null);
+
+  /**
+   * What `file_stat` adds to its `access` verdicts when asked to explain them:
+   * `why` each verdict holds, from the resolver the gates use, and — only for
+   * someone who may write the path's access rules, the same gate the Manage
+   * access dialog's grant route applies — the roster that dialog lists. A file
+   * that cannot carry rules of its own is governed by its folder's
+   * `access.md`, so that is the file the gate asks about.
+   */
+  const explainAccessAt = async (branch: string, ctx: ToolContext, p: string, kind: AccessTargetKind) => {
+    const norm = p.replace(/^\/+/, '').replace(/\/+$/, '');
+    const rel = norm === kbDirName ? '' : toKbRelative(norm, kbDirName);
+    if (rel === null) {
+      return { why: null, roster: null, rosterReason: `"${p}" is outside the \`${kbDirName}/\` repository, so no access rules apply to it.` };
+    }
+    if (!accessControl.explainAccess) throw new ToolError('Access explanation is not available on this server.', 501);
+    const workspaceId = workspaceIdForBranch(branch);
+    const email = ctx.user.email;
+    const explained = await accessControl.explainAccess(workspaceId, email, kind, rel);
+    const why = Object.fromEntries(
+      Object.entries(explained).map(([verb, { source, via, principal }]) => [verb, { source: sourceToWs(source), via, principal }]),
+    );
+    const rulesPath =
+      kind === 'folder'
+        ? accessMdPathForFolder(rel)
+        : fileCarriesAccessRules(rel)
+          ? rel
+          : accessMdPathForFolder(governingFolderOf(rel));
+    if (!(await accessControl.canWrite(workspaceId, email, rulesPath))) {
+      return {
+        why,
+        roster: null,
+        rosterReason: `You cannot change who has access here (no write on ${toWs(rulesPath)}), so only your own access is shown.`,
+      };
+    }
+    const roster = accessRoster(await resolveAccessView(accessControl, workspaceId, rel, email, kind), kind, rel);
+    const rosterWs = Object.fromEntries(
+      Object.entries(roster).map(([verb, entries]) => [
+        verb,
+        entries.map((e) => ({ ...e, sources: e.sources.map((s) => ({ ...s, path: toWs(s.path) })) })),
+      ]),
+    );
+    return { why, roster: rosterWs };
+  };
 
   /**
    * Refuse a file tool call that names the repository's git folder, in any
@@ -1060,7 +1110,7 @@ export function registerWorkspaceTools(
       'Get a file/directory\'s metadata (name, type, size, …) without returning content. A file also reports `contentMode`: `text` (read, write and edit it as text), `document` (read returns an extraction; replace it by upload) or `binary` (bytes: copy, move, delete, or replace by upload), plus `kind` (`text` | `document` | `image` | `binary`), `mime`, `mimeSource` and `textEditable` — decided by the same file readers read_file, grep and the write tools use, so an extensionless text file is `text/plain`.' +
       ' Every entry also reports what you may DO with it. ' +
       '`managed` is true for a platform item — a platform file (`access.md`, `roles.yaml`, `.bevelignore`, `AGENTS.md`) or a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`); managed items are never movable or deletable through these tools. ' +
-      '`access: { read, write, download, owner }` is your own verdict under the access rules. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
+      '`access: { read, write, download, owner }` is your own verdict under the access rules; pass `explainAccess: true` to learn why, and who else holds each verb. `movable` and `deletable` say whether `move_file` / `delete_file` / `delete_folder` would be allowed for you, judged like their dry runs: not managed, no symbolic link, and on a protected branch you hold write on the item AND on every file under a folder (on a draft branch writes are not gated). `movable` judges the source side only; the destination is judged by a `move_file` dry run. ' +
       'For a folder, `descendants` is the number of files under it at any depth; counting stops at 10000 and `descendantsTruncated` says so, and past that point `movable` and `deletable` are false because a folder that large was not judged in full — run the `move_file` or `delete_folder` dry run for the real verdict. ' +
       'Call this before a move or delete to see what it would touch.' +
       ONTOLOGY_BOUNDARY_NOTE,
@@ -1069,6 +1119,11 @@ export function registerWorkspaceTools(
       properties: {
         branch: BRANCH_INPUT,
         path: wsPath(kbDirName, 'Path'),
+        explainAccess: {
+          type: 'boolean',
+          description:
+            'Also explain `access` (default false): `access.why` says what decided each of your verdicts — the folder rules or file frontmatter and whether that is inherited; `access.roster` lists who holds each verb and where each grant is written, given only when you can manage this path\'s access (otherwise null, with `access.rosterReason`).',
+        },
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path'],
@@ -1092,6 +1147,17 @@ export function registerWorkspaceTools(
             write: { type: 'boolean', description: 'You may write it.' },
             download: { type: 'boolean', description: 'You may download it.' },
             owner: { type: 'boolean', description: 'You own it.' },
+            why: {
+              type: ['object', 'null'],
+              description:
+                'Only with `explainAccess: true`. `why.<verb>` is `{ source, via, principal }`: `source` is `{ kind: folder | frontmatter, path, inherited }` (null when no rule decided it — default-deny, admin rescue, a machine-owned file, or Admin\'s write at a root with no rules); `via` is `person`, `group`, `role`, `plugin`, `everyone`, `admin-rescue`, `admin-floor` (Admin always keeps write at the repository root), `machine-owned` or `default-deny`. Null for a path outside the repository.',
+            },
+            roster: {
+              type: ['object', 'null'],
+              description:
+                'Only with `explainAccess: true`. `roster.<verb>` lists `{ kind: group | role | plugin | person, name, email?, sources }` as the Manage access dialog does; null with `rosterReason` when you cannot manage this path\'s access. Paths start with the repository folder.',
+            },
+            rosterReason: str('Present when `roster` is null: why only your own access is shown.'),
           },
           required: ['read', 'write', 'download', 'owner'],
         },
@@ -1153,7 +1219,9 @@ export function registerWorkspaceTools(
       delete stat.mimeType;
       const kind = stat.type === 'directory' ? 'folder' : 'file';
       const managed = managedReason(await onDiskSpelling(root, p), kind) !== undefined;
-      const access = await accessAt(branch, ctx, p);
+      const verdicts = await accessAt(branch, ctx, p);
+      const access =
+        a.explainAccess === true ? { ...verdicts, ...(await explainAccessAt(branch, ctx, p, kind)) } : verdicts;
       const link = !plain || viaLink !== undefined;
       // Judged on the same paths move_file and delete_folder judge: a folder
       // move or delete touches every file under it, so a file its own rules
