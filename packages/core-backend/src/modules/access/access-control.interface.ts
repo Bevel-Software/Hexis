@@ -77,6 +77,46 @@ export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' | 'plugin
  */
 export type GrantSources = Partial<Record<'read' | 'write' | 'download' | 'owner', VerbSources>>;
 
+/**
+ * Where one verdict was decided, repo-relative: a folder's rules (its
+ * `access.md`; `''` is the repo root) or a file's own frontmatter.
+ * `inherited` is true when that place is not the target's own — an ancestor
+ * folder's rules — and false for the target's own frontmatter or, for a folder
+ * target, its own `access.md`.
+ */
+export type AccessDecisionSource = {
+  kind: 'folder' | 'frontmatter';
+  path: string;
+  inherited: boolean;
+};
+
+/**
+ * ONE caller's verdict on one verb, with its reason — what `canRead` /
+ * `canWrite` / `canDownload` / `canOwner` answer, explained. `source` is null
+ * when no access rule decided it: the admin rescue on `access.md` /
+ * `roles.yaml`, a machine-owned file, or default-deny (nothing grants it).
+ * `via` names the tier that matched and `principal` the display name of the
+ * group, role or plugin principal it matched on (the caller's own email for
+ * `person`, `everyone` for the built-in). `admin-floor` is Admin's write at
+ * the repository root, which no rule there can take away; its source is the
+ * root's rules, or null when the root has none.
+ */
+export interface AccessDecision {
+  allowed: boolean;
+  source: AccessDecisionSource | null;
+  via:
+    | 'person'
+    | 'group'
+    | 'role'
+    | 'plugin'
+    | 'everyone'
+    | 'admin-rescue'
+    | 'admin-floor'
+    | 'machine-owned'
+    | 'default-deny';
+  principal: string | null;
+}
+
 export interface IAccessControl {
   /** True iff `userEmail` has `write` on `relativePath` per the current access tree. */
   canWrite(workspaceId: string, userEmail: string, relativePath: string): Promise<boolean>;
@@ -327,6 +367,22 @@ export interface IAccessControl {
     principal: GrantPrincipal,
     opts?: { tokenMatch?: 'exact' | 'name' },
   ): Promise<GrantSources>;
+
+  /**
+   * The caller's own verdict on each verb at a target, and what decided it —
+   * computed by the SAME walk `canRead` / `canWrite` / `canDownload` /
+   * `canOwner` run (their booleans are its `allowed`), so an explanation never
+   * disagrees with an operation. `kind` only decides which scope counts as the
+   * target's own (`inherited: false`).
+   *
+   * Optional so existing test doubles stay valid; the real service implements it.
+   */
+  explainAccess?(
+    workspaceId: string,
+    userEmail: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<Record<'read' | 'write' | 'download' | 'owner', AccessDecision>>;
 
   /**
    * Drop a workspace's cached model. Call after operations that mutate
