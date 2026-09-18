@@ -407,23 +407,57 @@ export function xmlElementBlocks(
 }
 
 /**
+ * Break elements and the character each stands for in extracted text. A soft
+ * line break (`<w:br/>`, `<w:cr/>`, `<a:br/>`) and a tab (`<w:tab/>`) are
+ * EMPTY elements, so collecting run text alone gave them no character at all
+ * and fused the words either side: "however", a soft break, "suits" read as
+ * "howeversuits". A line break becomes a space rather than a newline because
+ * an extraction's lines are its paragraphs (and table rows) — a newline here
+ * would split one paragraph into two.
+ */
+const BREAK_TEXT: ReadonlyMap<string, string> = new Map([
+  ['br', ' '],
+  ['cr', ' '],
+  ['tab', '\t'],
+]);
+
+/**
+ * Elements whose break-named children are NOT text. `tab` also names a tab
+ * STOP (`<w:pPr><w:tabs><w:tab w:pos="720"/>`, `<a:pPr><a:tabLst><a:tab/>`),
+ * which is layout, and every such list sits inside a `…Pr` properties element
+ * (`pPr`, `rPr`, `lvl1pPr`, …). A tracked DELETION (`<w:del>`, `<w:moveFrom>`)
+ * is omitted from the text already — its `<w:delText>` is never a `<w:t>` —
+ * so a break inside one is omitted with it.
+ */
+function suppressesBreaks(local: string): boolean {
+  return local.endsWith('Pr') || local === 'del' || local === 'moveFrom';
+}
+
+/**
  * The text of one OOXML paragraph: every `<w:t>`/`<a:t>` run's character
  * content, concatenated with NO separator — Word/PowerPoint split runs
  * mid-word on formatting boundaries, so any separator would break words apart.
  * `tag` is the run tag ('w:t' for docx, 'a:t' for pptx). A self-closing
  * `<w:t/>` is an empty run and contributes nothing, exactly as it did when
  * the pattern simply failed to match it.
+ *
+ * The exception is a break element between runs: a soft line break adds one
+ * space and a tab element one tab, in document order — see {@link BREAK_TEXT}.
  */
 export function paragraphRunText(paragraphXml: string, localTag: string): string {
   let out = '';
   let inRun = 0;
+  let suppressed = 0;
   let inCdata = false;
   let depth = 0;
   const parser = new Parser(
     {
       onopentag(name) {
         depth++;
-        if (localName(name) === localTag) inRun++;
+        const local = localName(name);
+        if (local === localTag) inRun++;
+        if (suppressesBreaks(local)) suppressed++;
+        else if (suppressed === 0 && BREAK_TEXT.has(local)) out += BREAK_TEXT.get(local);
         if (depth > MAX_ELEMENT_DEPTH) throw TOO_DEEP;
       },
       // TEXT, never the raw body: a run's body is markup as well as characters
@@ -445,7 +479,9 @@ export function paragraphRunText(paragraphXml: string, localTag: string): string
         inCdata = false;
       },
       onclosetag(name) {
-        if (localName(name) === localTag && inRun > 0) inRun--;
+        const local = localName(name);
+        if (local === localTag && inRun > 0) inRun--;
+        if (suppressesBreaks(local) && suppressed > 0) suppressed--;
         depth--;
       },
     },

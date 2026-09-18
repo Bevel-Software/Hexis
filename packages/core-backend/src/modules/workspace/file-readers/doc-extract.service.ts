@@ -45,8 +45,11 @@ export type DocExtractOutcome =
  * v2: extraction moved from hand-rolled scanning to a real XML/HTML parser,
  * which changed self-closing paragraphs, entity edge cases and recovery from
  * malformed parts.
+ *
+ * v3: Word soft line breaks and tab elements (and PowerPoint `<a:br/>`) now
+ * yield a space / tab instead of fusing the words around them.
  */
-export const EXTRACTION_SCHEMA = 'v2';
+export const EXTRACTION_SCHEMA = 'v3';
 
 export class DocExtractService {
   private readonly cache: DocExtractionCache;
