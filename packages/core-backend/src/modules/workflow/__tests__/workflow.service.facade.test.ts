@@ -100,6 +100,7 @@ function makeFileLockService(): FileLockService {
     heartbeat: vi.fn(),
     release: vi.fn(),
     get: vi.fn().mockResolvedValue(null),
+    hasAnyActive: vi.fn().mockResolvedValue(false),
   } as unknown as FileLockService;
 }
 
@@ -116,6 +117,7 @@ function makePendingCommits(): PendingCommitsService {
     markNeedsAttention: vi.fn().mockResolvedValue(undefined),
     listNeedsAttention: vi.fn().mockResolvedValue([]),
     countPending: vi.fn().mockResolvedValue(0),
+    hasAnyForWorkspace: vi.fn().mockResolvedValue(false),
     startupReconcile: vi.fn().mockResolvedValue(undefined),
   } as unknown as PendingCommitsService;
 }

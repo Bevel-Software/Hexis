@@ -1812,6 +1812,313 @@ describe('FileExplorer: delete and move ask first', () => {
   });
 });
 
+// A folder holding files proposed in open change requests. Its delete used to
+// ask the plain question, count the proposed rows as files it would take, and
+// leave them behind: the folder came straight back holding only the proposed
+// rows, and deleting THAT reached the server for a path the branch did not
+// have. The dialog now names the requests and asks what to do with them.
+describe('FileExplorer: deleting a folder with proposed files', () => {
+  const KB = 'knowledge-base';
+  const REPORTS = `${KB}/Data/Reports`;
+  const PROPOSED = `${REPORTS}/proposed.md`;
+  /** One committed file on the branch; `proposed.md` exists only in request #12. */
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: KB,
+        relativePath: KB,
+        type: 'directory',
+        children: [
+          {
+            name: 'Data',
+            relativePath: `${KB}/Data`,
+            type: 'directory',
+            children: [
+              {
+                name: 'Reports',
+                relativePath: REPORTS,
+                type: 'directory',
+                children: [{ name: 'committed.md', relativePath: `${REPORTS}/committed.md`, type: 'file' }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  /** The branch after "Delete folder only": the folder is gone, the proposal is not. */
+  const TREE_WITHOUT_REPORTS: FileTreeEntry = {
+    ...TREE,
+    children: [
+      { name: KB, relativePath: KB, type: 'directory', children: [{ name: 'Data', relativePath: `${KB}/Data`, type: 'directory', children: [] }] },
+    ],
+  };
+
+  const request = (over: Record<string, unknown> = {}) => ({
+    number: 12,
+    title: 'Quarterly numbers',
+    authorName: 'Razvan',
+    mine: true,
+    paths: ['Data/Reports/proposed.md'],
+    mayRemove: true,
+    ...over,
+  });
+  const json = (body: unknown, status = 200) => ({
+    ok: status < 400,
+    status,
+    json: async () => body,
+  });
+
+  const removal = (over: Record<string, unknown> = {}) => ({
+    number: 12,
+    removedPaths: ['Data/Reports/proposed.md'],
+    withdrawn: true,
+    stillProposed: [],
+    keptForSaves: false,
+    ...over,
+  });
+
+  function answer(requests: unknown[], results: unknown[] = [removal()]) {
+    mockAuthFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/workflow/change-requests/under-folder?')) return json({ requests });
+      if (url === '/api/workflow/change-requests/under-folder/remove' && init?.method === 'POST') {
+        return json({ results });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+  }
+
+  const renderWithProposal = (fileTree: FileTreeEntry = TREE) =>
+    renderExplorer({
+      fileTree,
+      minePaths: new Map([[PROPOSED, 12]]),
+      openChangeRequestPaths: [PROPOSED],
+    });
+
+  async function chooseDelete(rowName: string) {
+    fireEvent.contextMenu(screen.getByText(rowName));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /Delete/i }));
+    });
+  }
+
+  let alertSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    alertSpy.mockRestore();
+  });
+
+  it('names the open requests and offers the three actions, counting only the files on this branch', async () => {
+    answer([request()]);
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(dialog).toHaveTextContent('#12 “Quarterly numbers” by you (1 proposed file)'));
+    expect(dialog).toHaveTextContent('Delete Reports and its 1 file?');
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports');
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete folder only' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Delete folder and its proposed changes' })).toBeEnabled();
+  });
+
+  it('"Delete folder only" deletes the branch copy and leaves the requests alone', async () => {
+    answer([request()]);
+    const retracted = vi.fn();
+    window.addEventListener('bevel:suggestions-retracted', retracted);
+    const { deleteEntry } = renderWithProposal();
+    try {
+      await chooseDelete('Reports');
+      const onlyFolder = await screen.findByRole('button', { name: 'Delete folder only' });
+      await act(async () => {
+        fireEvent.click(onlyFolder);
+      });
+      expect(deleteEntry).toHaveBeenCalledWith(REPORTS);
+      expect(mockAuthFetch).not.toHaveBeenCalledWith(
+        '/api/workflow/change-requests/under-folder/remove',
+        expect.anything(),
+      );
+      // The requests stay open, so their proposed rows stay listed.
+      expect(retracted).not.toHaveBeenCalled();
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('bevel:suggestions-retracted', retracted);
+    }
+  });
+
+  it('"Delete folder and its proposed changes" deletes the branch copy, then empties the requests, then clears the markers', async () => {
+    answer([request()]);
+    const events: string[] = [];
+    const onRetract = (e: Event) =>
+      events.push(`retract:${(e as CustomEvent<{ folder: string }>).detail.folder}`);
+    const onStale = () => events.push('stale');
+    window.addEventListener('bevel:suggestions-retracted', onRetract);
+    window.addEventListener('bevel:pr-stale', onStale);
+    const deleteEntry = vi.fn(async () => {
+      events.push('delete');
+    });
+    renderExplorer({
+      fileTree: TREE,
+      deleteEntry,
+      minePaths: new Map([[PROPOSED, 12]]),
+      openChangeRequestPaths: [PROPOSED],
+    });
+    try {
+      await chooseDelete('Reports');
+      const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+      await waitFor(() => expect(both).toBeEnabled());
+      await act(async () => {
+        fireEvent.click(both);
+      });
+      await waitFor(() => expect(events).toContain('stale'));
+      expect(deleteEntry).toHaveBeenCalledWith(REPORTS);
+      const removeCall = mockAuthFetch.mock.calls.find(
+        ([url]) => url === '/api/workflow/change-requests/under-folder/remove',
+      );
+      expect(JSON.parse((removeCall?.[1] as RequestInit).body as string)).toEqual({ path: 'Data/Reports' });
+      // Branch first, requests second, markers last.
+      expect(events).toEqual(['delete', 'retract:Data/Reports', 'stale']);
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('bevel:suggestions-retracted', onRetract);
+      window.removeEventListener('bevel:pr-stale', onStale);
+    }
+  });
+
+  it('says what the removal left behind: a file proposed meanwhile, a request kept open for a save still landing', async () => {
+    answer(
+      [request(), request({ number: 40, mine: false, authorName: 'Ana', paths: ['Data/Reports/q3.md'] })],
+      [
+        removal({ withdrawn: false, stillProposed: ['Data/Reports/notes.md'] }),
+        removal({ number: 40, removedPaths: ['Data/Reports/q3.md'], withdrawn: false, keptForSaves: true }),
+      ],
+    );
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    await waitFor(() => expect(both).toBeEnabled());
+    await act(async () => {
+      fireEvent.click(both);
+    });
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    const message = String(alertSpy.mock.calls[0]![0]);
+    expect(message).toContain('Deleted Reports and its proposed changes, except:');
+    expect(message).toContain('#12 still proposes Data/Reports/notes.md — added while the folder was being deleted.');
+    expect(message).toContain('#40 stays open: a save to it was still landing.');
+  });
+
+  it('does not touch the requests when the branch delete was called off', async () => {
+    answer([request()]);
+    const deleteEntry = vi.fn().mockResolvedValue(false);
+    renderExplorer({
+      fileTree: TREE,
+      deleteEntry,
+      minePaths: new Map([[PROPOSED, 12]]),
+      openChangeRequestPaths: [PROPOSED],
+    });
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    await act(async () => {
+      fireEvent.click(both);
+    });
+    expect(deleteEntry).toHaveBeenCalled();
+    expect(mockAuthFetch).not.toHaveBeenCalledWith(
+      '/api/workflow/change-requests/under-folder/remove',
+      expect.anything(),
+    );
+  });
+
+  it('disables the second action with the reason when one request is not the caller’s to change', async () => {
+    answer([
+      request(),
+      request({
+        number: 40,
+        title: 'Colleague draft',
+        authorName: 'Ana',
+        mine: false,
+        paths: ['Data/Reports/q3.md'],
+        mayRemove: false,
+        reason: '#40 was proposed by Ana; only its author, an admin or someone who can write every file it proposes here can change it.',
+      }),
+    ]);
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    expect(both).toBeDisabled();
+    expect(screen.getByRole('note')).toHaveTextContent('#40 was proposed by Ana');
+    expect(screen.getByRole('dialog')).toHaveTextContent('#40 “Colleague draft” by Ana (1 proposed file)');
+    expect(screen.getByRole('button', { name: 'Delete folder only' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+  });
+
+  it('never reaches the server for a folder that only proposed files put in the tree (the reproduction case)', async () => {
+    answer([request()]);
+    const { deleteEntry } = renderWithProposal(TREE_WITHOUT_REPORTS);
+    // The proposal alone keeps the folder in the tree.
+    await chooseDelete('Reports');
+    const onlyFolder = await screen.findByRole('button', { name: 'Delete folder only' });
+    expect(screen.getByRole('dialog')).toHaveTextContent('Delete Reports and its 0 files?');
+    await act(async () => {
+      fireEvent.click(onlyFolder);
+    });
+    expect(deleteEntry).not.toHaveBeenCalled();
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
+  it('opens the plain delete at once for a folder no request touches, and keeps it when the check agrees', async () => {
+    answer([]);
+    renderExplorer({ fileTree: TREE });
+    await chooseDelete('Reports');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Delete Reports and its 1 file?');
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    await waitFor(() =>
+      expect(mockAuthFetch).toHaveBeenCalledWith('/api/workflow/change-requests/under-folder?path=Data%2FReports'),
+    );
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Delete folder only' })).not.toBeInTheDocument();
+  });
+
+  it('still asks about proposals when the shared request list has not shown any (loading or failed)', async () => {
+    answer([request()]);
+    // No proposed paths in the shared list, yet the server knows of #12.
+    renderExplorer({ fileTree: TREE });
+    await chooseDelete('Reports');
+    expect(await screen.findByRole('button', { name: 'Delete folder and its proposed changes' })).toBeEnabled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('#12 “Quarterly numbers” by you (1 proposed file)');
+  });
+
+  it('says nothing about a failed check for a folder the shared list shows no proposals under', async () => {
+    mockAuthFetch.mockResolvedValue(json({ error: 'boom' }, 500));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      renderExplorer({ fileTree: TREE });
+      await chooseDelete('Reports');
+      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      expect(screen.queryByText(/Couldn't check which change requests/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still offers the plain delete, with a note, when the requests cannot be checked', async () => {
+    mockAuthFetch.mockResolvedValue(json({ error: 'boom' }, 500));
+    const { deleteEntry } = renderWithProposal();
+    await chooseDelete('Reports');
+    await screen.findByText(/Couldn't check which change requests propose files here/);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    });
+    expect(deleteEntry).toHaveBeenCalledWith(REPORTS);
+  });
+});
+
 /**
  * Read is default-deny, so an empty explorer has two causes that look the
  * same: nothing is shared with the caller, or nothing exists yet. The listing
