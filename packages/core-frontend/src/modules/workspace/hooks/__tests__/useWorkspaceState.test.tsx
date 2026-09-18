@@ -533,6 +533,57 @@ describe('useWorkspaceState multi-tab', () => {
       expect(JSON.parse(raw!).paths).toEqual(['restored.md', 'clicked.md']);
     });
   });
+
+  /**
+   * The last read without a workspace guard: activating a tab whose bytes an
+   * fs bump invalidated re-reads it in the background. If the branch switches
+   * while that read is in flight, the tab of the same path on the new branch
+   * is not the one it was for — its answer, bytes or a 404, is about the
+   * branch that was left.
+   */
+  it.each([
+    ['bytes', (resolve: (c: string) => void) => resolve('content:from-main')],
+    ['a 404', (_resolve: (c: string) => void, reject: (e: unknown) => void) => reject(new WorkspaceApiError(404))],
+  ])('an activate re-read from the branch left behind lands nowhere (%s)', async (_label, settle) => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    await act(async () => { await result.current.addTab('shared.md'); });
+    await act(async () => { await result.current.addTab('other.md'); });
+    // An fs bump invalidates the inactive tab; re-activating it re-reads.
+    act(() => { result.current.bumpFsRevision(); });
+    await waitFor(() => {
+      expect(result.current.openTabs.find((t) => t.path === 'shared.md')?.content).toBeNull();
+    });
+    let resolveOld: (c: string) => void = () => {};
+    let rejectOld: (e: unknown) => void = () => {};
+    apiMocks.readFile.mockImplementation((wsId: string, path: string) => {
+      if (wsId === 'main') {
+        return new Promise<string>((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+      }
+      return Promise.resolve(`content:draft:${path}`);
+    });
+    const invalidated = result.current.openTabs.find((t) => t.path === 'shared.md')!;
+    act(() => { result.current.activateTab(invalidated); });
+
+    // Switch to the draft and open the same path there.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    await act(async () => { await result.current.addTab('shared.md'); });
+
+    // main's answer arrives late.
+    await act(async () => { settle(resolveOld, rejectOld); await Promise.resolve(); });
+
+    const draftTab = result.current.openTabs.find((t) => t.path === 'shared.md');
+    expect(draftTab?.content).toBe('content:draft:shared.md');
+  });
 });
 
 

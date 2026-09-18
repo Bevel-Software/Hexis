@@ -333,11 +333,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // null-content guard renders an empty/loading state until content arrives.
     if (tab.content === null && workspaceId) {
       const path = tab.path;
-      readFile(workspaceId, path).then((content) => {
+      // The same guard the eager refetch and `addTab` carry: a switch while
+      // this read is in flight clears the strip, and a tab of the SAME path
+      // may already be open on the new branch. Its answer — bytes, a 404 or a
+      // 403 — is about the branch that was left, so it must neither overwrite
+      // that tab nor close it.
+      const readFrom = workspaceId;
+      readFile(readFrom, path).then((content) => {
+        if (workspaceIdRef.current !== readFrom) return;
         setOpenTabs((prev) => prev.map((t) => (
           t.path === path ? { ...t, content, savedContent: content } : t
         )));
       }).catch((err) => {
+        if (workspaceIdRef.current !== readFrom) return;
         if (
           err instanceof WorkspaceApiError &&
           (err.status === 404 || err.status === 403)
