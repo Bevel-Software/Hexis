@@ -10,6 +10,7 @@ import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { WorkflowDomainError } from '../../../shared/domain-errors.js';
 
 /**
  * HTTP contract for `GET /access/prospective` — what the move confirmation
@@ -173,6 +174,32 @@ describe('GET /access/prospective', () => {
       expect((await get(query)).status).toBe(400);
     }
     expect(h.prospectiveHolders).not.toHaveBeenCalled();
+  });
+
+  it('answers a failed resolver with a clean 500 and no internals', async () => {
+    h = await makeHarness();
+    h.prospectiveHolders.mockRejectedValueOnce(new Error('resolver exploded reading /srv/kb/roles.yaml'));
+
+    const res = await get(`from=${encodeURIComponent('Knowledge/a.md')}&toDir=Knowledge`);
+
+    // The dialog's fallback — the one-sentence form plus "Couldn't work out
+    // the access change." with Move still enabled — rests on the request
+    // FINISHING when the resolver fails. A handler that threw past its catch
+    // would hang the fetch until the 2s budget instead, and a raw message
+    // would leak a server path to a caller who asked about one file.
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Internal error.' });
+  });
+
+  it('refuses a folder source the way the resolver does, without guessing', async () => {
+    h = await makeHarness();
+    h.prospectiveHolders.mockRejectedValueOnce(
+      new WorkflowDomainError('prospective access answers for a file, not a folder', 400),
+    );
+
+    const res = await get(`from=${encodeURIComponent('Knowledge/Legal')}&toDir=Knowledge`);
+
+    expect(res.status).toBe(400);
   });
 
   it('falls back to the name-only roles list when the resolver omits kinds', async () => {

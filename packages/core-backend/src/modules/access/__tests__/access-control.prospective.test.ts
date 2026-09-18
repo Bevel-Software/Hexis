@@ -46,7 +46,9 @@ describe('AccessControlService.prospectiveHolders', () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-prospective-'));
   });
   afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
+    // A `mkdtemp` that threw leaves `root` unassigned; removing it would throw
+    // over the top of the setup failure and hide it.
+    if (root) await fs.rm(root, { recursive: true, force: true });
   });
 
   async function makeService(files: Record<string, string>) {
@@ -106,13 +108,16 @@ describe('AccessControlService.prospectiveHolders', () => {
     expect(holderPrincipals(after.read).map((p) => p.email)).toContain('ali@x.io');
   });
 
-  it('answers identically on both sides for a move inside the same folder', async () => {
+  it('answers identically on both sides for a destination in the same folder', async () => {
     const svc = await makeService(TREE);
 
+    // A DIFFERENT destination path, resolved on its own, that happens to fall
+    // under the same rules — the "Nobody's access changes." case. Handing the
+    // source path back as the destination would assert nothing at all.
     const { before, after } = await svc.prospectiveHolders(
       workspaceId,
       'Knowledge/Legal/contract.md',
-      'Knowledge/Legal/contract.md',
+      'Knowledge/Legal/draft.md',
     );
 
     expect(names(after.read)).toEqual(names(before.read));
@@ -129,6 +134,17 @@ describe('AccessControlService.prospectiveHolders', () => {
     );
 
     expect(holderPrincipals(before.read)).toContainEqual({ kind: 'group', name: 'Engineering' });
+  });
+
+  it('refuses a folder source rather than resolving it as a file', async () => {
+    const svc = await makeService(TREE);
+
+    // `Knowledge/Legal` carries its own access.md and governs everything under
+    // it. Resolved as a file it would report the rules of the folder ABOVE it
+    // and none of its own — a confident, wrong answer.
+    await expect(
+      svc.prospectiveHolders(workspaceId, 'Knowledge/Legal', 'Knowledge/Sales/Legal'),
+    ).rejects.toThrow(/folder/i);
   });
 
   it('moves nothing and writes nothing', async () => {

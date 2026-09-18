@@ -704,6 +704,12 @@ function RenameInput({
 // ── Tree Node ──
 
 const DRAG_MIME = 'application/x-workspace-path';
+/**
+ * What kind of row is being dragged — `directory` or `file`. The path alone
+ * does not say (a folder may be named like a file), and the move dialog asks
+ * a file-only access question, so the kind travels with the path.
+ */
+const DRAG_KIND_MIME = 'application/x-workspace-kind';
 
 export function FileTreeNode({
   entry,
@@ -915,9 +921,10 @@ export function FileTreeNode({
   const handleDragStart = useCallback((e: React.DragEvent) => {
     if (isRoot || reserved) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
+    e.dataTransfer.setData(DRAG_KIND_MIME, entry.type);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, isRoot, reserved]);
+  }, [entry.relativePath, entry.type, isRoot, reserved]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -951,6 +958,7 @@ export function FileTreeNode({
         confirm({
           kind: 'move',
           sourcePath,
+          sourceIsDirectory: e.dataTransfer.getData(DRAG_KIND_MIME) === 'directory',
           targetDir,
           destinationLabel: targetDir ? entry.name : 'the top level',
           returnFocusTo: () => rowForPath(sourcePath),
@@ -1472,6 +1480,7 @@ export function TreeChrome({
     !!kbDirName && (path === kbDirName || path.startsWith(`${kbDirName}/`));
   const accessLookup =
     moveRequest && workspaceId && kbDirName
+    && !moveRequest.sourceIsDirectory
     && moveRequest.sourcePath.startsWith(`${kbDirName}/`)
     && insideKb(moveRequest.targetDir)
       ? moveRequest
@@ -1504,7 +1513,12 @@ export function TreeChrome({
       })
       .catch((err) => {
         if (cancelled) return;
-        console.warn('[FileExplorer] prospective access:', err);
+        // Running out of the two seconds is a designed outcome, not a fault:
+        // the abort is ours, and the dialog already says what it means. Only
+        // a genuine failure is worth a line in the console.
+        if ((err as { name?: string } | null)?.name !== 'AbortError') {
+          console.warn('[FileExplorer] prospective access:', err);
+        }
         setAccessAnswer({ request: accessLookup, change: { status: 'failed' } });
       })
       .finally(() => clearTimeout(timer));

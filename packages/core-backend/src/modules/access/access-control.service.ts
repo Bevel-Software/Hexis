@@ -25,6 +25,7 @@ import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
   pluginIdentityOf,
 } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
@@ -1482,7 +1483,20 @@ export class AccessControlService implements IAccessControl {
     toPath: string,
   ): Promise<ProspectiveHolders> {
     const model = await this.loadModel(workspaceId);
-    const own = await this.readOwnEntries(await this.repoDir(workspaceId), fromPath);
+    const repoDir = await this.repoDir(workspaceId);
+    // A FILE question only. A folder carries its own `access.md` — which moves
+    // with it and governs everything under it — so resolving it as a file
+    // would read frontmatter it does not have and omit the rules it does,
+    // naming principals that are not the ones a folder move changes. Refuse
+    // rather than answer the wrong question convincingly.
+    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch(() => null);
+    if (fromStat?.isDirectory()) {
+      throw new WorkflowDomainError(
+        'prospective access answers for a file, not a folder',
+        400,
+      );
+    }
+    const own = await this.readOwnEntries(repoDir, fromPath);
     const holdersAt = (relativePath: string): PathHolders => ({
       read: eligibleHoldersResolved(model, 'read', relativePath, own),
       write: eligibleHoldersResolved(model, 'write', relativePath, own),

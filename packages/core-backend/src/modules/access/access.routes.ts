@@ -369,6 +369,10 @@ export function createAccessRoutes(
    * `GET /access`: the caller must resolve read on the file being moved. The
    * lists name people, and someone who cannot see the file has no business
    * learning who can.
+   *
+   * `from` must be a FILE. A folder carries its own `access.md` and governs
+   * everything under it, which is a different question; the resolver refuses
+   * one with a 400 rather than answering it as if it were a file.
    */
   router.get('/workspace/:id/access/prospective', async (req, res) => {
     const user = await requireUser(req, res);

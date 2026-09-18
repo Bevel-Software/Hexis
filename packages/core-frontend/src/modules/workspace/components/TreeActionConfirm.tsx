@@ -51,6 +51,13 @@ export type TreeConfirmRequest =
       kind: 'move';
       /** Workspace-relative path of the entry being moved. */
       sourcePath: string;
+      /**
+       * Is the thing being dragged a folder? A folder's access is its own
+       * `access.md` plus every file under it — a different question from one
+       * file's, and not one this dialog answers, so it asks nothing and says
+       * only what it has always said.
+       */
+      sourceIsDirectory: boolean;
       /** Workspace-relative folder it lands in; `''` is the workspace root. */
       targetDir: string;
       /** How the destination reads in the sentence — the drop target's row name. */
@@ -289,8 +296,12 @@ function AccessBlock({ title, lines }: { title: string; lines: string[] }) {
     <>
       <p className="mt-2 text-detail text-ink">{title}</p>
       <ul className="mt-1 space-y-1">
-        {lines.map((line) => (
-          <li key={line} className="text-detail text-ink">
+        {/* Two principals can read the same — a group and a role sharing a
+            name spell one line identically — so position, not text, is what
+            tells the rows apart. The list is re-derived from the answer on
+            every render and holds no state of its own. */}
+        {lines.map((line, i) => (
+          <li key={`${i}:${line}`} className="text-detail text-ink">
             {line}
           </li>
         ))}

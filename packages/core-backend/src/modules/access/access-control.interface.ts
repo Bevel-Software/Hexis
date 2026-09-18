@@ -338,6 +338,11 @@ export interface IAccessControl {
    *
    * Writes nothing and moves nothing. The move confirmation diffs the two
    * sides to name who loses and who gains access.
+   *
+   * A FILE question only: a `fromPath` that is a directory is refused with a
+   * 400. A folder's access is its own `access.md` — which moves with it and
+   * governs everything beneath it — so resolving it as a file would name the
+   * wrong principals with the same confidence as the right ones.
    */
   prospectiveHolders(
     workspaceId: string,

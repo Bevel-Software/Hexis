@@ -1550,6 +1550,7 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
 // follows the destination, plus whatever else about it is worth knowing.
 describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
+  const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
   const TREE: FileTreeEntry = {
     name: '.',
@@ -1653,10 +1654,14 @@ describe('FileExplorer: delete and move ask first', () => {
     fireEvent.click(screen.getByText('Legal'));
   }
 
-  async function dropOn(rowName: string, sourcePath: string) {
+  async function dropOn(rowName: string, sourcePath: string, kind: 'file' | 'directory' = 'file') {
     await act(async () => {
       fireEvent.drop(screen.getByText(rowName), {
-        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''), files: [] },
+        dataTransfer: {
+          getData: (t: string) =>
+            t === DRAG_MIME ? sourcePath : t === DRAG_KIND_MIME ? kind : '',
+          files: [],
+        },
       });
     });
   }
@@ -1898,6 +1903,45 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(screen.getByRole('button', { name: 'Move' })).toBeEnabled();
       expect(screen.getByRole('dialog')).toHaveTextContent('Move contract.pdf to Sales?');
       expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+
+    it('names a group and a role that share a name as two separate lines', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering'), { kind: 'role', name: 'Engineering' }] },
+        {},
+      );
+      await openMoveDialog('Sales', CONTRACT);
+
+      // Two principals whose lines READ the same are still two principals; the
+      // block shows both rather than collapsing them into one.
+      expect(screen.getAllByText('Engineering: can no longer open')).toHaveLength(2);
+    });
+
+    it('asks nothing about a folder being dragged, and says only what it always said', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      // A folder's access is its own access.md plus every file under it — not
+      // the question this lookup answers, so it is not asked.
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
+
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(
+        "Move Old to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
+      expect(
+        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+      ).toBe(false);
+
+      // And it is still an ordinary move.
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(
+        `${KB}/KnowledgeBase/Legal/Old`,
+        `${KB}/KnowledgeBase/Sales/Old`,
+      );
     });
 
     it('never decorates the next move with the last one’s answer', async () => {
