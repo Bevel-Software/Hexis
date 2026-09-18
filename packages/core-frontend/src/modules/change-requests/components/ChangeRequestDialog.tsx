@@ -11,6 +11,7 @@ import { useModalLayer } from '../../../shared/components/useModalLayer';
 import { cn } from '../../../lib/utils';
 import { AuthContext } from '../../auth/state/auth.context';
 import { fetchPrDetail } from '../../pr/services/pr-detail.api';
+import { useEventBus } from '../../workflow/state/event-bus.context';
 import { approvePrFile, revertPrFile, unapprovePrFile } from '../../pr/services/pr-approvals.api';
 import { deleteChangeRequest } from '../../pr/services/pr-cancel.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
@@ -89,11 +90,20 @@ export function ChangeRequestDialog({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [isTop, onClose]);
 
+  /**
+   * Every detail read takes a number; only the newest read may publish. The
+   * opening read, an event re-read and a post-revert read can overlap, and an
+   * older answer resolving last would put back state a newer one replaced —
+   * a merged request shown pending again, a cleared refusal back on screen.
+   */
+  const detailSeq = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
+    const seq = ++detailSeq.current;
     fetchPrDetail(cr.number)
       .then((d) => {
-        if (!cancelled) setDetail(d);
+        if (!cancelled && seq === detailSeq.current) setDetail(d);
       })
       .catch((err) => {
         if (!cancelled) {
@@ -104,6 +114,33 @@ export function ChangeRequestDialog({
       cancelled = true;
     };
   }, [cr.number]);
+
+  // Somebody else's apply of THIS request just failed or landed. Re-read the
+  // detail so a reader with the dialog open sees the refusal the clicker saw
+  // (or that there is nothing left to decide), not the state from when it
+  // opened. Fresh: the event exists because the cached answer just went stale.
+  const bus = useEventBus();
+  useEffect(() => {
+    if (!bus) return;
+    let cancelled = false;
+    const reread = (e: { number: number }) => {
+      if (e.number !== cr.number) return;
+      const seq = ++detailSeq.current;
+      fetchPrDetail(cr.number, { fresh: true })
+        .then((d) => {
+          if (!cancelled && seq === detailSeq.current) setDetail(d);
+        })
+        .catch(() => undefined);
+    };
+    const offs = [
+      bus.subscribe('change-request-apply-failed', reread),
+      bus.subscribe('change-request-merged', reread),
+    ];
+    return () => {
+      cancelled = true;
+      for (const off of offs) off();
+    };
+  }, [bus, cr.number]);
 
   // EVERYTHING is repo-relative, scoped or not — the scope's baseFiles are
   // lifted to full paths, and every touched file lists whatever folder it is
@@ -387,9 +424,13 @@ export function ChangeRequestDialog({
    * the viewer cannot actually deliver. Only files the merge gate binds can
    * hold it up; the rest neither warn nor block on the server, but the viewer
    * still has to hold at least one file of the request to be offered Apply.
+   * And only while the request is OPEN: somebody else may apply or decline it
+   * with this dialog still up, and the re-read that tells the reader so must
+   * not leave a second merge a click away.
    */
   const canApply =
     detail !== null &&
+    detail.state === 'open' &&
     detail.approvals.length > 0 &&
     detail.approvals.filter((a) => a.inMergeGate).every((a) => a.isApproved || a.viewerCanApprove) &&
     detail.approvals.some((a) => a.isApproved || a.viewerCanApprove);
@@ -462,7 +503,9 @@ export function ChangeRequestDialog({
         return next;
       });
       setPicked(null);
-      setDetail(await fetchPrDetail(cr.number));
+      const seq = ++detailSeq.current;
+      const next = await fetchPrDetail(cr.number);
+      if (seq === detailSeq.current) setDetail(next);
     } catch (err) {
       setVerbError(err instanceof Error ? err.message : "Couldn't revert this file.");
     } finally {
@@ -675,6 +718,20 @@ export function ChangeRequestDialog({
         {error && (
           <Banner tone="danger" role="alert" className="mx-8 mt-4">
             {error}
+          </Banner>
+        )}
+
+        {/* A refusal from an attempt this dialog did not make — another
+            owner's, an admin's, or this reader's own in another tab. Its own
+            attempt speaks through `error` / `blocked` above instead. */}
+        {!error && !blocked && !applyBusy && detail?.lastApplyFailure && (
+          <Banner tone="danger" role="alert" className="mx-8 mt-4">
+            <b className="font-semibold">
+              {detail.lastApplyFailure.byName
+                ? `${detail.lastApplyFailure.byName} could not apply this`
+                : 'The last apply did not land'}
+            </b>
+            : {detail.lastApplyFailure.reason}
           </Banner>
         )}
 
