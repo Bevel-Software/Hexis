@@ -17,6 +17,8 @@ import type {
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  PathHolders,
+  ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
@@ -1460,6 +1462,32 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'download', relativePath, own);
+  }
+
+  /**
+   * The read and write holders of one file at its current path and at a path
+   * it has not moved to yet (see the interface).
+   *
+   * A move changes nothing about the file's own frontmatter — that travels
+   * with the bytes — and everything about the folder chain above it. So the
+   * hypothetical side is the ordinary resolution with the destination path
+   * substituted: the same model, the same own-entries (read from the SOURCE,
+   * since nothing sits at the destination to read), resolved against the
+   * destination's ancestors. One model load and one file read serve all four
+   * lookups.
+   */
+  async prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders> {
+    const model = await this.loadModel(workspaceId);
+    const own = await this.readOwnEntries(await this.repoDir(workspaceId), fromPath);
+    const holdersAt = (relativePath: string): PathHolders => ({
+      read: eligibleHoldersResolved(model, 'read', relativePath, own),
+      write: eligibleHoldersResolved(model, 'write', relativePath, own),
+    });
+    return { before: holdersAt(fromPath), after: holdersAt(toPath) };
   }
 
   async eligibleWriterEmails(

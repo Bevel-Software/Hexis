@@ -43,7 +43,7 @@ import {
   type Verb,
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
-import { resolveAccessView } from './access-view.js';
+import { holderPrincipals, resolveAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
@@ -344,6 +344,66 @@ export function createAccessRoutes(
       res.json({
         overrides: overrides.filter((o) => readable.get(o.governs) === true),
         truncated,
+      });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * GET /api/workspace/:id/access/prospective?from=<file>&toDir=<folder>
+   *
+   * Who can open and who can edit one file where it is, and where a move
+   * would put it — `{ before, after }`, each `{ read, write }` lists of
+   * principals named as their grants name them. `toDir` is the destination
+   * FOLDER (`''` is the repo root); the file keeps its name, so the route
+   * derives the destination path itself rather than trusting a second one.
+   *
+   * The destination path does not exist yet, which is why this cannot be two
+   * calls to `GET /access`: the resolver is asked for a hypothetical, with
+   * the file's own frontmatter (read where the file actually is) layered over
+   * the destination's folder chain. Nothing is written and nothing is moved.
+   *
+   * Gated like the sibling `overrides` route rather than the permissive
+   * `GET /access`: the caller must resolve read on the file being moved. The
+   * lists name people, and someone who cannot see the file has no business
+   * learning who can.
+   */
+  router.get('/workspace/:id/access/prospective', async (req, res) => {
+    const user = await requireUser(req, res);
+    if (!user) return;
+
+    const rawFrom = req.query.from;
+    // An empty `toDir` is the repo ROOT, a real destination — only a missing
+    // one is a bad request.
+    const rawToDir = req.query.toDir;
+    if (typeof rawFrom !== 'string' || !rawFrom) {
+      res.status(400).json({ error: 'from query parameter is required' });
+      return;
+    }
+    if (typeof rawToDir !== 'string') {
+      res.status(400).json({ error: 'toDir query parameter is required' });
+      return;
+    }
+
+    try {
+      const from = toRepoRelative(rawFrom);
+      assertRepoRelativeTarget(from, 'file');
+      const toDir = toRepoRelative(rawToDir);
+      assertRepoRelativeTarget(toDir, 'folder');
+
+      if (!(await accessControl.canRead(req.params.id, user.email, from))) {
+        res.status(403).json({ error: 'You do not have access to this file.' });
+        return;
+      }
+
+      const name = from.slice(from.lastIndexOf('/') + 1);
+      const to = toDir ? `${toDir}/${name}` : name;
+      const { before, after } = await accessControl.prospectiveHolders(req.params.id, from, to);
+      res.json({
+        before: { read: holderPrincipals(before.read), write: holderPrincipals(before.write) },
+        after: { read: holderPrincipals(after.read), write: holderPrincipals(after.write) },
       });
     } catch (err) {
       const { status, body } = toHttpError(err);

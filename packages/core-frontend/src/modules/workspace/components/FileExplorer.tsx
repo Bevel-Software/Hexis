@@ -57,14 +57,15 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
-import { fetchFileAccess } from '../../access/api';
+import { fetchFileAccess, fetchProspectiveAccess } from '../../access/api';
 import {
   TreeActionConfirmDialog,
   type DeleteMode,
   type FolderProposals,
+  type MoveAccessChange,
   type TreeConfirmRequest,
 } from './TreeActionConfirm';
-import { moveWarnings } from '../utils/treeConfirm';
+import { ACCESS_LOOKUP_TIMEOUT_MS, accessChangeOf, moveWarnings } from '../utils/treeConfirm';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -1456,6 +1457,63 @@ export function TreeChrome({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [confirmRequest, workspaceId, kbDirName]);
+  // Who the move costs access and who it gains it for. The dialog opens at
+  // once and fills this in: the answer describes the move, it does not gate
+  // it, and Move is enabled the whole time. Keyed by the request it answers,
+  // so a late answer never decorates the next move.
+  const [accessAnswer, setAccessAnswer] = useState<
+    { request: TreeConfirmRequest; change: MoveAccessChange } | null
+  >(null);
+  const moveRequest = confirmRequest?.kind === 'move' ? confirmRequest : null;
+  // Both ends have to sit inside the KB clone for the access tree to govern
+  // them; outside it there are no rules to compare, and the dialog says
+  // nothing about access it cannot resolve. `kbDirName` alone is the KB root.
+  const insideKb = (path: string) =>
+    !!kbDirName && (path === kbDirName || path.startsWith(`${kbDirName}/`));
+  const accessLookup =
+    moveRequest && workspaceId && kbDirName
+    && moveRequest.sourcePath.startsWith(`${kbDirName}/`)
+    && insideKb(moveRequest.targetDir)
+      ? moveRequest
+      : null;
+  const moveAccessChange: MoveAccessChange = !accessLookup
+    ? { status: 'unavailable' }
+    : accessAnswer?.request === accessLookup
+      ? accessAnswer.change
+      : { status: 'loading' };
+  useEffect(() => {
+    if (!accessLookup || !workspaceId || !kbDirName) return;
+    const prefix = `${kbDirName}/`;
+    const controller = new AbortController();
+    // Two seconds is the whole budget; past it the answer is no longer wanted
+    // and the dialog falls back to saying it could not work the change out.
+    const timer = setTimeout(() => controller.abort(), ACCESS_LOOKUP_TIMEOUT_MS);
+    let cancelled = false;
+    fetchProspectiveAccess(
+      workspaceId,
+      accessLookup.sourcePath.slice(prefix.length),
+      accessLookup.targetDir === kbDirName ? '' : accessLookup.targetDir.slice(prefix.length),
+      controller.signal,
+    )
+      .then((access) => {
+        if (cancelled) return;
+        setAccessAnswer({
+          request: accessLookup,
+          change: { status: 'ready', ...accessChangeOf(access) },
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn('[FileExplorer] prospective access:', err);
+        setAccessAnswer({ request: accessLookup, change: { status: 'failed' } });
+      })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [accessLookup, workspaceId, kbDirName]);
   // A folder delete asks which open change requests propose files in the
   // folder. It asks for EVERY knowledge-base folder: the shared list may still
   // be loading, or have failed, and its silence is not "no proposals". A
@@ -1534,6 +1592,7 @@ export function TreeChrome({
               ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
               : []
           }
+          accessChange={moveAccessChange}
           proposals={folderProposals}
           onCancel={() => closeConfirm(false)}
           onConfirm={(mode) => closeConfirm(true, mode)}
