@@ -336,6 +336,33 @@ export function withLinkHealth<T extends LibraryFilterable & { status: Attention
   };
 }
 
+/**
+ * Where an item that reaches `plugin` by LINK actually lives — the folder
+ * holding it, which is what the card's Linked pill names on hover.
+ *
+ * Null for an item the plugin's own folder holds, and for one that is not in
+ * the plugin at all: an inline card has nothing to disclose, and a page that
+ * pilled every card would be saying nothing with three more words.
+ *
+ * The folder, not the item: a skill's `path` IS its folder
+ * (`Skills/Testing/test-shared-linking`) and a tool's is its file, so the
+ * answer to "where does this live" is the parent of both — `Skills/Testing`,
+ * the root somebody linked.
+ */
+export function linkedHomeOf(
+  item: Pick<LibraryFilterable, 'plugins'> & { path: string },
+  plugin: string,
+): string | null {
+  const membership = (item.plugins as { name: string; linked?: boolean }[] | undefined)?.find(
+    (m) => m.name === plugin,
+  );
+  if (!membership?.linked) return null;
+  const cut = item.path.lastIndexOf('/');
+  // A path with no parent (nothing this catalog serves, but the slice would
+  // otherwise silently answer with the empty string) names itself.
+  return cut > 0 ? item.path.slice(0, cut) : item.path;
+}
+
 /** The distinct plugin names an item belongs to. */
 export function pluginsOfItem(item: Pick<LibraryFilterable, 'plugin' | 'plugins'>): string[] {
   const names = new Set<string>();

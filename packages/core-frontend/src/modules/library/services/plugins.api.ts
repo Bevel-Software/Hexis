@@ -33,6 +33,17 @@ export interface PluginSummary {
   displayName?: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /**
+   * Repo-relative roots the plugin LINKS skills from, e.g. `['Skills/Testing']`.
+   *
+   * What lets the plugin's page tell a card that LIVES here from one it only
+   * points at. A skill says so itself (`PluginMembership.linked`); a tool
+   * says nothing — a `.tool` beside the skills under a linked root reaches
+   * the plugin the same way they do, and only these roots reveal it. Absent
+   * from an older server: every tool then reads as inline, which is what the
+   * page showed before.
+   */
+  linkedRoots?: string[];
   /** Per-caller: can read the folder (membership). Locked === !canRead. */
   canRead: boolean;
   /** Per-caller; true ⇒ may manage the plugin's access (admin-rescue applies). */

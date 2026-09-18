@@ -306,6 +306,7 @@ describe('/api/plugins routes', () => {
       name: 'gtm',
       displayName: 'GTM',
       folders: ['Plugins/GTM'],
+      linkedRoots: [],
       linksAreManaged: true,
       skillCount: 2,
       toolCount: 0,

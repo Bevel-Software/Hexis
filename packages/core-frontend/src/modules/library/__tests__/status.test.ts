@@ -3,6 +3,7 @@ import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api'
 import {
   emptyMessageFor,
   filterLibraryItems,
+  linkedHomeOf,
   pluginCounts,
   neededToolsFor,
   skillStatus,
@@ -307,5 +308,25 @@ describe('toastDuration', () => {
     const lengths = [0, 10, 40, 80, 160, 400];
     const times = lengths.map((n) => toastDuration('x'.repeat(n)));
     expect([...times].sort((a, b) => a - b)).toEqual(times);
+  });
+});
+
+describe('linkedHomeOf', () => {
+  /** A skill's `path` is its folder; a tool's is its file. Both answer with the parent. */
+  const linked = (path: string) => ({ path, plugins: [{ name: 'GTM', linked: true }] });
+
+  it('names the folder a LINKED item lives in — the root somebody linked', () => {
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM')).toBe('Skills/Testing');
+    expect(linkedHomeOf(linked('Plugins/Shared/observability/grafana.tool'), 'GTM')).toBe(
+      'Plugins/Shared/observability',
+    );
+  });
+
+  it('is null for an INLINE item, and for one this plugin does not hold at all', () => {
+    const inline = { path: 'Plugins/GTM/outreach', plugins: [{ name: 'GTM', linked: false }] };
+    expect(linkedHomeOf(inline, 'GTM')).toBeNull();
+    // Linked into another plugin entirely — not this page's business.
+    expect(linkedHomeOf(linked('Skills/Testing/x'), 'Product')).toBeNull();
+    expect(linkedHomeOf({ path: 'Plugins/GTM/outreach' }, 'GTM')).toBeNull();
   });
 });

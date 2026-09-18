@@ -4,7 +4,7 @@ import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, HEXIS_EXTENSION_NS, HEXIS_LINKED_SKILLS_KEY } from '@bevel-software/platform-shared';
 import { PluginIndexService } from '../plugins.service.js';
 import type { PluginLinkIndex } from '../plugin-links.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -71,9 +71,14 @@ describe('PluginIndexService', () => {
    * access.md that makes it exist to the index (a legacy folder without a
    * manifest gets one from the boot step before the index ever runs).
    */
-  const pluginDir = async (name: string) => {
+  const pluginDir = async (name: string, linkedRoots: string[] = []) => {
     await mkdir(join(kb(), 'Plugins', name), { recursive: true });
-    await writeFile(join(kb(), 'Plugins', name, 'plugin.json'), `{"name":"${name.toLowerCase()}"}`);
+    const manifest: Record<string, unknown> = { name: name.toLowerCase() };
+    // The roots a manifest links, where `linkedSkillRoots` reads them.
+    if (linkedRoots.length > 0) {
+      manifest.extensions = { [HEXIS_EXTENSION_NS]: { [HEXIS_LINKED_SKILLS_KEY]: linkedRoots } };
+    }
+    await writeFile(join(kb(), 'Plugins', name, 'plugin.json'), JSON.stringify(manifest));
     await writeFile(join(kb(), 'Plugins', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
   };
 
@@ -146,6 +151,43 @@ describe('PluginIndexService', () => {
     const product = catalog.find((g) => g.name === 'product')!;
     expect(product.skillCount).toBe(1);
     expect(product.toolCount).toBe(0);
+  });
+
+  /**
+   * A plugin's manifest points at roots elsewhere, and the catalog has to say
+   * so: the page uses them to tell a card that LIVES in the plugin from one it
+   * only reaches. A skill under such a root carries its own membership record;
+   * a `.tool` manual beside it carries none, so the root is the only witness —
+   * which is why the tools it brings in are counted here too.
+   */
+  test("serves a plugin's linked roots, and counts the tools that reach it through them", async () => {
+    await pluginDir('GTM', ['Skills/Testing', 'Plugins/Shared/observability']);
+    await pluginDir('Product');
+
+    const catalog = await svc({
+      tools: tools(
+        'Plugins/GTM/heyreach.tool',
+        'Plugins/Shared/observability/grafana.tool',
+        // A sibling folder sharing a prefix is NOT under the root.
+        'Plugins/Shared/observability-archive/old.tool',
+      ),
+    }).catalog();
+
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
+    expect(gtm.linkedRoots).toEqual(['Skills/Testing', 'Plugins/Shared/observability']);
+    // Its own, plus the one under the linked root; never the archive's.
+    expect(gtm.toolCount).toBe(2);
+    // Product links nothing and holds nothing.
+    const product = catalog.find((g) => g.name === 'product')!;
+    expect(product.linkedRoots).toEqual([]);
+    expect(product.toolCount).toBe(0);
+  });
+
+  test('counts a tool ONCE for a plugin whose linked root sits inside its own folder', async () => {
+    await pluginDir('GTM', ['Plugins/GTM/tools']);
+
+    const catalog = await svc({ tools: tools('Plugins/GTM/tools/grafana.tool') }).catalog();
+    expect(catalog.find((g) => g.name === 'gtm')!.toolCount).toBe(1);
   });
 
   test("counts the linked skills a plugin's members cannot read, from the unfiltered link index", async () => {
