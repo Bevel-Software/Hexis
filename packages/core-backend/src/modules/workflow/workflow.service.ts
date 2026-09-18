@@ -53,7 +53,12 @@ import type {
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  isProtectedBranch,
+  DEFAULT_BRANCH,
+  isFolderPlaceholder,
+  folderPlaceholderPath,
+} from '@bevel-software/platform-shared';
 import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
@@ -174,7 +179,9 @@ const formatWriter = (u: { name: string; email: string }): string =>
  * the overflow is collapsed into a single deduped summary of every eligible
  * approver across the change. This keeps the body bounded regardless of how
  * many files the change touches (see {@link MAX_AFFECTED_PATHS_LISTED}).
- * Returns '' when no path has resolvable eligibility.
+ * Returns '' when no path has resolvable eligibility. The empty-folder
+ * placeholder is never listed or counted: it is not content, and no one
+ * reviews it.
  */
 export function formatAffectedOwnersBlock(
   paths: string[],
@@ -186,6 +193,7 @@ export function formatAffectedOwnersBlock(
   const allUsers = new Map<string, string>(); // email -> display, deduped
   let eligible = 0;
   for (const p of paths) {
+    if (isFolderPlaceholder(p)) continue;
     const info = resolved.get(p);
     if (!info) continue;
     const parts: string[] = [];
@@ -1970,6 +1978,29 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * The folder placeholder a file's revert takes along, or null. When a
+   * request removed a folder's last file, the placeholder that keeps the
+   * folder came with it (git may even pair them as one rename); reverting the
+   * file alone would leave that hidden placeholder as a change nobody can
+   * see. So it is reverted too — when the request changed it, and only when
+   * that cannot leave the folder with nothing in git: either the file comes
+   * back, or the base had the placeholder to restore.
+   */
+  private async placeholderRevertedWith(
+    workspaceId: string,
+    mergeBase: string,
+    repoRelPath: string,
+    changedPaths: string[],
+  ): Promise<string | null> {
+    if (isFolderPlaceholder(repoRelPath)) return null;
+    const slash = repoRelPath.lastIndexOf('/');
+    const placeholder = folderPlaceholderPath(slash === -1 ? '' : repoRelPath.slice(0, slash));
+    if (!changedPaths.includes(placeholder)) return null;
+    if (await this.git.pathExistsAtRef(workspaceId, mergeBase, repoRelPath)) return placeholder;
+    return (await this.git.pathExistsAtRef(workspaceId, mergeBase, placeholder)) ? placeholder : null;
+  }
+
+  /**
    * Decline ONE file of an open change request: restore its merge-base
    * version on the SOURCE branch (commit + push), so the file drops out of
    * the request's three-dot diff — the same mechanics
@@ -2032,38 +2063,60 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowDomainError('These branches share no history to revert to.', 422);
     }
 
+    const placeholder = await this.placeholderRevertedWith(ws.id, mergeBase, repoRelPath, paths);
+    const reverted = placeholder ? [repoRelPath, placeholder] : [repoRelPath];
+
     // Same per-file lock every other editor of this path takes — a concurrent
     // save must not race the restore between write and commit.
-    const lockPath = `${this.kbDirName}/${repoRelPath}`;
-    const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
-    if (!lock.acquired) {
-      throw new WorkflowDomainError(
-        `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
-        409,
-      );
-    }
+    const held: string[] = [];
+    let revertError: { reason: unknown } | null = null;
     try {
-      await this.git.restorePathFromRef(ws.id, mergeBase, repoRelPath);
-      await this.git.commitFile(
-        ws.id,
-        user,
-        repoRelPath,
-        `Revert ${repoRelPath} (declined in change request #${number})`,
-        true, // skipValidator — this restores an already-validated base version
-      );
+      for (const p of reverted) {
+        const lockPath = `${this.kbDirName}/${p}`;
+        const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
+        if (!lock.acquired) {
+          throw new WorkflowDomainError(
+            p === repoRelPath
+              ? `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`
+              : `The folder of ${repoRelPath} is being changed by ${lock.lock.holderName} — try again once the edit settles.`,
+            409,
+          );
+        }
+        held.push(lockPath);
+      }
+      for (const p of reverted) {
+        await this.git.restorePathFromRef(ws.id, mergeBase, p);
+        await this.git.commitFile(
+          ws.id,
+          user,
+          p,
+          `Revert ${p} (declined in change request #${number})`,
+          true, // skipValidator — this restores an already-validated base version
+        );
+      }
       await this.trackedPush(ws.id, user);
-    } finally {
-      // Committed inline — drop the lock row directly rather than enqueueing
-      // a duplicate commit through releaseLock.
-      await this.fileLocks.release(ws.id, headBranch, lockPath, user);
+    } catch (err) {
+      revertError = { reason: err };
     }
+    // Committed inline — drop the lock rows directly rather than enqueueing
+    // a duplicate commit through releaseLock. Each is released on its own, on
+    // success and failure alike: one failed release must not leave the other
+    // lock held. The revert's own error wins; otherwise a failed release
+    // still surfaces, as a single release's did.
+    const released = await Promise.allSettled(
+      held.map((lockPath) => this.fileLocks.release(ws.id, headBranch, lockPath, user)),
+    );
+    if (revertError) throw revertError.reason;
+    const failedRelease = released.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failedRelease) throw failedRelease.reason;
     // The source head moved: the refusal described a revision that is gone.
     await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
     if (remaining.length > 0) {
-      return { closed: false, remainingPaths: remaining };
+      // Answered like the file list: the placeholder is not a remaining file.
+      return { closed: false, remainingPaths: remaining.filter((p) => !isFolderPlaceholder(p)) };
     }
     // Every change declined → the request proposes nothing.
     await this.closeEmptyChangeRequest(number, user);

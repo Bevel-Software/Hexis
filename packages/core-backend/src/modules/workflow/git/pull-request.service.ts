@@ -12,6 +12,7 @@ import type {
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -81,6 +82,14 @@ export class PullRequestService implements IPullRequestService {
    * none exists yet) so each keeps its own view.
    */
   private cachedList = new Map<string, { at: number; value: PullRequestSummary[] }>();
+  /**
+   * What each listed summary is ROUTED by: its touched paths with the
+   * empty-folder placeholders kept. A summary never shows a placeholder, but a
+   * request that only creates a folder still belongs to that folder's owners,
+   * so `listPrsForOwnerEmail` matches on these. Held beside the summaries the
+   * list cache stores, so it lives and dies with them.
+   */
+  private routingPaths = new WeakMap<PullRequestSummary, string[]>();
   /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
@@ -171,7 +180,10 @@ export class PullRequestService implements IPullRequestService {
     };
   }
 
-  /** Cheap touched-paths for a CR row (empty when no workspace exists yet). */
+  /**
+   * Cheap touched-paths for a CR row (empty when no workspace exists yet),
+   * placeholders included — see {@link summaryOf} for what a summary shows.
+   */
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
@@ -191,6 +203,19 @@ export class PullRequestService implements IPullRequestService {
       });
   }
 
+  /**
+   * The summary of a CR row. The empty-folder placeholder is never content,
+   * so it is not a touched path on the summary: it would inflate the file
+   * count a list shows. The unfiltered paths are kept for routing, where a
+   * folder-only request must still reach the folder's owners.
+   */
+  private async summaryOf(row: ChangeRequestRow, workspaceId: string | null): Promise<PullRequestSummary> {
+    const touched = await this.touchedPathsFor(row, workspaceId);
+    const summary = this.rowToSummary(row, touched.filter((p) => !isFolderPlaceholder(p)));
+    this.routingPaths.set(summary, touched);
+    return summary;
+  }
+
   async listOpenPrs(
     opts: { fresh?: boolean; workspaceId?: string } = {},
   ): Promise<PullRequestSummary[]> {
@@ -208,7 +233,7 @@ export class PullRequestService implements IPullRequestService {
       .where(eq(changeRequests.state, 'open'))
       .orderBy(desc(changeRequests.createdAt));
     const summaries = await Promise.all(
-      rows.map(async (row) => this.rowToSummary(row, await this.touchedPathsFor(row, workspaceId))),
+      rows.map((row) => this.summaryOf(row, workspaceId)),
     );
     if (generation === this.cacheGeneration) {
       this.cachedList.set(cacheKey, { at: now, value: summaries });
@@ -253,15 +278,16 @@ export class PullRequestService implements IPullRequestService {
     // collecting unique (ref, path) pairs and resolving them in one round keeps
     // the ls-tree/git-show fan-out bounded even with dozens of open PRs.
     const pathsByRef = new Map<string, Set<string>>();
+    const routedBy = (pr: PullRequestSummary) => this.routingPaths.get(pr) ?? pr.touchedNodePaths;
     for (const pr of prs) {
-      if (pr.touchedNodePaths.length === 0) continue;
+      if (routedBy(pr).length === 0) continue;
       for (const ref of [pr.branch, pr.base]) {
         let bucket = pathsByRef.get(ref);
         if (!bucket) {
           bucket = new Set();
           pathsByRef.set(ref, bucket);
         }
-        for (const p of pr.touchedNodePaths) bucket.add(p);
+        for (const p of routedBy(pr)) bucket.add(p);
       }
     }
     const writeByRef = new Map<string, Map<string, boolean>>();
@@ -286,10 +312,10 @@ export class PullRequestService implements IPullRequestService {
         matches.push(pr);
         continue;
       }
-      if (pr.touchedNodePaths.length === 0) continue;
+      if (routedBy(pr).length === 0) continue;
       const headWrite = writeByRef.get(pr.branch);
       const baseWrite = writeByRef.get(pr.base);
-      const matched = pr.touchedNodePaths.some(
+      const matched = routedBy(pr).some(
         (p) => headWrite?.get(p) === true || baseWrite?.get(p) === true,
       );
       if (matched) matches.push(pr);
@@ -304,7 +330,7 @@ export class PullRequestService implements IPullRequestService {
     const row = await this.findRow(prNumber);
     if (!row) return null;
     const workspaceId = await this.resolveWorkspaceId();
-    return this.rowToSummary(row, await this.touchedPathsFor(row, workspaceId));
+    return this.summaryOf(row, workspaceId);
   }
 
   async getPrDetail(

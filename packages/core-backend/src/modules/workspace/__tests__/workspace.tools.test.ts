@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import AdmZip from 'adm-zip';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LocalFilesystem } from '@mastra/core/workspace';
 import { ToolRegistry } from '../../tool-registry/tool-registry.js';
 import { createToolHandlerFactory } from '../../tool-helpers/tool-handler.js';
@@ -32,6 +32,13 @@ const allowAll = {
   canRead: async () => true,
   canReadBatch: async (_w: string, _u: string, paths: string[]) =>
     new Map(paths.map((p) => [p, true])),
+  // The verbs `file_stat` and the move/delete preflight ask about. Allowing
+  // everything, and answering "no rules at HEAD" for the batch write check,
+  // keeps these tests about what they test rather than about access.
+  canWrite: async () => true,
+  canDownload: async () => true,
+  canOwner: async () => true,
+  canWriteBatchAtRef: async () => null,
 } as unknown as IAccessControl;
 
 /** Access control that denies `canRead` for an explicit set of repo-relative paths. */
@@ -63,6 +70,8 @@ let fs: LocalFilesystem;
  * named "undefined" is attempted.
  */
 let workspacePathCalls: string[] = [];
+/** Every folder turn a tool took, as `workspaceId:dir`. */
+let folderTurns: string[] = [];
 /** The policy instance the tools were mounted with, so a test can restrict a session. */
 let writePolicy: RoutineWritePolicyService;
 /**
@@ -102,6 +111,7 @@ async function start(
   };
   await fs.writeFile('a.md', 'hello\nworld\n');
   workspacePathCalls = [];
+  folderTurns = [];
   writePolicy = new RoutineWritePolicyService();
   focusedBranch = undefined;
 
@@ -124,6 +134,10 @@ async function start(
       getWorkspacePath: async (id: string) => {
         workspacePathCalls.push(id);
         return tempDir;
+      },
+      withFolderTurn: async <T>(id: string, dir: string, op: () => Promise<T>) => {
+        folderTurns.push(`${id}:${dir}`);
+        return op();
       },
     } as never,
     workflowService: {} as never,
@@ -1554,6 +1568,185 @@ describe('path inputs tell the agent about the repository folder', () => {
     expect(list).toBeDefined();
     expect(list!.description).toContain(`\`${KB_DIR}/\``);
     expect(inputDescription(list, 'path')).toContain(`\`${KB_DIR}/\``);
+  });
+});
+
+/**
+ * A folder exists until someone deletes it, and its placeholder is never shown
+ * as content — the agent tools' half (the UI routes' half lives in
+ * `workspace.routes.folders.test.ts`). The filesystem here is a plain
+ * LocalFilesystem, so "committed" is proven the way git sees it: a real
+ * repository in the clone folder, committed and freshly cloned.
+ */
+describe('folders never vanish', () => {
+  const KB = (p: string) => `${KB_DIR}/${p}`;
+  const tool = async (base: string, name: string, body: Record<string, unknown>) => {
+    const res = await post(`${base}/api/agent/tools/${name}`, body);
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  };
+  const names = async (base: string, dir: string) =>
+    ((await tool(base, 'list_files', { path: dir })).body.entries as { name: string; type: string }[]).map(
+      (e) => `${e.name}:${e.type}`,
+    );
+  const gitIn = (cwd: string, args: string[]) =>
+    promisify(execFile)('git', args, {
+      cwd,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@x',
+      },
+    });
+
+  it('list_files, file_stat and grep never show the placeholder', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Docs/note.md'), 'marker');
+    await fs.writeFile(KB('Docs/.gitkeep'), 'marker');
+    await fs.writeFile(KB('Docs/Empty/.gitkeep'), '');
+
+    expect((await names(base, KB('Docs'))).sort()).toEqual(['Empty:directory', 'note.md:file']);
+    expect(await names(base, KB('Docs/Empty'))).toEqual([]);
+
+    const missing = await tool(base, 'file_stat', { path: KB('Docs/nothing-here.md') });
+    const placeholder = await tool(base, 'file_stat', { path: KB('Docs/.gitkeep') });
+    expect(missing.status).toBe(404);
+    expect(placeholder).toEqual({ status: 404, body: { error: `There is no file or directory at "${KB('Docs/.gitkeep')}".` } });
+    expect((await tool(base, 'file_stat', { path: KB('Docs/Empty') })).body).toMatchObject({ type: 'directory' });
+
+    const grep = await tool(base, 'grep', { pattern: 'marker' });
+    expect((grep.body.matches as { path: string }[]).map((m) => m.path)).toEqual([KB('Docs/note.md')]);
+    expect((await tool(base, 'grep', { pattern: 'marker', path: KB('Docs/.gitkeep') })).status).toBe(404);
+  });
+
+  it('delete_folder removes its folder but keeps the one that held it, placeholder not counted as content', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Parent/Child/a.md'), 'a');
+    await fs.writeFile(KB('Parent/Child/.gitkeep'), '');
+
+    // The placeholder goes with the folder, but it is not a file the caller
+    // is told about or asked to confirm.
+    const dry = await tool(base, 'delete_folder', { path: KB('Parent/Child'), dryRun: true });
+    expect(dry.body).toMatchObject({ descendants: 1, files: [KB('Parent/Child/a.md')] });
+    expect((await tool(base, 'file_stat', { path: KB('Parent/Child') })).body).toMatchObject({ descendants: 1 });
+
+    const run = await tool(base, 'delete_folder', { path: KB('Parent/Child'), confirm: true });
+    expect(run.body).toMatchObject({ deleted: true });
+    expect(await fs.exists(KB('Parent/Child'))).toBe(false);
+    // `Parent` was not deleted: now empty, it stays, listed as an empty folder.
+    expect(await names(base, KB(''))).toContain('Parent:directory');
+    expect(await names(base, KB('Parent'))).toEqual([]);
+    expect(await fs.exists(KB('Parent/.gitkeep'))).toBe(true);
+  });
+
+  it('a folder holding only its placeholder is empty: deleted without confirm, reporting no files', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Holder/Empty/.gitkeep'), '');
+    await fs.writeFile(KB('Holder/keep.md'), 'k');
+
+    const run = await tool(base, 'delete_folder', { path: KB('Holder/Empty') });
+    expect(run.body).toMatchObject({ deleted: true, descendants: 0, files: [] });
+    expect(await fs.exists(KB('Holder/Empty'))).toBe(false);
+    // `Holder` still has content of its own, so it needs no placeholder.
+    expect(await fs.exists(KB('Holder/.gitkeep'))).toBe(false);
+  });
+
+  it('move_file of a whole folder out keeps the folder it came from', async () => {
+    const base = await start();
+    await fs.writeFile(KB('Src/Inner/x.md'), 'x');
+
+    expect((await tool(base, 'move_file', { src: KB('Src/Inner'), dest: KB('Dst/Inner') })).status).toBe(200);
+    expect(await fs.exists(KB('Dst/Inner/x.md'))).toBe(true);
+    expect(await names(base, KB('Src'))).toEqual([]);
+    expect(await fs.exists(KB('Src/.gitkeep'))).toBe(true);
+  });
+
+  it('delete_file on the last file keeps the folder, and it survives a fresh clone', async () => {
+    const base = await start();
+    const repo = join(tempDir, KB_DIR);
+    await fs.writeFile(KB('nested/level-two/notes.md'), 'x');
+    await gitIn(repo, ['init', '-q', '-b', 'main']);
+    await gitIn(repo, ['add', '-A']);
+    await gitIn(repo, ['commit', '-qm', 'seed']);
+
+    expect((await tool(base, 'delete_file', { path: KB('nested/level-two/notes.md') })).status).toBe(200);
+
+    expect(await names(base, KB('nested'))).toEqual(['level-two:directory']);
+    expect(await names(base, KB('nested/level-two'))).toEqual([]);
+    // What the lock-aware filesystem commits on release, committed here by hand.
+    await gitIn(repo, ['add', '-A']);
+    await gitIn(repo, ['commit', '-qm', 'delete']);
+    await gitIn(tempDir, ['clone', '-q', repo, 'fresh-clone']);
+    expect((await fs.stat('fresh-clone/nested/level-two')).type).toBe('directory');
+  });
+
+  it('delete_file with siblings left, or at the clone folder itself, writes no placeholder', async () => {
+    const base = await start();
+    await fs.writeFile(KB('full/a.md'), 'a');
+    await fs.writeFile(KB('full/b.md'), 'b');
+    await fs.writeFile(KB('top.md'), 't');
+
+    expect((await tool(base, 'delete_file', { path: KB('full/a.md') })).status).toBe(200);
+    expect((await tool(base, 'delete_file', { path: KB('top.md') })).status).toBe(200);
+    expect((await tool(base, 'delete_file', { path: 'a.md' })).status).toBe(200);
+
+    expect(await names(base, KB('full'))).toEqual(['b.md:file']);
+    await expect(fs.exists(KB('full/.gitkeep'))).resolves.toBe(false);
+    await expect(fs.exists(KB('.gitkeep'))).resolves.toBe(false);
+    await expect(fs.exists('.gitkeep')).resolves.toBe(false);
+  });
+
+  it('delete_file keeps the folder in its folder turn, on the branch it was given', async () => {
+    const base = await start();
+    await fs.writeFile(KB('turned/only.md'), 'x');
+
+    expect((await tool(base, 'delete_file', { path: KB('turned/only.md'), branch: 'alice/draft' })).status).toBe(200);
+    expect(folderTurns).toEqual([`alice%2Fdraft:${KB('turned')}`]);
+  });
+
+  it('delete_file fails when the emptied folder cannot be kept, and says the file is gone', async () => {
+    const base = await start();
+    await fs.writeFile(KB('unkeepable/only.md'), 'x');
+    const write = fs.writeFile.bind(fs);
+    const spy = vi.spyOn(fs, 'writeFile').mockImplementation(async (p, ...rest) => {
+      if (p.endsWith('.gitkeep')) throw new Error('disk full');
+      return write(p, ...rest);
+    });
+
+    let res: Awaited<ReturnType<typeof tool>>;
+    try {
+      res = await tool(base, 'delete_file', { path: KB('unkeepable/only.md') });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe(
+      `"${KB('unkeepable/only.md')}" was removed, but its folder "${KB('unkeepable')}" could not be kept: disk full`,
+    );
+    await expect(fs.exists(KB('unkeepable/only.md'))).resolves.toBe(false);
+  });
+
+  it('move_file of the last file keeps the source folder', async () => {
+    const base = await start();
+    await fs.writeFile(KB('from/a.md'), 'a');
+
+    expect((await tool(base, 'move_file', { src: KB('from/a.md'), dest: KB('to/a.md') })).status).toBe(200);
+
+    expect((await names(base, KB(''))).sort()).toEqual(['from:directory', 'to:directory']);
+    expect(await names(base, KB('from'))).toEqual([]);
+    await expect(fs.exists(KB('from/.gitkeep'))).resolves.toBe(true);
+  });
+
+  it('mkdir, a nested write, and an emptied folder converge on the same state', async () => {
+    const base = await start();
+    await tool(base, 'mkdir', { path: KB('Made') });
+    await tool(base, 'write_file', { path: KB('Written/n.md'), content: 'n' });
+
+    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory']);
+    expect(await names(base, KB('Made'))).toEqual([]);
+
+    await tool(base, 'delete_file', { path: KB('Written/n.md') });
+    expect((await names(base, KB(''))).sort()).toEqual(['Made:directory', 'Written:directory']);
+    expect(await names(base, KB('Written'))).toEqual(await names(base, KB('Made')));
+    expect((await tool(base, 'file_stat', { path: KB('Written') })).body).toMatchObject({ type: 'directory' });
   });
 });
 

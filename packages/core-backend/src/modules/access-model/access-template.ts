@@ -21,10 +21,12 @@ export const ACCESS_MD_FRONTMATTER_NOTE: readonly string[] = [
 export const ACCESS_MD_BODY_NOTE: readonly string[] = [
   '# THIS BLOCK (the body) governs the FOLDER this file sits in, and everything',
   '# beneath it until a nearer access.md says otherwise. Verbs: read, write,',
-  '# download, owner (owner implies the rest; write implies read). An entry is a',
-  '# role from roles.yaml, a group from groups.yaml, a person as `Name <email>`,',
-  '# or `everyone` — every signed-in person, the whole organisation. `deny X`',
-  '# takes away. Keep this block pure YAML; explanations go in `#` lines.',
+  '# download, owner (owner implies the rest; write and download each imply read).',
+  '# An entry is a role from roles.yaml, a group from groups.yaml, a person as',
+  '# `Name <email>`, or `everyone` — every signed-in person, the whole organisation.',
+  '# `deny X` takes away that verb ALONE: grants imply the lower verbs, denials',
+  '# never do — `deny download` says nothing about read, and leaves a separate',
+  '# read grant standing. Keep this block pure YAML; explanations go in `#` lines.',
 ];
 
 /**

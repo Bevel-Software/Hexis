@@ -115,6 +115,22 @@ describe('plugin principals', () => {
       expect(await svc.canWrite(workspaceId, 'sam@x.io', skill)).toBe(false);
     });
 
+    it('counts a download-only member of the plugin among its readers', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/GTM/access.md': pluginAccessMd('download:\n  - Dana <dana@x.io>\n'),
+        'Skills/Eng/deploy/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
+      });
+      const skill = 'Skills/Eng/deploy/SKILL.md';
+      // The roster folds exactly the way resolution does — one shared
+      // `sourceVerbsFor` table — so someone the plugin trusts with a copy of
+      // its files is one of its readers, and the read token names them.
+      expect(await svc.canRead(workspaceId, 'dana@x.io', skill)).toBe(true);
+      // Download is not write, and there is no download token: the read
+      // principal is the only one she lands in.
+      expect(await svc.canWrite(workspaceId, 'dana@x.io', skill)).toBe(false);
+    });
+
     it('the write token names the plugin\'s writers and owners only', async () => {
       const svc = await makeService({
         ...BASE,
