@@ -88,7 +88,12 @@ async function makeHarness(opts: HarnessOpts = {}) {
   ];
   for (const [folder, name] of fixtures) {
     await fs.mkdir(path.join(kbRoot, 'Plugins', folder), { recursive: true });
-    await fs.writeFile(path.join(kbRoot, 'Plugins', folder, 'plugin.json'), `{"name":"${name}"}`);
+    // Both names in the file, as every manifest carries them: the identity
+    // and the spelling people see. Nothing reads the folder for either.
+    await fs.writeFile(
+      path.join(kbRoot, 'Plugins', folder, 'plugin.json'),
+      `{"name":"${name}","displayName":"${folder}"}`,
+    );
     await fs.writeFile(
       path.join(kbRoot, 'Plugins', folder, 'access.md'),
       '---\nread:\n  - everyone\n---\nread: []\n',
@@ -295,7 +300,7 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const { status, plugins } = await listPlugins(h.baseUrl);
     expect(status).toBe(200);
-    // Named by identity (the manifest), labelled by folder.
+    // Named by identity and labelled by display name — both the manifest's.
     expect(plugins.map((g) => [g.name, g.displayName])).toEqual([['finance', 'Finance'], ['gtm', 'GTM']]);
     // `linkedRoots` is part of the summary's contract — the plugin page reads
     // it to name where a linked card lives. Neither fixture links anything,

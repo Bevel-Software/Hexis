@@ -4,7 +4,7 @@ import type { TreeWalkOptions, WalkListener, WalkResult } from '../../../shared/
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { DEFAULT_BRANCH, type AuthUser } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, pluginDisplayNameOf, type AuthUser } from '@bevel-software/platform-shared';
 
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import { AccessControlService } from '../../access/access-control.service.js';
@@ -198,10 +198,19 @@ describe('PluginRenameService', () => {
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
 
     const result = await svc.rename(manager, 'gtm', { name: 'go-to-market' });
-    expect(result).toEqual({ name: 'go-to-market', displayName: 'GTM', rewritten: ['Skills/Eng/deploy/access.md'] });
+    // The fixture's manifest carries no `displayName` — the shape the boot
+    // backfill leaves only for a plugin whose folder IS its identifier — so
+    // the plugin is called by its identifier, and the new identifier is what
+    // it is now called. Nothing here reads `Plugins/GTM`.
+    expect(result).toEqual({
+      name: 'go-to-market',
+      displayName: 'go-to-market',
+      rewritten: ['Skills/Eng/deploy/access.md'],
+    });
 
-    // The manifest keeps everything else it had.
-    expect(await manifest()).toEqual({ name: 'go-to-market', version: '1.0.0' });
+    // The manifest keeps everything else it had, and gains the field every
+    // write path persists.
+    expect(await manifest()).toEqual({ name: 'go-to-market', version: '1.0.0', displayName: 'go-to-market' });
     // Both spellings became the one new one; the file's shape is otherwise untouched.
     expect(await read('Skills/Eng/deploy/access.md')).toBe(
       '---\n---\nread:\n  - plugin/go-to-market/read\nwrite:\n  - plugin/go-to-market/write\n',
@@ -222,15 +231,60 @@ describe('PluginRenameService', () => {
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(false);
   });
 
-  it('changes the display name without touching a single grant, and stores none that equals the folder', async () => {
+  it('changes the display name without touching a single grant, and stores it whatever it equals', async () => {
     await svc.rename(manager, 'gtm', { displayName: '  Go To Market ' });
     expect(await manifest()).toEqual({ name: 'gtm', version: '1.0.0', displayName: 'Go To Market' });
     expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
     expect(commits).toEqual([{ summary: 'Rename plugin gtm: display name', paths: [`${KB_DIR}/Plugins/GTM/plugin.json`] }]);
 
-    // The folder name is the default label — writing it down would only be noise.
-    await svc.rename(manager, 'gtm', { displayName: 'GTM' });
-    expect(await manifest()).toEqual({ name: 'gtm', version: '1.0.0' });
+    // Equal to the FOLDER's spelling: stored all the same. The field used to
+    // be deleted here, which handed the folder's spelling back the job of
+    // saying what the plugin is called.
+    const toFolder = await svc.rename(manager, 'gtm', { displayName: 'GTM' });
+    expect(await manifest()).toEqual({ name: 'gtm', version: '1.0.0', displayName: 'GTM' });
+    expect(toFolder).toMatchObject({ name: 'gtm', displayName: 'GTM' });
+
+    // Equal to the IDENTIFIER: stored too, and the identifier is untouched.
+    const toIdentifier = await svc.rename(manager, 'gtm', { displayName: 'gtm' });
+    expect(await manifest()).toEqual({ name: 'gtm', version: '1.0.0', displayName: 'gtm' });
+    expect(toIdentifier).toMatchObject({ name: 'gtm', displayName: 'gtm' });
+
+    // Blanked: the field is never DELETED — it falls back to the identifier,
+    // which is what the plugin is then called, and every reader sees the same.
+    const blanked = await svc.rename(manager, 'gtm', { displayName: '   ' });
+    expect(await manifest()).toEqual({ name: 'gtm', version: '1.0.0', displayName: 'gtm' });
+    expect(blanked).toMatchObject({ name: 'gtm', displayName: 'gtm' });
+  });
+
+  it('round-trips a display name: what comes back is what the file holds, and what every reader then says', async () => {
+    for (const typed of ['Go To Market', 'GTM', 'gtm', '  Sales & Marketing  ']) {
+      const result = await svc.rename(manager, 'gtm', { displayName: typed });
+      expect(result.displayName).toBe(typed.trim());
+      expect((await manifest()).displayName).toBe(typed.trim());
+      // The identifier never moves with a display-name edit, and no grant does.
+      expect(result.name).toBe('gtm');
+      expect(result.rewritten).toEqual([]);
+      expect(await read('Skills/Eng/deploy/access.md')).toBe(DEPLOY_RULES);
+      // The three answers that must never diverge: the rename's, the
+      // discovery source's, and the shared reader's over the file itself.
+      const { plugins } = await new KbPluginSource(new NodeFs()).discover(repo);
+      const found = plugins.find((p) => p.folder === 'Plugins/GTM')!;
+      expect([found.name, found.displayName]).toEqual([result.name, result.displayName]);
+      expect(pluginDisplayNameOf(JSON.parse(await read('Plugins/GTM/plugin.json')))).toBe(result.displayName);
+    }
+  });
+
+  it('carries a stored display name through an identifier change, and never the identifier it stopped being', async () => {
+    await svc.rename(manager, 'gtm', { displayName: 'Go To Market' });
+    const result = await svc.rename(manager, 'gtm', { name: 'go-to-market' });
+    expect(result).toMatchObject({ name: 'go-to-market', displayName: 'Go To Market' });
+    expect(await manifest()).toEqual({ name: 'go-to-market', version: '1.0.0', displayName: 'Go To Market' });
+  });
+
+  it('changes both at once, and the answer is what the file holds', async () => {
+    const result = await svc.rename(manager, 'gtm', { name: 'go-to-market', displayName: '  Go To Market  ' });
+    expect(result).toMatchObject({ name: 'go-to-market', displayName: 'Go To Market' });
+    expect(await manifest()).toEqual({ name: 'go-to-market', version: '1.0.0', displayName: 'Go To Market' });
   });
 
   it('judges only a NEW identifier: a plugin whose manifest already wears the reserved prefix can still change its display name', async () => {

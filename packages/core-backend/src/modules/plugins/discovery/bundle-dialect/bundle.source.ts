@@ -116,10 +116,16 @@ export async function readBundlePlugin(
 
   // A record, or nothing: a list where the block should be is not a block.
   const ui = isRecord(bundle.interface) ? bundle.interface : {};
+  // The bundle's own rule for what it is called: `interface.displayName`,
+  // else the FOLDER — this dialect is a foreign repository's, read-only, and
+  // its folders are its presentation. The synthesized manifest carries the
+  // answer so the shared reader (`pluginDisplayNameOf`, manifest-only) tells
+  // anyone who asks the same thing this discovery reports.
+  const displayName = typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf;
   const manifest: Record<string, unknown> = { name: pluginManifestName(name) };
   if (typeof bundle.version === 'string') manifest.version = bundle.version;
   if (typeof bundle.description === 'string') manifest.description = bundle.description;
-  if (typeof ui.displayName === 'string') manifest.displayName = ui.displayName;
+  manifest.displayName = displayName;
   // What the bundle says about itself beyond the four fields above — who
   // wrote it, what it is for, how a catalogue should present it — is carried
   // as written, so the compiled plugin can say the same. Shapes are the
@@ -131,9 +137,7 @@ export async function readBundlePlugin(
 
   return {
     name,
-    // The shared contract (`DiscoveredPlugin.displayName`): the declared
-    // display name, else the FOLDER — never the identity.
-    displayName: typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf,
+    displayName,
     folder,
     relFolder,
     // The same rule as the native reader: a reserved personal folder directly

@@ -85,7 +85,11 @@ describe('PluginIndexService', () => {
    */
   const pluginDir = async (name: string, linkedRoots: string[] = []) => {
     await mkdir(join(kb(), 'Plugins', name), { recursive: true });
-    const manifest: Record<string, unknown> = { name: name.toLowerCase() };
+    // Both names, as every manifest carries them: the identity the folder
+    // folds to, and the spelling people see. The folder itself is not an
+    // input to either — creation writes both, and the boot backfill gave
+    // them to the manifests written before the field was mandatory.
+    const manifest: Record<string, unknown> = { name: name.toLowerCase(), displayName: name };
     // The roots a manifest links, where `linkedSkillRoots` reads them.
     if (linkedRoots.length > 0) {
       manifest.extensions = { [HEXIS_EXTENSION_NS]: { [HEXIS_LINKED_SKILLS_KEY]: linkedRoots } };
@@ -105,7 +109,8 @@ describe('PluginIndexService', () => {
     await pluginDir('Engineering');
 
     const catalog = await svc().catalog();
-    // The manifest name is the identity; the folder is what people see.
+    // The manifest's `name` is the identity and its `displayName` what people
+    // see — both read from the file, neither from the folder.
     expect(catalog.map((g) => g.name)).toEqual(['engineering', 'gtm']);
     expect(catalog[1]).toMatchObject({ displayName: 'GTM', folders: ['Plugins/GTM'] });
   });

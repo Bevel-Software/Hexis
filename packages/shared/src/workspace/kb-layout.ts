@@ -396,27 +396,49 @@ export function pluginIdentityOf(manifest: Record<string, unknown> | null, folde
 /**
  * What a person sees the plugin called: the manifest's `displayName` (the
  * vendor field Claude Code shows in its picker; any casing, spaces allowed),
- * else the folder name — which is what every plugin made before this field
- * existed was called, so nothing renames itself on upgrade.
+ * else the manifest's `name`.
+ *
+ * THE MANIFEST IS THE ONLY SOURCE — there is no folder argument, on purpose.
+ * The folder's spelling used to stand in here, which made where a plugin
+ * happens to live a hidden input to what everyone sees it called: the API
+ * always answered with a display name while the file sometimes omitted the
+ * field, and moving or re-casing a folder silently renamed the plugin. Every
+ * write path now persists the field (see {@link renderPluginManifest} and
+ * the rename service), and one startup step backfilled the folder's spelling
+ * into the manifests written before that, so nothing renames itself.
+ *
+ * Empty only for a manifest that names nothing at all — the shape discovery
+ * already warns about and stands the folder in as the IDENTITY for; its
+ * display name then follows that identity, never the folder directly.
  */
-export function pluginDisplayNameOf(manifest: Record<string, unknown> | null, folderName: string): string {
+export function pluginDisplayNameOf(manifest: Record<string, unknown> | null): string {
   const declared = manifest?.displayName;
-  return typeof declared === 'string' && declared.trim() ? declared.trim() : folderName;
+  if (typeof declared === 'string' && declared.trim()) return declared.trim();
+  const name = manifest?.name;
+  return typeof name === 'string' ? name.trim() : '';
 }
 
 /**
  * A minimal, valid `plugin.json` for a plugin folder: the identifier the
- * folder name folds into, and — when the folder is spelled differently — the
- * folder's spelling as `displayName`, so a client's picker shows "Sales
- * Team" for `sales-team`. Nothing else: `version`, `license` and the rest
- * are metadata about a DISTRIBUTED package, and inventing values for a
- * folder someone just made in the app would be asserting things nobody said.
+ * folder name folds into, and the name a person sees it by — `displayName`,
+ * ALWAYS written, so a client's picker shows "Sales Team" for `sales-team`
+ * and every reader has the one field to read. `displayName` defaults to the
+ * folder's spelling, which is what a folder someone made in the app is
+ * called; creation passes the name its creator typed. The field is written
+ * even when it equals the identifier: a manifest that omits it when the two
+ * agree is a manifest whose readers need a second rule.
+ *
+ * Nothing else: `version`, `license` and the rest are metadata about a
+ * DISTRIBUTED package, and inventing values for a folder someone just made
+ * in the app would be asserting things nobody said.
  */
-export function renderPluginManifest(folderName: string): string {
+export function renderPluginManifest(folderName: string, displayName: string = folderName): string {
   const name = pluginManifestName(folderName);
-  const manifest: Record<string, unknown> = { $schema: PLUGIN_MANIFEST_SCHEMA, name };
-  if (folderName !== name) manifest.displayName = folderName;
-  return `${JSON.stringify(manifest, null, 2)}\n`;
+  // Always a non-blank, trimmed answer: what was asked for, else the folder,
+  // else the identifier — a `displayName` of spaces would be a field present
+  // and saying nothing, which is the shape every reader here exists to avoid.
+  const shown = displayName.trim() || folderName.trim() || name;
+  return `${JSON.stringify({ $schema: PLUGIN_MANIFEST_SCHEMA, name, displayName: shown }, null, 2)}\n`;
 }
 
 /**

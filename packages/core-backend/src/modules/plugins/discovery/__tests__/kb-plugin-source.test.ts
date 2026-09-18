@@ -3,7 +3,7 @@ import { NodeFs } from '../../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_KB_LAYOUT, configureKbLayout } from '@bevel-software/platform-shared';
+import { DEFAULT_KB_LAYOUT, configureKbLayout, pluginDisplayNameOf } from '@bevel-software/platform-shared';
 import { KbPluginSource } from '../kb-plugin-source.js';
 
 /**
@@ -68,9 +68,13 @@ describe('KbPluginSource — bundles', () => {
     const { plugins, warnings } = await new KbPluginSource(new NodeFs()).discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
     expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'unnamed']);
-    // The shared contract: a declared display name, else the FOLDER — never the identity.
+    // The bundle dialect's own rule — a declared display name, else the
+    // FOLDER — which this foreign, read-only format keeps. It is resolved
+    // INTO the manifest the reader synthesizes, so the shared manifest-only
+    // reader says the same thing about a bundle that discovery does.
     expect(byName.get('example-plugin')!.displayName).toBe('Example Plugin');
     expect(byName.get('ledger')!.displayName).toBe('ledger-folder');
+    expect(pluginDisplayNameOf(byName.get('ledger')!.manifest)).toBe('ledger-folder');
 
     const example = byName.get('example-plugin')!;
     expect(example.folder).toBe('plugins/functional/cluster-a/example-plugin');
@@ -230,7 +234,7 @@ describe('KbPluginSource — one walk, both shapes', () => {
     ]);
   });
 
-  it('the manifest name is the identity and the folder only the label — unless the name is no identifier', async () => {
+  it('reads both names from the manifest and neither from the folder — the name standing in only when there is none', async () => {
     await write('Plugins/GTM/plugin.json', JSON.stringify({ name: 'go-to-market', displayName: 'Go To Market' }));
     await write('Plugins/Numeric/plugin.json', '{"name":42}');
     // A name nested deeper than any stack would serialise: the warning must
@@ -240,11 +244,19 @@ describe('KbPluginSource — one walk, both shapes', () => {
     await write('Plugins/Plain/plugin.json', '{}');
     const { plugins, warnings } = await new KbPluginSource(new NodeFs()).discover(kb);
     expect(plugins.map((p) => [p.name, p.displayName, p.folder])).toEqual([
+      // Both fields present: both are read, and `Plugins/GTM` says nothing.
       ['go-to-market', 'Go To Market', 'Plugins/GTM'],
-      ['nested', 'Nested', 'Plugins/Nested'],
-      ['numeric', 'Numeric', 'Plugins/Numeric'],
-      ['ops', 'Ops', 'Plugins/Ops'],
-      ['plain', 'Plain', 'Plugins/Plain'],
+      // The three below name nothing usable at all — the shape the folder
+      // stands in as the IDENTITY for, out loud. What they are called follows
+      // that identity; the folder is never read for the label directly, which
+      // is why `Nested` shows as `nested`.
+      ['nested', 'nested', 'Plugins/Nested'],
+      ['numeric', 'numeric', 'Plugins/Numeric'],
+      // A name that is no identifier cannot BE the identity — the folder
+      // stands in for that too — but it is still what the manifest SAYS the
+      // plugin is called, so it is the display name.
+      ['ops', 'Not An Identifier', 'Plugins/Ops'],
+      ['plain', 'plain', 'Plugins/Plain'],
     ]);
     // Every PRESENT name that is no identifier is said out loud — whatever its type.
     expect(warnings).toEqual([

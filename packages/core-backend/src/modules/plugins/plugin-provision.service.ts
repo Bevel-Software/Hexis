@@ -106,6 +106,12 @@ export interface ProvisionedPlugin {
   skillsDir: string;
   /** The plugin's identity — the manifest name written for it. */
   name: string;
+  /**
+   * What a person sees it called — the manifest's `displayName`, which is the
+   * name the creator typed, trimmed. Exactly as persisted: the answer and the
+   * file on disk can never say two different things.
+   */
+  displayName: string;
   /** False when an ensure found the folder already there. */
   created: boolean;
 }
@@ -122,9 +128,9 @@ export class PluginProvisionError extends Error {
 }
 
 /** The one shape every provisioning answer has: the folder in both spellings, and where its skills go. */
-function provisioned(folder: string, name: string, created: boolean): ProvisionedPlugin {
+function provisioned(folder: string, name: string, displayName: string, created: boolean): ProvisionedPlugin {
   const path = `${PLUGINS_DIR}/${folder}`;
-  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, created };
+  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
 }
 
 export class PluginProvisionService {
@@ -216,8 +222,10 @@ export class PluginProvisionService {
         );
       }
       const folder = parent ? `${parent}/${name}` : name;
+      // `name` is the creator's own spelling, trimmed — the folder's leaf AND
+      // the display name persisted for it, whether or not it equals either.
       await this.provision(user, folder, name, pluginAccessMd(user));
-      return provisioned(folder, pluginManifestName(name), true);
+      return provisioned(folder, pluginManifestName(name), name, true);
     });
   }
 
@@ -274,7 +282,7 @@ export class PluginProvisionService {
     const folder = personalPluginFolderName(user.id);
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
       if ((await this.existingFolder(folder)) !== null) {
-        return provisioned(folder, pluginManifestName(folder), false);
+        return provisioned(folder, pluginManifestName(folder), folder, false);
       }
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
@@ -283,11 +291,11 @@ export class PluginProvisionService {
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
         if (err instanceof PluginProvisionError && err.status === 409) {
-          return provisioned(folder, pluginManifestName(folder), false);
+          return provisioned(folder, pluginManifestName(folder), folder, false);
         }
         throw err;
       }
-      return provisioned(folder, pluginManifestName(folder), true);
+      return provisioned(folder, pluginManifestName(folder), folder, true);
     });
   }
 
@@ -505,6 +513,13 @@ export class PluginProvisionService {
       // this app, so it lands in the same commit as the access rules — and
       // INSIDE the rollback scope: a manifest write that fails must clean up
       // the access.md it would otherwise strand as a half-made plugin.
+      //
+      // `leaf` is the name its creator typed, trimmed — the folder's last
+      // segment and, as the renderer's `displayName`, what people will see it
+      // called, persisted whether or not it equals the identifier the name
+      // folds to. Every door into here (the dialog's route, the
+      // `create_plugin` tool, the personal-folder ensure) arrives through
+      // this one write, so no two of them can derive a different name.
       await this.workspaceService.writeFile(
         wsId,
         `${folderPath}/${PLUGIN_MANIFEST_FILE}`,
