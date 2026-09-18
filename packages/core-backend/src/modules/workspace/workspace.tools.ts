@@ -1938,13 +1938,31 @@ export function registerWorkspaceTools(
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
       const copyFs = await ctx.getFilesystem(a.branch as string);
-      // The SOURCE is probed on its own, as move_file probes its own: the
-      // filesystem reports every absence under a copy against the source,
-      // including one that is really the destination's (a parent segment that
-      // is a file), and a 404 naming a source that is sitting right there
-      // would send the caller to re-spell the wrong argument.
-      if ((await kindOf(copyFs, a.src as string)) === null) throw notFound(a.src as string, 'Nothing to copy');
-      await copyFs.copyFile(a.src as string, a.dest as string);
+      // The copy is ATTEMPTED FIRST, and absence is only asked about once it
+      // has failed. The permission to write the destination is the
+      // filesystem's to refuse, and its refusal must not depend on what is on
+      // disk: a caller who may not write here gets the same `write-denied`
+      // whether the source is there or not, exactly as it does from
+      // write_file, edit_file, move_file and delete_file. Probing the source
+      // up front put a 404 in front of that 403 and made the refusal report
+      // whether a path the caller could not copy from exists.
+      //
+      // Which path the absence belongs to is then decided by probing the
+      // SOURCE, as move_file probes its own: a copy reports every absence
+      // against the source, including one that is really the destination's (a
+      // parent segment that is a file), and a 404 naming a source that is
+      // sitting right there would send the caller to re-spell the wrong
+      // argument. Only a source that really is missing gets the 404; anything
+      // else travels on as it always did.
+      try {
+        await copyFs.copyFile(a.src as string, a.dest as string);
+      } catch (err) {
+        const missing = isAbsence(err) || (err as { name?: string }).name === 'FileNotFoundError';
+        if (missing && (await kindOf(copyFs, a.src as string)) === null) {
+          throw notFound(a.src as string, 'Nothing to copy');
+        }
+        throw err;
+      }
       return { src: a.src, dest: a.dest, copied: true };
     },
   });

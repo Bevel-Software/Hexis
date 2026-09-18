@@ -2740,6 +2740,37 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
     }
   });
 
+  // The same ordering rule on the WRITE side. A refusal to write must not
+  // report what is on disk, or the refusal itself becomes the disclosure: a
+  // caller who may not copy into a folder would learn from the answer whether
+  // the source they named exists. So the write denial comes first and absence
+  // is only asked about once the copy was allowed to be attempted — the 404
+  // this ticket adds must not push in front of the 403 that was already there.
+  it('copy_file refuses a denied destination with the write denial, even when the source is missing', async () => {
+    const base = await start('write');
+    await fs.mkdir(FOLDER, { recursive: true });
+    const denied = async (src: string): Promise<{ status: number; body: string }> => {
+      const copySpy = vi.spyOn(fs, 'copyFile').mockRejectedValue(
+        new AccessDeniedError({ path: `${FOLDER}/Denied.md`, eligibleRoles: ['Owner'], eligibleUsers: [] }),
+      );
+      try {
+        const res = await post(`${base}/api/agent/tools/copy_file`, { branch: 'main', src, dest: `${FOLDER}/Denied.md` });
+        return { status: res.status, body: await res.text() };
+      } finally {
+        copySpy.mockRestore();
+      }
+    };
+    await fs.writeFile(`${FOLDER}/Present.md`, 'here\n');
+    const present = await denied(`${FOLDER}/Present.md`);
+    const absent = await denied(MISSING);
+    expect(present.status).toBe(403);
+    // Byte for byte the same refusal: the source's existence changes nothing.
+    expect(absent.status).toBe(403);
+    expect(absent.body).toBe(present.body);
+    expect(absent.body).toContain('write-denied');
+    expect(absent.body).not.toContain('not_found');
+  });
+
   // Absence is ENOENT and ENOTDIR and nothing else. A path that cannot be READ
   // is not a path the caller should be told to go and re-spell.
   it('a filesystem failure that is not absence stays a 500', async () => {
