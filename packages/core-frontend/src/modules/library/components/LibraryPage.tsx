@@ -14,7 +14,7 @@ import { offersManageAccess } from '../../access/manage-access-affordance';
 import { PluginItemSections } from './plugin-page-parts';
 import { PluginRows } from './PluginRows';
 import { ManagedPluginRequests } from './ManagedPluginRequests';
-import { PendingSkillReview } from './PendingSkillReview';
+import { PendingItemReview } from './PendingItemReview';
 
 /**
  * The Library gallery — Everything (the root), Owned by me, and a team's
@@ -118,9 +118,10 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
 
   /**
    * Both kinds open a PAGE now — the skill page landed alongside the tool one.
-   * A PROPOSED skill is the exception: it has no page, because the skill page
-   * reads the default branch and the skill is not on it yet. Its card opens the
-   * change request instead, which is the only thing there is to read.
+   * A PROPOSAL is the exception, skill or tool alike: it has no page, because
+   * both pages read the default branch and the file is not on it yet. Its card
+   * opens the change request instead, which is the only thing there is to read
+   * — and the reason a Proposed card can never be opened AS the thing.
    */
   function openItem(item: LibraryItem) {
     if (item.pending) {
@@ -246,7 +247,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
       )}
 
       {reviewing && (
-        <PendingSkillReview
+        <PendingItemReview
           item={reviewing}
           onClose={() => setReviewing(null)}
           onResolved={() => {

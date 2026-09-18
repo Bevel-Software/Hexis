@@ -156,6 +156,7 @@ const CATALOG: LibraryData = {
     { name: 'roadmap', description: 'Keeps the roadmap.', path: 'Plugins/Product/roadmap' },
   ],
   pendingSkills: [],
+  pendingTools: [],
   tools: [connectedTool()],
   ownedSkills: new Set(['outreach']),
   writableSkills: new Set(['outreach']),

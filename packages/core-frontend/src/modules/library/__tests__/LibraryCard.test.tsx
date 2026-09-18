@@ -126,6 +126,36 @@ describe('LibraryCard', () => {
     expect(screen.queryByText('Needs slack')).not.toBeInTheDocument();
   });
 
+  /**
+   * A proposed TOOL — a `.tool` manual or an `mcp.json` server that exists only
+   * on an open change request, the same hole the skill card above fixed. It
+   * wears the same review badge and the same dashed outline, because it is the
+   * same fact, and it still says how it is declared: which file the request
+   * adds is exactly what an approver is about to decide on.
+   */
+  it('marks a proposed tool in review without claiming it is connected', () => {
+    card({
+      kind: 'integration',
+      flavor: 'mcp',
+      id: 'tickets',
+      name: 'tickets',
+      // The connection state a released tool always states. On a proposal
+      // "Needs setup" would send the reader off to configure a credential for
+      // a server nobody has approved.
+      status: { state: 'warn', text: 'Needs setup' },
+      pending: { authorName: 'Ali Raza', mine: false },
+    });
+    expect(screen.getByText('In review')).toBeInTheDocument();
+    expect(screen.getByText('MCP server')).toBeInTheDocument();
+    expect(screen.getByText(/From Ali Raza: waiting on you/)).toBeInTheDocument();
+    expect(screen.queryByText('Needs setup')).not.toBeInTheDocument();
+    // Dashed: the card is an outline of a tool rather than one, and that reads
+    // before any text does.
+    expect(screen.getByTestId('library-card-integration-tickets').className).toContain(
+      'border-dashed',
+    );
+  });
+
   it('does not call a proposal yours to own', () => {
     // `Owner` means you can change the released skill. There is no released
     // skill, so the two badges would contradict each other in one row.

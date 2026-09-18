@@ -76,6 +76,7 @@ const CATALOG: LibraryData = {
     { name: 'create-sales-deck', description: '', path: 'Plugins/Sales/create-sales-deck' },
   ],
   pendingSkills: [],
+  pendingTools: [],
   tools: [
     {
       slug: 'notion',

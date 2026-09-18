@@ -13,7 +13,7 @@ import type { IAccessControl } from '../access/access-control.interface.js';
 import type { IPluginIndexService } from '../plugins/plugins.contract.js';
 import '@utcp/http'; // side effect: register the 'http' call-template type
 import { CallTemplateSerializer, type CallTemplate } from '@utcp/sdk';
-import { type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
+import { type IPendingToolService, type IToolManualService, EXTERNAL_KB_MANUAL_NAME } from './tool-manuals.contract.js';
 import { McpServerEditError, type McpServerEditService, type McpServerWrite } from './mcp-server-edit.service.js';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import '../auth/auth.middleware.js'; // Express Request augmentation (req.userId / req.userEmail)
@@ -281,6 +281,7 @@ export function createToolManualsAgentRoutes(
 /**
  * Browser-facing tool-manual routes (mounted under the JWT auth middleware):
  *   GET  /tools           — the caller's accessible `.tool` manuals (summaries).
+ *   GET  /tools/pending   — tools proposed on an open change request, not released.
  *   POST /tools/preview    — validate a draft `.tool` for the renderer.
  *   GET  /tools/:slug      — one readable manual with description + capabilities
  *                            (the tool page). Registered LAST so no future
@@ -290,6 +291,7 @@ export function createToolManualsAgentRoutes(
 export function createToolManualsBrowserRoutes(
   toolManualService: IToolManualService,
   serverEdit?: { service: McpServerEditService; getUser: (userId: string) => Promise<AuthUser | undefined> },
+  pendingTools?: IPendingToolService,
 ): express.Router {
   const router = express.Router();
 
@@ -344,6 +346,21 @@ export function createToolManualsBrowserRoutes(
       log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
+  });
+
+  /**
+   * BEFORE `/tools/:slug`, and it has to stay there: Express matches in
+   * declaration order, so the parameterised route would otherwise swallow
+   * `pending` and answer "no such tool".
+   *
+   * Optional dependency so a host that composes its own service set gets an
+   * empty review shelf rather than a 404 the frontend has to special-case —
+   * the same shape `GET /skills/pending` has.
+   */
+  router.get('/tools/pending', async (req, res) => {
+    const email = req.userEmail;
+    if (!email) return void res.status(401).json({ error: 'Not authenticated' });
+    res.json({ tools: pendingTools ? await pendingTools.listPendingTools(email) : [] });
   });
 
   router.post('/tools/preview', async (req, res) => {

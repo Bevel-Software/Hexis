@@ -690,7 +690,7 @@ export async function createCoreServer(
       const u = await core.authService.getUserById(userId);
       return u ? ({ id: u.id, email: u.email, name: u.name } as AuthUser) : undefined;
     },
-  }));
+  }, core.pendingToolsService));
   app.use('/api', core.authMiddleware, createSecretsVaultRoutes(secretsVaultRoutesDeps));
   // The authed tail of the MCP OAuth flow: /connect calls these to describe
   // the pending authorization and, on Finish, to mint the one-time code. The

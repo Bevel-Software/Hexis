@@ -35,6 +35,7 @@ function library(over: Partial<LibraryContextValue> = {}): LibraryContextValue {
     error: null,
     skills: [],
     pendingSkills: [],
+    pendingTools: [],
     tools: [],
     ownedSkills: new Set(),
     writableSkills: new Set(),
