@@ -7,6 +7,7 @@ import {
 import { useWorkspace } from './workspace.context';
 import {
   PR_STALE_EVENT,
+  PR_STALE_FALLBACK_MS,
   SUGGESTIONS_OPTIMISTIC_EVENT,
   SUGGESTIONS_RETRACTED_EVENT,
 } from '../../../core/events';
@@ -87,10 +88,13 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     /** Strictly increasing order of retractions and fetch starts. */
     let order = 0;
     /**
-     * The latest fetch start each list has applied. An answer from an older
-     * fetch that lands after a newer one is dropped: it can predate a
-     * retraction whose hide token the newer answer already lifted, and would
-     * bring the removed proposals back.
+     * The latest fetch start each list has applied. Loads overlap — the
+     * fallback poll, a stale event, a tab coming back into view, a
+     * retraction — and an answer from an older fetch that lands after a newer
+     * one is dropped: it would put an applied request's markers back in the
+     * tree, or predate a retraction whose hide token the newer answer already
+     * lifted and bring the removed proposals back. Per list, since the two
+     * requests settle apart.
      */
     const applied = { all: 0, mine: 0 };
     const supersedes = (list: 'all' | 'mine', startedOrder: number) => {
@@ -159,6 +163,20 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // rows for a just-uploaded file would sit invisible until the TTL).
     const onStale = () => load({ fresh: true });
     window.addEventListener(PR_STALE_EVENT, onStale);
+    // The fallback for a stale event that never came. Stale events now follow
+    // the bus's merge / reject / apply-failed broadcasts, so a dropped bus
+    // event would otherwise leave an applied request's markers in this tree
+    // until a reload. Cached reads (a merge, a recorded refusal and a cleared
+    // one all evict the server's list cache, so the first read after any of
+    // them is already true), and only while visible — a
+    // hidden tab catches up the moment it is shown instead.
+    const reconcile = setInterval(() => {
+      if (!document.hidden) load();
+    }, PR_STALE_FALLBACK_MS);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     const onAnnounce = (e: Event) => {
       const cr = (e as CustomEvent<PullRequestSummary>).detail;
       if (!cr || typeof cr.number !== 'number') return;
@@ -186,6 +204,8 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     window.addEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);
     return () => {
       cancelled = true;
+      clearInterval(reconcile);
+      document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener(PR_STALE_EVENT, onStale);
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
       window.removeEventListener(SUGGESTIONS_RETRACTED_EVENT, onRetract);

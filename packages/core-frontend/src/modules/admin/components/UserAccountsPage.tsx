@@ -46,7 +46,10 @@ function signInAfterDelete(account: AccountSummary): string {
  * set/create both go through `POST /api/admin/accounts`, an upsert-by-email
  * that preserves an existing display name when none is supplied. The
  * signed-in admin's own row offers neither action — the backend refuses
- * self-erasure, and their own password lives on the Account page.
+ * self-erasure, and their own password lives on the Account page. The
+ * deployment admin's row offers no password action either, from any admin:
+ * that account's password is set in the deployment environment, and the
+ * backend refuses to store one for it.
  */
 export function UserAccountsPage() {
   const { isAdmin } = useAdmin();
@@ -214,16 +217,26 @@ export function UserAccountsPage() {
                         {signInMethodLabel(account)}
                       </div>
                     </div>
-                    {!isSelf && (
-                      <button
-                        onClick={() => openPasswordDialog(account)}
-                        className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
-                        title="Set a new sign-in password for this account."
-                        aria-label={`Set password for ${account.email}`}
-                      >
-                        Set password
-                      </button>
-                    )}
+                    {!isSelf &&
+                      (account.isEnvAdmin ? (
+                        // No "Set password" for the deployment admin: its
+                        // password is the environment's, and a stored one
+                        // would only ADD a credential that outlives rotating
+                        // ADMIN_PASSWORD. The backend refuses it too — this
+                        // says why instead of offering a button that fails.
+                        <span className="text-meta text-ink-muted text-right max-w-[13rem]">
+                          Password set in the deployment environment
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => openPasswordDialog(account)}
+                          className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
+                          title="Set a new sign-in password for this account."
+                          aria-label={`Set password for ${account.email}`}
+                        >
+                          Set password
+                        </button>
+                      ))}
                     {!isSelf && (
                       <button
                         onClick={() => setPendingDelete(account)}

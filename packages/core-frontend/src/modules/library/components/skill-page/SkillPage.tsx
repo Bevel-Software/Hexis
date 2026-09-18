@@ -30,7 +30,10 @@ import { useFileAccess } from '../../../access/hooks/useFileAccess';
 import { proposeChange, suggestionBranchFor } from '../../services/library.api';
 import { getOrCreateWorkspace, writeFile } from '../../../workspace/services/workspace.api';
 import { useSkillDetail } from '../../hooks/useSkillDetail';
-import { useApplyChangeRequest } from '../../../change-requests/hooks/useApplyChangeRequest';
+import {
+  refusalLine,
+  useApplyChangeRequest,
+} from '../../../change-requests/hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../../../change-requests/hooks/useCrFileDiffs';
 import { useDefaultBranchFile, useFileOnBranch } from '../../../change-requests/hooks/useFileOnBranch';
 import { useLibrary } from '../../state/library-data';
@@ -913,13 +916,7 @@ export function SkillPage({
               upToDate={fileDiff !== null && fileDiff.length === 0}
               blocked={blockedCrs.has(cr.number)}
               conflictPrompt={conflictResolutionPrompt(cr)}
-              // A conflict already speaks through `blocked`; repeating it as a
-              // refusal line would say the same thing twice in one box.
-              refusal={
-                applying.refusals.get(cr.number)?.conflicts === false
-                  ? (applying.refusals.get(cr.number)?.reason ?? null)
-                  : null
-              }
+              refusal={refusalLine(cr, applying.refusals)}
               owner={ownerName}
               busy={busyCr === cr.number || applying.activeCr === cr.number}
               phase={applying.activeCr === cr.number ? applying.phase : 'idle'}

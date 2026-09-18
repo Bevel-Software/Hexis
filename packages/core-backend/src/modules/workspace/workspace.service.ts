@@ -6,12 +6,20 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  validateRelativePath,
+  validateFilename,
+  DEFAULT_BRANCH,
+  FOLDER_PLACEHOLDER,
+  isFolderPlaceholder,
+} from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import {
+  GitInternalsError,
   PathTraversalError,
   UnreadableArchiveError,
   WorkflowValidationError,
@@ -209,6 +217,11 @@ export class WorkspaceService implements IWorkspaceService {
    * {@link withPathTurn} for what takes a turn and why.
    */
   private readonly writeTurns = new Map<string, Promise<void>>();
+  /**
+   * The folder structure changes in flight, keyed by RESOLVED absolute folder
+   * path — see {@link withFolderTurn}.
+   */
+  private readonly folderTurns = new Map<string, Promise<void>>();
   /**
    * The turns the CURRENT async context already holds. Taking one it holds
    * runs straight through instead of waiting for itself, which is what lets a
@@ -845,16 +858,20 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async readFile(workspaceId: string, relativePath: string): Promise<string> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath, 'utf-8');
   }
 
   async readFileBinary(workspaceId: string, relativePath: string): Promise<Buffer> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     return fs.readFile(absolutePath);
@@ -958,8 +975,10 @@ export class WorkspaceService implements IWorkspaceService {
    * no streaming API); the cap therefore doubles as a peak-heap bound.
    */
   async createFolderZip(workspaceId: string, relativePath: string): Promise<Buffer> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absoluteRoot = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absoluteRoot);
     this.assertWithinWorkspace(absoluteRoot, workspaceDir);
     const stat = await fs.stat(absoluteRoot);
     if (!stat.isDirectory()) {
@@ -1010,6 +1029,7 @@ export class WorkspaceService implements IWorkspaceService {
     relativePath: string,
   ): Promise<string | null> {
     this.assertValidGitRef(ref);
+    assertNoGitInternalsSegment(relativePath);
     this.assertValidRepoRelativePath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoDir = path.join(workspaceDir, this.kbDirName);
@@ -1096,6 +1116,7 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async deleteFile(workspaceId: string, relativePath: string): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
@@ -1103,8 +1124,10 @@ export class WorkspaceService implements IWorkspaceService {
     // landing between a conditional write's compare and its write would let
     // that write recreate the file the delete had just removed. The diff
     // baseline is updated inside the same turn, so two mutations of one path
-    // update it in the order they landed on disk.
+    // update it in the order they landed on disk. The resolved git check runs
+    // inside the turn too (see `withPathTurn`), so it cannot reorder callers.
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await fs.rm(absolutePath, { recursive: true, force: true });
       await this.diffService?.markUserDeleted(workspaceId, relativePath);
     });
@@ -1140,10 +1163,14 @@ export class WorkspaceService implements IWorkspaceService {
    * serializes it against the app's own editors.
    */
   async moveEntry(workspaceId: string, oldRelativePath: string, newRelativePath: string): Promise<void> {
+    assertNoGitInternalsSegment(oldRelativePath);
+    assertNoGitInternalsSegment(newRelativePath);
     assertValidPath(newRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const oldAbsolute = path.resolve(workspaceDir, oldRelativePath);
     const newAbsolute = path.resolve(workspaceDir, newRelativePath);
+    await assertNotGitInternals(workspaceDir, oldRelativePath, oldAbsolute);
+    await assertNotGitInternals(workspaceDir, newRelativePath, newAbsolute);
     this.assertWithinWorkspace(oldAbsolute, workspaceDir);
     this.assertWithinWorkspace(newAbsolute, workspaceDir);
     // Both ends: a link on the way to either end would carry the rename
@@ -1173,9 +1200,11 @@ export class WorkspaceService implements IWorkspaceService {
     relativePath: string,
     expectedContent: string,
   ): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await assertConditionalWriteMatches(absolutePath, relativePath,expectedContent);
   }
@@ -1206,11 +1235,60 @@ export class WorkspaceService implements IWorkspaceService {
    * them as one would be a worse bug than the race it would close.
    */
   async withPathTurn<T>(workspaceId: string, relativePath: string, op: () => Promise<T>): Promise<T> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    return this.withResolvedPathTurn(absolutePath, op);
+    // The resolved check reads the disk, and how long that takes depends on
+    // the spelling. Run before the queue, it let a later call overtake an
+    // earlier one for the same file; inside the turn, callers keep their order
+    // and `op` still never runs on a path that resolves into the git folder.
+    return this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+      return op();
+    });
+  }
+
+  /**
+   * One folder structure change at a time per SUBTREE: an explicit folder
+   * delete and the placeholder that keeps an emptied folder. Two turns wait
+   * for each other when one folder is, or sits inside, the other, so keeping
+   * a folder can never run in the middle of deleting it (and write the
+   * placeholder back into a folder whose delete already enumerated its
+   * files), and a delete never starts while a folder under it is being kept.
+   * Not re-entrant: take it once, and never around another folder's turn.
+   *
+   * The reach of the guarantee, like {@link withPathTurn}'s: within this
+   * process, over this process's clones. Across instances the workflow lock
+   * rows coordinate — the placeholder write takes its own path's lock, as the
+   * folder delete takes each file's — and each clone's changes meet in git,
+   * as any write into a folder another instance deletes already does.
+   */
+  async withFolderTurn<T>(workspaceId: string, relativeDir: string, op: () => Promise<T>): Promise<T> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const overlaps = (held: string) =>
+      held === absoluteDir ||
+      held.startsWith(absoluteDir + path.sep) ||
+      absoluteDir.startsWith(held + path.sep);
+    // Check-and-claim with no await in between, so two callers cannot both
+    // find the subtree free.
+    for (;;) {
+      const waiting = [...this.folderTurns].filter(([held]) => overlaps(held)).map(([, turn]) => turn);
+      if (waiting.length === 0) break;
+      await Promise.all(waiting);
+    }
+    let release!: () => void;
+    this.folderTurns.set(absoluteDir, new Promise<void>((resolve) => (release = resolve)));
+    try {
+      return await op();
+    } finally {
+      this.folderTurns.delete(absoluteDir);
+      release();
+    }
   }
 
   /**
@@ -1280,11 +1358,14 @@ export class WorkspaceService implements IWorkspaceService {
     content: string,
     options?: { failIfExists?: boolean; expectedContent?: string },
   ): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.withResolvedPathTurn(absolutePath, async () => {
+      // Inside the turn, beside the link check (see `withPathTurn`).
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await this.assertNotThroughLink(absolutePath, workspaceDir);
       // Compare BEFORE creating anything. The parent chain used to be made
       // first, so a refused save at `x/new-folder/note.md` left an empty
@@ -1320,19 +1401,49 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   async createDirectory(workspaceId: string, relativePath: string): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
+    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.assertNotThroughLink(absolutePath, workspaceDir);
     await fs.mkdir(absolutePath, { recursive: true });
     const entries = await fs.readdir(absolutePath);
     if (entries.length === 0) {
-      await fs.writeFile(path.join(absolutePath, '.gitkeep'), '', 'utf-8');
+      await fs.writeFile(path.join(absolutePath, FOLDER_PLACEHOLDER), '', 'utf-8');
     }
   }
 
+  /**
+   * Write the empty-folder placeholder into `relativeDir` when that folder
+   * exists and holds nothing; true when it wrote one. Unlike
+   * {@link createDirectory} it never creates the folder: one that is gone was
+   * deleted explicitly and stays gone. A folder reached through a link is
+   * refused like any write through one, so the placeholder cannot land
+   * outside the workspace.
+   */
+  async writeFolderPlaceholder(workspaceId: string, relativeDir: string): Promise<boolean> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const placeholder = path.join(absoluteDir, FOLDER_PLACEHOLDER);
+    await this.assertNotThroughLink(placeholder, workspaceDir);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(absoluteDir);
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
+    if (entries.length > 0) return false;
+    await fs.writeFile(placeholder, '', { flag: 'wx' });
+    return true;
+  }
+
   async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
+    assertNoGitInternalsSegment(relativePath);
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
@@ -1342,6 +1453,7 @@ export class WorkspaceService implements IWorkspaceService {
     // parent chain too, so a folder delete serialized before this turn
     // cannot remove the parent between its creation and the write.
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await this.assertNotThroughLink(absolutePath, workspaceDir);
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       await fs.writeFile(absolutePath, data);
@@ -1367,8 +1479,11 @@ export class WorkspaceService implements IWorkspaceService {
      */
     guardWrite?: (wsRelativePath: string) => Promise<void>,
   ): Promise<UnzipResult> {
+    assertNoGitInternalsSegment(zipRelativePath);
+    if (destDirRelativePath !== undefined) assertNoGitInternalsSegment(destDirRelativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const zipAbsolute = path.resolve(workspaceDir, zipRelativePath);
+    await assertNotGitInternals(workspaceDir, zipRelativePath, zipAbsolute);
     this.assertWithinWorkspace(zipAbsolute, workspaceDir);
     if (!zipRelativePath.toLowerCase().endsWith('.zip')) {
       throw new WorkflowValidationError('Only .zip files can be extracted');
@@ -1381,6 +1496,7 @@ export class WorkspaceService implements IWorkspaceService {
     const destRel = destDirRelativePath ?? inferredDest;
     if (destRel) assertValidPath(destRel);
     const destAbsolute = destRel ? path.resolve(workspaceDir, destRel) : workspaceDir;
+    await assertNotGitInternals(workspaceDir, destRel, destAbsolute);
     this.assertWithinWorkspace(destAbsolute, workspaceDir);
     // Neither the archive nor the destination may sit behind a link; each
     // entry's own target is checked again below, once it is known.
@@ -1428,6 +1544,12 @@ export class WorkspaceService implements IWorkspaceService {
         continue;
       }
 
+      // An archive never writes into the git folder, whatever the entry's spelling.
+      if (hasGitInternalsSegment(rawName)) {
+        skipped.push({ path: rawName, reason: new GitInternalsError().message });
+        continue;
+      }
+
       const trimmed = rawName.replace(/\/+$/, '');
       const segments = trimmed.split('/').filter((s) => s.length > 0);
       let invalidReason: string | null = null;
@@ -1472,9 +1594,10 @@ export class WorkspaceService implements IWorkspaceService {
       // destination must not redirect this entry's bytes. Reported like the
       // other per-entry refusals, so one such entry does not fail the rest.
       try {
+        await assertNotGitInternals(workspaceDir, trimmed, targetAbsolute);
         await this.assertNotThroughLink(targetAbsolute, workspaceDir);
       } catch (err) {
-        if (err instanceof PathTraversalError) {
+        if (err instanceof PathTraversalError || err instanceof GitInternalsError) {
           skipped.push({ path: rawName, reason: err.message });
           continue;
         }
@@ -1879,7 +2002,10 @@ export class WorkspaceService implements IWorkspaceService {
  */
 function explorerWalk(): TreeWalkOptions {
   return {
-    skip: (e) => (e.name === '.git' && e.isDirectory()) || (e.name === '.gitkeep' && e.isFile()),
+    // Any spelling of the git folder (`.GIT`, `.git.`) — the same rule the path
+    // guards apply, so a download or listing never carries what they refuse —
+    // and the empty-folder placeholder, which is never content.
+    skip: (e) => hasGitInternalsSegment(e.name) || (isFolderPlaceholder(e.name) && e.isFile()),
     ignore: true,
     unreadable: 'throw',
   };

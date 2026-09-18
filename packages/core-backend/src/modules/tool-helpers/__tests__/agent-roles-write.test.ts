@@ -60,6 +60,10 @@ async function start(): Promise<string> {
   const router = express.Router();
   const allowAll = {
     canRead: async () => true,
+    canWrite: async () => true,
+    canDownload: async () => true,
+    canOwner: async () => true,
+    canWriteBatchAtRef: async () => null,
     canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   } as never;
   registerWorkspaceTools(registry, router, toolAuth, createToolHandlerFactory(resolve), new SpillStore(path.join(os.tmpdir(), 'bevel-test-spills')), new DocExtractService(docCache), allowAll, KB, {
@@ -134,10 +138,18 @@ describe('agent writes to roles.yaml never create a role', () => {
     await expect(fs.access(path.join(root, KB, 'KnowledgeBase/note.md'))).rejects.toBeDefined();
   });
 
-  it('copy_file and move_file onto roles.yaml are checked with the bytes they would land', async () => {
+  it('copy_file onto roles.yaml is checked with the bytes it would land', async () => {
     const base = await start();
     await expectNewRoleRefused(await call(base, 'copy_file', { src: DRAFT, dest: ROLES }), 'Project Phoenix');
-    await expectNewRoleRefused(await call(base, 'move_file', { src: DRAFT, dest: ROLES }), 'Project Phoenix');
+    expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_NEW_ROLE);
+  });
+
+  it('move_file onto the existing roles.yaml is refused before any byte moves: a move never overwrites', async () => {
+    const base = await start();
+    const res = await call(base, 'move_file', { src: DRAFT, dest: ROLES });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain('already exists');
+    expect(await rolesOnDisk()).toBe(CURRENT);
     expect(await fs.readFile(path.join(root, DRAFT), 'utf-8')).toBe(WITH_NEW_ROLE);
   });
 

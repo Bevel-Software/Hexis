@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Button, Surface } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
-import { ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
+import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
 import { AlreadyReadableError, requestPluginAccess, type PluginSummary } from '../services/plugins.api';
 import { firstNames, joinNames } from '../utils/names';
 import { useLibraryToast } from '../state/toast.context';
@@ -138,22 +138,5 @@ function countsLine(plugin: Pick<PluginSummary, 'skillCount' | 'toolCount'>): st
   const skills = `${plugin.skillCount} ${plugin.skillCount === 1 ? 'skill' : 'skills'}`;
   const tools = `${plugin.toolCount} ${plugin.toolCount === 1 ? 'tool' : 'tools'}`;
   return `${skills} · ${tools}. Visible once you have access.`;
-}
-
-/**
- * The people `ownersTextOf` names, as a list.
- *
- * Mirrors that helper's chain exactly — owners, else writers, else nobody — so
- * the sentence and the count of subjects in it can never disagree. It is a
- * separate function only because the toast needs the NAMES (to take first
- * names) and the verb needs the COUNT, and prose gives back neither.
- */
-function adminNamesOf(plugin: Pick<PluginSummary, 'owners' | 'writers'>): string[] {
-  const owners = [...plugin.owners.users.map((u) => u.name), ...plugin.owners.roles];
-  const named = owners.filter((s) => s.length > 0);
-  if (named.length > 0) return named;
-  return [...plugin.writers.users.map((u) => u.name), ...plugin.writers.roles].filter(
-    (s) => s.length > 0,
-  );
 }
 

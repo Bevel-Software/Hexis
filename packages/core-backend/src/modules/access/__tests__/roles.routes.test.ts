@@ -91,6 +91,7 @@ async function makeHarness(opts: { isAdmin?: boolean } = {}): Promise<{ server: 
     return { name: path.basename(absDir), relativePath: rel || '.', type: 'directory', children };
   };
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({})),
     getWorkspacePath: vi.fn(async () => workspaceDir),
     listFiles: vi.fn(async () => buildTree(workspaceDir)),

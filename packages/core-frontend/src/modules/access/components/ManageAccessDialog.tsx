@@ -9,7 +9,11 @@ import {
   type RefObject,
 } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe, CircleHelp } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import {
+  canCarryFrontmatter,
+  folderGovernsAccessMessage,
+  type FileTreeEntry,
+} from '@bevel-software/platform-shared';
 import {
   Badge,
   Banner,
@@ -289,7 +293,12 @@ function isEveryoneRole(p: Principal): boolean {
   return p.kind === 'role' && p.role.trim().toLowerCase() === 'everyone';
 }
 
-/** A short summary of the verbs a row holds, for the dropdown trigger. */
+/**
+ * A short summary of the verbs a row holds, for the dropdown trigger. Read is
+ * folded in by write/owner/download before a `VerbSet` reaches here (see
+ * `effectiveNewVerbs` and the row aggregation), so a download-only grant reads
+ * “Can read, Can download” — what the resolver actually gives.
+ */
 function summarizeVerbs(v: VerbSet): string {
   const parts: string[] = [];
   if (v.owner) parts.push('Owner');
@@ -615,7 +624,8 @@ export function ManageAccessDialog({
     // independent verb set. Membership IS the displayed set — we do NOT subtract
     // the rollup. The resolver already folds owner⊇write⊇read on the lower lists,
     // so an owner legitimately shows owner+write+read checked; download is its own
-    // axis (owner folds in, write does not), sourced from `downloaders`.
+    // axis (owner folds in, write does not), sourced from `downloaders` — and it
+    // folds DOWN into read, so a download row shows read checked too.
     const rows = new Map<string, PrincipalRow>();
     // Kinded collective list for one eligible set. Older servers omit
     // `principals` (version skew) — fall back to the name-only `roles`,
@@ -704,6 +714,12 @@ export function ManageAccessDialog({
     for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
 
+    // Download implies read, the way write does. The server folds it into
+    // `readers` too, so this is belt-and-braces for an older backend — but it is
+    // also what makes the row's Read box render checked-and-implied next to a
+    // Download it cannot be unticked without.
+    for (const row of rows.values()) if (row.verbs.download) row.verbs.read = true;
+
     // Attach each row's per-verb source + manageability (direct / inherited /
     // external) from the resolver's `sources` map, keyed by the same row key
     // (with the `g:` → `r:` version-skew fallback for group rows).
@@ -725,6 +741,8 @@ export function ManageAccessDialog({
     () => principals.filter((p) => p.manage !== 'direct'),
     [principals],
   );
+  // The read side of a folder-governed file: who can open it, shown read-only.
+  const readerRows = useMemo(() => principals.filter((p) => p.verbs.read), [principals]);
 
   /**
    * The inherited rows, ONE SECTION PER GRANTING FOLDER — the prototype's shape
@@ -778,10 +796,28 @@ export function ManageAccessDialog({
   const [openSection, setOpenSection] = useState<string | null>(null);
 
   const governed = repoRelative !== null;
+  // A file that cannot carry frontmatter (a PDF, a deck, an image) has no rules
+  // of its own: its folder's rules govern it, and the grant / revoke routes
+  // refuse it. The server's ruling (`governedByFolder`, from the same shared
+  // predicate over the resolver's registered extensions) decides once the view
+  // has loaded; until then the shared predicate's core set stands in, so the
+  // sheet never flashes a field for a PDF.
+  const folderGoverns =
+    targetKind === 'file' &&
+    repoRelative !== null &&
+    (data ? data.governedByFolder !== undefined : !canCarryFrontmatter(repoRelative));
+  const governingFolder =
+    data?.governedByFolder ??
+    (repoRelative !== null && repoRelative.includes('/')
+      ? repoRelative.slice(0, repoRelative.lastIndexOf('/'))
+      : '');
+  const governingFolderLabel =
+    governingFolder === '' ? WHOLE_WORKSPACE : governingFolder.slice(governingFolder.lastIndexOf('/') + 1);
   // The dialog can mutate only if the current user can write this path's access
   // config — exactly what the backend gate enforces. `canWrite` on the path is
   // the same signal (folder access.md / node frontmatter both gate on write).
-  const canManage = !!data?.canWrite;
+  // Never on a folder-governed file: there is nothing here to write to.
+  const canManage = !!data?.canWrite && !folderGoverns;
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
   // exact group/role match or a free-typed email. (Suggestion clicks append
@@ -820,14 +856,15 @@ export function ManageAccessDialog({
     setPickedChips((chips) => chips.filter((c) => principalKey(c) !== principalKey(p)));
   }, []);
 
-  // The new-grant checklist stores independent flags, but owner⊇write⊇read folds
-  // for display (selecting Owner implies edit+read; Edit implies read; owner also
-  // folds in download). `effectiveNewVerbs` is what the boxes render as checked.
+  // The new-grant checklist stores independent flags, but the nesting folds for
+  // display: Owner implies edit + download + read; Edit implies read; Download
+  // implies read too (a person trusted with a copy may open it).
+  // `effectiveNewVerbs` is what the boxes render as checked.
   const effectiveNewVerbs = useMemo<VerbSet>(
     () => ({
       owner: newVerbs.owner,
       write: newVerbs.owner || newVerbs.write,
-      read: newVerbs.owner || newVerbs.write || newVerbs.read,
+      read: newVerbs.owner || newVerbs.write || newVerbs.download || newVerbs.read,
       download: newVerbs.owner || newVerbs.download,
     }),
     [newVerbs],
@@ -835,11 +872,14 @@ export function ManageAccessDialog({
 
   // The minimal verb list to send: the single highest tier verb (the lower ones
   // fold in server-side) plus download when it's chosen independently of owner.
+  // A bare `read` line is only worth writing when nothing else already confers
+  // read — download does, so Download alone (or Read + Download) sends `download`
+  // and no redundant second grant.
   const grantVerbs = useMemo<GrantVerb[]>(() => {
     const verbs: GrantVerb[] = [];
     if (effectiveNewVerbs.owner) verbs.push('owner');
     else if (effectiveNewVerbs.write) verbs.push('write');
-    else if (effectiveNewVerbs.read) verbs.push('read');
+    else if (effectiveNewVerbs.read && !effectiveNewVerbs.download) verbs.push('read');
     if (effectiveNewVerbs.download && !effectiveNewVerbs.owner) verbs.push('download');
     return verbs;
   }, [effectiveNewVerbs]);
@@ -860,17 +900,14 @@ export function ManageAccessDialog({
         const label = principalLabel(principal);
         // `everyone` is public-read only — the backend rejects any other verb for
         // it, so clamp here to avoid a guaranteed failure when a higher verb is
-        // also selected for the other chips.
+        // also selected for the other chips. Every selection that reaches this
+        // point confers read (Share is disabled while `grantVerbs` is empty, and
+        // each of the four boxes now implies read), so the clamp always has a
+        // verb to send: "Can download" on Everyone shares it publicly readable
+        // and drops only the download half the backend would refuse anyway.
         const verbsForPrincipal = isEveryoneRole(principal)
-          ? (effectiveNewVerbs.read ? (['read'] as GrantVerb[]) : [])
+          ? (['read'] as GrantVerb[])
           : grantVerbs;
-        // Don't silently drop the Everyone chip when nothing read-equivalent was
-        // picked (e.g. only "Can download"): record it as a failure so the chip
-        // stays visible and the user is told why, rather than a no-op clear.
-        if (isEveryoneRole(principal) && verbsForPrincipal.length === 0) {
-          failures.push(`${label}: "Everyone" can only be granted read access. Select "Can read".`);
-          continue;
-        }
         for (const verb of verbsForPrincipal) {
           try {
             await grantAccess(workspaceId, {
@@ -898,7 +935,7 @@ export function ManageAccessDialog({
       reload();
       setBusy(false);
     }
-  }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, effectiveNewVerbs, reload]);
+  }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, reload]);
 
   // The footer's one primary action. With picks it shares them and closes; a
   // grant that fails keeps the dialog — and the picks — up with the failure
@@ -1255,7 +1292,8 @@ export function ManageAccessDialog({
                     const disabled =
                       busy ||
                       (role === 'Can edit' && p.verbs.owner) ||
-                      (role === 'Can read' && (p.verbs.owner || p.verbs.write));
+                      (role === 'Can read' &&
+                        (p.verbs.owner || p.verbs.write || p.verbs.download));
                     return (
                       <MenuItem
                         key={role}
@@ -1521,7 +1559,10 @@ export function ManageAccessDialog({
                       const checked = effectiveNewVerbs[k];
                       const disabled =
                         (role === 'Can edit' && effectiveNewVerbs.owner) ||
-                        (role === 'Can read' && (effectiveNewVerbs.owner || effectiveNewVerbs.write));
+                        (role === 'Can read' &&
+                          (effectiveNewVerbs.owner ||
+                            effectiveNewVerbs.write ||
+                            effectiveNewVerbs.download));
                       return (
                         <MenuItem
                           key={role}
@@ -1588,120 +1629,160 @@ export function ManageAccessDialog({
           <>
             {/* No field to sit under: the reach line leads the sheet instead. */}
             {!canManage && reachLine}
-            {!canManage && (
-              <Banner tone="neutral" role="note" className="mt-3">
-                Only people with edit access can share this {targetKind}.
-                {ownerNames && <> Ask an owner: {ownerNames}.</>}
-              </Banner>
-            )}
-
-            {/* Names WHICH RULE you are editing, and adapts to the target
-                (proto:3625: `On this ` + file|folder). The sheet mixes rules
-                set HERE with rules inherited from above, so a heading that
-                says only "People with access" leaves the reader to work out
-                which of the two lists below is which. The count rides it, as
-                on every band in the app. */}
-            <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
-              On this {targetKind}
-              {directRows.length > 0 && (
-                <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
-              )}
-            </h3>
-
-            {directRows.length === 0 ? (
-              <p className="py-2 text-ui text-ink-muted">
-                {inheritedRows.length > 0
-                  ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
-                  : 'No explicit grants at this path.'}
-              </p>
+            {folderGoverns ? (
+              <>
+                {/* No field and no rules here: say where the rules are, and
+                    go there. Who can open the file is still worth knowing. */}
+                <Banner tone="neutral" role="note" className="mt-3">
+                  {folderGovernsAccessMessage(governingFolderLabel)}
+                </Banner>
+                {onManageAncestor && kbDirName && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    title={governingFolder || WHOLE_WORKSPACE}
+                    onClick={() =>
+                      onManageAncestor({
+                        name: governingFolderLabel,
+                        relativePath: governingFolder ? `${kbDirName}/${governingFolder}` : kbDirName,
+                        type: 'directory',
+                      })
+                    }
+                  >
+                    {`Manage access on ${governingFolderLabel}`}
+                  </Button>
+                )}
+                <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+                  Who can open it
+                  {readerRows.length > 0 && (
+                    <span className="text-meta normal-case tabular-nums">{readerRows.length}</span>
+                  )}
+                </h3>
+                {readerRows.length === 0 ? (
+                  <p className="py-2 text-ui text-ink-muted">No one is named here.</p>
+                ) : (
+                  readerRows.map(renderRow)
+                )}
+              </>
             ) : (
-              directRows.map(renderRow)
-            )}
+              <>
+                {!canManage && (
+                  <Banner tone="neutral" role="note" className="mt-3">
+                    Only people with edit access can share this {targetKind}.
+                    {ownerNames && <> Ask an owner: {ownerNames}.</>}
+                  </Banner>
+                )}
 
-            {inheritedRows.length > 0 && (
-              <div className="mt-3 border-t border-line pt-2">
-                {inheritedByFolder.folders.map(([ancestor, rows]) => {
-                  const open = openSection === ancestor;
-                  return (
-                    <div key={ancestor}>
-                      <button
-                        type="button"
-                        aria-expanded={open}
-                        title={folderPath(ancestor)}
-                        onClick={() => setOpenSection(open ? null : ancestor)}
-                        className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
-                      >
-                        <ChevronDown
-                          size={14}
-                          className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
-                        />
-                        <span className="min-w-0 truncate">
-                          People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
-                        </span>
-                        <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
-                          {rows.length}
-                        </span>
-                      </button>
-                      {open && (
-                        <div className="mb-1">
-                          {rows.map(renderRow)}
-                          {/* The folder is both what the heading means and
-                              where it changes (proto:3647). Without this the
-                              only act available on an inherited grant is the
-                              destructive one behind Remove. */}
-                          {onManageAncestor && kbDirName && (
-                            <Button
-                              variant="quiet"
-                              size="tiny"
-                              className="mt-0.5"
-                              onClick={() => {
-                                const dir = ancestor.replace(/\/?access\.md$/, '');
-                                onManageAncestor({
-                                  // The same name the button just said. A
-                                  // root-level `access.md` leaves `dir` empty,
-                                  // and `''.split('/').pop()` is `''` — a
-                                  // dialog with no title.
-                                  name: folderLabel(ancestor),
-                                  relativePath: `${kbDirName}/${dir}`,
-                                  type: 'directory',
-                                });
-                              }}
-                            >
-                              {`Manage ${folderLabel(ancestor)} →`}
-                            </Button>
+                {/* Names WHICH RULE you are editing, and adapts to the target
+                    (proto:3625: `On this ` + file|folder). The sheet mixes rules
+                    set HERE with rules inherited from above, so a heading that
+                    says only "People with access" leaves the reader to work out
+                    which of the two lists below is which. The count rides it, as
+                    on every band in the app. */}
+                <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+                  On this {targetKind}
+                  {directRows.length > 0 && (
+                    <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
+                  )}
+                </h3>
+
+                {directRows.length === 0 ? (
+                  <p className="py-2 text-ui text-ink-muted">
+                    {inheritedRows.length > 0
+                      ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
+                      : 'No explicit grants at this path.'}
+                  </p>
+                ) : (
+                  directRows.map(renderRow)
+                )}
+
+                {inheritedRows.length > 0 && (
+                  <div className="mt-3 border-t border-line pt-2">
+                    {inheritedByFolder.folders.map(([ancestor, rows]) => {
+                      const open = openSection === ancestor;
+                      return (
+                        <div key={ancestor}>
+                          <button
+                            type="button"
+                            aria-expanded={open}
+                            title={folderPath(ancestor)}
+                            onClick={() => setOpenSection(open ? null : ancestor)}
+                            className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                          >
+                            <ChevronDown
+                              size={14}
+                              className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
+                            />
+                            <span className="min-w-0 truncate">
+                              People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
+                            </span>
+                            <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                              {rows.length}
+                            </span>
+                          </button>
+                          {open && (
+                            <div className="mb-1">
+                              {rows.map(renderRow)}
+                              {/* The folder is both what the heading means and
+                                  where it changes (proto:3647). Without this the
+                                  only act available on an inherited grant is the
+                                  destructive one behind Remove. */}
+                              {onManageAncestor && kbDirName && (
+                                <Button
+                                  variant="quiet"
+                                  size="tiny"
+                                  className="mt-0.5"
+                                  onClick={() => {
+                                    const dir = ancestor.replace(/\/?access\.md$/, '');
+                                    onManageAncestor({
+                                      // The same name the button just said. A
+                                      // root-level `access.md` leaves `dir` empty,
+                                      // and `''.split('/').pop()` is `''` — a
+                                      // dialog with no title.
+                                      name: folderLabel(ancestor),
+                                      relativePath: `${kbDirName}/${dir}`,
+                                      type: 'directory',
+                                    });
+                                  }}
+                                >
+                                  {`Manage ${folderLabel(ancestor)} →`}
+                                </Button>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+                      );
+                    })}
 
-                {/* A role that grants at the workspace level belongs to no
-                    folder, so it cannot be filed under one. Named for what it
-                    is rather than swept into the folder sections. */}
-                {inheritedByFolder.external.length > 0 && (
-                  <div>
-                    <button
-                      type="button"
-                      aria-expanded={openSection === 'roles'}
-                      onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
-                      className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
-                    >
-                      <ChevronDown
-                        size={14}
-                        className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
-                      />
-                      <span className="min-w-0 truncate">People with access through a role</span>
-                      <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
-                        {inheritedByFolder.external.length}
-                      </span>
-                    </button>
-                    {openSection === 'roles' && (
-                      <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                    {/* A role that grants at the workspace level belongs to no
+                        folder, so it cannot be filed under one. Named for what it
+                        is rather than swept into the folder sections. */}
+                    {inheritedByFolder.external.length > 0 && (
+                      <div>
+                        <button
+                          type="button"
+                          aria-expanded={openSection === 'roles'}
+                          onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
+                          className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                        >
+                          <ChevronDown
+                            size={14}
+                            className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
+                          />
+                          <span className="min-w-0 truncate">People with access through a role</span>
+                          <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                            {inheritedByFolder.external.length}
+                          </span>
+                        </button>
+                        {openSection === 'roles' && (
+                          <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
-              </div>
+              </>
             )}
           </>
         )}

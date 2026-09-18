@@ -14,6 +14,14 @@
 export const PR_STALE_EVENT = 'bevel:pr-stale';
 
 /**
+ * The fallback window for a {@link PR_STALE_EVENT} that never came — the bus
+ * dropped the merge or rejection that would have triggered it. Change-request
+ * lists re-read the server on this cadence while the tab is visible, so a lost
+ * event leaves a request pending for at most this long, never until a reload.
+ */
+export const PR_STALE_FALLBACK_MS = 60_000;
+
+/**
  * CustomEvent carrying a `PullRequestSummary` the CLIENT just made true —
  * a suggestion-routed upload committed these files to the caller's branch,
  * so their suggestion rows must show NOW. The server's own list catches up

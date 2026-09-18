@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { defaultKbTemplateDir } from './assets.js';
 import { assertKeyDecodesTo32Bytes } from './shared/token-crypto.js';
 import { DEFAULT_GIT_TIMEOUT_MS } from './modules/workflow/git/node-git-runner.js';
+import { logger } from './shared/logging.js';
+
+const log = logger('config');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -38,6 +41,16 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
   const port = (env.POSTGRES_PORT || '5432').trim();
   const database = encodeURIComponent(env.POSTGRES_DB || 'bevel');
   return `postgresql://${user}:${password}@${host}:${port}/${database}`;
+}
+
+/**
+ * `url` with any `user:pass@` removed and EVERY OTHER BYTE KEPT. Not a
+ * `new URL(...).toString()` round-trip: that drops a default port, lowercases
+ * the host and re-encodes, and a provider comparing redirect URIs as exact
+ * strings (Entra, Okta) would refuse the one an admin registered.
+ */
+export function withoutUserinfo(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/?#]*@/i, '$1');
 }
 
 /**
@@ -402,12 +415,20 @@ export class CoreConfig {
       Number.isFinite(gitTimeout) && gitTimeout > 0 && gitTimeout <= MAX_TIMER_MS
         ? gitTimeout
         : DEFAULT_GIT_TIMEOUT_MS;
-    this.publicBackendUrl = (
-      process.env.PUBLIC_BACKEND_URL ||
-      (domain ? `https://${domain}` : `http://localhost:${this.port}`)
-    )
+    // Userinfo stripped HERE, once, so no consumer can hand it on: a
+    // `PUBLIC_BACKEND_URL` spelled with `user:pass@` (a basic-auth proxy in
+    // front of the deployment) must not reach an identity provider in a
+    // redirect URI, a third-party OAuth provider, or `/api/config`.
+    const backendUrl = (process.env.PUBLIC_BACKEND_URL || (domain ? `https://${domain}` : `http://localhost:${this.port}`))
       .trim()
       .replace(/\/+$/, '');
+    this.publicBackendUrl = withoutUserinfo(backendUrl);
+    if (this.publicBackendUrl !== backendUrl) {
+      // Said out loud — it is likely a mistake — but never with the credential.
+      log.warn(
+        `PUBLIC_BACKEND_URL contains credentials (user:pass@); they are ignored and the public address is ${this.publicBackendUrl}.`,
+      );
+    }
     // Unset, the frontend origin is the backend's own in production (the
     // backend serves the built SPA — under docker compose this is what makes
     // a bare `up -d` bounce logins back to the right place), and Vite's dev

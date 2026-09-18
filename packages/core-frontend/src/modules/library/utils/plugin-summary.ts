@@ -100,6 +100,22 @@ export function ownersTextOf(summary: Pick<PluginSummary, 'owners' | 'writers'>)
 }
 
 /**
+ * The people `ownersTextOf` names, as a list.
+ *
+ * Mirrors that helper's chain exactly — owners, else writers, else nobody — so
+ * the sentence and the count of subjects in it can never disagree. It is a
+ * separate function only because a "we asked them" toast needs the NAMES (to
+ * take first names) while the verb beside them needs the COUNT, and prose
+ * gives back neither. Shared by the locked plugin page and the index row's
+ * Subscribe, which say the same thing after the same call.
+ */
+export function adminNamesOf(summary: Pick<PluginSummary, 'owners' | 'writers'>): string[] {
+  const owners = usersThenRoles(summary.owners);
+  if (owners.length > 0) return owners;
+  return usersThenRoles(summary.writers);
+}
+
+/**
  * Who the plugin is shared with, or `null` when there is nothing honest to say
  * — either the reader list was withheld (the caller cannot read the plugin, and
  * a locked plugin never advertises its share list) or it resolved empty.

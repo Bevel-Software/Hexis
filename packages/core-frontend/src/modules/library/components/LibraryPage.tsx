@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import '../library.css';
 import { useLibrary, type LibraryItem } from '../state/library-data';
 import { urlForLibraryItem } from '../routes/library-paths';
@@ -8,6 +9,8 @@ import { EVERYONE_TEAM, emptyMessageFor, filterLibraryItems, type LibraryFilter 
 import { pluginEntriesFor } from '../utils/plugin-entries';
 import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
+import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
+import { offersManageAccess } from '../../access/manage-access-affordance';
 import { PluginItemSections } from './plugin-page-parts';
 import { PluginRows } from './PluginRows';
 import { ManagedPluginRequests } from './ManagedPluginRequests';
@@ -62,6 +65,38 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const [query, setQuery] = useState('');
   /** The proposed skill being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
+  /**
+   * What the gallery's ONE access dialog is open on — the folder of whichever
+   * card or row the reader chose Share from. One instance for both bands,
+   * exactly as `SkillPage` keeps one for its title row and its request banner:
+   * two dialogs would be two copies of the same state, and only one of them
+   * can be open anyway.
+   */
+  const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
+
+  /**
+   * A repo-relative folder as the access dialog addresses it — the same entry
+   * the explorer's right-click hands over, and the same one the skill page
+   * builds for its Share. Null until the KB directory has resolved: a
+   * half-built path would manage the wrong folder, or the KB root, so a page
+   * that does not have it yet offers no Share at all.
+   */
+  const folderTarget = useCallback(
+    (folder: string): FileTreeEntry | null => {
+      if (!kbDirName) return null;
+      const entry: FileTreeEntry = {
+        name: folder.split('/').pop() ?? folder,
+        relativePath: `${kbDirName}/${folder}`,
+        type: 'directory',
+      };
+      return offersManageAccess(entry) ? entry : null;
+    },
+    [kbDirName],
+  );
+  const shareFolder = useCallback(
+    (folder: string) => setManageTarget(folderTarget(folder)),
+    [folderTarget],
+  );
 
   const visible = useMemo(
     () => filterLibraryItems(data.items, filter, query, data.teams),
@@ -157,7 +192,11 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
         </div>
       ) : (
         <div className="pb-14">
-          <PluginRows entries={plugins} showCreate={filter.kind === 'all'} />
+          <PluginRows
+            entries={plugins}
+            showCreate={filter.kind === 'all'}
+            onShare={kbDirName ? shareFolder : undefined}
+          />
           {visible.length === 0 && plugins.length === 0 ? (
             <div className="py-16 text-center text-ui text-ink-faint">
               {emptyMessageFor(filter, query)}
@@ -172,11 +211,38 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
               skillItems={visible.filter((i) => i.kind === 'skill')}
               toolItems={visible.filter((i) => i.kind === 'integration')}
               onOpen={openItem}
+              // A skill's rules live on its own folder — the same folder the
+              // skill page's Share opens. Tools get none: access to a tool is
+              // decided at the plugin that carries it.
+              onShare={kbDirName ? (item) => shareFolder(item.path) : undefined}
               hideEmpty
               emptySkills=""
             />
           )}
         </div>
+      )}
+
+      {manageTarget && (
+        <ManageAccessDialog
+          // Keyed on the path, so retargeting at an ancestor remounts it
+          // against that folder — the explorer's arrangement exactly.
+          key={manageTarget.relativePath}
+          // The Library speaks the DEFAULT branch: the gallery lists what is
+          // on it, so the rules it shares are edited where it read them,
+          // whatever branch the ambient workspace happens to be on. Same
+          // choice the skill page's Share makes.
+          workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+          entry={manageTarget}
+          onManageAncestor={setManageTarget}
+          onClose={() => {
+            setManageTarget(null);
+            // Granting can change what the reader — or a plugin's members —
+            // can see, so both witnesses are re-read: the catalog and the
+            // plugin index.
+            data.reload();
+            data.reloadPlugins();
+          }}
+        />
       )}
 
       {reviewing && (
