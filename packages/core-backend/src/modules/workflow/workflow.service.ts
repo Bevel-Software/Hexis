@@ -60,6 +60,7 @@ import {
   DEFAULT_BRANCH,
   isFolderPlaceholder,
   folderPlaceholderPath,
+  isPlatformRestoreShape,
 } from '@bevel-software/platform-shared';
 import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
@@ -899,9 +900,10 @@ export class WorkflowService implements IWorkflowService {
     targetPath: string,
     /**
      * The caller says this write is an admin putting a misplaced platform file
-     * back. Checked, never taken on trust — see `acquireLock`'s `opts`.
+     * back, and names where the file is coming from. Checked in both halves,
+     * never taken on trust — see `acquireLock`'s `opts`.
      */
-    platformRestore = false,
+    platformRestore?: { source: string },
   ): Promise<void> {
     // The lock route passes workspace-relative paths
     // (`knowledge-base/GTM/.../Foo.md`), but the access model is keyed by
@@ -912,9 +914,9 @@ export class WorkflowService implements IWorkflowService {
     // typically only grants Admin → non-admins get 403'd on files their
     // role's nested access.md actually permits. Mirrors the frontend's
     // `useFileAccess` prefix-strip on the way INTO the API.
-    const repoRelative = targetPath.startsWith(`${this.kbDirName}/`)
-      ? targetPath.slice(this.kbDirName.length + 1)
-      : targetPath;
+    const toRepoRelative = (p: string): string =>
+      p.startsWith(`${this.kbDirName}/`) ? p.slice(this.kbDirName.length + 1) : p;
+    const repoRelative = toRepoRelative(targetPath);
     const result = await this.accessControl.canWriteBatchAtRef(
       workspaceId,
       `HEAD`,
@@ -925,10 +927,19 @@ export class WorkflowService implements IWorkflowService {
     if (result.get(repoRelative)) return;
     // The one write allowed past a destination that denies it: an admin
     // putting a platform file back where the platform reads it. The access
-    // module decides — a repository whose root `access.md` is the file that
-    // went missing denies everyone, including the admin who would restore it.
+    // module decides who — a repository whose root `access.md` is the file
+    // that went missing denies everyone, including the admin who would
+    // restore it — and the shape check decides WHICH MOVE may even ask.
+    //
+    // Both are asked here rather than trusted from the route, because
+    // `canRestorePlatformFile` answers only on where the write LANDS: on its
+    // own it would approve carrying the root's own `access.md` into a folder
+    // that has none, which is the loss this feature exists to prevent, spelled
+    // as its own rescue. The source is part of the claim precisely so no
+    // future caller can make that claim by passing a flag.
     if (
-      platformRestore &&
+      typeof platformRestore?.source === 'string' &&
+      isPlatformRestoreShape(toRepoRelative(platformRestore.source), repoRelative) &&
       (await this.accessControl.canRestorePlatformFile(workspaceId, userEmail, repoRelative))
     ) {
       return;
@@ -964,7 +975,7 @@ export class WorkflowService implements IWorkflowService {
     branch: string,
     rawPath: string,
     user: AuthUser,
-    opts?: { coordination?: boolean; platformRestore?: boolean },
+    opts?: { coordination?: boolean; platformRestore?: { source: string } },
   ): Promise<AcquireLockResult> {
     const targetPath = canonicalFileIdentity(rawPath);
     // **Permission check at lock acquisition, not at commit time.** Under the
@@ -1000,7 +1011,7 @@ export class WorkflowService implements IWorkflowService {
         branch,
         user.email,
         targetPath,
-        opts?.platformRestore === true,
+        opts?.platformRestore,
       );
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);

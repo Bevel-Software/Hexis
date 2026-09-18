@@ -14,7 +14,7 @@ import {
   canonicalRelativePath,
   folderPlaceholderPath,
   isPlatformFile,
-  isRootPlatformFile,
+  isPlatformRestoreShape,
   platformFileRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
@@ -167,11 +167,12 @@ export function createWorkspaceRoutes(
       skipFsTreeEvent?: boolean;
       /**
        * This acquire is the destination side of an admin putting a misplaced
-       * platform file back. Passed straight to `acquireLock`, which VERIFIES
-       * it against the access module rather than believing it — see the
-       * `IWorkflowService.acquireLock` contract.
+       * platform file back, coming from `source`. Passed straight to
+       * `acquireLock`, which VERIFIES both halves — that the move is a restore
+       * at all, and that this caller may make it — rather than believing
+       * either. See the `IWorkflowService.acquireLock` contract.
        */
-      platformRestore?: boolean;
+      platformRestore?: { source: string };
     },
   ): Promise<T> {
     const branch = branchForWorkspaceId(workspaceId);
@@ -209,7 +210,7 @@ export function createWorkspaceRoutes(
       return result;
     }
     const acquired = await workflowService.acquireLock(workspaceId, branch, targetPath, user, {
-      platformRestore: options?.platformRestore === true,
+      platformRestore: options?.platformRestore,
     });
     if (!acquired.acquired) {
       const holder = acquired.lock.holderName || 'another user';
@@ -995,24 +996,45 @@ export function createWorkspaceRoutes(
       // would undo it is the move the gate refuses.
       //
       // The single exception is that repair: an admin putting a misplaced
-      // copy BACK. It is a restore only when the source is not already where
-      // the platform reads it — otherwise "move the root's access.md into a
-      // folder that has none" would qualify, which is the bug itself spelled
-      // as its own rescue. `canRestorePlatformFile` decides the rest.
+      // copy BACK. `isPlatformRestoreShape` says whether the MOVE is that
+      // repair — it is judged on the source's name and the destination, not
+      // on the source being a platform file where it currently sits, because
+      // a stray `roles.yaml` in a folder is ordinary content there and is
+      // still the copy the root is missing. `canRestorePlatformFile` then
+      // decides who may make it, and whether the disk agrees.
       const oldRel = toKbRelative(oldPath, kbDirName);
       const newRel = toKbRelative(newPath, kbDirName);
-      let platformRestore = false;
-      if (oldRel !== null && isPlatformFile(oldRel)) {
-        const name = oldRel.slice(oldRel.lastIndexOf('/') + 1);
-        platformRestore =
-          !isRootPlatformFile(oldRel) &&
-          newRel !== null &&
-          newRel.slice(newRel.lastIndexOf('/') + 1) === name &&
-          (await accessControl.canRestorePlatformFile(id, user.email, newRel));
-        if (!platformRestore) {
-          res.status(409).json({ error: platformFileRefusal(oldRel) });
+      // Nothing lands ON a platform file. `moveEntry` is a plain rename, so
+      // an ordinary file moved onto `access.md` would replace the folder's
+      // rules with content — the very loss this route refuses — while the
+      // rule above, which reads only the SOURCE, says nothing about it. A
+      // destination that already holds the file is also not a place one is
+      // missing from, so this is not the restore either.
+      if (newRel !== null && isPlatformFile(newRel)) {
+        const workspaceDir = await workspaceService.getWorkspacePath(id);
+        const absoluteNew = path.resolve(workspaceDir, newPath);
+        assertWithinDirectory(absoluteNew, workspaceDir);
+        const occupied = await fs.stat(absoluteNew).then(
+          () => true,
+          (err: unknown) => {
+            // Genuine absence is the only "free"; anything else is unknown,
+            // and unknown must not clear the way onto a platform file.
+            if (isAbsence(err)) return false;
+            return true;
+          },
+        );
+        if (occupied) {
+          res.status(409).json({ error: platformFileRefusal(newRel) });
           return;
         }
+      }
+      let platformRestore = false;
+      if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel)) {
+        platformRestore = await accessControl.canRestorePlatformFile(id, user.email, newRel);
+      }
+      if (oldRel !== null && isPlatformFile(oldRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileRefusal(oldRel) });
+        return;
       }
       // Move = rename on disk + commit on both sides. We lock-and-release
       // the destination first (commits the new file's appearance), then
@@ -1038,7 +1060,9 @@ export function createWorkspaceRoutes(
       // ordinary write the caller must already hold: the exception exists so a
       // file can land where the platform reads it, not so an admin can take
       // one out of a folder that denies them.
-      const restoreAt = (p: string) => ({ platformRestore: platformRestore && p === newPath });
+      const restoreAt = (p: string) => ({
+        platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
+      });
       await withLock(
         id,
         user,

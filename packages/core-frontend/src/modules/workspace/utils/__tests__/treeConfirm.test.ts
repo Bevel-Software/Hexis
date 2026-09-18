@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { moveWarnings, platformFileMoveRefusal } from '../treeConfirm';
+import { moveWarnings, platformFileDragRefusal, platformFileMoveRefusal } from '../treeConfirm';
 
 const KB = 'knowledge-base';
 
@@ -39,6 +39,35 @@ describe('platformFileMoveRefusal', () => {
   });
 });
 
+describe('platformFileDragRefusal', () => {
+  const sentence = (n: string) => `${n} is a platform file and stays in its folder.`;
+
+  it('is the rename refusal for anyone who is not an admin', () => {
+    for (const p of [`${KB}/access.md`, `${KB}/Sales/access.md`, `${KB}/Sales/.bevelignore`]) {
+      expect(platformFileDragRefusal(p, KB, false)).toBe(platformFileMoveRefusal(p, KB));
+    }
+  });
+
+  it('lets an admin drag a MISPLACED copy — the drag that puts one back', () => {
+    expect(platformFileDragRefusal(`${KB}/Sales/access.md`, KB, true)).toBeNull();
+    expect(platformFileDragRefusal(`${KB}/Sales/.bevelignore`, KB, true)).toBeNull();
+  });
+
+  it("never lets go of the root's own copy, which is the one a restore puts back", () => {
+    expect(platformFileDragRefusal(`${KB}/access.md`, KB, true)).toBe(sentence('access.md'));
+    expect(platformFileDragRefusal(`${KB}/roles.yaml`, KB, true)).toBe(sentence('roles.yaml'));
+    expect(platformFileDragRefusal(`${KB}/.bevelignore`, KB, true)).toBe(sentence('.bevelignore'));
+    expect(platformFileDragRefusal(`${KB}/AGENTS.md`, KB, true)).toBe(sentence('AGENTS.md'));
+  });
+
+  it('leaves ordinary content alone for either of them', () => {
+    for (const admin of [true, false]) {
+      expect(platformFileDragRefusal(`${KB}/Sales/deal.md`, KB, admin)).toBeNull();
+      expect(platformFileDragRefusal(`${KB}/access.md`, null, admin)).toBeNull();
+    }
+  });
+});
+
 describe('moveWarnings', () => {
   it('no longer warns about a platform file — the move never reaches the dialog', () => {
     expect(
@@ -64,6 +93,23 @@ describe('moveWarnings', () => {
     ).toEqual([
       "You can't write to Data — the move will be refused.",
       'This moves it out of KnowledgeBase/ into Data/ — the two roots are handled differently.',
+    ]);
+  });
+
+  it('does not predict a refusal for the one move a denied destination still takes', () => {
+    // The admin's restore: a misplaced access.md into a folder that has none.
+    // "The move will be refused" would be the wrong prediction — this is the
+    // move the destination's rules are bypassed for.
+    expect(
+      moveWarnings({
+        sourcePath: `${KB}/KnowledgeBase/Misplaced/access.md`,
+        targetDir: `${KB}/KnowledgeBase/Legal`,
+        destinationLabel: 'Legal',
+        kbDirName: KB,
+        canWrite: false,
+      }),
+    ).toEqual([
+      "You can't write to Legal, but putting access.md back where the platform reads it is allowed for an Admin.",
     ]);
   });
 });

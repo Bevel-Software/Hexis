@@ -54,6 +54,7 @@ import { cn } from '../../../lib/utils';
 import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
+import { AdminContext } from '../../admin/state/admin.context';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
@@ -64,7 +65,7 @@ import {
   type FolderProposals,
   type TreeConfirmRequest,
 } from './TreeActionConfirm';
-import { moveWarnings, platformFileMoveRefusal } from '../utils/treeConfirm';
+import { moveWarnings, platformFileDragRefusal, platformFileMoveRefusal } from '../utils/treeConfirm';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -759,11 +760,20 @@ export function FileTreeNode({
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, kbDirName, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
   /**
-   * Why this row cannot be renamed, moved or dragged, or null when it can.
-   * A platform file is refused here with the sentence the server refuses
-   * with — the tree says it without a round trip, and says the same thing.
+   * Why this row cannot be renamed, or null when it can. A platform file is
+   * refused here with the sentence the server refuses with — the tree says it
+   * without a round trip, and says the same thing.
    */
   const platformRefusal = platformFileMoveRefusal(entry.relativePath, kbDirName);
+  /**
+   * Why it cannot be DRAGGED — the same, minus an admin's one repair (see
+   * `platformFileDragRefusal`). Read through the context rather than
+   * `useAdmin()` so a tree rendered without an `AdminProvider` — a host app's,
+   * a test's — still draws: no provider is simply nobody's admin, which is the
+   * refusal this row had before the exception existed.
+   */
+  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
+  const dragRefusal = platformFileDragRefusal(entry.relativePath, kbDirName, isAdmin);
   const confirm = useTreeConfirm();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
@@ -937,11 +947,11 @@ export function FileTreeNode({
 
   // ── Drag source (internal reorder) ──
   const handleDragStart = useCallback((e: React.DragEvent) => {
-    if (isRoot || reserved || platformRefusal) { e.preventDefault(); return; }
+    if (isRoot || reserved || dragRefusal) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, isRoot, reserved, platformRefusal]);
+  }, [entry.relativePath, isRoot, reserved, dragRefusal]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -974,7 +984,7 @@ export function FileTreeNode({
         // sentence, and nothing is sent. The row itself is not draggable, so
         // this catches a drag begun before the tree knew the path's shape
         // (a drop is the last moment the answer is still cheap).
-        const refusal = platformFileMoveRefusal(sourcePath, kbDirName);
+        const refusal = platformFileDragRefusal(sourcePath, kbDirName, isAdmin);
         if (refusal) {
           alert(refusal);
           return;
@@ -1018,7 +1028,7 @@ export function FileTreeNode({
       if (files.length === 0) return;
       dispatchUpload({ kind: 'files', files }, targetDir);
     },
-    [entry, isRoot, dispatchUpload, moveEntry, confirm, kbDirName],
+    [entry, isRoot, dispatchUpload, moveEntry, confirm, kbDirName, isAdmin],
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1117,7 +1127,7 @@ export function FileTreeNode({
             dragOver && 'bg-hover text-ink ring-1 ring-accent/40',
           )}
           style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
-          draggable={!isRoot && !reserved && !renaming && !isPending}
+          draggable={!isRoot && !reserved && !renaming && !isPending && !dragRefusal}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onDrop={handleDrop}
@@ -1237,6 +1247,11 @@ export function FileTreeNode({
             // either, but that needs no gate: only the Knowledge explorer
             // offers pinning, and its roots are not reserved.)
             onRename={reserved ? undefined : () => setRenaming(true)}
+            // A folder NAMED like a platform file (`access.md/`) meets the same
+            // rule: the server reads the path, not the kind, and refuses to
+            // move it. Without this the row refused the drag and offered the
+            // rename, which opened an editor only to fail on the round trip.
+            renameRefusal={platformRefusal}
             deletable={!reserved}
             onDownload={absent ? undefined : handleDownload}
             extraItems={nav.menuItems?.(entry)}
@@ -1312,7 +1327,7 @@ export function FileTreeNode({
           isPending && 'cursor-progress',
         )}
         style={{ paddingLeft, opacity: dragging ? 0.5 : isPending ? 0.6 : 1 }}
-        draggable={!renaming && !isPending && !platformRefusal}
+        draggable={!renaming && !isPending && !dragRefusal}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onClick={() => { if (!renaming && !isPending) nav.open(entry.relativePath); }}

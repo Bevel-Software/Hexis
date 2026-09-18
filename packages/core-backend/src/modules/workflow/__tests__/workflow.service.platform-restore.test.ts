@@ -17,10 +17,12 @@ import { AccessDeniedError } from '../../access-model/access-errors.js';
  * exception expressed INSIDE it.
  *
  * `opts.platformRestore` is a claim the caller makes, not an authorisation it
- * carries: the gate re-asks the access module about the exact path being
- * written, and only a yes lets the acquire through. These cases hold that
- * apart from a general admin write bypass, which is the thing this rescue
- * must never become.
+ * carries. The gate re-asks both halves: that source→destination is a restore
+ * at all, which it answers itself, and whether this caller may land this exact
+ * path, which the access module answers. Only both yeses let the acquire
+ * through. These cases hold that apart from a general admin write bypass,
+ * which is the thing this rescue must never become — and apart from a flag a
+ * future caller could pass to take the root's own copy OUT.
  */
 
 const USER: AuthUser = { id: 'user-1', email: 'razvan@bevel.software', name: 'Razvan' };
@@ -57,10 +59,14 @@ function makeService(canRestorePlatformFile: IAccessControl['canRestorePlatformF
 }
 
 describe('acquiring the destination lock of a platform-file restore', () => {
+  const MISPLACED = `${KB}/Misplaced/access.md`;
+
   it('lets the write past a destination that denies it when the access module says this is a restore', async () => {
     const { svc, acquire, accessControl } = makeService(async () => true);
 
-    const result = await svc.acquireLock(WS, BRANCH, `${KB}/access.md`, USER, { platformRestore: true });
+    const result = await svc.acquireLock(WS, BRANCH, `${KB}/access.md`, USER, {
+      platformRestore: { source: MISPLACED },
+    });
 
     expect(result.acquired).toBe(true);
     expect(acquire).toHaveBeenCalledOnce();
@@ -72,20 +78,46 @@ describe('acquiring the destination lock of a platform-file restore', () => {
     const { svc, acquire } = makeService(async () => false);
 
     await expect(
-      svc.acquireLock(WS, BRANCH, `${KB}/access.md`, USER, { platformRestore: true }),
+      svc.acquireLock(WS, BRANCH, `${KB}/access.md`, USER, { platformRestore: { source: MISPLACED } }),
     ).rejects.toBeInstanceOf(AccessDeniedError);
     expect(acquire).not.toHaveBeenCalled();
   });
 
-  it('a claim on any other path buys nothing — the access module answers no and the gate refuses', async () => {
-    const { svc, acquire, accessControl } = makeService(
-      async (_w, _e, dest) => dest === 'access.md',
-    );
+  it('a claim whose source is the copy the platform reads is refused without asking anyone', async () => {
+    // The move the whole feature exists to stop, wearing the rescue's clothes:
+    // the ROOT's own access.md carried into a folder that has none. The access
+    // module would say yes — it is only ever asked where the write LANDS — so
+    // the gate answers this one itself rather than passing it on.
+    const { svc, acquire, accessControl } = makeService(async () => true);
 
     await expect(
-      svc.acquireLock(WS, BRANCH, `${KB}/Sales/deal.md`, USER, { platformRestore: true }),
+      svc.acquireLock(WS, BRANCH, `${KB}/Sales/access.md`, USER, {
+        platformRestore: { source: `${KB}/access.md` },
+      }),
     ).rejects.toBeInstanceOf(AccessDeniedError);
-    expect(accessControl.canRestorePlatformFile).toHaveBeenCalledWith(WS, USER.email, 'Sales/deal.md');
+    expect(accessControl.canRestorePlatformFile).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('a claim on any other path buys nothing — it is not a restore and is never asked about', async () => {
+    const { svc, acquire, accessControl } = makeService(async () => true);
+
+    await expect(
+      svc.acquireLock(WS, BRANCH, `${KB}/Sales/deal.md`, USER, {
+        platformRestore: { source: `${KB}/Misplaced/deal.md` },
+      }),
+    ).rejects.toBeInstanceOf(AccessDeniedError);
+    expect(accessControl.canRestorePlatformFile).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('a restore must keep the name: a misplaced access.md may not arrive as roles.yaml', async () => {
+    const { svc, acquire, accessControl } = makeService(async () => true);
+
+    await expect(
+      svc.acquireLock(WS, BRANCH, `${KB}/roles.yaml`, USER, { platformRestore: { source: MISPLACED } }),
+    ).rejects.toBeInstanceOf(AccessDeniedError);
+    expect(accessControl.canRestorePlatformFile).not.toHaveBeenCalled();
     expect(acquire).not.toHaveBeenCalled();
   });
 

@@ -61,21 +61,38 @@ describe('restoring a platform file', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('lets an admin land the three root-only platform files at the root of a repository whose root denies everyone', async () => {
+  it('lets an admin land the root-only platform files the root is missing, and no others', async () => {
     // The state the ticket describes: the root's own rules are gone, so the
-    // ordinary gate has no grant to give anyone.
+    // ordinary gate has no grant to give anyone. `roles.yaml` is on disk here
+    // only because it is the file that says who the admin is — the repository
+    // that lost that one too is the last case in this file.
     const svc = service();
-    for (const name of ['roles.yaml', '.bevelignore', 'AGENTS.md']) {
+    for (const name of ['.bevelignore', 'AGENTS.md']) {
       expect(await svc.canRestorePlatformFile(WS, ADMIN, name)).toBe(true);
     }
+    // Nothing is missing at `roles.yaml`: the root has one. A move is a rename
+    // on disk, so landing another there would REPLACE the admin model rather
+    // than put it back, and no exception carries that.
+    expect(await svc.canRestorePlatformFile(WS, ADMIN, 'roles.yaml')).toBe(false);
   });
 
-  it('lets an admin land the three root-only platform files even when the root access.md denies Admin outright', async () => {
-    await write(repo, 'access.md', '---\nwrite:\n  - deny everyone\n  - deny Admin\n---\n');
+  it('lets an admin land an access.md in a folder whose inherited rules deny them', async () => {
+    // The premise, made real: `Sales/access.md` denies the Admin ROLE (the
+    // `role/` alias — a bare `Admin` key belongs to a group of that name, so
+    // the deny would land on nobody), and `Sales/Legal` has no access.md of
+    // its own, so it inherits the deny. There is no such case at the ROOT:
+    // Admin holds a write floor there that the root's own access.md cannot
+    // take away (see `isAdminFloorScope`), so a root deny is a deny of
+    // everyone else.
+    await write(repo, 'Sales/access.md', '---\nwrite:\n  - deny role/Admin\n---\n');
+    await fs.mkdir(path.join(repo, 'Sales/Legal'), { recursive: true });
     const svc = service();
-    expect(await svc.canRestorePlatformFile(WS, ADMIN, 'roles.yaml')).toBe(true);
-    expect(await svc.canRestorePlatformFile(WS, ADMIN, '.bevelignore')).toBe(true);
-    expect(await svc.canRestorePlatformFile(WS, ADMIN, 'AGENTS.md')).toBe(true);
+    // The deny is real and it reaches the admin: an ordinary file in that
+    // folder is refused them.
+    expect(await svc.canWrite(WS, ADMIN, 'Sales/Legal/deal.md')).toBe(false);
+    expect(await svc.canRestorePlatformFile(WS, ADMIN, 'Sales/Legal/access.md')).toBe(true);
+    // The destination's rules are bypassed; who may bypass them is not.
+    expect(await svc.canRestorePlatformFile(WS, ENGINEER, 'Sales/Legal/access.md')).toBe(false);
   });
 
   it('the three root-only names are a restore at the root and nowhere else', async () => {
@@ -103,10 +120,22 @@ describe('restoring a platform file', () => {
 
   it('the deployment owner is an admin for it, and an ordinary destination is not a restore for anyone', async () => {
     const svc = service();
-    expect(await svc.canRestorePlatformFile(WS, OWNER, 'roles.yaml')).toBe(true);
+    expect(await svc.canRestorePlatformFile(WS, OWNER, 'AGENTS.md')).toBe(true);
     for (const email of [ADMIN, OWNER]) {
       expect(await svc.canRestorePlatformFile(WS, email, 'Sales/deal.md')).toBe(false);
       expect(await svc.canRestorePlatformFile(WS, email, 'Sales/notes.md')).toBe(false);
+    }
+  });
+
+  it('a destination that walks out of the repository is not a restore, whatever it would resolve to', async () => {
+    // `KnowledgeBase/../access.md` names the root's file to a resolver and a
+    // nested one to a reader of segments. The single exception is the one
+    // write allowed past a destination that denies it, so it refuses the
+    // question rather than answering the wrong reading of it — and it fails
+    // closed here rather than leaning on the move's own path-safety check.
+    const svc = service();
+    for (const dest of ['../access.md', '../roles.yaml', 'Sales/../access.md', 'Sales/./access.md']) {
+      expect(await svc.canRestorePlatformFile(WS, ADMIN, dest)).toBe(false);
     }
   });
 

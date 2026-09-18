@@ -9,6 +9,7 @@ import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { AdminContext, type AdminContextValue } from '../../../admin/state/admin.context';
 
 // authFetch is the bearer-token wrapper around window.fetch. The Download
 // click test asserts the URL + ?download=1 flag, so we mock it at the
@@ -103,6 +104,13 @@ interface RenderOptions {
   openChangeRequestPaths?: string[];
   /** The caller's own open requests: workspace-relative path → CR number. */
   minePaths?: Map<string, number>;
+  /**
+   * Whether the signed-in person is an admin. Only the platform-file rows
+   * read it: an admin may drag a MISPLACED one back where the platform reads
+   * it, so the row lets that drag start and the server decides the rest.
+   * Omitted means no `AdminProvider` at all, which is nobody's admin.
+   */
+  isAdmin?: boolean;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -129,6 +137,7 @@ function renderExplorer(opts: RenderOptions = {}) {
   const ui = (ws: WorkspaceContextValue) => (
       <MemoryRouter>
         <AuthContext.Provider value={makeAuth()}>
+          <AdminContext.Provider value={{ isAdmin: opts.isAdmin === true } as AdminContextValue}>
           <WorkspaceContext.Provider value={ws}>
             <GitContext.Provider value={makeGit()}>
                 <OpenChangeRequestsContext.Provider
@@ -164,6 +173,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                 </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
+          </AdminContext.Provider>
         </AuthContext.Provider>
       </MemoryRouter>
   );
@@ -2339,6 +2349,112 @@ describe('FileExplorer: platform files stay put', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Move' }));
     });
     expect(moveEntry).toHaveBeenCalledWith(`${KB}/Handbook/notes.md`, `${KB}/Sales/notes.md`);
+  });
+
+  // The recovery the refusal must not swallow: an admin putting a MISPLACED
+  // platform file back where the platform reads it. The row cannot know the
+  // destination, so it keeps only what it is sure of — the root's own copy
+  // never moves, and nobody but an admin moves any of them — and lets the
+  // server answer the rest, which is the only place the answer lives.
+  describe('an admin may drag a misplaced one back', () => {
+    const MISPLACED: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: KB,
+          relativePath: KB,
+          type: 'directory',
+          children: [
+            file(`${KB}/access.md`),
+            file(`${KB}/Misplaced/.bevelignore`),
+            { name: 'Sales', relativePath: `${KB}/Sales`, type: 'directory', children: [] },
+          ],
+        },
+      ],
+    };
+
+    function misplacedRow(): HTMLElement {
+      return screen.getAllByText('.bevelignore')[0].closest('button')!;
+    }
+
+    it('the misplaced row drags, and the drop asks rather than refusing', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      expect(misplacedRow()).toHaveAttribute('draggable', 'true');
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(
+        `${KB}/Misplaced/.bevelignore`,
+        `${KB}/Sales/.bevelignore`,
+      );
+    });
+
+    it("the root's own copy still cannot be dragged, admin or not", () => {
+      renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      expect(row('access.md')).toHaveAttribute('draggable', 'false');
+    });
+
+    it('a non-admin gets no exception: the misplaced row is refused like any other', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: false });
+      expect(misplacedRow()).toHaveAttribute('draggable', 'false');
+      await act(async () => {
+        fireEvent.drop(screen.getByText('Sales'), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).toHaveBeenCalledWith(sentence('.bevelignore'));
+      expect(moveEntry).not.toHaveBeenCalled();
+    });
+
+    it('a rename is never the recovery, so an admin is refused it', async () => {
+      renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      fireEvent.contextMenu(misplacedRow());
+      const rename = screen.getByRole('menuitem', { name: /Rename/i });
+      expect(rename).toHaveAttribute('aria-disabled', 'true');
+      expect(rename).toHaveAttribute('title', sentence('.bevelignore'));
+    });
+  });
+
+  it('a FOLDER named like a platform file refuses the rename too, not just the drag', () => {
+    // The server reads the path, not the kind. Offering Rename here opened an
+    // editor that could only fail on the round trip.
+    const WITH_FOLDER: FileTreeEntry = {
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [
+        {
+          name: KB,
+          relativePath: KB,
+          type: 'directory',
+          children: [
+            { name: 'access.md', relativePath: `${KB}/access.md`, type: 'directory', children: [] },
+          ],
+        },
+      ],
+    };
+    renderExplorer({ fileTree: WITH_FOLDER });
+    // The folder row's draggable sits on the wrapper around the name button.
+    expect(screen.getByText('access.md').closest('[draggable]')).toHaveAttribute('draggable', 'false');
+    fireEvent.contextMenu(row('access.md'));
+    const rename = screen.getByRole('menuitem', { name: /Rename/i });
+    expect(rename).toHaveAttribute('aria-disabled', 'true');
+    expect(rename).toHaveAttribute('title', sentence('access.md'));
   });
 
   it('a nested AGENTS.md is content, not a platform file: it drags like any other row', () => {

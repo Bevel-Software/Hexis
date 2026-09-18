@@ -519,10 +519,17 @@ export interface IAccessControl {
    * named `roles.yaml`, `.bevelignore` or `AGENTS.md` into the repository
    * root, and a file named `access.md` into a folder that has none.
    *
+   * Only where the file is MISSING: a destination that already holds it is
+   * false, because a move is a rename on disk and landing on the file would
+   * replace the very rules the exception exists to bring back.
+   *
    * Narrow on purpose, and the narrowness lives here rather than in the
-   * caller: false for any other path, for any other destination, and for
-   * anyone who is not an admin. It grants no write anywhere else, and it is
-   * asked only about where a move LANDS — never about what a move takes away.
+   * caller: false for any other path, for any other destination, for a
+   * destination spelled with `..`, and for anyone who is not an admin. It
+   * grants no write anywhere else, and it is asked only about where a move
+   * LANDS — never about what a move takes away, which is why a caller that
+   * could take one away (the move route, the lock gate) also checks the
+   * SOURCE with `isPlatformRestoreShape`.
    */
   canRestorePlatformFile(
     workspaceId: string,

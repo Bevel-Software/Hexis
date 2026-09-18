@@ -2020,8 +2020,10 @@ describe('preflight for moves and deletes', () => {
         [KB('roles.yaml'), KB('Sales/roles.yaml')],
         [KB('.bevelignore'), KB('Sales/.bevelignore')],
         [KB('AGENTS.md'), KB('Sales/AGENTS.md')],
-        // Including the one an admin WOULD be allowed to make from the UI.
-        [KB('Misplaced/access.md'), KB('access.md')],
+        // Including the shape of the admin's recovery move: a misplaced
+        // access.md into a folder that has none. A person holding the Admin
+        // role is allowed exactly this move from the UI; the agent is not.
+        [KB('Misplaced/access.md'), KB('HR/access.md')],
       ];
       for (const [src, dest] of cases) {
         const name = src.slice(src.lastIndexOf('/') + 1);

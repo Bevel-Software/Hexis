@@ -1759,15 +1759,20 @@ export class AccessControlService implements IAccessControl {
       admin = this.deploymentOwners.has(email);
     }
     if (!admin) return false;
-    if (target.kind === 'root') return true;
 
-    // An `access.md` goes back only into a folder that has none. Into a folder
-    // that already has one it would not be a restore but a rule change wearing
-    // a move's clothes — and the destination's own rules would be the thing it
-    // bypassed the write gate to overwrite.
+    // A restore puts back what is MISSING, so the place it lands must be
+    // empty. An `access.md` goes back only into a folder that has none —
+    // into a folder that already has one it would not be a restore but a rule
+    // change wearing a move's clothes, and the destination's own rules would
+    // be the thing it bypassed the write gate to overwrite. The same holds at
+    // the root: a move is a rename on disk, so landing `.bevelignore` on a
+    // root that already has one would silently replace it, and the repository
+    // was never missing that file to begin with.
+    const destination =
+      target.kind === 'root' ? target.name : path.join(target.dir, 'access.md');
     const repoDir = await this.repoDir(workspaceId);
     try {
-      await fs.stat(path.join(repoDir, target.dir, 'access.md'));
+      await fs.stat(path.join(repoDir, destination));
       return false;
     } catch (err) {
       if (isAbsence(err)) return true;

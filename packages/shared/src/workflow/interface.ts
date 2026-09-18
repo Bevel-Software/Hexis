@@ -281,18 +281,24 @@ export interface IWorkflowService {
    *
    * `opts.platformRestore` CLAIMS that this acquire is the destination side of
    * an admin putting a misplaced platform file back (`access.md`, `roles.yaml`,
-   * `.bevelignore`, `AGENTS.md`). It is a claim, not an authorisation: the
-   * implementation re-asks the access module
-   * (`canRestorePlatformFile`) whether this caller may land this exact path,
-   * and only a yes lets the acquire past the write gate. No other path and no
-   * non-admin gains anything by passing it.
+   * `.bevelignore`, `AGENTS.md`), and names the move's `source` — the path the
+   * file is coming FROM, in the same spelling as `path`.
+   *
+   * It is a claim, not an authorisation. The implementation re-asks both
+   * halves of it: that source→path is a restore at all (a misplaced copy
+   * going back under its own name, never the root's own copy coming out —
+   * `isPlatformRestoreShape`), and that the access module
+   * (`canRestorePlatformFile`) lets this caller land this exact path. Only
+   * both yeses let the acquire past the write gate, so a caller that omits or
+   * fakes the source gains nothing: the gate never takes the route's word for
+   * which move this is.
    */
   acquireLock(
     workspaceId: string,
     branch: string,
     path: string,
     user: AuthUser,
-    opts?: { coordination?: boolean; platformRestore?: boolean },
+    opts?: { coordination?: boolean; platformRestore?: { source: string } },
   ): Promise<AcquireLockResult>;
   /** Heartbeat to keep an acquired lock alive past its current TTL. */
   heartbeatLock(workspaceId: string, branch: string, path: string, user: AuthUser): Promise<FileLock>;

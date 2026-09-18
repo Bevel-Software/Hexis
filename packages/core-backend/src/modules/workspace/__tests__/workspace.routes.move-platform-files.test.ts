@@ -187,39 +187,79 @@ describe('a platform file stays in its folder', () => {
     },
   );
 
-  it('an admin restores a misplaced access.md into a root that denies them, and only the destination carries the claim', async () => {
-    h.canRestorePlatformFile.mockResolvedValue(true);
-    const res = await move(h, `${KB}/Misplaced/access.md`, `${KB}/access.md`);
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: 'moved' });
-    expect(h.moveEntry).toHaveBeenCalledWith(WORKSPACE_ID, `${KB}/Misplaced/access.md`, `${KB}/access.md`);
-    // Asked about where the move LANDS, repo-relative — never about what it
-    // takes away.
-    expect(h.canRestorePlatformFile).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, 'access.md');
-    // The source side is an ordinary write the caller must already hold; only
-    // the destination lock may present the restore claim to the write gate.
-    const claims = new Map(
-      h.acquireLock.mock.calls.map((c) => [c[2] as string, (c[4] as { platformRestore?: boolean })?.platformRestore]),
-    );
-    expect(claims.get(`${KB}/access.md`)).toBe(true);
-    expect(claims.get(`${KB}/Misplaced/access.md`)).toBe(false);
-  });
+  // The recovery move, for each of the four, from the place a misplaced copy
+  // is actually found to the place the platform reads it.
+  const RESTORES = [
+    { name: 'access.md', from: `${KB}/Misplaced/access.md`, to: `${KB}/access.md`, dest: 'access.md' },
+    { name: '.bevelignore', from: `${KB}/Misplaced/.bevelignore`, to: `${KB}/.bevelignore`, dest: '.bevelignore' },
+    { name: 'roles.yaml', from: `${KB}/Misplaced/roles.yaml`, to: `${KB}/roles.yaml`, dest: 'roles.yaml' },
+    { name: 'AGENTS.md', from: `${KB}/Misplaced/AGENTS.md`, to: `${KB}/AGENTS.md`, dest: 'AGENTS.md' },
+  ];
 
-  it('an admin restores a misplaced .bevelignore into the repository root', async () => {
-    h.canRestorePlatformFile.mockResolvedValue(true);
-    const res = await move(h, `${KB}/Misplaced/.bevelignore`, `${KB}/.bevelignore`);
-    expect(res.status).toBe(200);
-    expect(h.moveEntry).toHaveBeenCalledOnce();
-    expect(h.canRestorePlatformFile).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, '.bevelignore');
-  });
+  it.each(RESTORES)(
+    'an admin restores a misplaced $name, and only the destination carries the claim',
+    async ({ from, to, dest }) => {
+      h.canRestorePlatformFile.mockResolvedValue(true);
+      const res = await move(h, from, to);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'moved' });
+      expect(h.moveEntry).toHaveBeenCalledWith(WORKSPACE_ID, from, to);
+      // Asked about where the move LANDS, repo-relative — never about what it
+      // takes away. (What it takes away is the source, which the claim names
+      // so the write gate can check it without trusting this route.)
+      expect(h.canRestorePlatformFile).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, dest);
+      // The source side is an ordinary write the caller must already hold; only
+      // the destination lock may present the restore claim to the write gate.
+      const claims = new Map(
+        h.acquireLock.mock.calls.map(
+          (c) => [c[2] as string, (c[4] as { platformRestore?: { source: string } })?.platformRestore],
+        ),
+      );
+      expect(claims.get(to)).toEqual({ source: from });
+      expect(claims.get(from)).toBeUndefined();
+    },
+  );
 
-  it('refuses the same restore for a non-admin, with the same sentence', async () => {
+  it.each(RESTORES)('a non-admin never gets the restore for $name', async ({ name, from, to }) => {
     h.canRestorePlatformFile.mockResolvedValue(false);
-    const res = await move(h, `${KB}/Misplaced/access.md`, `${KB}/access.md`);
-    expect(res.status).toBe(409);
-    expect(res.body.error).toBe('access.md is a platform file and stays in its folder.');
+    const res = await move(h, from, to);
+    expect(h.canRestorePlatformFile).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, name);
+    if (name === 'access.md' || name === '.bevelignore') {
+      // Read wherever they sit, so the misplaced copy is a platform file too
+      // and the refusal is the sentence.
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe(`${name} is a platform file and stays in its folder.`);
+      expect(h.moveEntry).not.toHaveBeenCalled();
+    } else {
+      // A nested `roles.yaml` / `AGENTS.md` is ordinary content, so nothing
+      // here refuses moving it. What the non-admin does not get is the CLAIM:
+      // the move faces the destination's own rules like any other, which in
+      // the repository this feature is about is the deny that started it.
+      expect(res.status).toBe(200);
+      for (const call of h.acquireLock.mock.calls) {
+        expect((call[4] as { platformRestore?: unknown })?.platformRestore).toBeUndefined();
+      }
+    }
+  });
+
+  it('nothing lands ON a platform file that is already there, restore or not', async () => {
+    // `moveEntry` is a rename: without this the destination's rules would be
+    // replaced by whatever was dragged onto them, and the rule above — which
+    // reads only the SOURCE — would have nothing to say about it.
+    await fs.mkdir(path.join(h.workspaceDir, KB), { recursive: true });
+    await fs.writeFile(path.join(h.workspaceDir, KB, 'access.md'), '---\nread: everyone\n---\n');
+
+    const ordinary = await move(h, `${KB}/Sales/deal.md`, `${KB}/access.md`);
+    expect(ordinary.status).toBe(409);
+    expect(ordinary.body.error).toBe('access.md is a platform file and stays in its folder.');
+
+    // Not even the rescue: a root that HAS its access.md is not missing one.
+    h.canRestorePlatformFile.mockResolvedValue(true);
+    const restore = await move(h, `${KB}/Misplaced/access.md`, `${KB}/access.md`);
+    expect(restore.status).toBe(409);
+    expect(restore.body.error).toBe('access.md is a platform file and stays in its folder.');
+
     expect(h.moveEntry).not.toHaveBeenCalled();
-    expect(h.acquireLock).not.toHaveBeenCalled();
   });
 
   it('a restore must keep the name: a misplaced access.md may not arrive as something else', async () => {
@@ -249,7 +289,7 @@ describe('a platform file stays in its folder', () => {
     expect(h.moveEntry).toHaveBeenCalledTimes(2);
     expect(h.canRestorePlatformFile).not.toHaveBeenCalled();
     for (const call of h.acquireLock.mock.calls) {
-      expect((call[4] as { platformRestore?: boolean })?.platformRestore).toBe(false);
+      expect((call[4] as { platformRestore?: unknown })?.platformRestore).toBeUndefined();
     }
   });
 
