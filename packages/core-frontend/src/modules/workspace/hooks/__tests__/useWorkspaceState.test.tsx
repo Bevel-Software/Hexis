@@ -297,20 +297,292 @@ describe('useWorkspaceState multi-tab', () => {
     expect(result.current.openFileSavedContent).toBe('content:a.md');
   });
 
-  it('persists tabs to localStorage after hydrate, debounced', async () => {
+  /**
+   * The reproduction's "URL and open file disagree after fast clicks": click
+   * several unopened files, then one that is already open. Reopening an open
+   * tab took a shortcut that skipped the "latest open" token, so the last
+   * still-in-flight read counted as the newest intent and activated ITS file
+   * when it landed — the URL naming one file and the screen showing another,
+   * indefinitely.
+   */
+  it('reopening an already-open tab outranks an older read still in flight', async () => {
     const result = await mountReady();
+    await act(async () => { await result.current.addTab('b.md'); });
+    expect(result.current.activeTab?.path).toBe('b.md');
+
+    // A click on an unopened file: its read hangs.
+    let releaseRead: ((content: string) => void) | undefined;
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { releaseRead = resolve; }),
+    );
+    let slowOpen: Promise<boolean> | undefined;
+    act(() => { slowOpen = result.current.addTab('a.md'); });
+
+    // A click on `b.md`, which is already open — the last thing the user asked for.
+    await act(async () => { await result.current.addTab('b.md'); });
+    expect(result.current.activeTab?.path).toBe('b.md');
+
+    // Now `a.md` arrives. It opens its tab, but it does NOT steal the focus.
+    await act(async () => {
+      releaseRead?.('content:a.md');
+      await slowOpen;
+    });
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['b.md', 'a.md']);
+    expect(result.current.activeTab?.path).toBe('b.md');
+  });
+
+  it('persists tabs to localStorage after hydrate, debounced', async () => {
+    // A real workspace id IS the encoded branch, and the persistence key is
+    // built from the branch the workspace turned out to be — so the fixture
+    // has to be a branch-shaped id, not an opaque one.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
     act(() => { result.current.setPersistenceBranch('alice/draft'); });
     await act(async () => { await result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
     await act(async () => { await result.current.addTab('c.md'); });
 
     // Wait for the 200ms debounce to flush.
     await waitFor(() => {
-      const raw = localStorage.getItem('bevel.tabs.ws-1.alice/draft');
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
       expect(raw).not.toBeNull();
       const parsed = JSON.parse(raw!);
       expect(parsed.paths).toEqual(['a.md', 'b.md', 'c.md']);
       expect(parsed.activePath).toBe('c.md');
     });
+  });
+
+  /**
+   * A restore and an open are different claims. The open says "this file is
+   * what I want ACTIVE"; the restore says "these tabs are this branch's".
+   * Sharing one token made an ordinary click mid-restore look like it had
+   * retired the restore: the branch's whole tab list was dropped on the floor,
+   * and — the marker for "this key has been hydrated" never being set —
+   * persistence for that branch stayed off, so the list was never written
+   * again either. The click wins the focus; it does not empty the strip.
+   */
+  it('an open during a hydration keeps the focus without discarding the restored tabs', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+
+    // The restore's reads hang; the click's read answers at once.
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => {
+      if (path === 'c.md') return 'content:c.md';
+      return new Promise<string>((resolve) => { pendingReads.push(resolve); });
+    });
+
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
+    await act(async () => { await result.current.addTab('c.md'); });
+    expect(result.current.activeTab?.path).toBe('c.md');
+
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:restored');
+      await hydration;
+    });
+
+    // Every restored tab is there, alongside the one the user clicked, and the
+    // click keeps the focus it claimed.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['a.md', 'b.md', 'c.md']);
+    expect(result.current.activeTab?.path).toBe('c.md');
+
+    // And persistence is live for this branch: the restore counted.
+    await waitFor(() => {
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).paths).toEqual(['a.md', 'b.md', 'c.md']);
+    });
+  });
+
+  /**
+   * The other half of the same split: a NEWER RESTORE does retire an older
+   * one, and the older one has to say so. A caller that recorded it as done
+   * would mark the branch hydrated on the strength of a result that never
+   * reached the screen.
+   */
+  it('reports a hydration overtaken by a newer hydration as superseded', async () => {
+    const { result } = await (async () => {
+      const r = renderHook(() => useWorkspaceState());
+      await waitFor(() => expect(r.result.current.workspaceId).toBe('ws-1'));
+      return r;
+    })();
+
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { pendingReads.push(resolve); }),
+    );
+    let first: Promise<{ superseded: boolean }> | undefined;
+    act(() => { first = result.current.hydrateTabs(['a.md'], 'a.md'); });
+
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => `content:${path}`);
+    await act(async () => { await result.current.hydrateTabs(['b.md'], 'b.md'); });
+
+    let firstResult: { superseded: boolean } | undefined;
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:a.md');
+      firstResult = await first;
+    });
+    expect(firstResult?.superseded).toBe(true);
+    // The newer restore's strip stands, untouched by the older one.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['b.md']);
+  });
+
+  /**
+   * The crossed key from the reproduction: `bevel.tabs.main.someone/draft` —
+   * one branch's workspace under another branch's name. It was written
+   * mid-switch, because the persistence key took its branch from
+   * `persistenceBranch`, which points at the branch being switched TO from the
+   * instant the switch starts, while `workspaceId` still serves the branch
+   * being left. Tabs are persisted under the key of the branch they were READ
+   * from, or not at all.
+   */
+  it('never persists one branch\'s tabs under another branch\'s key during a switch', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+
+    act(() => { result.current.setPersistenceBranch('main'); });
+    await act(async () => { await result.current.hydrateTabs(['a.md'], 'a.md'); });
+    await waitFor(() => {
+      expect(localStorage.getItem('bevel.tabs.main.main')).not.toBeNull();
+    });
+
+    // A second hydration against `main` goes in flight…
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(
+      () => new Promise<string>((resolve) => { pendingReads.push(resolve); }),
+    );
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['a.md', 'b.md'], 'b.md'); });
+
+    // …and mid-flight the user switches away. `persistenceBranch` moves to the
+    // destination immediately; the destination's workspace never arrives.
+    apiMocks.getOrCreateWorkspace.mockImplementation(() => new Promise(() => {}));
+    act(() => { result.current.setPersistenceBranch('someone/draft'); });
+
+    // Now `main`'s reads land. These bytes belong to `main` and to no other key.
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:from-main');
+      await hydration;
+    });
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(localStorage.getItem('bevel.tabs.main.someone/draft')).toBeNull();
+    expect(localStorage.getItem('bevel.tabs.someone%2Fdraft.someone/draft')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('bevel.tabs.main.main')!).paths)
+      .toEqual(['a.md', 'b.md']);
+  });
+
+  /**
+   * A restore overtaken by a click MERGES into the strip rather than replacing
+   * it. If the strip still held the branch being left, the merge carried those
+   * tabs over: shown on the new branch with the old branch's text, and
+   * persisted under the new branch's key. The strip belongs to the workspace
+   * it was read from, so a new workspace starts it empty.
+   */
+  it('a click during a switch never carries the previous branch\'s tabs into the new one', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    act(() => { result.current.setPersistenceBranch('main'); });
+    await act(async () => { await result.current.hydrateTabs(['only-on-main.md'], 'only-on-main.md'); });
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['only-on-main.md']);
+
+    // Switch to the draft; its workspace arrives.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+
+    // The draft's restore hangs; the user clicks a file meanwhile.
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => {
+      if (path === 'clicked.md') return 'content:clicked.md';
+      return new Promise<string>((resolve) => { pendingReads.push(resolve); });
+    });
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['restored.md'], 'restored.md'); });
+    await act(async () => { await result.current.addTab('clicked.md'); });
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:restored.md');
+      await hydration;
+    });
+
+    // Only the draft's tabs: the restored one and the clicked one.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['restored.md', 'clicked.md']);
+    await waitFor(() => {
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).paths).toEqual(['restored.md', 'clicked.md']);
+    });
+  });
+
+  /**
+   * The last read without a workspace guard: activating a tab whose bytes an
+   * fs bump invalidated re-reads it in the background. If the branch switches
+   * while that read is in flight, the tab of the same path on the new branch
+   * is not the one it was for — its answer, bytes or a 404, is about the
+   * branch that was left.
+   */
+  it.each([
+    ['bytes', (resolve: (c: string) => void) => resolve('content:from-main')],
+    ['a 404', (_resolve: (c: string) => void, reject: (e: unknown) => void) => reject(new WorkspaceApiError(404))],
+  ])('an activate re-read from the branch left behind lands nowhere (%s)', async (_label, settle) => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    await act(async () => { await result.current.addTab('shared.md'); });
+    await act(async () => { await result.current.addTab('other.md'); });
+    // An fs bump invalidates the inactive tab; re-activating it re-reads.
+    act(() => { result.current.bumpFsRevision(); });
+    await waitFor(() => {
+      expect(result.current.openTabs.find((t) => t.path === 'shared.md')?.content).toBeNull();
+    });
+    let resolveOld: (c: string) => void = () => {};
+    let rejectOld: (e: unknown) => void = () => {};
+    apiMocks.readFile.mockImplementation((wsId: string, path: string) => {
+      if (wsId === 'main') {
+        return new Promise<string>((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+      }
+      return Promise.resolve(`content:draft:${path}`);
+    });
+    const invalidated = result.current.openTabs.find((t) => t.path === 'shared.md')!;
+    act(() => { result.current.activateTab(invalidated); });
+
+    // Switch to the draft and open the same path there.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    await act(async () => { await result.current.addTab('shared.md'); });
+
+    // main's answer arrives late.
+    await act(async () => { settle(resolveOld, rejectOld); await Promise.resolve(); });
+
+    const draftTab = result.current.openTabs.find((t) => t.path === 'shared.md');
+    expect(draftTab?.content).toBe('content:draft:shared.md');
   });
 });
 
@@ -537,6 +809,37 @@ describe('useWorkspaceState: bootstrap trace', () => {
     expect(traceCalls(info).some((c) => c.event === 'bootstrap:ok')).toBe(false);
     await waitFor(() => expect(result.current.bootstrapError).toMatchObject({ status: 500 }));
     expect(result.current.workspaceId).toBeNull();
+  });
+
+  /**
+   * A bootstrap failure used to be terminal for the session: the workspace
+   * never came up, the file route waited on it forever, and only a full page
+   * reload could try again. `retryBootstrap` re-runs the same request for the
+   * same branch, which is what the file page's Retry is wired to.
+   */
+  it('retryBootstrap re-runs the request for the same branch and recovers', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    apiMocks.getOrCreateWorkspace.mockRejectedValue(new WorkspaceApiError(500));
+
+    const { result } = renderHook(() => useWorkspaceState());
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() =>
+      expect(result.current.bootstrapError)
+        .toMatchObject({ branch: 'alice/draft', status: 500, message: 'HTTP 500' }),
+    );
+    expect(result.current.workspaceId).toBeNull();
+
+    // The outage clears; the reader presses Retry.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.retryBootstrap(); });
+
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    expect(result.current.bootstrapError).toBeNull();
+    // Retried for the branch that was asked for, not the default.
+    expect(apiMocks.getOrCreateWorkspace).toHaveBeenLastCalledWith('alice/draft');
   });
 
   it('logs nothing without the flag', async () => {

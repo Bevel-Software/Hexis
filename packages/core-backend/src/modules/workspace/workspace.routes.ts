@@ -18,7 +18,7 @@ import { canReadWorkspacePath, resolveReadableMap, toKbRelative } from '../acces
 import type { ICreatorAccess } from '../access-model/creator.js';
 import { isRolesYamlPath, assertRolesYamlParsable } from '../access-model/roles-yaml-guard.js';
 import type { WorkflowEventBus } from '../workflow/event-bus.js';
-import { GitInternalsError, PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
+import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { hasGitInternalsSegment } from '../../shared/git-internals.js';

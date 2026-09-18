@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useGit } from '../../git/state/git.context';
 import { useWorkspace } from '../state/workspace.context';
 import { authFetch } from '../../../lib/api';
@@ -275,11 +275,33 @@ export function openExternalHref(href: string): boolean {
   return true;
 }
 
+/**
+ * The branch segment of a `/workspace/<branch>/…` pathname, decoded, or null
+ * when this location is not a workspace URL. The pathname from the router is
+ * still percent-encoded (unlike `useParams`, which decodes for you), so this
+ * decodes exactly once. A malformed escape (a name ending in a bare `%`)
+ * throws out of `decodeURIComponent`; the raw segment is the honest fallback.
+ */
+export function branchFromPathname(pathname: string): string | null {
+  if (!pathname.startsWith(`${KB_ROUTE_PREFIX}/`)) return null;
+  const segment = pathname.slice(KB_ROUTE_PREFIX.length + 1).split('/')[0];
+  return segment ? safeDecode(segment) : null;
+}
+
 export function useFileNav() {
   const navigate = useNavigate();
+  const location = useLocation();
   const git = useGit();
   const { kbDirName } = useWorkspace();
-  const branch = git.status?.branch ?? null;
+  // The URL's branch first, the git status second. During a branch switch the
+  // status still reports the branch being LEFT — it only catches up once the
+  // destination workspace has bootstrapped and answered — so building a click
+  // target from it sent the user back to the branch they were leaving, which
+  // read as the switch undoing itself. The URL is the app's authority for
+  // which branch is on screen (`FileRoute` bootstraps to match it), so a click
+  // lands on the branch being switched TO. Off a workspace route there is no
+  // branch in the URL and the status is the only answer there is.
+  const branch = branchFromPathname(location.pathname) ?? git.status?.branch ?? null;
 
   const openFile = useCallback(
     (pathOrUrl: string) => {

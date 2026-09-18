@@ -9,7 +9,11 @@ import {
   type RefObject,
 } from 'react';
 import { X, Lock, Loader2, ChevronDown, Check, Globe, CircleHelp } from 'lucide-react';
-import type { FileTreeEntry } from '@bevel-software/platform-shared';
+import {
+  canCarryFrontmatter,
+  folderGovernsAccessMessage,
+  type FileTreeEntry,
+} from '@bevel-software/platform-shared';
 import {
   Badge,
   Banner,
@@ -737,6 +741,8 @@ export function ManageAccessDialog({
     () => principals.filter((p) => p.manage !== 'direct'),
     [principals],
   );
+  // The read side of a folder-governed file: who can open it, shown read-only.
+  const readerRows = useMemo(() => principals.filter((p) => p.verbs.read), [principals]);
 
   /**
    * The inherited rows, ONE SECTION PER GRANTING FOLDER — the prototype's shape
@@ -790,10 +796,28 @@ export function ManageAccessDialog({
   const [openSection, setOpenSection] = useState<string | null>(null);
 
   const governed = repoRelative !== null;
+  // A file that cannot carry frontmatter (a PDF, a deck, an image) has no rules
+  // of its own: its folder's rules govern it, and the grant / revoke routes
+  // refuse it. The server's ruling (`governedByFolder`, from the same shared
+  // predicate over the resolver's registered extensions) decides once the view
+  // has loaded; until then the shared predicate's core set stands in, so the
+  // sheet never flashes a field for a PDF.
+  const folderGoverns =
+    targetKind === 'file' &&
+    repoRelative !== null &&
+    (data ? data.governedByFolder !== undefined : !canCarryFrontmatter(repoRelative));
+  const governingFolder =
+    data?.governedByFolder ??
+    (repoRelative !== null && repoRelative.includes('/')
+      ? repoRelative.slice(0, repoRelative.lastIndexOf('/'))
+      : '');
+  const governingFolderLabel =
+    governingFolder === '' ? WHOLE_WORKSPACE : governingFolder.slice(governingFolder.lastIndexOf('/') + 1);
   // The dialog can mutate only if the current user can write this path's access
   // config — exactly what the backend gate enforces. `canWrite` on the path is
   // the same signal (folder access.md / node frontmatter both gate on write).
-  const canManage = !!data?.canWrite;
+  // Never on a folder-governed file: there is nothing here to write to.
+  const canManage = !!data?.canWrite && !folderGoverns;
 
   // Resolve the CURRENT typed query into a principal to append as a chip: an
   // exact group/role match or a free-typed email. (Suggestion clicks append
@@ -1608,120 +1632,160 @@ export function ManageAccessDialog({
           <>
             {/* No field to sit under: the reach line leads the sheet instead. */}
             {!canManage && reachLine}
-            {!canManage && (
-              <Banner tone="neutral" role="note" className="mt-3">
-                Only people with edit access can share this {targetKind}.
-                {ownerNames && <> Ask an owner: {ownerNames}.</>}
-              </Banner>
-            )}
-
-            {/* Names WHICH RULE you are editing, and adapts to the target
-                (proto:3625: `On this ` + file|folder). The sheet mixes rules
-                set HERE with rules inherited from above, so a heading that
-                says only "People with access" leaves the reader to work out
-                which of the two lists below is which. The count rides it, as
-                on every band in the app. */}
-            <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
-              On this {targetKind}
-              {directRows.length > 0 && (
-                <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
-              )}
-            </h3>
-
-            {directRows.length === 0 ? (
-              <p className="py-2 text-ui text-ink-muted">
-                {inheritedRows.length > 0
-                  ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
-                  : 'No explicit grants at this path.'}
-              </p>
+            {folderGoverns ? (
+              <>
+                {/* No field and no rules here: say where the rules are, and
+                    go there. Who can open the file is still worth knowing. */}
+                <Banner tone="neutral" role="note" className="mt-3">
+                  {folderGovernsAccessMessage(governingFolderLabel)}
+                </Banner>
+                {onManageAncestor && kbDirName && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    title={governingFolder || WHOLE_WORKSPACE}
+                    onClick={() =>
+                      onManageAncestor({
+                        name: governingFolderLabel,
+                        relativePath: governingFolder ? `${kbDirName}/${governingFolder}` : kbDirName,
+                        type: 'directory',
+                      })
+                    }
+                  >
+                    {`Manage access on ${governingFolderLabel}`}
+                  </Button>
+                )}
+                <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+                  Who can open it
+                  {readerRows.length > 0 && (
+                    <span className="text-meta normal-case tabular-nums">{readerRows.length}</span>
+                  )}
+                </h3>
+                {readerRows.length === 0 ? (
+                  <p className="py-2 text-ui text-ink-muted">No one is named here.</p>
+                ) : (
+                  readerRows.map(renderRow)
+                )}
+              </>
             ) : (
-              directRows.map(renderRow)
-            )}
+              <>
+                {!canManage && (
+                  <Banner tone="neutral" role="note" className="mt-3">
+                    Only people with edit access can share this {targetKind}.
+                    {ownerNames && <> Ask an owner: {ownerNames}.</>}
+                  </Banner>
+                )}
 
-            {inheritedRows.length > 0 && (
-              <div className="mt-3 border-t border-line pt-2">
-                {inheritedByFolder.folders.map(([ancestor, rows]) => {
-                  const open = openSection === ancestor;
-                  return (
-                    <div key={ancestor}>
-                      <button
-                        type="button"
-                        aria-expanded={open}
-                        title={folderPath(ancestor)}
-                        onClick={() => setOpenSection(open ? null : ancestor)}
-                        className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
-                      >
-                        <ChevronDown
-                          size={14}
-                          className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
-                        />
-                        <span className="min-w-0 truncate">
-                          People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
-                        </span>
-                        <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
-                          {rows.length}
-                        </span>
-                      </button>
-                      {open && (
-                        <div className="mb-1">
-                          {rows.map(renderRow)}
-                          {/* The folder is both what the heading means and
-                              where it changes (proto:3647). Without this the
-                              only act available on an inherited grant is the
-                              destructive one behind Remove. */}
-                          {onManageAncestor && kbDirName && (
-                            <Button
-                              variant="quiet"
-                              size="tiny"
-                              className="mt-0.5"
-                              onClick={() => {
-                                const dir = ancestor.replace(/\/?access\.md$/, '');
-                                onManageAncestor({
-                                  // The same name the button just said. A
-                                  // root-level `access.md` leaves `dir` empty,
-                                  // and `''.split('/').pop()` is `''` — a
-                                  // dialog with no title.
-                                  name: folderLabel(ancestor),
-                                  relativePath: `${kbDirName}/${dir}`,
-                                  type: 'directory',
-                                });
-                              }}
-                            >
-                              {`Manage ${folderLabel(ancestor)} →`}
-                            </Button>
+                {/* Names WHICH RULE you are editing, and adapts to the target
+                    (proto:3625: `On this ` + file|folder). The sheet mixes rules
+                    set HERE with rules inherited from above, so a heading that
+                    says only "People with access" leaves the reader to work out
+                    which of the two lists below is which. The count rides it, as
+                    on every band in the app. */}
+                <h3 className="mb-1 mt-4 flex items-baseline gap-2 text-label uppercase text-ink-faint">
+                  On this {targetKind}
+                  {directRows.length > 0 && (
+                    <span className="text-meta normal-case tabular-nums">{directRows.length}</span>
+                  )}
+                </h3>
+
+                {directRows.length === 0 ? (
+                  <p className="py-2 text-ui text-ink-muted">
+                    {inheritedRows.length > 0
+                      ? 'No one is granted directly here. Everyone below inherits access from a parent folder.'
+                      : 'No explicit grants at this path.'}
+                  </p>
+                ) : (
+                  directRows.map(renderRow)
+                )}
+
+                {inheritedRows.length > 0 && (
+                  <div className="mt-3 border-t border-line pt-2">
+                    {inheritedByFolder.folders.map(([ancestor, rows]) => {
+                      const open = openSection === ancestor;
+                      return (
+                        <div key={ancestor}>
+                          <button
+                            type="button"
+                            aria-expanded={open}
+                            title={folderPath(ancestor)}
+                            onClick={() => setOpenSection(open ? null : ancestor)}
+                            className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                          >
+                            <ChevronDown
+                              size={14}
+                              className={`shrink-0 transition-transform ${open ? 'rotate-180' : '-rotate-90'}`}
+                            />
+                            <span className="min-w-0 truncate">
+                              People invited to <b className="font-semibold">{folderLabel(ancestor)}</b>
+                            </span>
+                            <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                              {rows.length}
+                            </span>
+                          </button>
+                          {open && (
+                            <div className="mb-1">
+                              {rows.map(renderRow)}
+                              {/* The folder is both what the heading means and
+                                  where it changes (proto:3647). Without this the
+                                  only act available on an inherited grant is the
+                                  destructive one behind Remove. */}
+                              {onManageAncestor && kbDirName && (
+                                <Button
+                                  variant="quiet"
+                                  size="tiny"
+                                  className="mt-0.5"
+                                  onClick={() => {
+                                    const dir = ancestor.replace(/\/?access\.md$/, '');
+                                    onManageAncestor({
+                                      // The same name the button just said. A
+                                      // root-level `access.md` leaves `dir` empty,
+                                      // and `''.split('/').pop()` is `''` — a
+                                      // dialog with no title.
+                                      name: folderLabel(ancestor),
+                                      relativePath: `${kbDirName}/${dir}`,
+                                      type: 'directory',
+                                    });
+                                  }}
+                                >
+                                  {`Manage ${folderLabel(ancestor)} →`}
+                                </Button>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
+                      );
+                    })}
 
-                {/* A role that grants at the workspace level belongs to no
-                    folder, so it cannot be filed under one. Named for what it
-                    is rather than swept into the folder sections. */}
-                {inheritedByFolder.external.length > 0 && (
-                  <div>
-                    <button
-                      type="button"
-                      aria-expanded={openSection === 'roles'}
-                      onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
-                      className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
-                    >
-                      <ChevronDown
-                        size={14}
-                        className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
-                      />
-                      <span className="min-w-0 truncate">People with access through a role</span>
-                      <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
-                        {inheritedByFolder.external.length}
-                      </span>
-                    </button>
-                    {openSection === 'roles' && (
-                      <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                    {/* A role that grants at the workspace level belongs to no
+                        folder, so it cannot be filed under one. Named for what it
+                        is rather than swept into the folder sections. */}
+                    {inheritedByFolder.external.length > 0 && (
+                      <div>
+                        <button
+                          type="button"
+                          aria-expanded={openSection === 'roles'}
+                          onClick={() => setOpenSection(openSection === 'roles' ? null : 'roles')}
+                          className="flex w-full items-center gap-1.5 rounded-xs py-1 text-detail text-ink-muted hover:text-ink"
+                        >
+                          <ChevronDown
+                            size={14}
+                            className={`shrink-0 transition-transform ${openSection === 'roles' ? 'rotate-180' : '-rotate-90'}`}
+                          />
+                          <span className="min-w-0 truncate">People with access through a role</span>
+                          <span className="ml-auto shrink-0 tabular-nums text-ink-faint">
+                            {inheritedByFolder.external.length}
+                          </span>
+                        </button>
+                        {openSection === 'roles' && (
+                          <div className="mb-1">{inheritedByFolder.external.map(renderRow)}</div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}
-              </div>
+              </>
             )}
           </>
         )}
