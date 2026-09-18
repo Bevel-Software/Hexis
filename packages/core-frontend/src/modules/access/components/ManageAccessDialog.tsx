@@ -289,7 +289,12 @@ function isEveryoneRole(p: Principal): boolean {
   return p.kind === 'role' && p.role.trim().toLowerCase() === 'everyone';
 }
 
-/** A short summary of the verbs a row holds, for the dropdown trigger. */
+/**
+ * A short summary of the verbs a row holds, for the dropdown trigger. Read is
+ * folded in by write/owner/download before a `VerbSet` reaches here (see
+ * `effectiveNewVerbs` and the row aggregation), so a download-only grant reads
+ * “Can read, Can download” — what the resolver actually gives.
+ */
 function summarizeVerbs(v: VerbSet): string {
   const parts: string[] = [];
   if (v.owner) parts.push('Owner');
@@ -615,7 +620,8 @@ export function ManageAccessDialog({
     // independent verb set. Membership IS the displayed set — we do NOT subtract
     // the rollup. The resolver already folds owner⊇write⊇read on the lower lists,
     // so an owner legitimately shows owner+write+read checked; download is its own
-    // axis (owner folds in, write does not), sourced from `downloaders`.
+    // axis (owner folds in, write does not), sourced from `downloaders` — and it
+    // folds DOWN into read, so a download row shows read checked too.
     const rows = new Map<string, PrincipalRow>();
     // Kinded collective list for one eligible set. Older servers omit
     // `principals` (version skew) — fall back to the name-only `roles`,
@@ -703,6 +709,12 @@ export function ManageAccessDialog({
     for (const u of data.readers.users) touchUser(u).verbs.read = true;
     for (const c of collectivesOf(data.downloaders)) touchCollective(c).verbs.download = true;
     for (const u of data.downloaders.users) touchUser(u).verbs.download = true;
+
+    // Download implies read, the way write does. The server folds it into
+    // `readers` too, so this is belt-and-braces for an older backend — but it is
+    // also what makes the row's Read box render checked-and-implied next to a
+    // Download it cannot be unticked without.
+    for (const row of rows.values()) if (row.verbs.download) row.verbs.read = true;
 
     // Attach each row's per-verb source + manageability (direct / inherited /
     // external) from the resolver's `sources` map, keyed by the same row key
@@ -820,14 +832,15 @@ export function ManageAccessDialog({
     setPickedChips((chips) => chips.filter((c) => principalKey(c) !== principalKey(p)));
   }, []);
 
-  // The new-grant checklist stores independent flags, but owner⊇write⊇read folds
-  // for display (selecting Owner implies edit+read; Edit implies read; owner also
-  // folds in download). `effectiveNewVerbs` is what the boxes render as checked.
+  // The new-grant checklist stores independent flags, but the nesting folds for
+  // display: Owner implies edit + download + read; Edit implies read; Download
+  // implies read too (a person trusted with a copy may open it).
+  // `effectiveNewVerbs` is what the boxes render as checked.
   const effectiveNewVerbs = useMemo<VerbSet>(
     () => ({
       owner: newVerbs.owner,
       write: newVerbs.owner || newVerbs.write,
-      read: newVerbs.owner || newVerbs.write || newVerbs.read,
+      read: newVerbs.owner || newVerbs.write || newVerbs.download || newVerbs.read,
       download: newVerbs.owner || newVerbs.download,
     }),
     [newVerbs],
@@ -835,11 +848,14 @@ export function ManageAccessDialog({
 
   // The minimal verb list to send: the single highest tier verb (the lower ones
   // fold in server-side) plus download when it's chosen independently of owner.
+  // A bare `read` line is only worth writing when nothing else already confers
+  // read — download does, so Download alone (or Read + Download) sends `download`
+  // and no redundant second grant.
   const grantVerbs = useMemo<GrantVerb[]>(() => {
     const verbs: GrantVerb[] = [];
     if (effectiveNewVerbs.owner) verbs.push('owner');
     else if (effectiveNewVerbs.write) verbs.push('write');
-    else if (effectiveNewVerbs.read) verbs.push('read');
+    else if (effectiveNewVerbs.read && !effectiveNewVerbs.download) verbs.push('read');
     if (effectiveNewVerbs.download && !effectiveNewVerbs.owner) verbs.push('download');
     return verbs;
   }, [effectiveNewVerbs]);
@@ -1255,7 +1271,8 @@ export function ManageAccessDialog({
                     const disabled =
                       busy ||
                       (role === 'Can edit' && p.verbs.owner) ||
-                      (role === 'Can read' && (p.verbs.owner || p.verbs.write));
+                      (role === 'Can read' &&
+                        (p.verbs.owner || p.verbs.write || p.verbs.download));
                     return (
                       <MenuItem
                         key={role}
@@ -1521,7 +1538,10 @@ export function ManageAccessDialog({
                       const checked = effectiveNewVerbs[k];
                       const disabled =
                         (role === 'Can edit' && effectiveNewVerbs.owner) ||
-                        (role === 'Can read' && (effectiveNewVerbs.owner || effectiveNewVerbs.write));
+                        (role === 'Can read' &&
+                          (effectiveNewVerbs.owner ||
+                            effectiveNewVerbs.write ||
+                            effectiveNewVerbs.download));
                       return (
                         <MenuItem
                           key={role}

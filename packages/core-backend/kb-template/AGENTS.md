@@ -210,6 +210,14 @@ Access to any path — reading it as much as writing it — is governed by
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
   stray line of prose silently changes which block governs the folder.
+- **The verbs nest.** `owner` sits over `write` and `download`; `write` and
+  `download` each sit over `read` — anyone who may edit a node, or save a copy
+  of it, may also view it. `write` and `download` say nothing about each other.
+  The nesting is GRANT-ONLY: a grant of a higher verb confers the lower ones,
+  but `deny write` or `deny download` says nothing about `read` and never
+  strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
+  open the node as well as download it, and a `deny download` beside an
+  inherited read leaves her able to open it but not save it.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
