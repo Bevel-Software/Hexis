@@ -53,6 +53,18 @@ export interface PluginSummary {
   displayName: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /**
+   * Repo-relative roots the plugin LINKS — its manifest's linked-skill roots
+   * (`extensions["software.bevel.hexis"].skills`), or a bundle's
+   * `sourceSkillRoots`.
+   *
+   * Served because a plugin's page has to say which of its cards live
+   * somewhere else. A SKILL carries its own membership record (linked or
+   * inline); a TOOL carries none — a `.tool` sitting beside the skills under
+   * a linked root reaches the plugin exactly the way those skills do, and
+   * these roots are the only thing that says so.
+   */
+  linkedRoots: string[];
   /** Whether this platform writes the plugin's links — see `PluginCatalogEntry`. */
   linksAreManaged: boolean;
   /**
@@ -115,6 +127,8 @@ export interface PluginCatalogEntry {
   /** What a person sees it called — the manifest's `displayName`, else the folder name. */
   displayName: string;
   folders: string[];
+  /** The roots it links skills from — see `PluginSummary.linkedRoots`. */
+  linkedRoots: string[];
   /**
    * Whether this platform writes the plugin's links (a native `plugin.json`)
    * — false for a plugin read from an external format, whose links are

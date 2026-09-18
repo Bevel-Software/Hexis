@@ -401,6 +401,18 @@ export function PluginPage() {
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // This page is ONE plugin's, so a card here can be linked from it —
+        // and the ones that are say so, with the folder they live in on
+        // hover. The Advanced tree shows the disk and therefore does not list
+        // a linked skill under this folder; the pill is what stops the two
+        // views from looking like a contradiction.
+        linkedIn={plugin}
+        // The manifest's own roots, which is what the tooltip names — a
+        // manifest can link one skill folder outright, and only the summary
+        // says so (see `linkedHomeOf`). Absent while the summary loads, or
+        // when the plugins endpoint failed; the tooltip falls back rather
+        // than waiting.
+        linkedRoots={summary?.linkedRoots}
         // A skill's OWN rules, from its card — the skill page's Share, on the
         // skill's folder rather than the plugin's. It reuses this page's one
         // access dialog (`manageTarget`), the same one the title row's Share
@@ -416,9 +428,15 @@ export function PluginPage() {
         onRemove={summary?.canWrite ? setRemoving : undefined}
         // A LINK into a plugin whose links live in an external format cannot
         // be removed here — the endpoint refuses it — so it is not offered.
-        canRemove={(item) =>
-          summary?.linksAreManaged !== false || !(item.plugins?.some((m) => m.name === plugin && m.linked) ?? false)
-        }
+        canRemove={(item) => {
+          const linked = item.plugins?.some((m) => m.name === plugin && m.linked) ?? false;
+          // A TOOL reached through a linked root has no verb here at all: the
+          // unlink endpoint speaks skills (a root is linked, not the manual
+          // sitting in it), and deleting the file would take it from whoever
+          // the folder actually belongs to. It is removed where it lives.
+          if (linked && item.kind === 'integration') return false;
+          return summary?.linksAreManaged !== false || !linked;
+        }}
         emptySkills={
           filterOn ? (
             'Nothing in this band needs you right now.'
