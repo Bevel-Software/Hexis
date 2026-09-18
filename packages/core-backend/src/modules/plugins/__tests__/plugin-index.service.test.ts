@@ -49,11 +49,21 @@ describe('PluginIndexService', () => {
   const toolService = (list: ToolManualSummary[] = []): IToolManualService =>
     ({ listAllSummaries: async () => list }) as unknown as IToolManualService;
 
+  /**
+   * A link index that resolves no memberships — enough to put the service in
+   * the mode every real host runs in (counts follow links), without a tree to
+   * discover. Omit it to get the degraded, inline-only host.
+   */
+  const emptyLinks = () =>
+    ({ membership: async () => ({ bySkill: new Map(), byPlugin: new Map() }) }) as unknown as PluginLinkIndex;
+
   const svc = (opts: {
     access?: IAccessControl;
     skills?: SkillSummary[];
     tools?: ToolManualSummary[];
     workspace?: WorkspaceService;
+    /** Absent: the host that composes no link index — inline-only counts. */
+    links?: PluginLinkIndex;
   } = {}) =>
     new PluginIndexService(
       opts.workspace ?? workspaceService,
@@ -62,6 +72,8 @@ describe('PluginIndexService', () => {
       toolService(opts.tools),
       KB_DIR,
       new KbPluginSource(new NodeFs()),
+      Date.now,
+      opts.links,
     );
 
   const kb = () => join(root, wsId, KB_DIR);
@@ -165,6 +177,7 @@ describe('PluginIndexService', () => {
     await pluginDir('Product');
 
     const catalog = await svc({
+      links: emptyLinks(),
       tools: tools(
         'Plugins/GTM/heyreach.tool',
         'Plugins/Shared/observability/grafana.tool',
@@ -186,8 +199,29 @@ describe('PluginIndexService', () => {
   test('counts a tool ONCE for a plugin whose linked root sits inside its own folder', async () => {
     await pluginDir('GTM', ['Plugins/GTM/tools']);
 
-    const catalog = await svc({ tools: tools('Plugins/GTM/tools/grafana.tool') }).catalog();
+    const catalog = await svc({ links: emptyLinks(), tools: tools('Plugins/GTM/tools/grafana.tool') }).catalog();
     expect(catalog.find((g) => g.name === 'gtm')!.toolCount).toBe(1);
+  });
+
+  /**
+   * A host that composes no link index counts what each plugin's FOLDER holds
+   * — for skills (see `countThroughLinks`) and, for the same reason, for
+   * tools. Counting a plugin's linked tools there while its linked skills went
+   * uncounted would describe a plugin that exists on no screen.
+   */
+  test('counts tools inline-only when the host has no link index', async () => {
+    await pluginDir('GTM', ['Skills/Testing', 'Plugins/Shared/observability']);
+
+    const catalog = await svc({
+      skills: skills('Plugins/GTM/outreach', 'Skills/Testing/test-shared-linking'),
+      tools: tools('Plugins/GTM/heyreach.tool', 'Plugins/Shared/observability/grafana.tool'),
+    }).catalog();
+
+    // The roots are still SERVED — the page needs them to draw the pill; it is
+    // the counting that degrades, and it degrades the same way for both kinds.
+    const gtm = catalog.find((g) => g.name === 'gtm')!;
+    expect(gtm.linkedRoots).toEqual(['Skills/Testing', 'Plugins/Shared/observability']);
+    expect(gtm).toMatchObject({ skillCount: 1, toolCount: 1 });
   });
 
   test("counts the linked skills a plugin's members cannot read, from the unfiltered link index", async () => {

@@ -116,6 +116,7 @@ export function CardGrid({
   onRemove,
   canRemove,
   linkedIn,
+  linkedRoots,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
@@ -152,6 +153,14 @@ export function CardGrid({
    * it belongs to — there is no "this plugin" for it to be linked from.
    */
   linkedIn?: string;
+  /**
+   * That plugin's `linkedRoots` — the folders its manifest names. The pill's
+   * tooltip names the root a card came in through, and only the manifest
+   * knows which root that is (see `linkedHomeOf`). Absent or empty when the
+   * summary has not arrived, which the tooltip degrades around rather than
+   * waiting for.
+   */
+  linkedRoots?: readonly string[];
 }) {
   return (
     <div
@@ -197,7 +206,7 @@ export function CardGrid({
             lifecycle={item.lifecycle}
             // Null (inline, or no plugin in question) has to become `undefined`
             // — the prop is "there is a folder to name", and `null` is not it.
-            linkedHome={(linkedIn ? linkedHomeOf(item, linkedIn) : null) ?? undefined}
+            linkedHome={(linkedIn ? linkedHomeOf(item, linkedIn, linkedRoots) : null) ?? undefined}
             pending={
               item.pending && {
                 authorName: item.pending.authorName,
@@ -341,6 +350,7 @@ export function PluginItemSections({
   skillControls,
   skillControlsActive = false,
   linkedIn,
+  linkedRoots,
 }: {
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
@@ -353,6 +363,8 @@ export function PluginItemSections({
   canRemove?(item: LibraryItem): boolean;
   /** See {@link CardGrid} — the plugin a card can be linked FROM. */
   linkedIn?: string;
+  /** See {@link CardGrid} — that plugin's linked roots, for the pill's tooltip. */
+  linkedRoots?: readonly string[];
   /**
    * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
    * standard paragraph; a node is trusted to bring its own — the nudge carries
@@ -402,6 +414,7 @@ export function PluginItemSections({
               onRemove={onRemove}
               canRemove={canRemove}
               linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
             />
           )}
         </PluginSection>
@@ -418,6 +431,7 @@ export function PluginItemSections({
               onRemove={onRemove}
               canRemove={canRemove}
               linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
             />
           )}
         </PluginSection>

@@ -312,14 +312,35 @@ describe('toastDuration', () => {
 });
 
 describe('linkedHomeOf', () => {
-  /** A skill's `path` is its folder; a tool's is its file. Both answer with the parent. */
+  /** A skill's `path` is its folder; a tool's is its file. */
   const linked = (path: string) => ({ path, plugins: [{ name: 'GTM', linked: true }] });
 
-  it('names the folder a LINKED item lives in — the root somebody linked', () => {
-    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM')).toBe('Skills/Testing');
-    expect(linkedHomeOf(linked('Plugins/Shared/observability/grafana.tool'), 'GTM')).toBe(
+  it('names the ROOT the manifest links, for a skill and for a tool beside it', () => {
+    const roots = ['Skills/Testing', 'Plugins/Shared/observability'];
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM', roots)).toBe('Skills/Testing');
+    expect(linkedHomeOf(linked('Plugins/Shared/observability/grafana.tool'), 'GTM', roots)).toBe(
       'Plugins/Shared/observability',
     );
+  });
+
+  // The root IS the skill folder. Naming its parent would point at a shelf
+  // nobody linked — and at skills this plugin cannot see.
+  it('names the skill folder itself when THAT is what the manifest links', () => {
+    expect(
+      linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM', ['Skills/Testing/test-shared-linking']),
+    ).toBe('Skills/Testing/test-shared-linking');
+  });
+
+  it('answers with the deepest root that holds the item', () => {
+    const roots = ['Skills', 'Skills/Testing'];
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM', roots)).toBe('Skills/Testing');
+  });
+
+  // The summary has not arrived, or the plugins endpoint failed: the parent
+  // folder is where a linked item lives in every case but the one above.
+  it('falls back to the parent folder when no root is known', () => {
+    expect(linkedHomeOf(linked('Skills/Testing/test-shared-linking'), 'GTM')).toBe('Skills/Testing');
+    expect(linkedHomeOf(linked('Skills/Testing/x'), 'GTM', ['Skills/Other'])).toBe('Skills/Testing');
   });
 
   it('is null for an INLINE item, and for one this plugin does not hold at all', () => {

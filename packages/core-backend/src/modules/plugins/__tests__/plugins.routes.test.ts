@@ -297,8 +297,11 @@ describe('/api/plugins routes', () => {
     expect(status).toBe(200);
     // Named by identity (the manifest), labelled by folder.
     expect(plugins.map((g) => [g.name, g.displayName])).toEqual([['finance', 'Finance'], ['gtm', 'GTM']]);
-    expect(plugins[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1 });
-    expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0 });
+    // `linkedRoots` is part of the summary's contract — the plugin page reads
+    // it to name where a linked card lives. Neither fixture links anything,
+    // and an empty list is what says so; a dropped mapping would be `undefined`.
+    expect(plugins[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1, linkedRoots: [] });
+    expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0, linkedRoots: [] });
   });
 
   it("carries the index's broken-link count into the summary — the server's, not the caller's slice", async () => {
@@ -306,7 +309,7 @@ describe('/api/plugins routes', () => {
       name: 'gtm',
       displayName: 'GTM',
       folders: ['Plugins/GTM'],
-      linkedRoots: [],
+      linkedRoots: ['Skills/Testing'],
       linksAreManaged: true,
       skillCount: 2,
       toolCount: 0,
@@ -327,6 +330,9 @@ describe('/api/plugins routes', () => {
     expect(plugins[0]).toMatchObject({
       name: 'gtm',
       brokenLinks: 2,
+      // The roots the index scanned reach the page, which needs them to say
+      // where a linked card lives.
+      linkedRoots: ['Skills/Testing'],
       // What discovery left out reaches the summary as the index said it.
       warnings: ['mcpProfile "global" named but no registry could be read'],
     });

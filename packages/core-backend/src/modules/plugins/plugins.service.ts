@@ -240,10 +240,20 @@ export class PluginIndexService implements IPluginIndexService {
    * those skills reaches the plugin the same way they do — the plugin's page
    * lists it, so the plugin's total has to count it. Once per plugin: a root
    * inside the plugin's own folder says nothing the folder did not say first.
+   *
+   * Without a link index, inline only — the same degradation `countThroughLinks`
+   * makes for skills. A host that composes no link index has asked for totals
+   * that count what each plugin's folder holds, and a catalog that counted a
+   * plugin's linked tools while leaving its linked skills out would describe a
+   * plugin that exists nowhere.
    */
   private async countTools(scanned: Map<string, ScannedPlugin>): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
-    const plugins = [...scanned].map(([name, p]) => ({ name, folders: p.folders, roots: p.linkedRoots }));
+    const plugins = [...scanned].map(([name, p]) => ({
+      name,
+      folders: p.folders,
+      roots: this.links ? p.linkedRoots : [],
+    }));
     const bump = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
     for (const tool of await this.toolManualService.listAllSummaries()) {
       const inline = plugins.find((p) => p.folders.some((f) => tool.path.startsWith(`${f}/`)));

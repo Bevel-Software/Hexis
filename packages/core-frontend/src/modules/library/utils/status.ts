@@ -1,3 +1,4 @@
+import { skillUnderRoot } from '@bevel-software/platform-shared';
 import { formatRelativeTime } from '../../../lib/utils';
 import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
@@ -344,19 +345,36 @@ export function withLinkHealth<T extends LibraryFilterable & { status: Attention
  * the plugin at all: an inline card has nothing to disclose, and a page that
  * pilled every card would be saying nothing with three more words.
  *
- * The folder, not the item: a skill's `path` IS its folder
- * (`Skills/Testing/test-shared-linking`) and a tool's is its file, so the
- * answer to "where does this live" is the parent of both — `Skills/Testing`,
- * the root somebody linked.
+ * The answer is the MANIFEST'S ROOT, not the item's parent folder: the pill
+ * discloses the place somebody linked, and a manifest may name a whole shelf
+ * (`Skills/Testing`, which HOLDS the skill folder) or one skill folder
+ * outright (`Skills/Testing/test-shared-linking`, which IS it). Dropping the
+ * path's last segment gets the first case right and the second wrong — it
+ * would answer `Skills/Testing` for a skill whose shelf nobody linked. A tool
+ * is the same question asked of a file. Deepest root wins, as everywhere else
+ * a path is attributed to a place.
+ *
+ * No roots is the degraded read — the plugins endpoint failed, or its summary
+ * has not arrived — and the parent folder stands in, which is where the item
+ * lives in every case but the one above.
  */
 export function linkedHomeOf(
   item: Pick<LibraryFilterable, 'plugins'> & { path: string },
   plugin: string,
+  linkedRoots: readonly string[] = [],
 ): string | null {
   const membership = (item.plugins as { name: string; linked?: boolean }[] | undefined)?.find(
     (m) => m.name === plugin,
   );
   if (!membership?.linked) return null;
+  // `skillUnderRoot` is the one containment rule for a linked root — a tool
+  // under the root is under it the same way a skill is.
+  let root: string | null = null;
+  for (const candidate of linkedRoots) {
+    if (!skillUnderRoot(item.path, candidate)) continue;
+    if (root === null || candidate.length > root.length) root = candidate;
+  }
+  if (root !== null) return root;
   const cut = item.path.lastIndexOf('/');
   // A path with no parent (nothing this catalog serves, but the slice would
   // otherwise silently answer with the empty string) names itself.

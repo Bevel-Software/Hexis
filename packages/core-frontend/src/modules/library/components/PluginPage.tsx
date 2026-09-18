@@ -407,6 +407,12 @@ export function PluginPage() {
         // a linked skill under this folder; the pill is what stops the two
         // views from looking like a contradiction.
         linkedIn={plugin}
+        // The manifest's own roots, which is what the tooltip names — a
+        // manifest can link one skill folder outright, and only the summary
+        // says so (see `linkedHomeOf`). Absent while the summary loads, or
+        // when the plugins endpoint failed; the tooltip falls back rather
+        // than waiting.
+        linkedRoots={summary?.linkedRoots}
         // A skill's OWN rules, from its card — the skill page's Share, on the
         // skill's folder rather than the plugin's. It reuses this page's one
         // access dialog (`manageTarget`), the same one the title row's Share

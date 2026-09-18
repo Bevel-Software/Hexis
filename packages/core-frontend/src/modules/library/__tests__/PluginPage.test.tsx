@@ -992,6 +992,22 @@ describe('PluginPage', () => {
       expect(pillOn('library-card-skill-outreach')).toBeNull();
     });
 
+    // A manifest can link ONE skill folder rather than the shelf holding it.
+    // The tooltip names the root that was linked, not its parent: `Skills/Testing`
+    // here would point at a shelf this plugin was never given.
+    it('names the skill folder itself when the manifest links it outright', async () => {
+      pluginsMock.listPlugins.mockResolvedValue([
+        { ...linking, linkedRoots: ['Skills/Testing/test-shared-linking', 'Plugins/Shared/observability'] },
+      ]);
+      renderPlugin('GTM');
+      await screen.findByTestId('library-card-skill-test-shared-linking');
+
+      expect(pillOn('library-card-skill-test-shared-linking')).toHaveAttribute(
+        'title',
+        "Lives in Skills/Testing/test-shared-linking; linked from this plugin's manifest",
+      );
+    });
+
     it('marks a TOOL that reaches the plugin through a linked root, and leaves the inline one alone', async () => {
       renderPlugin('GTM');
       await screen.findByTestId('library-card-integration-grafana');
