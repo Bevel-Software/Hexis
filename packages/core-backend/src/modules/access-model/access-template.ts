@@ -24,7 +24,9 @@ export const ACCESS_MD_BODY_NOTE: readonly string[] = [
   '# download, owner (owner implies the rest; write and download each imply read).',
   '# An entry is a role from roles.yaml, a group from groups.yaml, a person as',
   '# `Name <email>`, or `everyone` — every signed-in person, the whole organisation.',
-  '# `deny X` takes away. Keep this block pure YAML; explanations go in `#` lines.',
+  '# `deny X` takes away that verb ALONE: grants imply the lower verbs, denials',
+  '# never do — `deny download` says nothing about read, and leaves a separate',
+  '# read grant standing. Keep this block pure YAML; explanations go in `#` lines.',
 ];
 
 /**

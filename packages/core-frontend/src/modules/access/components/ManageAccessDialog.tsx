@@ -900,17 +900,14 @@ export function ManageAccessDialog({
         const label = principalLabel(principal);
         // `everyone` is public-read only — the backend rejects any other verb for
         // it, so clamp here to avoid a guaranteed failure when a higher verb is
-        // also selected for the other chips.
+        // also selected for the other chips. Every selection that reaches this
+        // point confers read (Share is disabled while `grantVerbs` is empty, and
+        // each of the four boxes now implies read), so the clamp always has a
+        // verb to send: "Can download" on Everyone shares it publicly readable
+        // and drops only the download half the backend would refuse anyway.
         const verbsForPrincipal = isEveryoneRole(principal)
-          ? (effectiveNewVerbs.read ? (['read'] as GrantVerb[]) : [])
+          ? (['read'] as GrantVerb[])
           : grantVerbs;
-        // Don't silently drop the Everyone chip when nothing read-equivalent was
-        // picked (e.g. only "Can download"): record it as a failure so the chip
-        // stays visible and the user is told why, rather than a no-op clear.
-        if (isEveryoneRole(principal) && verbsForPrincipal.length === 0) {
-          failures.push(`${label}: "Everyone" can only be granted read access. Select "Can read".`);
-          continue;
-        }
         for (const verb of verbsForPrincipal) {
           try {
             await grantAccess(workspaceId, {
@@ -938,7 +935,7 @@ export function ManageAccessDialog({
       reload();
       setBusy(false);
     }
-  }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, effectiveNewVerbs, reload]);
+  }, [workspaceId, repoRelative, pickedChips, entry.relativePath, targetKind, grantVerbs, reload]);
 
   // The footer's one primary action. With picks it shares them and closes; a
   // grant that fails keeps the dialog — and the picks — up with the failure

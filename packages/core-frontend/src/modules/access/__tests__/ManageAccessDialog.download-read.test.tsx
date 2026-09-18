@@ -120,6 +120,41 @@ describe('ManageAccessDialog: Download carries Read', () => {
     );
   });
 
+  it('Everyone picked with Can download alone: one public read grant, no failure', async () => {
+    const user = userEvent.setup();
+    // `everyone` is public-read only (the backend refuses any other verb), so
+    // the dialog clamps it to read and says so standingly while the chip is
+    // up. Download-only used to be the one pick that clamped to NOTHING and
+    // failed after the fact; now that Download carries Read it clamps like
+    // every other pick.
+    api.suggestPrincipals.mockResolvedValue({
+      roles: ['everyone'],
+      groups: [],
+      people: [],
+      peopleWithheld: false,
+    });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const menu = await openNewGrantMenu(user);
+    await user.click(within(menu).getByRole('button', { name: /^can edit$/i }));
+    await user.click(within(menu).getByRole('button', { name: /^can download$/i }));
+    await user.keyboard('{Escape}');
+
+    await user.type(
+      await screen.findByPlaceholderText('Add people, groups, roles or plugins…'),
+      'every',
+    );
+    await user.click(await screen.findByRole('button', { name: /everyone/i }));
+    await user.click(screen.getByRole('button', { name: /^Share$/ }));
+
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalledTimes(1));
+    expect(api.grantAccess).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({ verb: 'read', principal: { kind: 'role', role: 'everyone' } }),
+    );
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('on an EXISTING row whose only grant is download: Read reads as checked and implied', async () => {
     const user = userEvent.setup();
     // A server that has not folded yet (`readers` empty): the row must still
