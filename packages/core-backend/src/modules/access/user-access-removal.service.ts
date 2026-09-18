@@ -28,6 +28,12 @@
  * dialog beforehand (`UserReferenceReport.unwritable`). A folder that cannot
  * be LISTED remains a hard refusal: an incomplete scan would commit a partial
  * cleanup that looks complete.
+ *
+ * That write pre-check is an optimisation over the lock gate, never a second
+ * authority. When it cannot be run at all, the dialog says so (`unwritable:
+ * null`, never `[]`) and the removal attempts every file: the gate still
+ * refuses what the admin may not write, and skipping files on a hunch could
+ * only clean less.
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -120,8 +126,10 @@ export interface UserReferenceReport extends UserReferenceCounts {
    * Of `files`, the ones the ACTING ADMIN may not write (a folder that
    * excludes Admin, or the machine-owned `synced-groups.yaml`). The cleanup
    * skips these and reports them; the dialog says so before the delete.
+   * `null` when write access could not be judged at all — never read as
+   * "none", same convention as {@link UserAccessRemovalResult.stillNamedIn}.
    */
-  unwritable: string[];
+  unwritable: string[] | null;
 }
 
 /** The outcome of a committed removal. */
@@ -424,25 +432,37 @@ export class UserAccessRemovalService {
   }
 
   /**
-   * Of `files`, the ones `actorEmail` may not write on the default branch.
+   * Of `files`, the ones `actorEmail` may not write on the default branch —
+   * or `null` when the question could not be ASKED (the lookup threw), which
+   * is not the same as "none".
+   *
    * Since #210 a subfolder may exclude Admin, and the lock gate refuses per
    * file: without this split ONE such grant would abort the whole cleanup —
    * nothing committed, and the address left in `roles.yaml`, the group file
    * and every other `access.md` too, with the admin learning it only from the
-   * outcome. A verdict the access model cannot give (`null` — the ref or
-   * `roles.yaml` won't resolve) counts as writable: the lock gate remains the
-   * authority, and guessing "unwritable" would silently skip a file the admin
-   * can in fact clean.
+   * outcome.
+   *
+   * A `null` VERDICT is a real answer, not uncertainty: it means no usable
+   * access config resolves at the ref, and `GitService.assertCanWriteAtRef`
+   * default-ALLOWS on exactly that signal (bootstrap — you cannot create
+   * `roles.yaml` if writing it needs `roles.yaml`). Reporting `[]` there
+   * matches the gate that will actually run. A THROWN lookup is different:
+   * nothing is known, so say so rather than claim "none".
    */
-  private async unwritableAmong(workspaceId: string, actorEmail: string, files: string[]): Promise<string[]> {
+  private async unwritableAmong(
+    workspaceId: string,
+    actorEmail: string,
+    files: string[],
+  ): Promise<string[] | null> {
     if (files.length === 0 || !actorEmail) return [];
-    let verdicts: Map<string, boolean> | null = null;
+    let verdicts: Map<string, boolean> | null;
     try {
       verdicts = await this.accessControl.canWriteBatchAtRef(workspaceId, 'HEAD', actorEmail, files);
     } catch (err) {
       log.warn(`could not judge write access to the files naming the account: ${printable(err instanceof Error ? err.message : String(err))}`);
-      return [];
+      return null;
     }
+    // null verdict = bootstrap default-allow, matching the commit gate.
     if (!verdicts) return [];
     return files.filter((f) => verdicts.get(f) === false);
   }
@@ -552,13 +572,25 @@ export class UserAccessRemovalService {
     // Clean what this admin CAN write; the rest stay named and are reported.
     // A scan hole is still a hard refusal above — not knowing what exists is
     // not the same as knowing a file is out of reach.
-    const unwritable = new Set(await this.unwritableAmong(workspaceId, canonicalEmail(actor.email), named));
-    if (unwritable.size > 0) {
+    const judged = await this.unwritableAmong(workspaceId, canonicalEmail(actor.email), named);
+    let planned = named;
+    if (judged === null) {
+      // The pre-check could not run. It is only an OPTIMISATION over the lock
+      // gate, so attempt every file: with nothing excluded a deployment that
+      // has no Admin-excluded folder — the overwhelmingly common case — is
+      // cleaned in full, and one that does aborts on the gate and reports
+      // `ok: false` with `stillNamedIn`, exactly what refusing here would
+      // achieve. Skipping files on a hunch could only clean LESS.
+      log.warn(
+        `erased account ${printable(erasedId)}: write access could not be judged, attempting every file naming them`,
+      );
+    } else if (judged.length > 0) {
+      const unwritable = new Set(judged);
       log.warn(
         `erased account ${printable(erasedId)}: ${unwritable.size} file(s) naming them are not writable by the acting admin and keep the address`,
       );
+      planned = named.filter((f) => !unwritable.has(f));
     }
-    const planned = named.filter((f) => !unwritable.has(f));
     let removedFrom: string[] = [];
     let publishPending = false;
     if (planned.length > 0) {

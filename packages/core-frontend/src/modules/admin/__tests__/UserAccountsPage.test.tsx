@@ -263,8 +263,13 @@ describe('UserAccountsPage', () => {
     );
   });
 
-  it('names the files this admin cannot write, which will keep the address', async () => {
+  it('names the files this admin cannot write, and still runs the removal for the rest', async () => {
     vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    vi.mocked(deleteAccount).mockResolvedValueOnce({
+      ok: true,
+      removedFrom: ['Sales/access.md', 'groups.yaml', 'roles.yaml'],
+      stillNamedIn: ['Sales/Plan.md'],
+    });
     renderPage();
     await waitFor(() => screen.getByText('Alice'));
     await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
@@ -274,15 +279,54 @@ describe('UserAccountsPage', () => {
         '1 file you cannot write will keep the address: Sales/Plan.md.',
       ),
     );
-    // The removal still runs — it cleans everything else.
     expect(
       dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
     ).toBeChecked();
-    // Turning the option off makes the warning moot: nothing is cleaned.
+
+    // The removal really runs with the option ON — it cleans everything else.
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: true }),
+    );
+    // And the file it could not write is named again in the outcome.
+    await waitFor(() => screen.getByText(/Some files still name them/));
+    expect(screen.getByText('Sales/Plan.md')).toBeInTheDocument();
+  });
+
+  it('with the option off, the unwritable-files warning goes away', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent(/you cannot write/));
     await userEvent.click(
       dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
     );
     expect(screen.getByRole('dialog')).not.toHaveTextContent(/you cannot write/);
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('says so when it could not tell which files this admin can write', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: null });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        /Which of these files you can write could not be checked/,
+      ),
+    );
+    // Unknown is not "none", and not a reason to refuse the removal. The
+    // definite "N files ...: <list>" line belongs to a check that DID run.
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/\d+ files? you cannot write/);
+    expect(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
   });
 
   it('the deployment owner / last Admin cannot be removed this way: option disabled with the reason', async () => {

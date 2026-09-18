@@ -297,6 +297,38 @@ describe('UserAccessRemovalService', () => {
     }
   });
 
+  it('a write check that cannot run reports unknown, and still attempts every file', async () => {
+    const canWrite = vi
+      .spyOn(AccessControlService.prototype, 'canWriteBatchAtRef')
+      .mockRejectedValue(new Error('access tree unreadable'));
+    try {
+      // The dialog must not be told "no unwritable files" when the question
+      // could not be asked at all.
+      expect((await build().service.report(LEE, 'admin@x.io')).unwritable).toBeNull();
+
+      // The pre-check only ever narrows the set; with nothing known, attempt
+      // them all — the lock gate remains the authority.
+      const { service, workflow } = build();
+      const result = await service.remove(ADMIN, LEE, 'deleted-1');
+      expect(workflow.commits).toHaveLength(1);
+      expect(result.removedFrom.sort()).toEqual(['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
+      expect(result.stillNamedIn).toEqual([]);
+    } finally {
+      canWrite.mockRestore();
+    }
+  });
+
+  it('a null verdict is bootstrap default-allow, not uncertainty', async () => {
+    // GitService.assertCanWriteAtRef default-ALLOWS on the same signal, so
+    // "no file is unwritable" is the answer that matches the gate.
+    const canWrite = vi.spyOn(AccessControlService.prototype, 'canWriteBatchAtRef').mockResolvedValue(null);
+    try {
+      expect((await build().service.report(LEE, 'admin@x.io')).unwritable).toEqual([]);
+    } finally {
+      canWrite.mockRestore();
+    }
+  });
+
   it('refuses the deployment owner and the last Admin, writing nothing', async () => {
     const { service, workflow } = build(stubWorkflow(), ['Lee@x.io']);
     const report = await service.report(LEE);

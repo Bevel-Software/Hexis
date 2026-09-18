@@ -140,8 +140,10 @@ export function UserAccountsPage() {
 
   const removalBlocked = references !== null && !references.removable;
   // Files naming them that this admin may not write: the cleanup skips those,
-  // so say it before the delete rather than only in the outcome.
+  // so say it before the delete rather than only in the outcome. `unwritable`
+  // is null when that could not be judged — which is not "none".
   const unwritableCount = references?.unwritable?.length ?? 0;
+  const unwritableUnknown = references !== null && references.unwritable === null;
 
   async function confirmDelete() {
     if (!pendingDelete || deleting) return;
@@ -499,7 +501,13 @@ export function UserAccountsPage() {
           {!removalBlocked && removeFromAccess && unwritableCount > 0 && (
             <p className="text-ink-muted">
               {plural(unwritableCount, 'file', 'files')} you cannot write will keep the address:{' '}
-              {references?.unwritable.join(', ')}.
+              {references?.unwritable?.join(', ')}.
+            </p>
+          )}
+          {!removalBlocked && removeFromAccess && unwritableUnknown && (
+            <p className="text-ink-muted">
+              Which of these files you can write could not be checked. Any you cannot write will
+              keep the address, and are listed afterwards.
             </p>
           )}
           {(!removeFromAccess || removalBlocked) && (

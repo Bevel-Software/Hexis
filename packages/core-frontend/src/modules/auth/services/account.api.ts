@@ -72,9 +72,10 @@ export interface AccountReferences {
   /**
    * Of `files`, the ones the signed-in admin may not write (a folder that
    * excludes Admin, the machine-owned `synced-groups.yaml`). The cleanup
-   * skips these and they keep the address.
+   * skips these and they keep the address. null when write access could not
+   * be judged at all — not the same as none.
    */
-  unwritable: string[];
+  unwritable: string[] | null;
 }
 
 export async function getAccountReferences(userId: string): Promise<AccountReferences> {
