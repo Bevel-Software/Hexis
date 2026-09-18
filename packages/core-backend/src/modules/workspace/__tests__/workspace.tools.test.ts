@@ -85,8 +85,12 @@ async function start(
   // `LockingFilesystem.writeFiles` is what the real `delete_folder` and
   // `write_files` land through — one lock cycle over every path, then one
   // commit. A plain LocalFilesystem has no such method, so stand in for its
-  // DISK effect (the commit half has no counterpart here: this harness never
-  // commits) and let the tools be exercised end to end.
+  // DISK effect and let the tools be exercised end to end. This stand-in is
+  // NOT atomic, and these tests do not claim atomicity: they assert what the
+  // TOOL controls — that it hands the whole folder over in ONE batch. The
+  // batch's own all-or-none behaviour is asserted where it lives, in
+  // `locking-filesystem.test.ts` ("a DELETE batch whose later lock is
+  // contended deletes nothing").
   (fs as unknown as Record<string, unknown>).writeFiles = async (
     writes: { path: string; content: string }[],
     _summary: string,
@@ -1573,7 +1577,7 @@ describe('preflight for moves and deletes', () => {
     if (rel.startsWith('Sales/outbox/nested/') || rel.startsWith('Sales/moved/nested/')) {
       return { read: true, write: false, download: false, owner: false };
     }
-    if (rel.endsWith('/sealed.md')) return { read: true, write: false, download: false, owner: false };
+    if (rel === 'sealed.md' || rel.endsWith('/sealed.md')) return { read: true, write: false, download: false, owner: false };
     if (rel.startsWith('HR/')) return { read: true, write: true, download: false, owner: false };
     if (rel.startsWith('Locked/')) return { read: true, write: false, download: false, owner: false };
     if (rel.startsWith('Secret/')) return { read: false, write: false, download: false, owner: false };
@@ -1938,10 +1942,11 @@ describe('preflight for moves and deletes', () => {
     it('a folder\'s own access.md goes with it, in the same single change as every other file', async () => {
       const base = await seeded();
       await fs.writeFile(KB('Sales/archive/access.md'), '---\nread: everyone\n---\n');
-      // The batch is what makes the folder land all-or-nothing, so assert the
-      // shape the tool hands the filesystem: ONE call carrying every file,
-      // the folder's own access.md among them. Ordering within it is no
-      // longer a property — nothing is committed until all of it is.
+      // What the TOOL decides is the shape it hands the filesystem: ONE batch
+      // carrying every file, the folder's own access.md among them. That the
+      // batch then lands all-or-nothing is the batch's own property, asserted
+      // in locking-filesystem.test.ts; the harness stand-in here only applies
+      // the deletes.
       const batches: string[][] = [];
       const fsAny = fs as unknown as Record<string, unknown>;
       const writeFiles = fsAny.writeFiles as (w: unknown[], s: string, d: string[]) => Promise<void>;

@@ -596,6 +596,31 @@ describe('LockingFilesystem — creator read grants on creation', () => {
     expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
   }, 10_000);
 
+  it('a DELETE batch whose later lock is contended deletes nothing — a folder never half-disappears', async () => {
+    // The all-or-none property `delete_folder` relies on, asserted on disk:
+    // every lock is taken before the first delete, so a contended path means
+    // no file under the folder is gone and nothing is committed.
+    await fs.mkdir(path.join(root, 'knowledge-base/Archive'), { recursive: true });
+    await fs.writeFile(path.join(root, 'knowledge-base/Archive/a.md'), 'a');
+    await fs.writeFile(path.join(root, 'knowledge-base/Archive/b.md'), 'b');
+    const workflow = makeWorkflow();
+    (workflow.acquireLock as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ acquired: true, lock: { holderUserId: 'user-1', holderName: 'Alice' } })
+      .mockResolvedValue({ acquired: false, lock: { holderUserId: 'bob', holderName: 'Bob' } });
+    const fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+
+    await expect(
+      fsLayer.writeFiles([], 'Delete Archive', ['knowledge-base/Archive/a.md', 'knowledge-base/Archive/b.md']),
+    ).rejects.toThrow(/locked by Bob/);
+
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Archive/a.md'), 'utf-8')).toBe('a');
+    expect(await fs.readFile(path.join(root, 'knowledge-base/Archive/b.md'), 'utf-8')).toBe('b');
+    expect(workflow.commitChanges).not.toHaveBeenCalled();
+  }, 10_000);
+
   it('a seed write that dies MID-WRITE restores the pre-image and releases UNTOUCHED', async () => {
     // The partial-write hazard: super.writeFile throws after touching disk,
     // leaving bytes that are neither the old content nor the new. The seed
