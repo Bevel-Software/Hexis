@@ -25,7 +25,7 @@ import { DeletePluginDialog } from './DeletePluginDialog';
 import { PageActions } from './PageActions';
 import { copyToClipboard } from '../utils/clipboard';
 import { LockedPluginView } from './LockedPluginView';
-import { PendingSkillReview } from './PendingSkillReview';
+import { PendingItemReview } from './PendingItemReview';
 
 /**
  * One plugin, as a place: `/skills-and-tools/plugins/:plugin`.
@@ -162,8 +162,8 @@ export function PluginPage() {
    * Both kinds open a PAGE — `skills/:name` has landed, so the contract this
    * function used to carry is discharged and the dialog is gone. Kept identical
    * to `LibraryPage.openItem` on purpose: a card must do the same thing
-   * wherever you clicked it — including the proposed-skill case, which opens
-   * its change request because it has no page to open.
+   * wherever you clicked it — including the proposed case, skill or tool,
+   * which opens its change request because it has no page to open.
    */
   function openItem(item: LibraryItem) {
     if (item.pending) {
@@ -486,7 +486,7 @@ export function PluginPage() {
       />
 
       {reviewing && (
-        <PendingSkillReview
+        <PendingItemReview
           item={reviewing}
           onClose={() => setReviewing(null)}
           onResolved={() => {

@@ -100,6 +100,7 @@ const CATALOG: LibraryData = {
   // nothing else.
   skills: [{ name: 'rfi', description: 'Answers an RFI.', path: 'Plugins/personal-juan/rfi' }],
   pendingSkills: [],
+  pendingTools: [],
   tools: [
     {
       slug: 'weather',

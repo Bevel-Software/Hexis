@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { fetchFileAccessBatch } from '../../access/api';
 import { listToolSecrets, type ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
+import { listPendingTools, type PendingToolSummary } from '../services/tools.api';
 import {
   defaultWorkspaceId,
   getSkill,
@@ -34,6 +35,8 @@ import {
  *  - change requests — all open + the caller's own, for the review layer
  *  - pending skills — `GET /api/skills/pending`, the skills that exist only on
  *                  an open change request's branch (author + approvers only)
+ *  - pending tools — `GET /api/tools/pending`, the same for a `.tool` manual or
+ *                  an `mcp.json` server proposed on an open change request
  *
  * Non-critical failures degrade to empty sets rather than blocking the page —
  * only the skills+tools pair failing surfaces as a load error.
@@ -49,6 +52,13 @@ export interface LibraryData {
    */
   pendingSkills: PendingSkillSummary[];
   tools: ToolSecrets[];
+  /**
+   * Proposed tools, not yet released. Kept SEPARATE from `tools` for exactly
+   * the reason `pendingSkills` is kept out of `skills`: everything downstream
+   * of `tools` treats an entry as an integration that exists — it has a page, a
+   * connection state, secrets to fill in — and a proposal has none of that.
+   */
+  pendingTools: PendingToolSummary[];
   /** Skill names (folder ids) whose SKILL.md names the caller in an `owner:` grant. */
   ownedSkills: Set<string>;
   /** Skill names (folder ids) whose SKILL.md the caller can write. */
@@ -74,6 +84,7 @@ export function useLibraryData(): LibraryData {
     error: null,
     skills: [],
     pendingSkills: [],
+    pendingTools: [],
     tools: [],
     ownedSkills: new Set(),
     writableSkills: new Set(),
@@ -114,12 +125,13 @@ export function useLibraryData(): LibraryData {
         return { results };
       };
 
-      const [writable, ownership, crs, mine, pending, details] = await Promise.all([
+      const [writable, ownership, crs, mine, pending, pendingTools, details] = await Promise.all([
         verdicts(skillProbes, 'write'),
         verdicts(ownerProbes, 'owner'),
         listOpenChangeRequests().catch(() => [] as PullRequestSummary[]),
         listMyChangeRequests().catch(() => [] as PullRequestSummary[]),
         listPendingSkills().catch(() => [] as PendingSkillSummary[]),
+        listPendingTools().catch(() => [] as PendingToolSummary[]),
         Promise.all(
           skills.map(
             (s): Promise<[string, string[]]> =>
@@ -140,6 +152,7 @@ export function useLibraryData(): LibraryData {
         skills,
         pendingSkills: pending,
         tools,
+        pendingTools,
         ownedSkills: skillsWhere(ownership.results),
         writableSkills: skillsWhere(writable.results),
         ownedTools: new Set(tools.filter((t) => ownership.results[t.path] === true).map((t) => t.slug)),

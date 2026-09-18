@@ -73,8 +73,17 @@ export function PersonalPluginPage() {
   const skillItems = items.filter((i) => i.kind === 'skill');
   const toolItems = items.filter((i) => i.kind === 'integration');
 
-  /** Identical to the gallery's and the plugin page's — one behaviour per card. */
+  /**
+   * Identical to the gallery's and the plugin page's — one behaviour per card.
+   *
+   * A PROPOSAL has no page to navigate to (its file is on a change request's
+   * branch, and both pages read the default branch), so its card does nothing
+   * here rather than routing to a URL that would 404. This space is your own,
+   * and a proposal into it has no second reader to review it — the review
+   * dialog the other two pages open would have nobody to open it for.
+   */
   function openItem(item: LibraryItem) {
+    if (item.pending) return;
     if (kbDirName) navigate(urlForLibraryItem(kbDirName, item));
   }
 

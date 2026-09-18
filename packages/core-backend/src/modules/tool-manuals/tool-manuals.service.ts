@@ -790,7 +790,12 @@ function capabilitiesOf(m: ToolManualDescriptor): ToolCapability[] {
   return out;
 }
 
-function baseName(rel: string): string {
+/**
+ * A `.tool` file's provisional slug — its filename without the extension. Exported
+ * for the pending-tool surface, which parses a `.tool` read at a change
+ * request's branch and must derive the same id the catalog would.
+ */
+export function baseName(rel: string): string {
   const base = rel.slice(rel.lastIndexOf('/') + 1);
   return base.replace(/\.tool$/i, '');
 }
