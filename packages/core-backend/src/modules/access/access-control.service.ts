@@ -1489,7 +1489,14 @@ export class AccessControlService implements IAccessControl {
     // would read frontmatter it does not have and omit the rules it does,
     // naming principals that are not the ones a folder move changes. Refuse
     // rather than answer the wrong question convincingly.
-    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch(() => null);
+    //
+    // Only absence is an answer here (see `isAbsence`): a probe that failed on
+    // permissions or I/O does not say "this is a file", and folding it into
+    // one would let the very case above through on an unreadable source.
+    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
     if (fromStat?.isDirectory()) {
       throw new WorkflowDomainError(
         'prospective access answers for a file, not a folder',

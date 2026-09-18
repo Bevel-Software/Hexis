@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -145,6 +145,30 @@ describe('AccessControlService.prospectiveHolders', () => {
     await expect(
       svc.prospectiveHolders(workspaceId, 'Knowledge/Legal', 'Knowledge/Sales/Legal'),
     ).rejects.toThrow(/folder/i);
+  });
+
+  it('a probe that fails for any reason but absence throws, never a silent "file"', async () => {
+    const svc = await makeService(TREE);
+    // A disk fault (EACCES here) must never read as "not a directory": that is
+    // exactly how a folder source would slip past the refusal above, and the
+    // answer it slips into names the wrong principals. Spied rather than
+    // staged with mode bits, so the property holds as root and on Windows too.
+    const real = fs.stat;
+    const spy = vi.spyOn(fs, 'stat').mockImplementation(((p: string) =>
+      String(p).endsWith('contract.md')
+        ? Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }))
+        : (real as (p: string) => Promise<unknown>).call(fs, p)) as never);
+    try {
+      await expect(
+        svc.prospectiveHolders(
+          workspaceId,
+          'Knowledge/Legal/contract.md',
+          'Knowledge/Sales/contract.md',
+        ),
+      ).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('moves nothing and writes nothing', async () => {
