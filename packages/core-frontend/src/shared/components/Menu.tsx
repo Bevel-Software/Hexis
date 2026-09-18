@@ -69,7 +69,10 @@ export function MenuItem({
         'aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent',
         tone === 'danger'
           ? 'text-danger hover:bg-danger-soft'
-          : 'text-ink-muted hover:bg-hover hover:text-ink',
+          // The aria-disabled text override is tone-local because the hover it
+          // undoes is: only the default tone brightens to `text-ink`, and a
+          // disabled row that still lights up on hover reads as usable.
+          : 'text-ink-muted hover:bg-hover hover:text-ink aria-disabled:hover:text-ink-muted',
         active && 'font-medium text-ink',
         className,
       )}

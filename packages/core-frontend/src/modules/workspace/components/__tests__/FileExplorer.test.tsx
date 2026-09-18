@@ -586,6 +586,53 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     }
   });
 
+  /**
+   * Two downloads for the same row can overlap — the menu closes on click but
+   * the ROW does not, so a second Download is one reopen away — and the two
+   * can land out of order. The notice speaks for the LATEST attempt only:
+   * a slow refusal arriving after a fast success would otherwise report a
+   * failed download the user had just watched succeed.
+   */
+  it('ignores a superseded download outcome instead of reporting a stale failure', async () => {
+    let releaseRefusal: () => void = () => {};
+    const slowRefusal = new Promise<unknown>((resolve) => {
+      releaseRefusal = () =>
+        resolve({ ok: false, status: 403, text: async () => '{"error":"Download permission required"}' });
+    });
+    let downloadsSeen = 0;
+    mockAuthFetch.mockImplementation((url: string) => {
+      if (url.includes('/access?')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => accessBody(true), text: async () => '' });
+      }
+      downloadsSeen += 1;
+      // First click hangs, second answers at once — the out-of-order case.
+      return downloadsSeen === 1
+        ? slowRefusal
+        : Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(['bytes']), text: async () => '' });
+    });
+    stubObjectUrls();
+
+    renderWithTree();
+    await openMenuOn('brief.md');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+    });
+    // Reopen and click again while the first attempt is still in flight.
+    await openMenuOn('brief.md');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+    });
+    expect(downloadCalls()).toHaveLength(2);
+    expect(screen.queryByTestId('tree-download-error')).toBeNull();
+
+    // The stale refusal lands last. It belongs to a download two clicks ago.
+    await act(async () => {
+      releaseRefusal();
+      await slowRefusal;
+    });
+    expect(screen.queryByTestId('tree-download-error')).toBeNull();
+  });
+
   it('calls /file/raw?download=1 with the entry path and saves the blob', async () => {
     routeAuthFetch({
       canDownload: true,

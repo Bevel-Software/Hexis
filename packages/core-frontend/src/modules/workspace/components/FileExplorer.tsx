@@ -287,15 +287,23 @@ export const DOWNLOAD_DENIED_MESSAGE = "You don't have download permission for t
  */
 function useDownloadVerdict(entry: FileTreeEntry | null): boolean | null {
   const { workspaceId } = useWorkspace();
-  const [verdict, setVerdict] = useState<boolean | null>(null);
   const path = entry?.relativePath ?? null;
   const kind = entry?.type === 'directory' ? 'folder' : 'file';
+  // The verdict is stored WITH the question it answers, and read back only
+  // while that question still stands. Keying it — rather than clearing it
+  // when a new lookup starts — is what makes an answer about a PREVIOUS
+  // entry unreadable as this one's: a stale `false` would disable a Download
+  // the caller does have, and would stay disabled for good if the new lookup
+  // failed, because the failure path deliberately leaves the verdict alone.
+  // Keying also costs no extra render, so there is no flash of a wrong state.
+  const key = workspaceId && path !== null ? `${workspaceId}\u0000${path}\u0000${kind}` : null;
+  const [answered, setAnswered] = useState<{ key: string; verdict: boolean } | null>(null);
   useEffect(() => {
-    if (!workspaceId || path === null) return;
+    if (!workspaceId || path === null || key === null) return;
     let cancelled = false;
     fetchFileAccess(workspaceId, path, kind)
       .then((res) => {
-        if (!cancelled) setVerdict(res.canDownload);
+        if (!cancelled) setAnswered({ key, verdict: res.canDownload });
       })
       .catch(() => {
         // Default-allow, as `useFileAccess` does: a transient lookup failure
@@ -304,8 +312,8 @@ function useDownloadVerdict(entry: FileTreeEntry | null): boolean | null {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, path, kind]);
-  return verdict;
+  }, [key, workspaceId, path, kind]);
+  return answered !== null && answered.key === key ? answered.verdict : null;
 }
 
 // ── Context Menu ──
@@ -689,6 +697,15 @@ export function FileTreeNode({
    * something the row itself can say.
    */
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  /**
+   * Which download the notice is allowed to speak for. The menu closes on
+   * click but the ROW does not, so a second Download can be started (reopen,
+   * click again) while the first is still in flight — and the two can land
+   * out of order. Only the latest may write `downloadError`: without this, a
+   * slow refusal arriving after a fast success reports a failed download the
+   * user just watched succeed.
+   */
+  const downloadSeq = useRef(0);
 
   const handleDownload = useCallback(async () => {
     if (!workspaceId) return;
@@ -703,9 +720,12 @@ export function FileTreeNode({
       ? `/api/workspace/${workspaceId}/folder/zip?path=${encodeURIComponent(entry.relativePath)}&download=1`
       : rawFileUrl(workspaceId, entry.relativePath, { download: true });
     const savedAs = isFolder ? `${entry.name}.zip` : entry.name;
+    const seq = ++downloadSeq.current;
     setDownloadError(null);
     try {
       const outcome = await downloadViaBlob(url, savedAs);
+      // Superseded: a later download for this row has already spoken.
+      if (seq !== downloadSeq.current) return;
       if (!outcome.ok) {
         setDownloadError(
           outcome.status === 403
@@ -716,6 +736,7 @@ export function FileTreeNode({
       }
     } catch (err) {
       console.error('Failed to download:', err);
+      if (seq !== downloadSeq.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       setDownloadError(`Couldn't download ${entry.name}: ${msg}`);
     }
