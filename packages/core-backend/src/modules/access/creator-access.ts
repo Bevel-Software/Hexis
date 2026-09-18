@@ -41,6 +41,7 @@ import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { spliceGrant, type Principal } from '../access-model/access-splice.js';
+import { isTextBytes } from '../workspace/file-readers/text-reader.js';
 import { isAccessMdPath } from '../access-model/access-grammar.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';
 import {
@@ -180,7 +181,13 @@ export class CreatorAccessService implements ICreatorAccess {
     if (rel === null || !rel.endsWith('.md')) return null;
     try {
       if (await this.accessControl.canRead(workspaceId, creator.email, rel)) return null;
-      const content = await this.workspaceService.readFile(workspaceId, wsRelPath);
+      // The name says note; the bytes decide. A binary archived under a `.md`
+      // name, read as UTF-8 and written back with a grant spliced in, would
+      // come out corrupted — the damage the share routes now refuse to do.
+      // Such a file carries no rule of its own, so it gets none here either.
+      const bytes = await this.workspaceService.readFileBinary(workspaceId, wsRelPath);
+      if (!isTextBytes(bytes)) return null;
+      const content = bytes.toString('utf-8');
       const result = spliceGrant(content, 'read', this.principalFor(creator), {
         allowScalar: true,
       });

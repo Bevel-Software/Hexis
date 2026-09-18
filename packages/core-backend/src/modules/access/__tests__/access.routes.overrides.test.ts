@@ -80,6 +80,7 @@ async function makeHarness(opts: {
       if (text === undefined) throw new Error(`ENOENT ${wsRel}`);
       return text;
     }),
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
   } as unknown as WorkspaceService;
 
