@@ -34,6 +34,17 @@ export const PR_STALE_FALLBACK_MS = 60_000;
 export const SUGGESTIONS_OPTIMISTIC_EVENT = 'bevel:suggestions-optimistic';
 
 /**
+ * CustomEvent carrying `{ folder }` — a KB-repo-relative folder whose
+ * proposed files the client just took out of every open change request (a
+ * folder delete's "and its proposed changes"). The mirror of
+ * {@link SUGGESTIONS_OPTIMISTIC_EVENT}: `OpenChangeRequestsProvider` hides
+ * every request path under the folder at once, until a fetch that started
+ * after the event answers — so no suggestion row or change-request dot for the
+ * deleted folder outlives the delete while the list catches up.
+ */
+export const SUGGESTIONS_RETRACTED_EVENT = 'bevel:suggestions-retracted';
+
+/**
  * Custom event the chat-side `compare_files` tool-card dispatches to deep-link
  * into the comparison panel. The FileViewer listens for this and forwards
  * `path` to the workspace open-file flow plus the from/to refs to the

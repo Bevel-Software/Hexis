@@ -38,6 +38,7 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
+import { assertValidRelativePath } from '../kb-fs/branch-name.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -634,6 +635,70 @@ export function createWorkflowRoutes(
       res.json(
         await scopeApplyFailures(req, await workflow.listChangeRequestsForUser(workspace.id, user.email, { fresh }), user),
       );
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * A KB-repo-relative folder from the request, or null (400 sent) when it is
+   * not a path git may be handed. The contract is `assertValidRelativePath`'s
+   * — the one every path reaching git meets (relative, no drive letter, no
+   * backslash, no `.`/`..`, no leading `-`, at most 1024 characters) — plus
+   * what a folder spelling adds: no empty segment and no control character.
+   * A malformed spelling matches no request, so letting it through would
+   * answer "nothing to remove" instead of saying the path is wrong.
+   */
+  function folderParam(raw: unknown, res: express.Response): string | null {
+    const folder = typeof raw === 'string' ? raw.replace(/\/+$/, '') : '';
+    let valid = true;
+    try {
+      assertValidRelativePath(folder);
+    } catch {
+      valid = false;
+    }
+    if (
+      !valid
+      || folder.split('/').includes('')
+      || [...folder].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f)
+    ) {
+      res.status(400).json({ error: 'path must be a folder inside the knowledge base' });
+      return null;
+    }
+    return folder;
+  }
+
+  /**
+   * Before a folder delete: the open change requests proposing files under
+   * the folder, and whether the caller may take those files out of each.
+   * Registered before `/:number`, which would otherwise claim the segment.
+   */
+  router.get('/workflow/change-requests/under-folder', async (req, res) => {
+    const folder = folderParam(req.query.path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ requests: await workflow.changeRequestsUnderFolder(folder, user) });
+    } catch (err) {
+      const { status, body } = toHttpError(err);
+      res.status(status).json(body);
+    }
+  });
+
+  /**
+   * "Delete folder and its proposed changes", the request half: every file
+   * under the folder leaves every open request proposing it, and a request
+   * left empty is withdrawn. All or nothing on permission (403).
+   */
+  router.post('/workflow/change-requests/under-folder/remove', async (req, res) => {
+    const folder = folderParam((req.body ?? {}).path, res);
+    if (folder === null) return;
+    const user = await requireUser(req, res);
+    if (!user) return;
+    try {
+      res.json({ results: await workflow.removeFolderFromChangeRequests(folder, user) });
     } catch (err) {
       const { status, body } = toHttpError(err);
       res.status(status).json(body);

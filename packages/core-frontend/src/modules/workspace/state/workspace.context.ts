@@ -252,7 +252,11 @@ export interface WorkspaceContextValue {
    */
   dispatchUpload: (input: UploadInput, targetDirectory: string) => Promise<void>;
   clearUploadError: () => void;
-  deleteEntry: (relativePath: string) => Promise<void>;
+  /**
+   * Delete this branch's copy of a file or folder. Resolves `false` when
+   * nothing was deleted because the user kept their unsaved tabs.
+   */
+  deleteEntry: (relativePath: string) => Promise<void | false>;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
   saveFile: (relativePath: string, content: string) => Promise<void>;
   /**
