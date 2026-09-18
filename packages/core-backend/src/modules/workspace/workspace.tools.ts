@@ -37,6 +37,8 @@ import { createFileReaderRegistry } from './file-readers/file-reader.registry.js
 import { DocumentReader } from './file-readers/document-reader.js';
 import { mcpImageResult } from '@bevel-software/platform-mcp-core';
 import {
+  folderPlaceholderPath,
+  isFolderPlaceholder,
   isPlatformFile,
   isPlatformFolder,
   isProtectedBranch,
@@ -46,6 +48,10 @@ import {
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
+
+const log = logger('workspace-tools');
 
 /** The caller's verdict per access verb on one path. */
 interface AccessVerbs {
@@ -122,6 +128,59 @@ async function filterReadableEntries(
     const wsPath = dir ? `${dir}/${e.name}` : e.name;
     return verdict.get(wsPath) === true;
   });
+}
+
+/**
+ * Drop the empty-folder placeholder from a directory listing: it keeps a
+ * folder alive in git and is never content (see `placeholder.ts`).
+ */
+function withoutPlaceholder(entries: DirEntry[]): DirEntry[] {
+  return entries.filter((e) => e.type === 'directory' || !isFolderPlaceholder(e.name));
+}
+
+/**
+ * Keep the folder a removal just emptied. A folder exists until it is deleted
+ * explicitly, so when deleting or moving out its last entry leaves it empty it
+ * gets the placeholder, written through the same filesystem (the agent's
+ * lock-aware one commits it) within the same tool call. Only folders inside
+ * the repository qualify, never the clone folder itself.
+ *
+ * It runs in the folder's turn, which the explicit folder delete also takes,
+ * and looks inside it: a folder that is gone by then was deleted explicitly
+ * and stays gone. A failure fails the call — the removal landed, but the
+ * folder would vanish on the next clone, and the agent must hear that.
+ */
+async function keepFolderOf(
+  fs: LocalFilesystem,
+  ctx: ToolContext,
+  branch: string,
+  removedPath: string,
+  kbDirName: string,
+): Promise<void> {
+  const trimmed = removedPath.replace(/^\/+/, '').replace(/\/+$/, '');
+  const dir = trimmed.includes('/') ? trimmed.slice(0, trimmed.lastIndexOf('/')) : '';
+  if (!dir.startsWith(`${kbDirName}/`)) return;
+  try {
+    await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), dir, async () => {
+      let entries: unknown[];
+      try {
+        entries = await fs.readdir(dir);
+      } catch (err) {
+        if (isAbsence(err)) return;
+        throw err;
+      }
+      if (entries.length > 0) return;
+      await fs.writeFile(folderPlaceholderPath(dir), '');
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log.error(`could not keep the folder ${printable(dir)} after removing ${printable(removedPath)}: ${printable(reason)}`);
+    const message = `"${removedPath}" was removed, but its folder "${dir}" could not be kept: ${reason}`;
+    // The original error keeps its status (a lock held elsewhere stays a 409).
+    if (!(err instanceof Error)) throw new ToolError(message, 500);
+    err.message = message;
+    throw err;
+  }
 }
 
 /**
@@ -408,6 +467,7 @@ async function grepWalk(
   for (const e of entries) {
     if (out.length >= max) return;
     if (hasGitInternalsSegment(e.name) || e.name === 'node_modules') continue;
+    if (e.type !== 'directory' && isFolderPlaceholder(e.name)) continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
       await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
@@ -988,7 +1048,7 @@ export function registerWorkspaceTools(
       const dir = (a.path as string) || '';
       await recordOntologyRead(sessionOntologyGate, ctx, dir);
       const fs = await ctx.getFilesystem(a.branch as string);
-      const entries = (await fs.readdir(dir || '.')) as DirEntry[];
+      const entries = withoutPlaceholder((await fs.readdir(dir || '.')) as DirEntry[]);
       const filtered = await filterReadableEntries(readGateFor(a.branch as string, ctx), dir, entries);
       return { path: a.path ?? '', entries: filtered };
     },
@@ -1065,6 +1125,10 @@ export function registerWorkspaceTools(
       const branch = a.branch as string;
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(branch, ctx), p);
+      // Nothing there is a 404, and the placeholder — never content — gets
+      // exactly that answer.
+      const nothingThere = () => new ToolError(`There is no file or directory at "${displayPath(p)}".`, 404);
+      if (isFolderPlaceholder(p)) throw nothingThere();
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Judged before `stat`, which follows links: a link anywhere on the path
@@ -1080,6 +1144,7 @@ export function registerWorkspaceTools(
         if (viaLink !== undefined) {
           throw new ToolError(`"${p}" goes through the symbolic link "${viaLink}", which leads nowhere; the agent tools never follow links.`, 400);
         }
+        if (isAbsence(err)) throw nothingThere();
         throw err;
       }
       // The filesystem's own `mimeType` comes from a second extension table
@@ -1133,7 +1198,8 @@ export function registerWorkspaceTools(
         access,
       };
       if (kind === 'folder') {
-        out.descendants = files.length;
+        // The placeholder is never content: a folder holding only it has none.
+        out.descendants = files.filter((f) => !isFolderPlaceholder(f)).length;
         if (truncated) out.descendantsTruncated = true;
         return out;
       }
@@ -1209,7 +1275,14 @@ export function registerWorkspaceTools(
       const docs: DocGrepState = { readers, uncachedBudget: UNCACHED_DOCS_PER_GREP, skippedUncached: 0 };
       // The empty root is the workspace itself — always a directory, and never
       // worth a stat.
-      const kind = searchRoot === '' ? 'directory' : await searchRootKind(fs, searchRoot);
+      // A placeholder named on its own is searched as what it is to every
+      // other tool: nothing.
+      const kind =
+        searchRoot === ''
+          ? 'directory'
+          : isFolderPlaceholder(searchRoot)
+            ? 'missing'
+            : await searchRootKind(fs, searchRoot);
       /** Why a single-file search found nothing, when "no matches" would be a lie. */
       let fileNote: string | undefined;
       if (kind === 'directory') {
@@ -1415,7 +1488,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_file',
     description:
-      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Files only: a folder is refused with a pointer to `delete_folder`. ' +
+      'Delete ONE workspace file (a symbolic link is refused: links are never followed or removed). Committed + pushed as you. Its folder stays, even when this was its last file. Files only: a folder is refused with a pointer to `delete_folder`. ' +
       'A platform file (`access.md` or `.bevelignore` in any folder, `roles.yaml` or `AGENTS.md` at the repository root) and git metadata are refused.' +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1459,6 +1532,8 @@ export function registerWorkspaceTools(
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
       await fs.deleteFile(path);
+      // Deleting content is not deleting structure: an emptied folder stays.
+      await keepFolderOf(fs, ctx, branch, path, kbDirName);
       return { path, deleted: true };
     },
   });
@@ -1466,7 +1541,7 @@ export function registerWorkspaceTools(
   mount({
     name: 'delete_folder',
     description:
-      'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. ' +
+      'Delete a workspace FOLDER and every file under it, at any depth; the whole folder lands as ONE committed + pushed change as you — all of it or none of it — then the empty folder is removed. This is the one way a folder goes away: the folder that held it stays, even if this was all it had, and a folder holding nothing but its empty-folder placeholder counts as empty. ' +
       'Preflight first: `dryRun: true` changes nothing and answers `{ path, kind: "folder", descendants, files, filesTruncated, allowed, reason? }` — `descendants` is the file count, `files` names up to 100 of them. ' +
       'A non-empty folder is deleted only with `confirm: true`; without it the call deletes nothing and returns the same impact with `confirmationRequired: true`. Do NOT set `confirm: true` on your first call — dry-run, check the impact, then confirm. ' +
       'Refused (in a dry run as `allowed: false` with the `reason`): a platform folder (the repository root or a reserved root folder such as `KnowledgeBase/`), git metadata, a folder holding a symbolic link (links are never removed), and a folder holding any file you may not write. A path that is a file is refused with a pointer to `delete_file`, and a path through a symbolic link is refused (links are never followed). ' +
@@ -1516,65 +1591,93 @@ export function registerWorkspaceTools(
       }
       const root = await workspaceRoot(branch, ctx);
       await assertNoSymlinkOnPath(root, path);
-      const { files, links } = await filesUnder(fs, path);
-      // A restricted run is judged on what it would actually delete: the files.
-      for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f);
-      const managed = managedReason(await onDiskSpelling(root, path), 'folder');
-      const blocked = managed !== undefined ? [] : await writeBlocked(branch, ctx, [path, ...files]);
-      const linked = managed === undefined && links.length > 0 ? linksRefusal(path, links) : undefined;
-      const reason = managed ?? linked ?? (blocked.length > 0
-        ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the folder cannot be deleted.`
-        : undefined);
-      const impact = {
-        path,
-        kind: 'folder' as const,
-        descendants: files.length,
-        files: files.slice(0, LISTED_FILES_CAP),
-        filesTruncated: files.length > LISTED_FILES_CAP,
-        allowed: reason === undefined,
-        ...(reason !== undefined ? { reason } : {}),
+      /**
+       * Everything the delete is judged on. `files` is every file that goes,
+       * the empty-folder placeholders included; `content` leaves those out,
+       * because a placeholder is never content — a folder holding nothing but
+       * its placeholder is EMPTY, needs no confirmation, and reports no files.
+       */
+      const judge = async () => {
+        const { files, links } = await filesUnder(fs, path);
+        const content = files.filter((f) => !isFolderPlaceholder(f));
+        // A restricted run is judged on what it would actually delete: the files.
+        for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f);
+        const managed = managedReason(await onDiskSpelling(root, path), 'folder');
+        const blocked = managed !== undefined ? [] : await writeBlocked(branch, ctx, [path, ...files]);
+        const linked = managed === undefined && links.length > 0 ? linksRefusal(path, links) : undefined;
+        const reason = managed ?? linked ?? (blocked.length > 0
+          ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the folder cannot be deleted.`
+          : undefined);
+        const impact = {
+          path,
+          kind: 'folder' as const,
+          descendants: content.length,
+          files: content.slice(0, LISTED_FILES_CAP),
+          filesTruncated: content.length > LISTED_FILES_CAP,
+          allowed: reason === undefined,
+          ...(reason !== undefined ? { reason } : {}),
+        };
+        return { files, content, managed, linked, blocked, impact };
       };
-      if (a.dryRun === true) return { ...impact, dryRun: true };
-      if (managed !== undefined) throw new ToolError(managed, 400);
-      if (linked !== undefined) throw new ToolError(linked, 400);
-      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
-      if (files.length > 0 && a.confirm !== true) {
+      if (a.dryRun === true) return { ...(await judge()).impact, dryRun: true };
+
+      // The real delete runs in the folder's TURN, judged again inside it: an
+      // emptied folder being kept (`keepFolderOf`, which takes the turn of
+      // the folder it keeps) can never write its placeholder into this folder
+      // after the files below were enumerated, and so bring it back.
+      const outcome = await ctx.workspaceService.withFolderTurn(workspaceIdForBranch(branch), path, async () => {
+        const { files, content, managed, linked, blocked, impact } = await judge();
+        if (managed !== undefined) throw new ToolError(managed, 400);
+        if (linked !== undefined) throw new ToolError(linked, 400);
+        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+        if (content.length > 0 && a.confirm !== true) {
+          return {
+            ...impact,
+            confirmationRequired: true,
+            deleted: false,
+            message: `Nothing was deleted: "${path}" holds ${content.length} ${content.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
+          };
+        }
+        // ONE commit for the whole folder. `write: true` guarantees a
+        // LockingFilesystem here, and its `writeFiles` takes every path's lock
+        // BEFORE touching disk, deletes inside those locks and commits the set
+        // as a single change (fail-closed: a refusal commits nothing). A folder
+        // therefore never half-disappears, and its own `access.md` needs no
+        // ordering trick to keep the rest governed on the way — nothing lands
+        // until all of it does. The placeholders go too: this is the one
+        // operation that removes a folder. Structural cast, as `write_files`
+        // does, to avoid importing the workflow-internal class here.
+        if (files.length > 0) {
+          const batch = fs as unknown as {
+            writeFiles(
+              writes: { path: string; content: string }[],
+              summary: string,
+              deletes: string[],
+            ): Promise<unknown>;
+          };
+          await batch.writeFiles([], `Delete ${path} and its ${content.length} file(s)`, files);
+        }
+        // Git tracks no folders: once the files are gone, the shells left on
+        // disk are swept so the folder stops appearing in listings. Only empty
+        // folders go, so a file a concurrent writer just dropped in survives.
+        await removeEmptyDirs(join(root, path));
         return {
           ...impact,
-          confirmationRequired: true,
-          deleted: false,
-          message: `Nothing was deleted: "${path}" holds ${files.length} ${files.length === 1 ? 'file' : 'files'}, so deleting it requires confirm: true.`,
+          deleted: true,
+          message: `Deleted "${path}" and its ${content.length} ${content.length === 1 ? 'file' : 'files'}.`,
         };
-      }
-      // ONE commit for the whole folder. `write: true` guarantees a
-      // LockingFilesystem here, and its `writeFiles` takes every path's lock
-      // BEFORE touching disk, deletes inside those locks and commits the set
-      // as a single change (fail-closed: a refusal commits nothing). A folder
-      // therefore never half-disappears, and its own `access.md` needs no
-      // ordering trick to keep the rest governed on the way — nothing lands
-      // until all of it does. Structural cast, as `write_files` does, to avoid
-      // importing the workflow-internal class here.
-      if (files.length > 0) {
-        const batch = fs as unknown as {
-          writeFiles(
-            writes: { path: string; content: string }[],
-            summary: string,
-            deletes: string[],
-          ): Promise<unknown>;
-        };
-        await batch.writeFiles([], `Delete ${path} and its ${files.length} file(s)`, files);
-      }
-      // Git tracks no folders: once the files are gone, the shells left on
-      // disk are swept so the folder stops appearing in listings. Only empty
-      // folders go, so a file a concurrent writer just dropped in survives.
-      await removeEmptyDirs(join(root, path));
-      return { ...impact, deleted: true, message: `Deleted "${path}" and its ${files.length} ${files.length === 1 ? 'file' : 'files'}.` };
+      });
+      // The folder that HELD this one is not being deleted: if this was all it
+      // had, it stays, with its placeholder. Outside the turn above — the
+      // parent's turn overlaps it, and a folder turn is never nested.
+      if (outcome.deleted) await keepFolderOf(fs, ctx, branch, path, kbDirName);
+      return outcome;
     },
   });
 
   mount({
     name: 'mkdir',
-    description: 'Create a directory (recursive). An empty dir gets a `.gitkeep` so it persists in git.' + ONTOLOGY_BOUNDARY_NOTE,
+    description: 'Create a directory (recursive). It lists as an empty folder and persists in git until it is deleted explicitly.' + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
@@ -1671,7 +1774,8 @@ export function registerWorkspaceTools(
 
       const [before, after] = await Promise.all([accessAt(branch, ctx, src), accessAt(branch, ctx, dest)]);
       const accessChanges = (Object.keys(before) as (keyof AccessVerbs)[]).some((v) => before[v] !== after[v]);
-      const descendants = srcFiles.length;
+      // The placeholder moves with its folder, but it is never content.
+      const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
       // item away nor makes one (a note renamed to `access.md` would start
       // governing its folder).
@@ -1726,6 +1830,9 @@ export function registerWorkspaceTools(
         };
       }
       await fs.moveFile(src, dest);
+      // Moving the last file — or a whole folder — out leaves the folder it
+      // came from in place, like a delete.
+      await keepFolderOf(fs, ctx, branch, src, kbDirName);
       return { ...impact, moved: true };
     },
   });

@@ -66,6 +66,7 @@ async function makeHarness(): Promise<Harness> {
   // recursive-cleanup logic under test reacts to.
   const workspaceServiceMock: Partial<WorkspaceService> = {
     getWorkspacePath: vi.fn(async () => workspaceDir),
+    withFolderTurn: async <T>(_id: string, _dir: string, op: () => Promise<T>) => op(),
     deleteFile: vi.fn(async (_id: string, relPath: string) => {
       await fs.rm(path.resolve(workspaceDir, relPath));
     }),

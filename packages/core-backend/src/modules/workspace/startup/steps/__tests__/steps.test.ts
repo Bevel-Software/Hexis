@@ -879,10 +879,10 @@ describe('PersonalSpacesStep', () => {
       // with the folder), and a shared plugin: untouched.
       'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
       'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
-      // Entries that say nothing about READ — a denial under write, a
-      // download grant — leave the space open to an inherited `read:
-      // everyone`, so it is closed like any other.
-      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\ndownload:\n  - everyone\nowner:\n  - Di <di@x.io>\n',
+      // Entries that say nothing about READ — a denial under write — leave the
+      // space open to an inherited `read: everyone`, so it is closed like any
+      // other.
+      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\nowner:\n  - Di <di@x.io>\n',
       // The old seed's frontmatter grants are carried into the body ONLY where
       // the body has no word on that person: a denial someone wrote there
       // stands, and is not overridden by the older grant.
@@ -891,6 +891,10 @@ describe('PersonalSpacesStep', () => {
       // same-scope grant wins, and write folds into read) is OPEN: the file
       // stays open with it, and nothing is written.
       'Plugins/personal-u6/access.md': '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      // `download: everyone` is a deliberate opening now that download folds
+      // into read: the space is already settled OPEN, so nothing is written —
+      // the same treatment `write: everyone` gets above.
+      'Plugins/personal-u7/access.md': '---\nread: []\n---\ndownload:\n  - everyone\nowner:\n  - Gi <gi@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
@@ -925,7 +929,6 @@ describe('PersonalSpacesStep', () => {
       expect(u4.slice(0, u4.indexOf('\n---\n', 4))).toBe('---\nread:\n  - deny everyone\n  - Di <di@x.io>');
       expect(u4.trimEnd().endsWith('\nread:\n  - deny everyone')).toBe(true);
       expect(u4).toContain('write:\n  - deny everyone');
-      expect(u4).toContain('download:\n  - everyone');
       expect(u4).toContain('owner:\n  - Di <di@x.io>');
       const u5 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u5/access.md'), 'utf8'));
       const u5Body = u5.slice(u5.indexOf('\n---\n', 4) + 5);
@@ -937,6 +940,11 @@ describe('PersonalSpacesStep', () => {
       expect(u5.slice(0, u5.indexOf('\n---\n', 4))).toBe('---\nread:\n  - Ed <ed@x.io>\n  - deny everyone\nowner:\n  - Ed <ed@x.io>');
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u6/access.md'), 'utf8'))).toBe(
         '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      );
+      // Untouched: `download: everyone` settles read as GRANTED (download folds
+      // into read), so the step reads the space as opened on purpose.
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u7/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\ndownload:\n  - everyone\nowner:\n  - Gi <gi@x.io>\n',
       );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',

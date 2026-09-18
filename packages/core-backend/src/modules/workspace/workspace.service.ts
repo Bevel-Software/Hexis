@@ -6,7 +6,13 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { AuthUser, IWorkspaceService, WorkspaceInfo, FileTreeEntry } from '@bevel-software/platform-shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { validateRelativePath, validateFilename, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
+import {
+  validateRelativePath,
+  validateFilename,
+  DEFAULT_BRANCH,
+  FOLDER_PLACEHOLDER,
+  isFolderPlaceholder,
+} from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
@@ -211,6 +217,11 @@ export class WorkspaceService implements IWorkspaceService {
    * {@link withPathTurn} for what takes a turn and why.
    */
   private readonly writeTurns = new Map<string, Promise<void>>();
+  /**
+   * The folder structure changes in flight, keyed by RESOLVED absolute folder
+   * path — see {@link withFolderTurn}.
+   */
+  private readonly folderTurns = new Map<string, Promise<void>>();
   /**
    * The turns the CURRENT async context already holds. Taking one it holds
    * runs straight through instead of waiting for itself, which is what lets a
@@ -1240,6 +1251,47 @@ export class WorkspaceService implements IWorkspaceService {
   }
 
   /**
+   * One folder structure change at a time per SUBTREE: an explicit folder
+   * delete and the placeholder that keeps an emptied folder. Two turns wait
+   * for each other when one folder is, or sits inside, the other, so keeping
+   * a folder can never run in the middle of deleting it (and write the
+   * placeholder back into a folder whose delete already enumerated its
+   * files), and a delete never starts while a folder under it is being kept.
+   * Not re-entrant: take it once, and never around another folder's turn.
+   *
+   * The reach of the guarantee, like {@link withPathTurn}'s: within this
+   * process, over this process's clones. Across instances the workflow lock
+   * rows coordinate — the placeholder write takes its own path's lock, as the
+   * folder delete takes each file's — and each clone's changes meet in git,
+   * as any write into a folder another instance deletes already does.
+   */
+  async withFolderTurn<T>(workspaceId: string, relativeDir: string, op: () => Promise<T>): Promise<T> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const overlaps = (held: string) =>
+      held === absoluteDir ||
+      held.startsWith(absoluteDir + path.sep) ||
+      absoluteDir.startsWith(held + path.sep);
+    // Check-and-claim with no await in between, so two callers cannot both
+    // find the subtree free.
+    for (;;) {
+      const waiting = [...this.folderTurns].filter(([held]) => overlaps(held)).map(([, turn]) => turn);
+      if (waiting.length === 0) break;
+      await Promise.all(waiting);
+    }
+    let release!: () => void;
+    this.folderTurns.set(absoluteDir, new Promise<void>((resolve) => (release = resolve)));
+    try {
+      return await op();
+    } finally {
+      this.folderTurns.delete(absoluteDir);
+      release();
+    }
+  }
+
+  /**
    * {@link withPathTurn} on an already-resolved path.
    *
    * A turn this context holds runs through: waiting for itself would hang.
@@ -1359,8 +1411,35 @@ export class WorkspaceService implements IWorkspaceService {
     await fs.mkdir(absolutePath, { recursive: true });
     const entries = await fs.readdir(absolutePath);
     if (entries.length === 0) {
-      await fs.writeFile(path.join(absolutePath, '.gitkeep'), '', 'utf-8');
+      await fs.writeFile(path.join(absolutePath, FOLDER_PLACEHOLDER), '', 'utf-8');
     }
+  }
+
+  /**
+   * Write the empty-folder placeholder into `relativeDir` when that folder
+   * exists and holds nothing; true when it wrote one. Unlike
+   * {@link createDirectory} it never creates the folder: one that is gone was
+   * deleted explicitly and stays gone. A folder reached through a link is
+   * refused like any write through one, so the placeholder cannot land
+   * outside the workspace.
+   */
+  async writeFolderPlaceholder(workspaceId: string, relativeDir: string): Promise<boolean> {
+    assertValidPath(relativeDir);
+    const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
+    const absoluteDir = path.resolve(workspaceDir, relativeDir);
+    this.assertWithinWorkspace(absoluteDir, workspaceDir);
+    const placeholder = path.join(absoluteDir, FOLDER_PLACEHOLDER);
+    await this.assertNotThroughLink(placeholder, workspaceDir);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(absoluteDir);
+    } catch (err) {
+      if (isAbsence(err)) return false;
+      throw err;
+    }
+    if (entries.length > 0) return false;
+    await fs.writeFile(placeholder, '', { flag: 'wx' });
+    return true;
   }
 
   async writeFileBinary(workspaceId: string, relativePath: string, data: Uint8Array): Promise<void> {
@@ -1924,8 +2003,9 @@ export class WorkspaceService implements IWorkspaceService {
 function explorerWalk(): TreeWalkOptions {
   return {
     // Any spelling of the git folder (`.GIT`, `.git.`) — the same rule the path
-    // guards apply, so a download or listing never carries what they refuse.
-    skip: (e) => hasGitInternalsSegment(e.name) || (e.name === '.gitkeep' && e.isFile()),
+    // guards apply, so a download or listing never carries what they refuse —
+    // and the empty-folder placeholder, which is never content.
+    skip: (e) => hasGitInternalsSegment(e.name) || (isFolderPlaceholder(e.name) && e.isFile()),
     ignore: true,
     unreadable: 'throw',
   };

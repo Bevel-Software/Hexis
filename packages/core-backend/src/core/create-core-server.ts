@@ -45,6 +45,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
 import {
   createKbSyncRoutes,
@@ -679,6 +680,8 @@ export async function createCoreServer(
       },
       // The connection probe's git runs through the deployment's one runner.
       repositoryConnectionCheck(core.gitRunner),
+      undefined,
+      oidcRedirectUri(core.config.publicBackendUrl),
     ),
   );
   app.use('/api', core.authMiddleware, createToolManualsBrowserRoutes(core.toolManualService, {
