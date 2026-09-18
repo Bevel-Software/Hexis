@@ -263,12 +263,15 @@ role.
 A role's member list takes a group as well as individual emails. Write the
 entry as `- group:<Name>`, where `<Name>` is a group in the active group
 source — `synced-groups.yaml` when the deployment syncs groups from an
-identity provider, `groups.yaml` otherwise:
+identity provider, `groups.yaml` otherwise. Here a `Reviewer` role the
+deployment already has goes to a whole group:
 
 ```yaml
 roles:
   Admin:
     - dana@example.com
+  Reviewer:
+    - lee@example.com
     - group:Platform Team
 ```
 
@@ -278,27 +281,33 @@ roles:
 - **Unknown groups are refused.** An entry naming a group the active source
   does not declare is a validation error: the write is refused with a 422
   that names the entry and its role (`'- group:Platfrom Team' under role
-  'Admin'`), and nothing is saved. Create the group first, or fix the name.
-- **Admin keeps a person.** `Admin` must always keep at least one direct email
-  member; a group entry alone is not enough, so a broken directory can never
-  leave the deployment without an admin.
+  'Reviewer'`), and nothing is saved. Create the group first, or fix the name.
+- **A group under `Admin` makes every member a full admin** — including anyone
+  added to the group later, and including the right to edit `roles.yaml`
+  itself. Only propose it when your user explicitly asks for exactly that, and
+  say so in the change request. `Admin` must also always keep at least one
+  direct email member; a group entry alone is not enough, so a broken
+  directory can never leave the deployment without an admin.
 - **With direct emails.** Group entries and emails add up: the role's members
   are everyone listed by email plus everyone currently in each listed group.
   A person in both is simply a member; adding or removing someone from the
   group changes the role with no edit to `roles.yaml`.
 - **With denials.** Group members hold the role's grants exactly as if they
   were listed by email. A denial of the role in an `access.md`
-  (`deny Admin`) therefore removes the role's contribution for everyone in
-  the group, as it does for the emails. A direct grant to a person
-  (`Name <email>`) is unaffected: user-level entries trump role-level ones, so
-  that person keeps the access granted to them by name.
+  (`deny Reviewer`) therefore removes the role's contribution for everyone in
+  the group, as it does for the emails. The nearest `access.md` that says
+  anything about the person decides: a person granted by name
+  (`Name <email>`) in the SAME `access.md` as the denial keeps that access,
+  because within one file a person's own entry beats a role entry. A grant by
+  name in a folder further up does not survive a role denial closer to the
+  file.
 
 **Editing `roles.yaml` goes through a change request** unless your user is an
 Admin: only admins may write the file on the default branch. Draft the edit
 on a branch and open a change request for an admin to approve:
 
-1. `create_branch` with `name: dana/platform-team-admin` and `branch` set to
-   the default branch.
+1. `create_branch` with `name: dana/platform-team-reviewer` and `branch` set
+   to the default branch.
 2. On that draft, `edit_file` `roles.yaml`, adding the entry under the
    existing role:
 
@@ -306,14 +315,16 @@ on a branch and open a change request for an admin to approve:
    roles:
      Admin:
        - dana@example.com
+     Reviewer:
+       - lee@example.com
        - group:Platform Team   # added
    ```
 
-3. `commit_change` with `summary: "Give the Admin role to the Platform Team group"`.
-4. `open_change_request` with `sourceBranch: dana/platform-team-admin`, the
-   default branch as `targetBranch`, and a title such as `Give Admin to the
-   Platform Team group`. Tell your user an admin must approve it before the
-   role takes effect.
+3. `commit_change` with `summary: "Give the Reviewer role to the Platform Team group"`.
+4. `open_change_request` with `sourceBranch: dana/platform-team-reviewer`,
+   the default branch as `targetBranch`, and a title such as `Give Reviewer
+   to the Platform Team group`. Tell your user an admin must approve it
+   before the role takes effect.
 
 ### Direct writes vs change requests
 

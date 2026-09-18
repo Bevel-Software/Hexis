@@ -260,7 +260,10 @@ describe('TemplateFilesStep', () => {
     expect(prose).toContain('validation error');
     expect(prose).toContain('names the entry');
     expect(prose).toContain("removes the role's contribution for everyone in the group");
-    expect(prose).toContain('A direct grant to a person (`Name <email>`) is unaffected');
+    // Closeness first: a person's own entry wins only inside the same access.md.
+    expect(prose).toContain('The nearest `access.md` that says anything about the person decides');
+    expect(prose).toContain('in the SAME `access.md` as the denial keeps that access');
+    expect(prose).toContain('A group under `Admin` makes every member a full admin');
     expect(prose).toContain('change request');
     for (const tool of ['create_branch', 'edit_file', 'commit_change', 'open_change_request']) {
       expect(prose).toContain(`\`${tool}\``);
@@ -274,7 +277,9 @@ describe('TemplateFilesStep', () => {
     if (!parsed.ok) return;
     const groups = new Map([['platform team', { displayName: 'Platform Team', emails: new Set(['pat@example.com']) }]]);
     expect(mergeGroupsIntoRoles(parsed.index, groups, 'groups.yaml')).toEqual([]);
-    expect(parsed.index.byEmail.get('pat@example.com')?.has('admin')).toBe(true);
+    // The example hands out an ordinary role, never Admin.
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('reviewer')).toBe(true);
+    expect(parsed.index.byEmail.get('pat@example.com')?.has('role/admin')).toBe(false);
 
     // What the step writes — the file agents read through the MCP server — carries it.
     await seedUpstream({ ...(await fullScaffold()), 'AGENTS.md': guide.replace(section, '') });
