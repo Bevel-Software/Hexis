@@ -36,6 +36,7 @@ function stubWorkspaceService(workspaceDir: string): WorkspaceService {
     },
     readFile: async (_id: string, wsRel: string) =>
       fs.readFile(path.join(workspaceDir, wsRel), 'utf-8'),
+    readFileBinary: async (_id: string, wsRel: string) => fs.readFile(path.join(workspaceDir, wsRel)),
   } as unknown as WorkspaceService;
 }
 
@@ -220,5 +221,15 @@ describe('CreatorAccessService.grantInExtractedFile', () => {
     expect(await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/extracted.md`)).toBeNull();
     expect(await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/pic.png`)).toBeNull();
     expect(await svc.grantInExtractedFile(WS, ALICE, 'reserved.md')).toBeNull();
+  });
+
+  it('gives a binary archived under a .md name no grant, so the bytes are never rewritten', async () => {
+    // A PDF header, a NUL and bytes that are not UTF-8: read as text and
+    // written back with a grant spliced in, this would come out corrupted.
+    const binary = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0xfe, 0x80, 0x0a]);
+    const abs = path.join(repo, 'KnowledgeBase/extracted.md');
+    await fs.writeFile(abs, binary);
+    expect(await svc.grantInExtractedFile(WS, ALICE, `${KB}/KnowledgeBase/extracted.md`)).toBeNull();
+    expect(await fs.readFile(abs)).toEqual(binary);
   });
 });

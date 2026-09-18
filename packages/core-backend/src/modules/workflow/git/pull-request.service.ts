@@ -12,6 +12,7 @@ import type {
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -82,6 +83,14 @@ export class PullRequestService implements IPullRequestService {
    */
   private cachedList = new Map<string, { at: number; value: PullRequestSummary[] }>();
   /**
+   * What each listed summary is ROUTED by: its touched paths with the
+   * empty-folder placeholders kept. A summary never shows a placeholder, but a
+   * request that only creates a folder still belongs to that folder's owners,
+   * so `listPrsForOwnerEmail` matches on these. Held beside the summaries the
+   * list cache stores, so it lives and dies with them.
+   */
+  private routingPaths = new WeakMap<PullRequestSummary, string[]>();
+  /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
    * workspace KB, so it can't be shared across workspaces or viewers. The stored
@@ -103,6 +112,13 @@ export class PullRequestService implements IPullRequestService {
 
   /** Origin + path prefix change-request links are built on; null when none is configured. */
   private readonly linkBase: string | null;
+
+  /**
+   * Bumped by every invalidation. A read captures it before touching the DB and
+   * caches its result only if it is unchanged afterwards — otherwise a read that
+   * started before a mutation could republish the pre-mutation row for a TTL.
+   */
+  private cacheGeneration = 0;
 
   constructor(
     private readonly db: Database,
@@ -151,10 +167,23 @@ export class PullRequestService implements IPullRequestService {
       // The in-app change-request route, absolute when a public address is
       // configured so an agent can hand it to a person.
       ...changeRequestLink(row.number, this.linkBase),
+      // Only an OPEN request can still be retried, so only it reports a refusal.
+      lastApplyFailure:
+        row.state === 'open' && row.applyFailureReason && row.applyFailedAt
+          ? {
+              reason: row.applyFailureReason,
+              conflicts: row.applyFailureConflicts === true,
+              at: row.applyFailedAt.toISOString(),
+              byName: row.applyFailedByName ?? '',
+            }
+          : null,
     };
   }
 
-  /** Cheap touched-paths for a CR row (empty when no workspace exists yet). */
+  /**
+   * Cheap touched-paths for a CR row (empty when no workspace exists yet),
+   * placeholders included — see {@link summaryOf} for what a summary shows.
+   */
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
@@ -174,6 +203,19 @@ export class PullRequestService implements IPullRequestService {
       });
   }
 
+  /**
+   * The summary of a CR row. The empty-folder placeholder is never content,
+   * so it is not a touched path on the summary: it would inflate the file
+   * count a list shows. The unfiltered paths are kept for routing, where a
+   * folder-only request must still reach the folder's owners.
+   */
+  private async summaryOf(row: ChangeRequestRow, workspaceId: string | null): Promise<PullRequestSummary> {
+    const touched = await this.touchedPathsFor(row, workspaceId);
+    const summary = this.rowToSummary(row, touched.filter((p) => !isFolderPlaceholder(p)));
+    this.routingPaths.set(summary, touched);
+    return summary;
+  }
+
   async listOpenPrs(
     opts: { fresh?: boolean; workspaceId?: string } = {},
   ): Promise<PullRequestSummary[]> {
@@ -184,15 +226,18 @@ export class PullRequestService implements IPullRequestService {
     if (!opts.fresh && cached && now - cached.at < LIST_PR_CACHE_TTL_MS) {
       return cached.value;
     }
+    const generation = this.cacheGeneration;
     const rows = await this.db
       .select()
       .from(changeRequests)
       .where(eq(changeRequests.state, 'open'))
       .orderBy(desc(changeRequests.createdAt));
     const summaries = await Promise.all(
-      rows.map(async (row) => this.rowToSummary(row, await this.touchedPathsFor(row, workspaceId))),
+      rows.map((row) => this.summaryOf(row, workspaceId)),
     );
-    this.cachedList.set(cacheKey, { at: now, value: summaries });
+    if (generation === this.cacheGeneration) {
+      this.cachedList.set(cacheKey, { at: now, value: summaries });
+    }
     return summaries;
   }
 
@@ -233,15 +278,16 @@ export class PullRequestService implements IPullRequestService {
     // collecting unique (ref, path) pairs and resolving them in one round keeps
     // the ls-tree/git-show fan-out bounded even with dozens of open PRs.
     const pathsByRef = new Map<string, Set<string>>();
+    const routedBy = (pr: PullRequestSummary) => this.routingPaths.get(pr) ?? pr.touchedNodePaths;
     for (const pr of prs) {
-      if (pr.touchedNodePaths.length === 0) continue;
+      if (routedBy(pr).length === 0) continue;
       for (const ref of [pr.branch, pr.base]) {
         let bucket = pathsByRef.get(ref);
         if (!bucket) {
           bucket = new Set();
           pathsByRef.set(ref, bucket);
         }
-        for (const p of pr.touchedNodePaths) bucket.add(p);
+        for (const p of routedBy(pr)) bucket.add(p);
       }
     }
     const writeByRef = new Map<string, Map<string, boolean>>();
@@ -266,10 +312,10 @@ export class PullRequestService implements IPullRequestService {
         matches.push(pr);
         continue;
       }
-      if (pr.touchedNodePaths.length === 0) continue;
+      if (routedBy(pr).length === 0) continue;
       const headWrite = writeByRef.get(pr.branch);
       const baseWrite = writeByRef.get(pr.base);
-      const matched = pr.touchedNodePaths.some(
+      const matched = routedBy(pr).some(
         (p) => headWrite?.get(p) === true || baseWrite?.get(p) === true,
       );
       if (matched) matches.push(pr);
@@ -284,7 +330,7 @@ export class PullRequestService implements IPullRequestService {
     const row = await this.findRow(prNumber);
     if (!row) return null;
     const workspaceId = await this.resolveWorkspaceId();
-    return this.rowToSummary(row, await this.touchedPathsFor(row, workspaceId));
+    return this.summaryOf(row, workspaceId);
   }
 
   async getPrDetail(
@@ -294,6 +340,7 @@ export class PullRequestService implements IPullRequestService {
     if (!Number.isInteger(prNumber) || prNumber <= 0) {
       throw new WorkflowValidationError('PR number must be a positive integer');
     }
+    const generation = this.cacheGeneration;
     const row = await this.findRow(prNumber);
     if (!row) return null;
 
@@ -450,8 +497,9 @@ export class PullRequestService implements IPullRequestService {
     };
 
     // A patch-less detail is an internal read; it must not be served to the
-    // next client poll as if it were the full one.
-    if (opts.patches !== false) {
+    // next client poll as if it were the full one. Nor may a read a mutation
+    // overtook: its row predates that mutation.
+    if (opts.patches !== false && generation === this.cacheGeneration) {
       this.detailCache.set(cacheKey, {
         at: now,
         headSha: detail.headSha,
@@ -468,6 +516,7 @@ export class PullRequestService implements IPullRequestService {
    * cancel, comment). Keeps the cache-busting plumbing internal to this service.
    */
   invalidateDetailCache(prNumber: number): void {
+    this.cacheGeneration++;
     const suffix = `:${prNumber}`;
     for (const key of this.detailCache.keys()) {
       if (key.endsWith(suffix)) this.detailCache.delete(key);
@@ -481,6 +530,7 @@ export class PullRequestService implements IPullRequestService {
    * that tree makes them stale without touching any one request.
    */
   invalidateListCache(): void {
+    this.cacheGeneration++;
     this.cachedList.clear();
   }
 

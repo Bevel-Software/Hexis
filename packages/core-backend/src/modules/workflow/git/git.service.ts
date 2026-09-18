@@ -12,6 +12,7 @@ import type {
   ShareChangesRequest,
   WorkingTreeStatus,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { WorkflowHooks, CommitValidationContext } from '../workflow-hooks.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
@@ -2306,8 +2307,17 @@ export class GitService implements IGitService {
       // land. Filter it from the review surface entirely; the neutralisation
       // reads the raw refs itself and is unaffected. Both lists are filtered
       // IN STEP so the index-zip below stays aligned.
-      if (statuses.some((s) => s.path === 'roles.yaml')) {
-        const keep = statuses.map((s) => s.path !== 'roles.yaml');
+      // The empty-folder placeholder is filtered the same way: it is never
+      // content, so it is not a file to review or approve. It still merges
+      // with the rest, and `changedPathsForPr` keeps it, so a request that
+      // only creates a folder is not mistaken for an empty one and closed.
+      // An empty file deleted as its folder gets the (equally empty)
+      // placeholder reads to `-M` as a RENAME onto it; the real side of such
+      // a pair is first made the plain removal (or addition) it is, so
+      // dropping the placeholder never drops the file with it.
+      statuses = statuses.map(withoutPlaceholderRename);
+      if (statuses.some((s) => s.path === 'roles.yaml' || isFolderPlaceholder(s.path))) {
+        const keep = statuses.map((s) => s.path !== 'roles.yaml' && !isFolderPlaceholder(s.path));
         statuses = statuses.filter((_, i) => keep[i]);
         if (counts.length === keep.length) counts = counts.filter((_, i) => keep[i]);
       }
@@ -2372,13 +2382,18 @@ export class GitService implements IGitService {
       const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
       const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
       const { stdout } = await this.git(cwd, [
-        'diff', '-M', '--name-only', `${baseRef}...${headRef}`,
+        'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
       ]);
       return (
-        stdout
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)
+        parseNameStatusZ(stdout)
+          // A rename onto or off the placeholder is a real file removed or
+          // added (see `withoutPlaceholderRename`): both of its paths are
+          // touched, or filtering the placeholder would lose the file.
+          .flatMap((s) =>
+            s.previousPath && (isFolderPlaceholder(s.path) || isFolderPlaceholder(s.previousPath))
+              ? [s.previousPath, s.path]
+              : [s.path],
+          )
           // Same rule as `changedFilesForPr`: a roles.yaml change never
           // survives a merge, so it is not a touched path for routing or
           // summaries either.
@@ -2491,6 +2506,28 @@ export class GitService implements IGitService {
       }
       await this.assertNotTreeAtRef(cwd, sha, repoRelativePath, relativePath);
       return this.readFileAtRef(workspaceId, sha, repoRelativePath);
+    });
+  }
+
+  /**
+   * Whether `repoRelativePath` exists (as a file or tree) at `ref`. ONLY
+   * git's own "that path is not at this ref" answer is false; an unresolvable
+   * ref, a timeout, a locked or corrupt repository PROPAGATE — a revert that
+   * read one of those as "absent" would decide wrongly what to restore.
+   */
+  async pathExistsAtRef(workspaceId: string, ref: string, repoRelativePath: string): Promise<boolean> {
+    assertValidRelativePath(repoRelativePath);
+    return this.mutex.run(workspaceId, async () => {
+      const cwd = await this.repoDir(workspaceId);
+      try {
+        await this.git(cwd, ['cat-file', '-e', `${ref}:${repoRelativePath}`]);
+        return true;
+      } catch (err) {
+        const stderr =
+          (err as { stderr?: string }).stderr ?? (err instanceof Error ? err.message : String(err));
+        if (/does not exist in|exists on disk, but not in/.test(stderr)) return false;
+        throw err;
+      }
     });
   }
 
@@ -2952,6 +2989,23 @@ export function parseNameStatusZ(out: string): NameStatusEntry[] {
     }
   }
   return entries;
+}
+
+/**
+ * Undo a rename git detected between a real file and the empty-folder
+ * placeholder. Deleting a folder's last file writes the placeholder, and
+ * when that file was empty too, `-M` pairs the two as a 100% rename. The
+ * pair is really a removal (or, the other way round, an addition) plus the
+ * placeholder, which is never reviewed — so the entry becomes the real side
+ * alone, and the caller's placeholder filter has nothing of it to drop.
+ */
+export function withoutPlaceholderRename(entry: NameStatusEntry): NameStatusEntry {
+  const { previousPath } = entry;
+  if (!previousPath || entry.status !== 'renamed') return entry;
+  const toPlaceholder = isFolderPlaceholder(entry.path);
+  const fromPlaceholder = isFolderPlaceholder(previousPath);
+  if (toPlaceholder === fromPlaceholder) return entry;
+  return toPlaceholder ? { status: 'removed', path: previousPath } : { status: 'added', path: entry.path };
 }
 
 interface NumstatEntry {

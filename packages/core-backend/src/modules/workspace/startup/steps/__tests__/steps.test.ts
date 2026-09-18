@@ -194,6 +194,47 @@ describe('TemplateFilesStep', () => {
   });
 
   /**
+   * The placement rule. A tester's agent filed a ticket into a plugin folder
+   * and explained itself: it had found no convention saying where tickets go,
+   * and Plugins was where it already held write rights. The guide named the
+   * three roots but never said which KIND of file belongs in which — so the
+   * section has to survive into the guide agents actually read, which is this
+   * written file (an MCP session reads the branch's copy of it), under the
+   * deployment's own root names rather than the placeholders.
+   */
+  it('writes the "Where a new file goes" placement rule, named for the deployment\'s roots', async () => {
+    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+    const start = agents.indexOf('## Where a new file goes\n');
+    expect(start, 'the written guide has no placement section').toBeGreaterThan(-1);
+    // The section alone, so a phrase matched elsewhere in the guide cannot
+    // stand in for a rule that is missing here.
+    const section = agents.slice(start).split('\n## ')[0]!;
+
+    // A document goes to the knowledge root, a shared skill to the skills
+    // root or the plugin's own skills folder, machinery inside a plugin.
+    expect(section).toContain('`Docs/`');
+    expect(section).toContain('`Abilities/`');
+    expect(section).toContain('Extensions/<Plugin>/skills/<skill>/SKILL.md');
+    expect(section).toContain('Extensions/<Plugin>/software.bevel.hexis/tools/');
+    for (const kind of ['notes', 'reports', 'tickets', 'mcp.json', 'plugin.json']) {
+      expect(section, kind).toContain(kind);
+    }
+    // And the two rules the tester's agent broke.
+    expect(section).toMatch(/never holds a document/);
+    expect(section).toMatch(/\bask\b/);
+
+    // Rendered, not raw: a leftover placeholder would name a folder that is
+    // not there in a section whose whole job is naming the right folder.
+    expect(section).not.toContain('{{');
+    expect(section).not.toContain('KnowledgeBase/');
+  });
+
+  /**
    * The step is built at boot, while the process still runs the defaults; the
    * save that completes first-run setup applies the admin's names afterwards.
    * A root list snapshotted at construction scaffolded `Skills/` beside the
@@ -400,6 +441,25 @@ describe('TemplateFilesStep', () => {
     const lines = norm(await fs.readFile(path.join(dir, '.bevelignore'), 'utf8')).split('\n').map((l) => l.trim());
     expect(lines).not.toContain('Plugins/');
     expect(lines).toContain('AGENTS.md');
+  });
+
+  it('never seeds a template entry that links into a git folder', async () => {
+    // A template that IS a working tree (this repo in a Docker build) can hold
+    // a link into its own .git. The name rule cannot see it; the target can.
+    const customTemplate = path.join(root, 'custom-template-gitlink');
+    await fs.cp(TEMPLATE_DIR, customTemplate, { recursive: true });
+    await fs.mkdir(path.join(customTemplate, '.git'), { recursive: true });
+    await fs.writeFile(path.join(customTemplate, '.git', 'config'), '[credential]\n\thelper = store\n');
+    await fs.symlink(path.join('.git', 'config'), path.join(customTemplate, 'notes.md'));
+
+    const dir = path.join(root, 'seeded-gitlink');
+    await fs.mkdir(dir, { recursive: true });
+    await buildSeedTree(new NodeFs(), customTemplate, [], ['admin@example.com'])(dir);
+
+    await expect(fs.readFile(path.join(dir, 'notes.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readdir(path.join(dir, '.git'))).rejects.toMatchObject({ code: 'ENOENT' });
+    // The rest of the template still seeded.
+    expect(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')).toContain('#');
   });
 
   it('seeds a binary template file byte for byte and keeps a script executable — text is what decodes', async () => {
@@ -860,10 +920,10 @@ describe('PersonalSpacesStep', () => {
       // with the folder), and a shared plugin: untouched.
       'Plugins/personal-u2/access.md': '---\nread: []\n---\nread:\n  - deny everyone\n  - Bo <bo@x.io>\n',
       'Plugins/personal-u3/access.md': '---\nread: []\n---\nread:\n  - everyone\nowner:\n  - Cy <cy@x.io>\n',
-      // Entries that say nothing about READ — a denial under write, a
-      // download grant — leave the space open to an inherited `read:
-      // everyone`, so it is closed like any other.
-      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\ndownload:\n  - everyone\nowner:\n  - Di <di@x.io>\n',
+      // Entries that say nothing about READ — a denial under write — leave the
+      // space open to an inherited `read: everyone`, so it is closed like any
+      // other.
+      'Plugins/personal-u4/access.md': '---\nread: []\n---\nwrite:\n  - deny everyone\nowner:\n  - Di <di@x.io>\n',
       // The old seed's frontmatter grants are carried into the body ONLY where
       // the body has no word on that person: a denial someone wrote there
       // stands, and is not overridden by the older grant.
@@ -872,6 +932,10 @@ describe('PersonalSpacesStep', () => {
       // same-scope grant wins, and write folds into read) is OPEN: the file
       // stays open with it, and nothing is written.
       'Plugins/personal-u6/access.md': '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      // `download: everyone` is a deliberate opening now that download folds
+      // into read: the space is already settled OPEN, so nothing is written —
+      // the same treatment `write: everyone` gets above.
+      'Plugins/personal-u7/access.md': '---\nread: []\n---\ndownload:\n  - everyone\nowner:\n  - Gi <gi@x.io>\n',
       'Plugins/GTM/plugin.json': '{"name":"gtm"}',
       'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',
     });
@@ -906,7 +970,6 @@ describe('PersonalSpacesStep', () => {
       expect(u4.slice(0, u4.indexOf('\n---\n', 4))).toBe('---\nread:\n  - deny everyone\n  - Di <di@x.io>');
       expect(u4.trimEnd().endsWith('\nread:\n  - deny everyone')).toBe(true);
       expect(u4).toContain('write:\n  - deny everyone');
-      expect(u4).toContain('download:\n  - everyone');
       expect(u4).toContain('owner:\n  - Di <di@x.io>');
       const u5 = norm(await fs.readFile(path.join(dir, 'Plugins/personal-u5/access.md'), 'utf8'));
       const u5Body = u5.slice(u5.indexOf('\n---\n', 4) + 5);
@@ -918,6 +981,11 @@ describe('PersonalSpacesStep', () => {
       expect(u5.slice(0, u5.indexOf('\n---\n', 4))).toBe('---\nread:\n  - Ed <ed@x.io>\n  - deny everyone\nowner:\n  - Ed <ed@x.io>');
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u6/access.md'), 'utf8'))).toBe(
         '---\nread: []\n---\nread:\n  - deny everyone\nwrite:\n  - everyone\nowner:\n  - Fy <fy@x.io>\n',
+      );
+      // Untouched: `download: everyone` settles read as GRANTED (download folds
+      // into read), so the step reads the space as opened on purpose.
+      expect(norm(await fs.readFile(path.join(dir, 'Plugins/personal-u7/access.md'), 'utf8'))).toBe(
+        '---\nread: []\n---\ndownload:\n  - everyone\nowner:\n  - Gi <gi@x.io>\n',
       );
       expect(norm(await fs.readFile(path.join(dir, 'Plugins/GTM/access.md'), 'utf8'))).toBe(
         '---\nread:\n  - everyone\n---\nread:\n  - Ali Vega <ali@x.io>\n',

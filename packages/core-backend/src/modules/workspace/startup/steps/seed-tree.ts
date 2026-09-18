@@ -5,6 +5,8 @@ import type { IFsProbe, ITreeWalker } from '../../../../shared/fs.contract.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import { reservedRootDirs } from './template-files.step.js';
 import { TEMPLATE_SOURCE_FALLBACKS, TemplateSource } from './template-source.js';
+import { assertNotGitInternals, hasGitInternalsSegment } from '../../../../shared/git-internals.js';
+import { GitInternalsError } from '../../../../shared/domain-errors.js';
 
 /**
  * The empty-remote seed builder the runner takes as `buildSeedTree`: the full
@@ -96,7 +98,7 @@ class KbSeedTree {
     // Never copy a git dir: a KB_TEMPLATE_DIR that is itself a working tree
     // (this repo in a Docker build) must not seed its history into the KB.
     // Every other entry is template content, dot-files included.
-    await this.disk.walk(this.templates.root, { skip: (e) => e.name === '.git', unreadable: 'throw' }, [
+    await this.disk.walk(this.templates.root, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
       {
         onFile: (relDir, name) => this.seedFile(relDir, name, dest),
         onOther: async (relDir, entry) => {
@@ -106,6 +108,11 @@ class KbSeedTree {
           // else — a link to a folder or to nothing, a socket — is a broken
           // template, and the error says what was found.
           const rel = relDir ? path.join(relDir, entry.name) : entry.name;
+          // A link whose target is inside a git folder is not template
+          // content, whatever it is named: seeding it would copy a working
+          // tree's `.git/config` into the KB as an ordinary file. The name
+          // check above cannot see this — only the resolved target can.
+          if (await linksIntoGitInternals(this.templates.root, rel)) return;
           const target = await this.templates.statOf(rel);
           if (target === null || !target.isFile()) {
             const what = target === null ? 'nothing' : target.isDirectory() ? 'a directory' : 'a special file';
@@ -185,5 +192,21 @@ function asText(bytes: Buffer): string | null {
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Whether `rel` under `templateRoot` resolves inside a git folder — the
+ * template entry is a link, and following it would read the repository's own
+ * git data. Judged on the resolved path, so a link out of the template into
+ * some other checkout's `.git` counts too.
+ */
+async function linksIntoGitInternals(templateRoot: string, rel: string): Promise<boolean> {
+  try {
+    await assertNotGitInternals(templateRoot, rel);
+    return false;
+  } catch (err) {
+    if (err instanceof GitInternalsError) return true;
+    throw err;
   }
 }

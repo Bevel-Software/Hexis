@@ -4,7 +4,7 @@ import { Banner, Button } from '../../../shared/components';
 import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { useOpenChangeRequests } from '../../workspace/hooks/useOpenChangeRequests';
 import { PR_STALE_EVENT } from '../../../core/events';
-import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
+import { refusalLine, useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { useCrFileDiffs } from '../hooks/useCrFileDiffs';
 import { changeAuthorName, formatWhen } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
@@ -142,13 +142,7 @@ export function FileChangeBoxes({
             upToDate={fileDiff !== null && fileDiff.length === 0}
             blocked={blockedCrs.has(cr.number)}
             conflictPrompt={conflictResolutionPrompt(cr)}
-            // A conflict already speaks through `blocked`; repeating it as a
-            // refusal line would say the same thing twice in one box.
-            refusal={
-              applying.refusals.get(cr.number)?.conflicts === false
-                ? (applying.refusals.get(cr.number)?.reason ?? null)
-                : null
-            }
+            refusal={refusalLine(cr, applying.refusals)}
             owner={ownersLabel}
             othersPending={othersPending}
             busy={busyCr === cr.number || applying.activeCr === cr.number}
