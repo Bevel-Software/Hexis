@@ -168,6 +168,31 @@ and `Pipelines/` scaffold an agentic execution layer in some installations.
 They are not part of this template and are not created here; where they exist,
 each carries its own `README.md` describing what belongs in it.
 
+## Where a new file goes
+
+Decide by what the file IS, not by which folder you already hold rights in.
+Write access is not evidence that a file belongs somewhere.
+
+- **Any document goes under `{{knowledgeBaseDir}}/`.** Knowledge, notes,
+  reports, tickets, specifications, plans, meeting minutes — anything written
+  to be read by a person. That is what the root is for, and its shape inside
+  is yours to choose.
+- **A shared skill goes under `{{skillsDir}}/`**, or under
+  `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md` when it belongs to one
+  plugin alone. A person's private skill goes in their own space (`my_plugin`).
+- **Tool manuals, MCP server declarations and manifests go inside a plugin:**
+  `.tool` manuals under `{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/`,
+  servers in that plugin's `mcp.json`, and `plugin.json` at its root.
+- **A plugin folder never holds a document.** `{{pluginsDir}}/` carries
+  machinery — manifests, tool manuals, server declarations, access rules, and
+  the skills a plugin owns. A ticket or a report written there is filed where
+  nobody will look for it, under rules written for tools.
+- **When the place named does not exist, or nothing fits, ask.** If the user
+  names a folder that is not there, or the file is of a kind this deployment
+  has made no home for, say so and ask where it should go. Do not settle for a
+  folder you happen to be able to write to; a wrong guess is discovered much
+  later than a question.
+
 ## Access control
 
 Access to any path — reading it as much as writing it — is governed by

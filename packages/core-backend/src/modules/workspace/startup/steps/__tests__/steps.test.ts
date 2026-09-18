@@ -194,6 +194,47 @@ describe('TemplateFilesStep', () => {
   });
 
   /**
+   * The placement rule. A tester's agent filed a ticket into a plugin folder
+   * and explained itself: it had found no convention saying where tickets go,
+   * and Plugins was where it already held write rights. The guide named the
+   * three roots but never said which KIND of file belongs in which — so the
+   * section has to survive into the guide agents actually read, which is this
+   * written file (an MCP session reads the branch's copy of it), under the
+   * deployment's own root names rather than the placeholders.
+   */
+  it('writes the "Where a new file goes" placement rule, named for the deployment\'s roots', async () => {
+    configureKbLayout({ knowledgeBaseDir: 'Docs', skillsDir: 'Abilities', pluginsDir: 'Extensions' });
+    await seedUpstream({ 'marker.txt': 'seeded' });
+    await makeRunner([new TemplateFilesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const agents = norm(await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8'));
+    const start = agents.indexOf('## Where a new file goes\n');
+    expect(start, 'the written guide has no placement section').toBeGreaterThan(-1);
+    // The section alone, so a phrase matched elsewhere in the guide cannot
+    // stand in for a rule that is missing here.
+    const section = agents.slice(start).split('\n## ')[0]!;
+
+    // A document goes to the knowledge root, a shared skill to the skills
+    // root or the plugin's own skills folder, machinery inside a plugin.
+    expect(section).toContain('`Docs/`');
+    expect(section).toContain('`Abilities/`');
+    expect(section).toContain('Extensions/<Plugin>/skills/<skill>/SKILL.md');
+    expect(section).toContain('Extensions/<Plugin>/software.bevel.hexis/tools/');
+    for (const kind of ['notes', 'reports', 'tickets', 'mcp.json', 'plugin.json']) {
+      expect(section, kind).toContain(kind);
+    }
+    // And the two rules the tester's agent broke.
+    expect(section).toMatch(/never holds a document/);
+    expect(section).toMatch(/\bask\b/);
+
+    // Rendered, not raw: a leftover placeholder would name a folder that is
+    // not there in a section whose whole job is naming the right folder.
+    expect(section).not.toContain('{{');
+    expect(section).not.toContain('KnowledgeBase/');
+  });
+
+  /**
    * The step is built at boot, while the process still runs the defaults; the
    * save that completes first-run setup applies the admin's names afterwards.
    * A root list snapshotted at construction scaffolded `Skills/` beside the
