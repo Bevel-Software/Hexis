@@ -131,7 +131,12 @@ function makeWorkflow() {
 const allowAll = {
   canRead: async () => true,
   canReadBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+  canWrite: async () => true,
+  canWriteBatch: async (_w: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
+  canWriteBatchAtRef: async (_w: string, _r: string, _u: string, paths: string[]) => new Map(paths.map((p) => [p, true])),
   canDownload: async () => true,
+  canOwner: async () => true,
+  eligibleWritersAtRef: async () => [],
 } as unknown as IAccessControl;
 
 const stubCreatorAccess = {
@@ -243,6 +248,8 @@ describe('workspace tools refuse the git folder', () => {
     ['grep', (p) => ({ pattern: 'helper', path: p })],
     ['mkdir', (p) => ({ path: `${p}/hooks-new` })],
     ['delete_file', (p) => ({ path: p })],
+    ['delete_folder', (p) => ({ path: p, confirm: true })],
+    ['delete_folder (dry run)', (p) => ({ path: p, dryRun: true })],
     ['unzip (destination)', (p) => ({ path: `${KB}/archive.zip`, destination: p })],
   ];
 
