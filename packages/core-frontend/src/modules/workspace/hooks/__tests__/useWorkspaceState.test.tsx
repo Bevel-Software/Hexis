@@ -484,6 +484,55 @@ describe('useWorkspaceState multi-tab', () => {
     expect(JSON.parse(localStorage.getItem('bevel.tabs.main.main')!).paths)
       .toEqual(['a.md', 'b.md']);
   });
+
+  /**
+   * A restore overtaken by a click MERGES into the strip rather than replacing
+   * it. If the strip still held the branch being left, the merge carried those
+   * tabs over: shown on the new branch with the old branch's text, and
+   * persisted under the new branch's key. The strip belongs to the workspace
+   * it was read from, so a new workspace starts it empty.
+   */
+  it('a click during a switch never carries the previous branch\'s tabs into the new one', async () => {
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'main' },
+    });
+    const { result } = renderHook(() => useWorkspaceState());
+    await waitFor(() => expect(result.current.workspaceId).toBe('main'));
+    act(() => { result.current.setPersistenceBranch('main'); });
+    await act(async () => { await result.current.hydrateTabs(['only-on-main.md'], 'only-on-main.md'); });
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['only-on-main.md']);
+
+    // Switch to the draft; its workspace arrives.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...WORKSPACE_FIXTURE,
+      workspace: { ...WORKSPACE_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+
+    // The draft's restore hangs; the user clicks a file meanwhile.
+    const pendingReads: ((content: string) => void)[] = [];
+    apiMocks.readFile.mockImplementation(async (_wsId: string, path: string) => {
+      if (path === 'clicked.md') return 'content:clicked.md';
+      return new Promise<string>((resolve) => { pendingReads.push(resolve); });
+    });
+    let hydration: Promise<unknown> | undefined;
+    act(() => { hydration = result.current.hydrateTabs(['restored.md'], 'restored.md'); });
+    await act(async () => { await result.current.addTab('clicked.md'); });
+    await act(async () => {
+      for (const resolve of pendingReads) resolve('content:restored.md');
+      await hydration;
+    });
+
+    // Only the draft's tabs: the restored one and the clicked one.
+    expect(result.current.openTabs.map((t) => t.path)).toEqual(['restored.md', 'clicked.md']);
+    await waitFor(() => {
+      const raw = localStorage.getItem('bevel.tabs.alice%2Fdraft.alice/draft');
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).paths).toEqual(['restored.md', 'clicked.md']);
+    });
+  });
 });
 
 

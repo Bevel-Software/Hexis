@@ -203,6 +203,22 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
    * PREVIOUS workspace on the very render that introduced the new one.
    */
   const adoptWorkspace = useCallback((id: string, branch: string) => {
+    // A different workspace IS a different branch, and every open tab holds
+    // bytes read from the one being left. The strip starts empty for the new
+    // branch rather than waiting for its restore to replace it: a restore
+    // overtaken by a click MERGES into the strip instead of replacing it, and
+    // merged with a strip that still held the old branch's tabs it carried
+    // them over — shown on the new branch with the old branch's text, and
+    // persisted under the new branch's key. Refs move with the state for the
+    // same reason `workspaceIdRef` does: the reads resolving next consult
+    // them. Nothing typed is lost — a switch is refused while any tab is dirty
+    // (`FileRoute`), and `deleteWorkspace` closes every tab before it re-adopts.
+    if (workspaceIdRef.current !== null && workspaceIdRef.current !== id) {
+      openTabsRef.current = [];
+      activeTabPathRef.current = null;
+      setOpenTabs([]);
+      setActiveTabPath(null);
+    }
     workspaceIdRef.current = id;
     setWorkspaceId(id);
     setWorkspaceBranch(branch);
