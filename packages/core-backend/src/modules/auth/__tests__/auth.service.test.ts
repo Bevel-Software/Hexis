@@ -69,6 +69,10 @@ const ROW = {
   email: 'alice@example.com',
   name: 'Alice',
   avatarUrl: null,
+  // NOT NULL with a default in the schema: a row read back from the database
+  // always has a boolean here, so the fixture carries one rather than letting
+  // every asserted payload read `undefined`.
+  onboardingDone: false,
 };
 
 describe('AuthService.loginWithPassword — env bootstrap admin', () => {
@@ -329,7 +333,56 @@ describe('AuthService.changePassword — the three account kinds', () => {
       const { db } = makeFakeDb([[rootRow]]);
       const user = await new AuthService(db, makeConfig(ENV_ADMIN)).getUserById('user-root');
       expect(user?.isEnvAdmin).toBe(true);
+      // The whole shape, pinned the way listAccounts pins its own: these keys
+      // and no others, so a column added to `users` cannot reach the browser
+      // by being spread in, and one that is dropped is noticed here.
+      expect(Object.keys(user ?? {}).sort()).toEqual([
+        'avatarUrl',
+        'email',
+        'id',
+        'isEnvAdmin',
+        'name',
+        'onboardingDone',
+      ]);
+      expect(user?.onboardingDone).toBe(false);
       expect(JSON.stringify(user)).not.toContain('sup3r-secret');
+    });
+
+    // The Account page is not the only way to a stored hash: any admin can aim
+    // "Set password" (POST /api/admin/accounts → createAccount) at this email.
+    // A hash planted there would be exactly the second credential the
+    // self-service refusal exists to prevent, so it is refused at the service.
+    it("is refused an admin's Set password too, and nothing is written", async () => {
+      const { db, captured } = makeFakeDb([[rootRow]]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).createAccount(
+          // Canonicalised first: a differently-cased ADMIN_EMAIL is the same
+          // identity and must not slip past the check.
+          'Root@Example.com',
+          'Root',
+          'planted-password',
+        ),
+      ).rejects.toThrow(/set in the deployment environment/);
+      expect(captured.values).toHaveLength(0);
+      expect(captured.conflict).toHaveLength(0);
+    });
+
+    it("is refused before the policy check, so the admin is told the real reason", async () => {
+      const { db } = makeFakeDb([[rootRow]]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).createAccount('root@example.com', 'Root', 'short'),
+      ).rejects.toThrow(/deployment environment/);
+    });
+
+    it('takes an admin-set password again once ADMIN_PASSWORD is unset', async () => {
+      const { db, captured } = makeFakeDb([[rootRow]]);
+      await new AuthService(
+        db,
+        makeConfig({ adminEmail: 'root@example.com', adminPassword: '' }),
+      ).createAccount('root@example.com', 'Root', 'ordinary-password');
+      expect((captured.values[0] as { passwordHash: string }).passwordHash.startsWith('scrypt:')).toBe(
+        true,
+      );
     });
 
     it('is an ordinary account — form and all — while ADMIN_PASSWORD is unset', async () => {

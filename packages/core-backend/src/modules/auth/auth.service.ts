@@ -15,6 +15,15 @@ import {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
+ * What every caller is told when it tries to give the deployment admin a
+ * stored password — the Account page's own change and an admin's "Set
+ * password" on the User Accounts page alike. One sentence in one place, so the
+ * two surfaces cannot end up explaining the same rule differently.
+ */
+const ENV_ADMIN_PASSWORD_REFUSAL =
+  "This account's password is set in the deployment environment and cannot be changed here";
+
+/**
  * Decoy hash verified when the email is unknown or has no password set, so
  * those paths cost the same scrypt work as a real wrong-password attempt —
  * without it, response timing would reveal which emails have accounts.
@@ -148,6 +157,14 @@ export class AuthService {
    * the user by email and sets their password — re-provisioning an existing
    * account (e.g. one that first arrived via SSO, or a reset for a locked-out
    * user) is deliberate admin behavior, not an error.
+   *
+   * The deployment admin is the one target this refuses, for the reason
+   * {@link changePassword} refuses it: that account's password is the
+   * environment's, so a stored hash would not replace it but ADD a second
+   * credential — one that keeps signing in after `ADMIN_PASSWORD` is rotated,
+   * and that the deployment owner never chose. The refusal belongs here and
+   * not only on the page, because this is the route any other admin reaches
+   * with an arbitrary email.
    */
   async createAccount(
     email: string,
@@ -157,6 +174,11 @@ export class AuthService {
     const normalizedEmail = canonicalEmail(email ?? '');
     if (!EMAIL_REGEX.test(normalizedEmail)) {
       throw new Error('Invalid email');
+    }
+    // Before the policy check, so the refusal names the real reason rather
+    // than sending the admin off to pick a longer password first.
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(password);
     const suppliedName = (name ?? '').trim();
@@ -184,8 +206,9 @@ export class AuthService {
    * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
    * rather than stored on its row? The single definition behind
    * {@link loginWithPassword} (which additionally verifies the environment
-   * password), {@link changePassword} (which refuses), {@link toClientUser}
-   * and {@link listAccounts}, so those four can never disagree about who the
+   * password), {@link changePassword} and {@link createAccount} (which both
+   * refuse to store a hash for it), {@link toClientUser} and
+   * {@link listAccounts}, so those five can never disagree about who the
    * deployment admin is. `email` must already be canonical.
    */
   private isEnvAdminEmail(email: string): boolean {
@@ -236,9 +259,7 @@ export class AuthService {
     // Before the policy check, so the deployment admin is told the real reason
     // rather than being sent to fix a password that would be refused anyway.
     if (this.isEnvAdminEmail(user.email)) {
-      throw new Error(
-        "This account's password is set in the deployment environment and cannot be changed here",
-      );
+      throw new Error(ENV_ADMIN_PASSWORD_REFUSAL);
     }
     this.assertPasswordPolicy(newPassword);
     if (user.passwordHash) {
