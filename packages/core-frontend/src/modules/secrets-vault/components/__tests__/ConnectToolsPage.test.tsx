@@ -46,6 +46,18 @@ function pending(configured: boolean): ConnectPending {
   };
 }
 
+/** The same tool holding two saved keys — a wipe is then two round-trips. */
+function pendingPair(): ConnectPending {
+  const one = pending(true);
+  one.tools[0].variables.push({
+    name: 'API_SECRET',
+    label: null,
+    key: 'heyreach_API_SECRET',
+    configured: true,
+  });
+  return one;
+}
+
 const heard = vi.fn();
 
 function renderPage() {
@@ -105,6 +117,49 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
 
     await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
     expect(window.location.hash).toBe('');
+  });
+
+  it('announces a failed OAuth return too, and consumes that fragment', async () => {
+    // A refused sign-in is still news: the provider may have revoked what was
+    // there, and the Library's copy predates the browser leaving either way.
+    window.history.replaceState(null, '', '/connect#error=Nope.');
+    renderPage();
+
+    await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+    expect(window.location.hash).toBe('');
+  });
+
+  it('announces a wipe that failed halfway — the first key really is gone', async () => {
+    connectMock.getConnectPending.mockResolvedValue(pendingPair());
+    varsMock.deleteUserVar
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Nope.'));
+    renderPage();
+
+    fireEvent.click(
+      await screen.findByRole('checkbox', {
+        name: 'Skip this tool (removes your saved keys and sign-ins for it)',
+      }),
+    );
+
+    // Both keys were attempted; only the first one actually went.
+    await waitFor(() => expect(varsMock.deleteUserVar).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+  });
+
+  it('announces nothing when the very first delete of a wipe fails', async () => {
+    connectMock.getConnectPending.mockResolvedValue(pending(true));
+    varsMock.deleteUserVar.mockRejectedValue(new Error('Nope.'));
+    renderPage();
+
+    fireEvent.click(
+      await screen.findByRole('checkbox', {
+        name: 'Skip this tool (removes your saved keys and sign-ins for it)',
+      }),
+    );
+
+    expect(await screen.findByText('Nope.')).toBeInTheDocument();
+    expect(heard).not.toHaveBeenCalled();
   });
 
   it('announces nothing when the save fails', async () => {
