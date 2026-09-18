@@ -90,6 +90,11 @@ export class AuthService {
    *     their Account page). Accounts that only ever signed in via SSO have
    *     no hash and are refused here.
    *
+   * The two are alternatives, not a fallback chain: source 1 never falls
+   * through to source 2, so the deployment admin is refused outright when the
+   * environment password is wrong — see the guard below for why a hash on
+   * that row must not become a second way in.
+   *
    * A generic "Invalid credentials" error for every failure mode — never
    * reveal whether the email exists or has a password.
    */
@@ -104,11 +109,29 @@ export class AuthService {
     }
 
     const provided = password ?? '';
-    const isEnvAdmin =
-      this.isEnvAdminEmail(normalizedEmail) &&
-      timingSafeStringEqual(provided, this.config.adminPassword);
 
-    if (isEnvAdmin) {
+    if (this.isEnvAdminEmail(normalizedEmail)) {
+      // While `ADMIN_PASSWORD` is set, the environment's password is this
+      // account's ONLY credential — the stored-hash fallback below is never
+      // reached for it. A hash can still be sitting on that row (planted
+      // before this rule existed, or left by an ordinary account that only
+      // later became `ADMIN_EMAIL`), and accepting it would defeat the point
+      // of refusing to write new ones: rotating `ADMIN_PASSWORD` would leave
+      // the old credential signing in.
+      //
+      // Refused rather than deleted, deliberately. The rule is reversible the
+      // same way every other env-admin fact is — unset `ADMIN_PASSWORD` and
+      // the identity goes back to being an ordinary account, stored password
+      // included, exactly as `isEnvAdmin` stops being reported — and a login
+      // path that destroys credentials would be a far worse thing to get
+      // wrong than one that ignores them.
+      if (!timingSafeStringEqual(provided, this.config.adminPassword)) {
+        // One scrypt verification on this path too, so a wrong password here
+        // costs what a wrong password anywhere else does and response timing
+        // does not point at which email is the deployment admin.
+        await verifyPassword(provided, await decoyHash());
+        throw new Error('Invalid credentials');
+      }
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       const user = await this.upsertUserByEmail(normalizedEmail, defaultName);
       return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
@@ -205,8 +228,8 @@ export class AuthService {
    * Is `email` the deployment admin — the account whose password is set in
    * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
    * rather than stored on its row? The single definition behind
-   * {@link loginWithPassword} (which additionally verifies the environment
-   * password), {@link changePassword} and {@link createAccount} (which both
+   * {@link loginWithPassword} (which accepts only the environment password
+   * for it), {@link changePassword} and {@link createAccount} (which both
    * refuse to store a hash for it), {@link toClientUser} and
    * {@link listAccounts}, so those five can never disagree about who the
    * deployment admin is. `email` must already be canonical.

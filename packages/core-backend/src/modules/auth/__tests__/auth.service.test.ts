@@ -86,13 +86,46 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
     expect(result.token.length).toBeGreaterThan(20);
   });
 
-  it('rejects the admin email with a wrong password (and does not fall back oddly)', async () => {
-    // Wrong env password → falls through to the DB path; no row → refused.
+  it('rejects the admin email with a wrong password', async () => {
     const { db } = makeFakeDb([[]]);
     const svc = new AuthService(db, config);
     await expect(svc.loginWithPassword('root@example.com', 'wrong')).rejects.toThrow(
       'Invalid credentials',
     );
+  });
+
+  // The environment password is this account's only credential, so a hash on
+  // its row is not a second one. Such a hash can exist without anyone
+  // planting it today: it may pre-date the rule that refuses to write one, or
+  // belong to an ordinary account that only later became `ADMIN_EMAIL`. If it
+  // still signed in, rotating `ADMIN_PASSWORD` would leave the old credential
+  // working — precisely what refusing the write was meant to prevent.
+  it('refuses a stored hash on the deployment admin row', async () => {
+    const passwordHash = await hashPassword('planted-password');
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash }]]);
+    const svc = new AuthService(db, config);
+    await expect(svc.loginWithPassword('root@example.com', 'planted-password')).rejects.toThrow(
+      'Invalid credentials',
+    );
+    // Never even read: the env credential is an alternative to the stored
+    // one, not a first attempt that falls through to it.
+    expect(vi.mocked(db.select)).not.toHaveBeenCalled();
+  });
+
+  // The refusal is a rule about this login, not a deletion of the row — which
+  // is why it is safe. Hand the identity back to the app by unsetting
+  // `ADMIN_PASSWORD` and its stored password works again, the same way
+  // `isEnvAdmin` stops being reported.
+  it('accepts that same stored hash once ADMIN_PASSWORD is unset', async () => {
+    const passwordHash = await hashPassword('planted-password');
+    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash }]]);
+    const svc = new AuthService(
+      db,
+      makeConfig({ adminEmail: 'root@example.com', adminPassword: '' }),
+    );
+    const result = await svc.loginWithPassword('root@example.com', 'planted-password');
+    expect(result.user.email).toBe('root@example.com');
+    expect(result.user.isEnvAdmin).toBe(false);
   });
 
   it('is disabled entirely when either env var is empty', async () => {
