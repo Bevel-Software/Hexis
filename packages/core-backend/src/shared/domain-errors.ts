@@ -18,6 +18,7 @@
  */
 
 import type { ValidationReport } from '@bevel-software/platform-shared';
+import { sanitizedPath } from './printable.js';
 
 export class WorkflowDomainError extends Error {
   readonly status: number;
@@ -243,6 +244,53 @@ export class WorkflowValidationError extends WorkflowDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
     this.name = 'WorkflowValidationError';
+  }
+}
+
+/**
+ * The next step a missing path always offers, in one sentence.
+ *
+ * Lives HERE, the layer with no module imports, because both surfaces that
+ * answer a missing path need it and they sit on opposite sides of a module
+ * boundary: this class (raised by services, rendered by the HTTP routes) and
+ * `modules/workspace/not-found.ts` (the file tools), which re-exports the
+ * constant under its own name. One sentence, written once, so the two cannot
+ * drift apart.
+ */
+export const NOT_FOUND_NEXT_STEP = 'Check the path with list_files.';
+
+/**
+ * Nothing is at the path the caller named.
+ *
+ * Raised by a SERVICE that probed the path itself, where the file tools' own
+ * `not-found` helper (modules/workspace/not-found.ts) cannot reach: the zip
+ * reader, for instance, answers "ADM-ZIP: Invalid filename" for a missing
+ * archive, which is not a filesystem error at all and would otherwise be
+ * dressed up as an unreadable archive. The helper recognises this class and
+ * the raw `ENOENT`/`ENOTDIR` shapes alike, so both end as the one 404.
+ *
+ * 404 with a `not_found` kind and the requested path, which is also what the
+ * HTTP routes answer — a path that is not there gets one answer whichever
+ * surface asked. The MESSAGE AND THE PAYLOAD ARE BUILT HERE, not by whoever
+ * catches it, because not every surface catches it: the tools pass through
+ * `orDeclaredNotFound`, which re-renders the same three parts, but
+ * `POST /workspace/:id/unzip` sends this error straight to `domainErrorBody`.
+ * Sanitizing the path and appending the next step in the constructor is what
+ * makes those two answers the same answer.
+ */
+export class PathNotFoundError extends WorkflowDomainError {
+  readonly kind = 'not_found' as const;
+  /** The requested path, sanitized — never the path on disk. */
+  readonly path: string;
+  constructor(path: string) {
+    const safe = sanitizedPath(path);
+    super(
+      `There is no file or directory at "${safe}" in this workspace. ${NOT_FOUND_NEXT_STEP}`,
+      404,
+      { kind: 'not_found', path: safe },
+    );
+    this.name = 'PathNotFoundError';
+    this.path = safe;
   }
 }
 
