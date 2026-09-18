@@ -260,6 +260,8 @@ describe('TemplateFilesStep', () => {
     expect(prose).toContain('validation error');
     expect(prose).toContain('names the entry');
     expect(prose).toContain("removes the role's contribution for everyone in the group");
+    // A bare name resolves to a same-named group first, so role denials use `role/`.
+    expect(prose).toContain('`deny role/Reviewer`');
     // Closeness first: a person's own entry wins only inside the same access.md.
     expect(prose).toContain('The nearest `access.md` that says anything about the person decides');
     expect(prose).toContain('in the SAME `access.md` as the denial keeps that access');

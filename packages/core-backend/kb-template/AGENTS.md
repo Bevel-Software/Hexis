@@ -208,6 +208,8 @@ Access to any path — reading it as much as writing it — is governed by
   frontmatter so the plugin can be found and joined, and that admits nobody
   to the plugin itself. A person's own space (`{{pluginsDir}}/personal-<id>/`)
   denies `everyone` outright, so opening a parent folder never opens it.
+  When a group and a role share a name, the bare name means the GROUP;
+  `role/<Name>` (for example `deny role/Reviewer`) always means the role.
 - **Keep an `access.md` body pure YAML**, with any explanation in `#` comments.
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
@@ -294,8 +296,10 @@ roles:
   group changes the role with no edit to `roles.yaml`.
 - **With denials.** Group members hold the role's grants exactly as if they
   were listed by email. A denial of the role in an `access.md`
-  (`deny Reviewer`) therefore removes the role's contribution for everyone in
-  the group, as it does for the emails. The nearest `access.md` that says
+  (`deny role/Reviewer`) therefore removes the role's contribution for
+  everyone in the group, as it does for the emails. Write the `role/` form:
+  a bare `deny Reviewer` would deny a group named `Reviewer` instead, if one
+  exists. The nearest `access.md` that says
   anything about the person decides: a person granted by name
   (`Name <email>`) in the SAME `access.md` as the denial keeps that access,
   because within one file a person's own entry beats a role entry. A grant by
