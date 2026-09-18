@@ -136,7 +136,8 @@ export type PostChangeRequestCommentInput = PostPrCommentInput;
 /**
  * One open change request proposing files under a folder, as a folder delete
  * lists it. `mayRemove`: the caller may take those files out of it (their own,
- * or they are an admin or a writer of the folder); a refusal always says why.
+ * they are an admin, or they may write every file it proposes under the
+ * folder); a refusal always says why.
  */
 export type FolderChangeRequest = {
   number: number;

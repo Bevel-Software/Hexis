@@ -23,6 +23,7 @@ import { WorkflowService } from '../workflow.service.js';
 
 const ALICE: AuthUser = { id: 'u-alice', email: 'alice@example.com', name: 'Alice' };
 const BOB: AuthUser = { id: 'u-bob', email: 'bob@example.com', name: 'Bob' };
+const DAN: AuthUser = { id: 'u-dan', email: 'dan@example.com', name: 'Dan' };
 
 function summary(over: Partial<PullRequestSummary> & { number: number; branch: string }): PullRequestSummary {
   return {
@@ -41,8 +42,8 @@ function summary(over: Partial<PullRequestSummary> & { number: number; branch: s
 interface Access {
   /** Emails with write on roles.yaml at the base. */
   admins?: string[];
-  /** Emails with write on `Data/Reports/access.md` at the base. */
-  folderWriters?: string[];
+  /** Email → the folder prefixes it may write under at the base. */
+  writes?: Record<string, string[]>;
 }
 
 function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
@@ -83,8 +84,12 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
     canWriteAtRef: vi.fn(async (_ws: string, ref: string, email: string, p: string) => {
       expect(ref).toBe('origin/main');
       if (p === 'roles.yaml') return (access.admins ?? []).includes(email);
-      if (p === 'Data/Reports/access.md') return (access.folderWriters ?? []).includes(email);
       return false;
+    }),
+    canWriteBatchAtRef: vi.fn(async (_ws: string, ref: string, email: string, paths: string[]) => {
+      expect(ref).toBe('origin/main');
+      const prefixes = access.writes?.[email] ?? [];
+      return new Map(paths.map((p) => [p, prefixes.some((prefix) => p.startsWith(prefix))]));
     }),
   } as unknown as IAccessControl;
 
@@ -187,7 +192,7 @@ describe('WorkflowService.changeRequestsUnderFolder', () => {
     expect(other).toMatchObject({
       number: 40,
       mayRemove: false,
-      reason: expect.stringMatching(/#40 was proposed by Bob; only its author, an admin or a writer of this folder/),
+      reason: expect.stringMatching(/#40 was proposed by Bob; only its author, an admin or someone who can write every file it proposes here/),
     });
   });
 
@@ -220,11 +225,23 @@ describe('WorkflowService.changeRequestsUnderFolder', () => {
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toHaveLength(2);
   });
 
-  it('lets a writer of the folder act on any request', async () => {
-    const { svc } = makeHarness([aliceRequest, bobRequest], { folderWriters: ['dan@example.com'] });
-    const dan = { id: 'u-dan', email: 'dan@example.com', name: 'Dan' };
-    const requests = await svc.changeRequestsUnderFolder('Data/Reports', dan);
+  it('lets someone who may write every file a request proposes there act on it', async () => {
+    const { svc } = makeHarness([aliceRequest, bobRequest], { writes: { [DAN.email]: ['Data/Reports/'] } });
+    const requests = await svc.changeRequestsUnderFolder('Data/Reports', DAN);
     expect(requests.every((r) => r.mayRemove)).toBe(true);
+  });
+
+  it('judges every proposed file, so a subfolder the writer may not write keeps its request out of reach', async () => {
+    // Dan writes the folder's own files but not `Sub/`, where #12 also proposes one.
+    const { svc } = makeHarness([aliceRequest, bobRequest], {
+      writes: { [DAN.email]: ['Data/Reports/proposed.md', 'Data/Reports/q3.md'] },
+    });
+    const [alices, bobs] = await svc.changeRequestsUnderFolder('Data/Reports', DAN);
+    expect(alices).toMatchObject({ number: 12, mayRemove: false, reason: expect.stringContaining('#12') });
+    expect(bobs).toMatchObject({ number: 40, mayRemove: true });
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', DAN)).rejects.toMatchObject({
+      message: expect.stringContaining('#12'),
+    });
   });
 });
 
@@ -320,6 +337,24 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).rejects.toMatchObject({
       status: 409,
       message: expect.stringContaining('#40'),
+    });
+    expect(git.revertPathsAndPush).not.toHaveBeenCalled();
+    expect(closed).toEqual([]);
+    expect(changed.get(aliceRequest.branch)!.size).toBe(3);
+  });
+
+  it('removes nothing when a request proposed a file under the folder after its permission was judged', async () => {
+    const { svc, git, changed, closed } = makeHarness([aliceRequest, bobRequest], {
+      writes: { [DAN.email]: ['Data/Reports/'] },
+    });
+    // Bringing the checkouts up to date lands a file #40 proposed since.
+    vi.mocked(git.pull).mockImplementation(async () => {
+      changed.get(bobRequest.branch)!.add('Data/Reports/Locked/new.md');
+      return { treeChanged: true } as never;
+    });
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', DAN)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('#40 changed while the folder was being deleted (Data/Reports/Locked/new.md)'),
     });
     expect(git.revertPathsAndPush).not.toHaveBeenCalled();
     expect(closed).toEqual([]);

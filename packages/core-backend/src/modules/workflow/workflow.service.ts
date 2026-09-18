@@ -2154,9 +2154,11 @@ export class WorkflowService implements IWorkflowService {
    * delete asks before it offers "Delete folder and its proposed changes".
    *
    * The caller may act on a request they authored, on any request as an
-   * admin, or on any request as a writer of the folder — the last two judged
-   * on `origin/<base>`, like every other request verb. An access answer that
-   * cannot be resolved (null) is a no.
+   * admin, or on a request whose every proposed file under the folder they
+   * may write — per file, not at the folder's top: a subfolder can deny a
+   * writer of its parent. The last two are judged on `origin/<base>`, like
+   * every other request verb. An access answer that cannot be resolved
+   * (null) is a no.
    */
   async changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]> {
     const prefix = folderPrefix(folder);
@@ -2188,25 +2190,35 @@ export class WorkflowService implements IWorkflowService {
       .filter((t) => t.paths.length > 0);
     if (touching.length === 0) return [];
     const callerHash = hashEmail(user.email);
-    // One access answer per base branch; the requests almost always share one.
-    const rightsByBase = new Map<string, Promise<boolean>>();
-    const adminOrWriterOn = (base: string): Promise<boolean> => {
-      let rights = rightsByBase.get(base);
-      if (!rights) {
-        rights = (async () => {
-          const ws = await this.workspaceService.getOrCreateForBranch(base);
-          const ref = `origin/${base}`;
-          // A folder's write gate is its access.md — the same key Manage
-          // access checks a folder write against.
-          const [admin, writer] = await Promise.all([
-            this.accessControl.canWriteAtRef(ws.id, ref, user.email, 'roles.yaml'),
-            this.accessControl.canWriteAtRef(ws.id, ref, user.email, `${prefix}access.md`),
-          ]);
-          return admin === true || writer === true;
-        })();
-        rightsByBase.set(base, rights);
+    // One admin answer per base branch; the requests almost always share one.
+    const baseWorkspaces = new Map<string, Promise<string>>();
+    const baseWorkspace = (base: string): Promise<string> => {
+      let ws = baseWorkspaces.get(base);
+      if (!ws) {
+        ws = this.workspaceService.getOrCreateForBranch(base).then((w) => w.id);
+        baseWorkspaces.set(base, ws);
       }
-      return rights;
+      return ws;
+    };
+    const adminByBase = new Map<string, Promise<boolean>>();
+    const adminOn = (base: string): Promise<boolean> => {
+      let admin = adminByBase.get(base);
+      if (!admin) {
+        admin = baseWorkspace(base).then(
+          async (wsId) => (await this.accessControl.canWriteAtRef(wsId, `origin/${base}`, user.email, 'roles.yaml')) === true,
+        );
+        adminByBase.set(base, admin);
+      }
+      return admin;
+    };
+    const writerOfAll = async (base: string, paths: string[]): Promise<boolean> => {
+      const answers = await this.accessControl.canWriteBatchAtRef(
+        await baseWorkspace(base),
+        `origin/${base}`,
+        user.email,
+        paths,
+      );
+      return answers !== null && paths.every((p) => answers.get(p) === true);
     };
 
     return Promise.all(
@@ -2219,11 +2231,13 @@ export class WorkflowService implements IWorkflowService {
           mine,
           paths,
         };
-        if (mine || (await adminOrWriterOn(cr.base))) return { ...listed, mayRemove: true };
+        if (mine || (await adminOn(cr.base)) || (await writerOfAll(cr.base, paths))) {
+          return { ...listed, mayRemove: true };
+        }
         return {
           ...listed,
           mayRemove: false,
-          reason: `#${cr.number} was proposed by ${cr.appAuthor?.name ?? 'someone else'}; only its author, an admin or a writer of this folder can change it.`,
+          reason: `#${cr.number} was proposed by ${cr.appAuthor?.name ?? 'someone else'}; only its author, an admin or someone who can write every file it proposes here can change it.`,
         };
       }),
     );
@@ -2245,7 +2259,7 @@ export class WorkflowService implements IWorkflowService {
     const refused = requests.filter((r) => !r.mayRemove);
     if (refused.length > 0) {
       throw new WorkflowDomainError(
-        `You can't remove proposed changes from ${refused.map((r) => `#${r.number}`).join(', ')} — only the author, an admin or a writer of this folder can.`,
+        `You can't remove proposed changes from ${refused.map((r) => `#${r.number}`).join(', ')} — only the author, an admin or someone who can write every file it proposes here can.`,
         403,
       );
     }
@@ -2276,6 +2290,16 @@ export class WorkflowService implements IWorkflowService {
       const paths = (await this.git.changedPathsForPr(ws.id, summary.base, summary.branch)).filter((p) =>
         p.startsWith(prefix),
       );
+      // The permission above was judged on the paths the request proposed
+      // then. One proposed since was never judged — a writer of every earlier
+      // file need not be one of it — so the request has to be asked about again.
+      const unjudged = paths.filter((p) => !request.paths.includes(p));
+      if (unjudged.length > 0) {
+        throw new WorkflowDomainError(
+          `#${summary.number} changed while the folder was being deleted (${unjudged.length === 1 ? unjudged[0] :`${unjudged.length} new files`}), so no proposed changes were removed — try again.`,
+          409,
+        );
+      }
       let mergeBase: string | null = null;
       if (paths.length > 0) {
         mergeBase = await this.git.mergeBaseForPr(ws.id, summary.base, summary.branch);

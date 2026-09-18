@@ -468,7 +468,8 @@ export interface IWorkflowService {
   /**
    * The open change requests proposing files under a KB-repo-relative
    * folder, each with whether the caller may take those files out of it
-   * (their own request, or they are an admin or a writer of the folder).
+   * (their own request, they are an admin, or they may write every file it
+   * proposes under the folder).
    */
   changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]>;
 

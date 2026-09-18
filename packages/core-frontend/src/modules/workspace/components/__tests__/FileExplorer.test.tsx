@@ -2013,7 +2013,7 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
         mine: false,
         paths: ['Data/Reports/q3.md'],
         mayRemove: false,
-        reason: '#40 was proposed by Ana; only its author, an admin or a writer of this folder can change it.',
+        reason: '#40 was proposed by Ana; only its author, an admin or someone who can write every file it proposes here can change it.',
       }),
     ]);
     renderWithProposal();
