@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   SUPPORTED_NODE,
   SUPPORTED_NODE_MAJORS,
+  codeModeInstalled,
   loadNativeSandbox,
   nodeMajor,
   preflight,
@@ -95,6 +96,23 @@ describe('preflight on an unsupported Node', () => {
     expect(preflight({ nodeVersion: '22.12.9', probeNativeSandbox: () => 'loaded' })).not.toBeNull();
     expect(preflight({ nodeVersion: '22.13.0', probeNativeSandbox: () => 'loaded' })).toBeNull();
   });
+
+  /**
+   * A nightly or an rc of a supported version compares EQUAL to its release,
+   * so the floor check alone waves it through — but `>=22.13 <23` does not
+   * match a prerelease in semver, and `isolated-vm` built no binary for a
+   * major whose ABI was not settled yet. Same sentence, which names the
+   * versions that do work.
+   */
+  it('refuses a prerelease of a version it would otherwise support', () => {
+    for (const version of ['22.13.0-nightly20260101abcdef', '24.0.0-rc.1', '22.14.0-pre']) {
+      const sentence = preflight({ nodeVersion: version, probeNativeSandbox: () => 'loaded' });
+      expect(sentence, `${version} was accepted`).not.toBeNull();
+      expect(sentence).toContain(version);
+    }
+    // And the releases they are prereleases OF still pass.
+    expect(preflight({ nodeVersion: '24.0.0', probeNativeSandbox: () => 'loaded' })).toBeNull();
+  });
 });
 
 describe('preflight when the native module will not load', () => {
@@ -116,7 +134,36 @@ describe('preflight when the native module will not load', () => {
   });
 
   it('says nothing when the module is merely absent — an embedder is not a broken install', () => {
-    expect(preflight({ nodeVersion: '22.13.1', probeNativeSandbox: () => 'unresolved' })).toBeNull();
+    // The embedder in question installed this package WITHOUT the code-mode
+    // extras: nothing here will reach for a sandbox, so there is no problem
+    // to report.
+    expect(
+      preflight({
+        nodeVersion: '22.13.1',
+        probeNativeSandbox: () => 'unresolved',
+        probeCodeMode: () => false,
+      }),
+    ).toBeNull();
+  });
+
+  /**
+   * The other absent-module install, and the one that is genuinely broken:
+   * code-mode is HERE, so `server.js` importing it will import `isolated-vm`
+   * and die — for an embedding host exactly as for the CLI. No caller has to
+   * ask for this refusal; the install asks for it.
+   */
+  it('refuses an absent module whenever code-mode itself is installed', () => {
+    const sentence = preflight({
+      nodeVersion: '22.13.1',
+      probeNativeSandbox: () => 'unresolved',
+      probeCodeMode: () => true,
+    });
+    expect(sentence).not.toBeNull();
+    expect(sentence).toContain('isolated-vm');
+  });
+
+  it('finds code-mode in THIS installation, so that guard is live rather than theoretical', () => {
+    expect(codeModeInstalled()).toBe(true);
   });
 
   /**
@@ -129,6 +176,9 @@ describe('preflight when the native module will not load', () => {
     const sentence = preflight({
       nodeVersion: '22.13.1',
       probeNativeSandbox: () => 'unresolved',
+      // Even with code-mode absent: the CLI is about to import `server.js`,
+      // which imports it, so this install cannot serve one request.
+      probeCodeMode: () => false,
       requireNativeSandbox: true,
     });
     expect(sentence).not.toBeNull();

@@ -83,6 +83,7 @@ export {
   nativeSandboxSentence,
   missingNativeSandboxSentence,
   loadNativeSandbox,
+  codeModeInstalled,
   type PreflightOptions,
   type NativeSandboxProbe,
   type SupportedNode,

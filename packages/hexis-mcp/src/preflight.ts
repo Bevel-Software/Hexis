@@ -92,6 +92,20 @@ function versionOrder(version: string): number | null {
 }
 
 /**
+ * Is this a PRERELEASE — a nightly, an rc, a self-built `-pre`?
+ *
+ * `22.13.0-nightly…` compares equal to the released 22.13.0 and would sail
+ * through the floor check, but it is not a version either `engines` range
+ * promises (semver excludes prereleases from `>=22.13 <23` unless the range
+ * names one), and not a version `isolated-vm` published a binary against: the
+ * ABI a major ships with is not settled until it releases. So it is refused by
+ * the same sentence, which names the versions that do work.
+ */
+function isPrerelease(version: string): boolean {
+  return version.trim().includes('-');
+}
+
+/**
  * Does this version reach its major's floor? An unreadable version is given
  * the benefit of the doubt — the load probe is the real test, and it answers
  * for whatever runtime this actually is.
@@ -201,17 +215,40 @@ export const loadNativeSandbox: NativeSandboxProbe = () => {
   return 'unresolved';
 };
 
+/**
+ * Is `@utcp/code-mode` — the module whose module-level import pulls the
+ * sandbox in — installed here at all?
+ *
+ * This is what separates the two ways `isolated-vm` can be missing. With
+ * code-mode PRESENT, an absent sandbox is a broken install for every caller:
+ * importing `server.js` imports code-mode, which imports `isolated-vm` and
+ * dies. With code-mode ABSENT, nothing here reaches for the sandbox, and an
+ * embedding host that installed this package without the extras is not broken
+ * — refusing there would be inventing a problem.
+ */
+export const codeModeInstalled = (): boolean => {
+  try {
+    createRequire(import.meta.url).resolve('@utcp/code-mode');
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 export interface PreflightOptions {
   /** Defaults to `process.versions.node`; injected so a test can be Node 26. */
   nodeVersion?: string;
   /** Defaults to {@link loadNativeSandbox}; injected so a test can fail it. */
   probeNativeSandbox?: NativeSandboxProbe;
+  /** Defaults to {@link codeModeInstalled}; injected so a test can be either install. */
+  probeCodeMode?: () => boolean;
   /**
-   * Is a sandbox that cannot even be RESOLVED a refusal? The CLI says yes —
-   * its very next statement imports `server.js`, and through it code-mode's
-   * module-level `isolated-vm` import, so an unresolved module is a crash
-   * one line away rather than a hypothetical. An embedding host that never
-   * runs a code-mode chain is fine without it, so the default is no.
+   * Refuse a sandbox that cannot even be RESOLVED, whatever else is installed.
+   * The CLI says yes: its very next statement imports `server.js`, so an
+   * unresolved module is a crash one line away rather than a hypothetical.
+   * Leaving it unset does NOT mean "never refuse" — an install carrying
+   * code-mode WITHOUT its sandbox is refused either way, because that one is
+   * broken for every caller (see {@link codeModeInstalled}).
    */
   requireNativeSandbox?: boolean;
 }
@@ -225,16 +262,17 @@ export interface PreflightOptions {
 export function preflight(options: PreflightOptions = {}): string | null {
   const version = options.nodeVersion ?? process.versions.node;
   const probe = options.probeNativeSandbox ?? loadNativeSandbox;
+  const probeCodeMode = options.probeCodeMode ?? codeModeInstalled;
 
   const major = nodeMajor(version);
   // An unreadable version is not a reason to refuse: the load probe below is
   // the real test, and it answers for whatever this runtime actually is.
   if (major !== null) {
     const supported = SUPPORTED_NODE.find((n) => n.major === major);
-    // Both halves of the range, one sentence: the wrong major (no binary at
-    // all) and the right major below its floor (outside what `engines`
-    // publishes, and what nobody tests).
-    if (supported === undefined || !reachesFloor(version, supported)) {
+    // Every way out of the published range, one sentence: the wrong major (no
+    // binary at all), the right major below its floor, and a prerelease of a
+    // right-looking version — none of which `engines` promises.
+    if (supported === undefined || !reachesFloor(version, supported) || isPrerelease(version)) {
       return unsupportedNodeSentence(version);
     }
   }
@@ -244,7 +282,11 @@ export function preflight(options: PreflightOptions = {}): string | null {
   } catch (err) {
     return nativeSandboxSentence(version, err instanceof Error ? err.message : String(err));
   }
-  if (loaded === 'unresolved' && options.requireNativeSandbox === true) {
+  // An unresolved sandbox is a refusal for a caller that is ABOUT to import
+  // code-mode (the CLI says so outright), and for any install that already
+  // HAS code-mode — there, the import that dies is one `server.js` makes on
+  // its own. What is left is the embedder without the extras, which is fine.
+  if (loaded === 'unresolved' && (options.requireNativeSandbox === true || probeCodeMode())) {
     return missingNativeSandboxSentence();
   }
   return null;

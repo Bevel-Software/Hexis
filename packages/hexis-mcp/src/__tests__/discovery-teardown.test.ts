@@ -125,13 +125,23 @@ describe('teardown landing in the middle of discovery', () => {
   it('tells a `tools/list` that the server is going away, not that the workspace is empty', async () => {
     holdManuals();
     const s = await start();
-    // Shutdown first (it marks `closed` before awaiting anything), then a
-    // listing behind the gate, then let discovery reach its boundary.
-    const shuttingDown = s.handle.shutdown();
+    // ORDER MATTERS, and it is the reason this reads the way it does. The
+    // listing goes first and is given time to PARK on the gate, so its
+    // handler is what resumes when discovery lets go. Shutting down first
+    // would leave the client's rejection ambiguous: the transport closing
+    // rejects a pending request too, with the same `ConnectionClosed` code,
+    // and the test would then pass with the guard deleted. The MESSAGE is
+    // asserted for the same reason — it is the half only the handler writes.
     const listing = s.client.listTools();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const shuttingDown = s.handle.shutdown();
     releaseManuals();
 
-    await expect(listing).rejects.toMatchObject({ code: ErrorCode.ConnectionClosed });
+    await expect(listing).rejects.toMatchObject({
+      code: ErrorCode.ConnectionClosed,
+      message: expect.stringContaining('hexis-mcp is shutting down.'),
+    });
     await shuttingDown;
   });
 
