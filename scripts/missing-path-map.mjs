@@ -30,7 +30,12 @@ const flag = (name, fallback) => {
 
 const url = flag('url', 'http://app:3001').replace(/\/+$/, '');
 const token = flag('token', process.env.HEXIS_TOKEN);
-const branch = flag('branch', 'main');
+// REQUIRED, with no default. The probes must run on a DRAFT branch: on a
+// protected one (`main`, normally) the write tools refuse before they ever
+// look at the path, so half the table would read the branch policy's answer
+// instead of the missing path's. Defaulting to `main` made that wrong run the
+// easy one to start, so there is no default at all.
+const branch = flag('branch');
 // The folder the missing paths are named under. It must be one the caller can
 // READ: the read gate answers BEFORE absence does — that is what keeps a
 // missing path from disclosing existence — so a row under an unreadable folder
@@ -40,6 +45,10 @@ const under = flag('under', 'knowledge-base').replace(/\/+$/, '');
 const asJson = args.includes('--json');
 if (!token) {
   console.error('missing --token (or HEXIS_TOKEN)');
+  process.exit(2);
+}
+if (!branch) {
+  console.error('missing --branch <draft-branch> (a protected branch refuses the writes before it reads the path)');
   process.exit(2);
 }
 
@@ -138,5 +147,8 @@ if (asJson) {
   }
 }
 const bad = rows.filter((r) => r.status !== 404 || r.kind !== 'not_found');
-console.log(`\n${rows.length - bad.length}/${rows.length} answer 404 not_found.`);
+// Under `--json` stdout is a JSON DOCUMENT and nothing else — the tally would
+// be trailing prose that no parser accepts, and this script is meant to pipe
+// into one. The exit code carries the same verdict either way.
+if (!asJson) console.log(`\n${rows.length - bad.length}/${rows.length} answer 404 not_found.`);
 process.exit(bad.length === 0 ? 0 : 1);

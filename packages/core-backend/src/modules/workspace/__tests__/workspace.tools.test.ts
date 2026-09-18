@@ -2697,6 +2697,32 @@ describe('a path with nothing at it answers 404 not_found on every file tool', (
     }
   });
 
+  // A copy has TWO ends and the filesystem blames the source for both: it
+  // re-throws every ENOENT as `FileNotFoundError(src)`, and a destination
+  // segment that is a file escapes raw as ENOTDIR from the parent mkdir. With
+  // the source sitting right there, the absence can only be the destination's
+  // — so the 404 names the destination. It must not be left to escape as a
+  // 500 either: that is the answer whose message carries the server's own
+  // absolute path, and a mis-spelled destination is the caller's to fix.
+  it('copy_file names the DESTINATION when the source is there and the destination is not', async () => {
+    const base = await start('write');
+    await fs.mkdir(FOLDER, { recursive: true });
+    await fs.writeFile(`${FOLDER}/Note.md`, 'a real file\n');
+    await fs.writeFile(`${FOLDER}/Source.md`, 'copy me\n');
+    const dest = `${FOLDER}/Note.md/deeper/copy.md`;
+    const res = await post(`${base}/api/agent/tools/copy_file`, { branch: 'main', src: `${FOLDER}/Source.md`, dest });
+    const json = (await res.json()) as { error?: string; kind?: string; path?: string };
+    expect(res.status).toBe(404);
+    expect(json.kind).toBe('not_found');
+    expect(json.path).toBe(dest);
+    expect(json.error).toContain(NOT_FOUND_NEXT_STEP);
+    // The source is not what is wrong, and the answer never says it is.
+    expect(json.error).not.toContain('Source.md');
+    // Nor does the raw errno — and the server's own absolute path with it —
+    // reach the caller, which is what the old 500 handed over.
+    expect(json.error).not.toContain('ENOTDIR');
+  });
+
   // A backslash is a filename character on this disk, never a separator, so
   // the read tools meet plain absence. move_file and delete_file judge the
   // path as WRITTEN and keep refusing it up front — an answer that predates

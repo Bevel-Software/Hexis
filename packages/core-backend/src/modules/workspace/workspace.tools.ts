@@ -1947,19 +1947,27 @@ export function registerWorkspaceTools(
       // up front put a 404 in front of that 403 and made the refusal report
       // whether a path the caller could not copy from exists.
       //
-      // Which path the absence belongs to is then decided by probing the
-      // SOURCE, as move_file probes its own: a copy reports every absence
-      // against the source, including one that is really the destination's (a
-      // parent segment that is a file), and a 404 naming a source that is
-      // sitting right there would send the caller to re-spell the wrong
-      // argument. Only a source that really is missing gets the 404; anything
-      // else travels on as it always did.
+      // WHICH path the absence belongs to is then decided by probing the
+      // SOURCE, as move_file probes its own — and the answer names whichever
+      // end it actually was. A copy has exactly two ends, and the filesystem
+      // blames the source for both: `LocalFilesystem.copyFile` re-throws every
+      // ENOENT as `FileNotFoundError(src)`, and a destination segment that is
+      // a file escapes raw as ENOTDIR from the parent mkdir. So a source that
+      // is really gone gets the 404 naming the source; a source that is
+      // sitting right there means the absence was the DESTINATION's, and it
+      // gets the same 404 naming the destination. Neither may be left to
+      // escape as a 500 — that is the answer whose message carries the
+      // server's own absolute path, and a mis-spelled path is the caller's to
+      // fix on either side of the copy. Anything that is not absence travels
+      // on as it always did.
       try {
         await copyFs.copyFile(a.src as string, a.dest as string);
       } catch (err) {
         const missing = isAbsence(err) || (err as { name?: string }).name === 'FileNotFoundError';
-        if (missing && (await kindOf(copyFs, a.src as string)) === null) {
-          throw notFound(a.src as string, 'Nothing to copy');
+        if (missing) {
+          throw (await kindOf(copyFs, a.src as string)) === null
+            ? notFound(a.src as string, 'Nothing to copy')
+            : notFound(a.dest as string, 'Nowhere to copy to');
         }
         throw err;
       }

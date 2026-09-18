@@ -24,8 +24,15 @@ export function printable(text: string): string {
 
 /**
  * A path (or any short text) as it may be interpolated into a ONE-LINE
- * message: the CR and LF a caller could put in a filename are escaped, so a
- * refusal naming the path stays one line and cannot forge a second.
+ * message: every character a caller can put in a filename that RENDERS as a
+ * line break is escaped, so a refusal naming the path stays one line and
+ * cannot forge a second.
+ *
+ * That is CR and LF, and the Unicode line separators U+2028/U+2029 with them:
+ * `JSON.stringify` leaves those two raw, so a path that carries one survives
+ * being carried — in the `path` field of a not-found body, in a log line —
+ * and breaks the line wherever it is finally rendered. {@link printable}
+ * escapes the pair for exactly that reason.
  *
  * Unquoted, unlike {@link printable}: this text is read by a person or an
  * agent inside a sentence that already quotes it, not by an operator scanning
@@ -33,6 +40,13 @@ export function printable(text: string): string {
  * function, and the missing-path refusals use it too, so a path reads the same
  * however it is refused.
  */
+const LINE_BREAKING: ReadonlyMap<string, string> = new Map([
+  ['\r', '\\r'],
+  ['\n', '\\n'],
+  ['\u2028', '\\u2028'],
+  ['\u2029', '\\u2029'],
+]);
+
 export function sanitizedPath(text: string): string {
-  return text.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
+  return text.replace(/[\r\n\u2028\u2029]/g, (c) => LINE_BREAKING.get(c) ?? c);
 }

@@ -1504,12 +1504,24 @@ export class WorkspaceService implements IWorkspaceService {
     await this.assertNotThroughLink(zipAbsolute, workspaceDir);
     if (destAbsolute !== workspaceDir) await this.assertNotThroughLink(destAbsolute, workspaceDir);
 
-    // Absence is asked BEFORE the archive is opened, because the zip reader
-    // cannot tell the two apart: on a path with nothing at it `AdmZip` throws
-    // "ADM-ZIP: Invalid filename", which would be dressed up as an unreadable
-    // archive (422) and blame the bytes for a name that never existed.
+    // The archive is READ ONCE, here, and the reader is handed those bytes —
+    // it is never given the path to open for itself. Two reasons, and the
+    // first is why this is not a `stat` followed by `new AdmZip(path)`:
+    //
+    //  - The zip reader cannot tell absence from corruption. On a path with
+    //    nothing at it `AdmZip` throws "ADM-ZIP: Invalid filename", which would
+    //    be dressed up as an unreadable archive (422) and blame the bytes for
+    //    a name that never existed. Only the read knows which it was.
+    //  - A separate probe answers about a DIFFERENT moment than the open. An
+    //    archive deleted in between passed the probe and then failed the open,
+    //    and the caller got the 422 the probe existed to prevent. One read is
+    //    one moment, so there is no in-between to lose.
+    //
+    // `AdmZip` from a buffer costs nothing extra: given a path it reads the
+    // whole file in anyway.
+    let zipBytes: Buffer;
     try {
-      await fs.stat(zipAbsolute);
+      zipBytes = await fs.readFile(zipAbsolute);
     } catch (err) {
       if (isAbsence(err)) throw new PathNotFoundError(zipRelativePath);
       throw err;
@@ -1517,7 +1529,7 @@ export class WorkspaceService implements IWorkspaceService {
 
     let zip: AdmZip;
     try {
-      zip = new AdmZip(zipAbsolute);
+      zip = new AdmZip(zipBytes);
     } catch (err) {
       throw new UnreadableArchiveError(err instanceof Error ? err.message : String(err));
     }

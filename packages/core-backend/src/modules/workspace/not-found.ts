@@ -1,6 +1,6 @@
 import { ToolError } from '../tool-helpers/tool.contract.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { PathNotFoundError } from '../../shared/domain-errors.js';
+import { NOT_FOUND_NEXT_STEP, PathNotFoundError } from '../../shared/domain-errors.js';
 import { sanitizedPath } from '../../shared/printable.js';
 import { logger } from '../../shared/logging.js';
 
@@ -40,8 +40,14 @@ const log = logger('not-found');
  * only ever reached past that point.
  */
 
-/** The next step, in one sentence — identical on every tool, so it is written once. */
-export const NOT_FOUND_NEXT_STEP = 'Check the path with list_files.';
+/**
+ * The next step, in one sentence — identical on every tool, so it is written
+ * once. Defined beside {@link PathNotFoundError} in `shared/domain-errors`,
+ * which raises the same 404 from the service and HTTP side and so needs the
+ * same sentence; re-exported here because this is where the file tools read
+ * it from.
+ */
+export { NOT_FOUND_NEXT_STEP };
 
 /** The machine-readable body of a missing-path refusal. */
 export interface NotFoundDetails {

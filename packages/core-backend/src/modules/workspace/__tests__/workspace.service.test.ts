@@ -1162,6 +1162,52 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     });
   });
 
+  // The error carries the WHOLE answer — sanitized path, kind AND the next
+  // step — because not every surface re-renders it. `POST /workspace/:id/unzip`
+  // hands this straight to `domainErrorBody`, so whatever is missing here is
+  // missing from the HTTP 404 that the tools' 404 is supposed to match.
+  it('the missing-archive 404 carries the next step and a one-line path, on any surface', async () => {
+    await expect(svc.unzipFile(workspaceId, 'nope.zip')).rejects.toMatchObject({
+      message: 'There is no file or directory at "nope.zip" in this workspace. Check the path with list_files.',
+    });
+    // A name carrying a line break cannot forge a second line of the answer,
+    // in the message or in the `path` a JSON consumer reads.
+    const forged = 'a\nb\u2028c.zip';
+    await expect(svc.unzipFile(workspaceId, forged)).rejects.toMatchObject({
+      status: 404,
+      payload: { kind: 'not_found', path: 'a\\nb\\u2028c.zip' },
+    });
+  });
+
+  // The archive is read ONCE and the reader is handed those bytes. With a
+  // `stat` probe followed by `new AdmZip(path)` there were two moments: an
+  // archive that vanished in between passed the probe and then failed the
+  // open, and the caller got back the 422 the probe existed to prevent.
+  it('an archive that vanishes as it is opened still answers 404, never the 422', async () => {
+    await writeZip('racy.zip', { 'x.md': '1' });
+    const gone = Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+    const readSpy = vi.spyOn(fs, 'readFile').mockRejectedValueOnce(gone);
+    try {
+      await expect(svc.unzipFile(workspaceId, 'racy.zip')).rejects.toMatchObject({
+        name: 'PathNotFoundError',
+        status: 404,
+        payload: { kind: 'not_found', path: 'racy.zip' },
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  // The other half of that single read: bytes that ARE there but are not a zip
+  // are still the archive's problem, not the path's.
+  it('a file that is not a zip is still the 422, read from its bytes', async () => {
+    await fs.writeFile(path.join(workspaceDir, 'junk.zip'), 'not really a zip');
+    await expect(svc.unzipFile(workspaceId, 'junk.zip')).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'unreadable-archive' },
+    });
+  });
+
   it('extracts everything when no guard is supplied (human / non-agent path)', async () => {
     await writeZip('b.zip', { 'x.md': '1', 'y.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'b.zip', 'out');
