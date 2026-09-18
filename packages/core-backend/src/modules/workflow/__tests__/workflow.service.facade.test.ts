@@ -563,6 +563,7 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
       changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/b.md']),
       mergeBaseForPr: vi.fn().mockResolvedValue('mb-sha'),
       restorePathFromRef: vi.fn().mockResolvedValue(undefined),
+      pathExistsAtRef: vi.fn().mockResolvedValue(true),
       commitFile: vi.fn().mockResolvedValue({}),
       push: vi.fn().mockResolvedValue(undefined),
       ...overrides,
@@ -667,6 +668,89 @@ describe('WorkflowService — revertChangeRequestFile / closeEmptyChangeRequest'
     const result = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md');
     expect(result).toEqual({ closed: true, remainingPaths: [] });
     expect(db.update).toHaveBeenCalled();
+  });
+
+  it('never names a folder placeholder among the remaining files', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi
+        .fn()
+        .mockResolvedValueOnce(['Docs/a.md', 'Docs/b.md', 'Docs/.gitkeep'])
+        .mockResolvedValueOnce(['Docs/b.md', 'Docs/.gitkeep']),
+    });
+    const { svc } = makeHarness({ git });
+    const result = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md');
+    expect(result).toEqual({ closed: false, remainingPaths: ['Docs/b.md'] });
+  });
+
+  it('reverting a file the request removed also reverts the placeholder that kept its folder', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi
+        .fn()
+        .mockResolvedValueOnce(['Docs/a.md', 'Docs/.gitkeep', 'Other/b.md'])
+        .mockResolvedValueOnce(['Other/b.md']),
+      // `Docs/a.md` is at the base; the placeholder is not.
+      pathExistsAtRef: vi.fn(async (_ws: string, _ref: string, p: string) => p === 'Docs/a.md'),
+    });
+    const { svc, fileLocks } = makeHarness({ git });
+    const result = await svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md');
+
+    expect((git.restorePathFromRef as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2])).toEqual([
+      'Docs/a.md',
+      'Docs/.gitkeep',
+    ]);
+    expect((git.commitFile as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2])).toEqual([
+      'Docs/a.md',
+      'Docs/.gitkeep',
+    ]);
+    expect((fileLocks.acquire as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2])).toEqual([
+      'knowledge-base/Docs/a.md',
+      'knowledge-base/Docs/.gitkeep',
+    ]);
+    expect(fileLocks.release).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ closed: false, remainingPaths: ['Other/b.md'] });
+  });
+
+  it('releases every lock it took even when one release fails, and still reports the failure', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/.gitkeep']),
+      pathExistsAtRef: vi.fn(async (_ws: string, _ref: string, p: string) => p === 'Docs/a.md'),
+    });
+    const { svc, fileLocks } = makeHarness({ git });
+    (fileLocks.release as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('lock store down'));
+
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toThrow('lock store down');
+    expect((fileLocks.release as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2])).toEqual([
+      'knowledge-base/Docs/a.md',
+      'knowledge-base/Docs/.gitkeep',
+    ]);
+  });
+
+  it('releases every lock it took when the revert itself fails, and reports that failure', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi.fn().mockResolvedValue(['Docs/a.md', 'Docs/.gitkeep']),
+      pathExistsAtRef: vi.fn(async (_ws: string, _ref: string, p: string) => p === 'Docs/a.md'),
+      commitFile: vi.fn().mockRejectedValue(new Error('commit failed')),
+    });
+    const { svc, fileLocks } = makeHarness({ git });
+    (fileLocks.release as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('lock store down'));
+
+    await expect(svc.revertChangeRequestFile(7, makeUser(), 'Docs/a.md')).rejects.toThrow('commit failed');
+    expect(fileLocks.release).toHaveBeenCalledTimes(2);
+  });
+
+  it('never reverts a placeholder when that would leave the folder with nothing', async () => {
+    const git = makeRevertGit({
+      changedPathsForPr: vi
+        .fn()
+        .mockResolvedValueOnce(['Docs/new.md', 'Docs/.gitkeep'])
+        .mockResolvedValueOnce(['Docs/.gitkeep']),
+      // An added file, and a placeholder the request added too.
+      pathExistsAtRef: vi.fn(async () => false),
+    });
+    const { svc } = makeHarness({ git });
+    await svc.revertChangeRequestFile(7, makeUser(), 'Docs/new.md');
+
+    expect((git.restorePathFromRef as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2])).toEqual(['Docs/new.md']);
   });
 
   it('closeEmptyChangeRequest never closes on a FAILED diff', async () => {
