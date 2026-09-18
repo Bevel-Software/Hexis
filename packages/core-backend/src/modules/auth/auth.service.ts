@@ -110,14 +110,27 @@ export class AuthService {
 
     const provided = password ?? '';
 
+    // Looked up for EVERY email, including the deployment admin's, whose hash
+    // is then ignored below. Skipping the query for that one address would
+    // make its wrong-password response measurably cheaper than every other
+    // address's — one round trip short — and repeated timings would then
+    // disclose which email the deployment configured as `ADMIN_EMAIL`. The
+    // decoy hash already buys that uniformity for the scrypt half; this keeps
+    // the database half uniform too.
+    const [user] = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.email, normalizedEmail))
+      .limit(1);
+
     if (this.isEnvAdminEmail(normalizedEmail)) {
       // While `ADMIN_PASSWORD` is set, the environment's password is this
-      // account's ONLY credential — the stored-hash fallback below is never
-      // reached for it. A hash can still be sitting on that row (planted
-      // before this rule existed, or left by an ordinary account that only
-      // later became `ADMIN_EMAIL`), and accepting it would defeat the point
-      // of refusing to write new ones: rotating `ADMIN_PASSWORD` would leave
-      // the old credential signing in.
+      // account's ONLY credential — the row was read above, but its hash is
+      // never consulted for this address. A hash can still be sitting on that
+      // row (planted before this rule existed, or left by an ordinary account
+      // that only later became `ADMIN_EMAIL`), and accepting it would defeat
+      // the point of refusing to write new ones: rotating `ADMIN_PASSWORD`
+      // would leave the old credential signing in.
       //
       // Refused rather than deleted, deliberately. The rule is reversible the
       // same way every other env-admin fact is — unset `ADMIN_PASSWORD` and
@@ -126,22 +139,18 @@ export class AuthService {
       // path that destroys credentials would be a far worse thing to get
       // wrong than one that ignores them.
       if (!timingSafeStringEqual(provided, this.config.adminPassword)) {
-        // One scrypt verification on this path too, so a wrong password here
-        // costs what a wrong password anywhere else does and response timing
-        // does not point at which email is the deployment admin.
+        // One scrypt verification here too — against the decoy, never against
+        // `user`'s hash — so that together with the lookup above a wrong
+        // password for this address costs what a wrong password for any other
+        // address does.
         await verifyPassword(provided, await decoyHash());
         throw new Error('Invalid credentials');
       }
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
-      const user = await this.upsertUserByEmail(normalizedEmail, defaultName);
-      return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
+      const admin = await this.upsertUserByEmail(normalizedEmail, defaultName);
+      return { token: this.signToken(admin.id, admin.email), user: this.toClientUser(admin) };
     }
 
-    const [user] = await this.db
-      .select()
-      .from(users)
-      .where(eq(users.email, normalizedEmail))
-      .limit(1);
     // Always run one scrypt verification — against the stored hash when there
     // is one, against the decoy otherwise — so unknown emails and
     // password-less (SSO-only) accounts take the same time as a wrong

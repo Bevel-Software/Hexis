@@ -79,7 +79,8 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
   const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' });
 
   it('signs in the env admin and upserts their user row', async () => {
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com', name: 'root' }]]);
+    // Two queued results: the lookup every login now performs, then the upsert.
+    const { db } = makeFakeDb([[], [{ ...ROW, email: 'root@example.com', name: 'root' }]]);
     const svc = new AuthService(db, config);
     const result = await svc.loginWithPassword('Root@Example.com', 'sup3r-secret');
     expect(result.user.email).toBe('root@example.com');
@@ -94,6 +95,24 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
     );
   });
 
+  // The generic "Invalid credentials" only hides the configured admin email if
+  // the WORK is generic too. The decoy hash equalises the scrypt half for
+  // every address; this pins the database half, which a branch that answered
+  // the admin's address without a lookup would otherwise leave one round trip
+  // shorter than every other address's — visible to repeated timing.
+  it('does the same lookup for a wrong password whichever address it is for', async () => {
+    const attempts = ['root@example.com', 'nobody@example.com', 'alice@example.com'];
+    const counts: number[] = [];
+    for (const email of attempts) {
+      const { db } = makeFakeDb([[]]);
+      await expect(
+        new AuthService(db, config).loginWithPassword(email, 'wrong'),
+      ).rejects.toThrow('Invalid credentials');
+      counts.push(vi.mocked(db.select).mock.calls.length);
+    }
+    expect(counts).toEqual([1, 1, 1]);
+  });
+
   // The environment password is this account's only credential, so a hash on
   // its row is not a second one. Such a hash can exist without anyone
   // planting it today: it may pre-date the rule that refuses to write one, or
@@ -102,14 +121,17 @@ describe('AuthService.loginWithPassword — env bootstrap admin', () => {
   // working — precisely what refusing the write was meant to prevent.
   it('refuses a stored hash on the deployment admin row', async () => {
     const passwordHash = await hashPassword('planted-password');
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash }]]);
+    const { db, captured } = makeFakeDb([[{ ...ROW, email: 'root@example.com', passwordHash }]]);
     const svc = new AuthService(db, config);
     await expect(svc.loginWithPassword('root@example.com', 'planted-password')).rejects.toThrow(
       'Invalid credentials',
     );
-    // Never even read: the env credential is an alternative to the stored
-    // one, not a first attempt that falls through to it.
-    expect(vi.mocked(db.select)).not.toHaveBeenCalled();
+    // The row IS read — every email takes the same lookup, so that this one
+    // cannot be picked out by how long a wrong password takes — but its hash
+    // is not what the answer is drawn from. Nothing is written either way.
+    expect(vi.mocked(db.select)).toHaveBeenCalledTimes(1);
+    expect(captured.set).toHaveLength(0);
+    expect(captured.values).toHaveLength(0);
   });
 
   // The refusal is a rule about this login, not a deletion of the row — which
@@ -540,7 +562,7 @@ describe('AuthService — the SSO domain allow-list', () => {
       adminEmail: 'root@gmail.com',
       adminPassword: 'sup3r-secret',
     });
-    const { db } = makeFakeDb([[{ ...ROW, email: 'root@gmail.com', name: 'root' }]]);
+    const { db } = makeFakeDb([[], [{ ...ROW, email: 'root@gmail.com', name: 'root' }]]);
     const out = await new AuthService(db, outsideConfig).loginWithPassword(
       'root@gmail.com',
       'sup3r-secret',
