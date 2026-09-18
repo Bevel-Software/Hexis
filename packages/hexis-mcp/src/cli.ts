@@ -6,7 +6,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ConfigError, USAGE, resolveConfig, type HexisMcpConfig } from './config.js';
 import { DeploymentError, resolveMcpUrl } from './deployment.js';
 import { OAuthError, establishOAuthConfig } from './oauth.js';
-import { createHexisMcpServer } from './server.js';
+import { preflight } from './preflight.js';
 import { beginOrderlyExit, makeExitAfterShutdown, type ShutdownHolder } from './teardown.js';
 
 /**
@@ -34,6 +34,26 @@ async function main(): Promise<void> {
     process.stderr.write(`${packageVersion()}\n`);
     return;
   }
+
+  // RUNTIME PREFLIGHT, before anything native is imported. `server.js` pulls
+  // in @utcp/code-mode, which imports the `isolated-vm` addon at module level:
+  // on a Node major that addon has no binary for, that import dies with an
+  // ERR_DLOPEN_FAILED stack trace before a single line of ours runs, and the
+  // client shows only that the server failed. One sentence and a non-zero exit
+  // instead — which is also why `server.js` is imported DYNAMICALLY below and
+  // why this sits after `--help`/`--version`, the two things worth answering
+  // on any runtime.
+  // `requireNativeSandbox`: here, unlike for an embedding host, a sandbox that
+  // does not even resolve is a crash one statement away — the import below
+  // pulls in code-mode, whose module-level `isolated-vm` import would throw
+  // ERR_MODULE_NOT_FOUND as a stack trace instead of a sentence.
+  const unsupported = preflight({ requireNativeSandbox: true });
+  if (unsupported) {
+    process.stderr.write(`${unsupported}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const { createHexisMcpServer } = await import('./server.js');
 
   const resolved = resolveConfig(argv, process.env);
   let config: HexisMcpConfig;

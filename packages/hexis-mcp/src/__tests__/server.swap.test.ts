@@ -130,6 +130,11 @@ describe('credential swap around registration and shutdown', () => {
       };
 
       const handle = await createHexisMcpServer(config, '0.0.0');
+      // Creation now returns as soon as the handshake can be answered, with
+      // registration still in flight behind `ready` — which is precisely the
+      // window this test is about, so wait for it to close before asserting
+      // which bearer registration ended up on.
+      await handle.ready;
       try {
         expect(await renewed!).toBe('tok-1');
         const inits = mcpPosts.filter((p) => p.method === 'initialize');
