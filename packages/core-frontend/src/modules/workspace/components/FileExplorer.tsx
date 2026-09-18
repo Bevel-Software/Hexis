@@ -449,8 +449,16 @@ function ContextMenu({
           // The branch first: a delete that failed (or was called off over
           // unsaved tabs) must not have already emptied the proposals.
           if (!(await deleteOnBranch())) return;
+          let leftovers: string[];
           try {
-            await removeFolderFromChangeRequests(repoFolder);
+            // What the removal could not take out, said rather than left to
+            // reappear unexplained in the tree once the refetch lands.
+            leftovers = (await removeFolderFromChangeRequests(repoFolder)).flatMap((r) => [
+              ...(r.stillProposed.length > 0
+                ? [`#${r.number} still proposes ${r.stillProposed.join(', ')} — added while the folder was being deleted.`]
+                : []),
+              ...(r.keptForSaves ? [`#${r.number} stays open: a save to it was still landing.`] : []),
+            ]);
           } catch (err) {
             console.error('Failed to remove proposed changes:', err);
             const msg = err instanceof Error ? err.message : String(err);
@@ -461,6 +469,9 @@ function ContextMenu({
           // The rows and dots go now; the refetch confirms it.
           window.dispatchEvent(new CustomEvent(SUGGESTIONS_RETRACTED_EVENT, { detail: { folder: repoFolder } }));
           window.dispatchEvent(new Event(PR_STALE_EVENT));
+          if (leftovers.length > 0) {
+            alert(`Deleted ${entry.name} and its proposed changes, except:\n${leftovers.join('\n')}`);
+          }
         },
       }),
     });

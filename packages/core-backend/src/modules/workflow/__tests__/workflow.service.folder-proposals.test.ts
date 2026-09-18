@@ -96,7 +96,11 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
   const fileLocks = {
     acquire: vi.fn().mockResolvedValue({ acquired: true }),
     release: vi.fn().mockResolvedValue(undefined),
+    hasAnyActive: vi.fn().mockResolvedValue(false),
   } as unknown as FileLockService;
+  const pendingCommits = {
+    hasAnyForWorkspace: vi.fn().mockResolvedValue(false),
+  } as unknown as PendingCommitsService;
 
   const workspaceService = {
     getOrCreateForBranch: vi.fn(async (branch: string) => ({ id: encodeURIComponent(branch) })),
@@ -132,7 +136,7 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
     workspaceService,
     accessControl,
     fileLocks,
-    {} as PendingCommitsService,
+    pendingCommits,
     'knowledge-base',
   );
   // Which request an UPDATE is closing is not recoverable from the drizzle
@@ -146,7 +150,7 @@ function makeHarness(requests: PullRequestSummary[], access: Access = {}) {
       updating = null;
     }
   });
-  return { svc, git, prs, changed, closed, fileLocks };
+  return { svc, git, prs, changed, closed, fileLocks, pendingCommits };
 }
 
 const aliceRequest = summary({
@@ -258,8 +262,14 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     const results = await svc.removeFolderFromChangeRequests('Data/Reports', ALICE);
 
     expect(results).toEqual([
-      { number: 12, removedPaths: ['Data/Reports/proposed.md', 'Data/Reports/Sub/deep.md'], withdrawn: false },
-      { number: 40, removedPaths: ['Data/Reports/q3.md'], withdrawn: true },
+      {
+        number: 12,
+        removedPaths: ['Data/Reports/proposed.md', 'Data/Reports/Sub/deep.md'],
+        withdrawn: false,
+        stillProposed: [],
+        keptForSaves: false,
+      },
+      { number: 40, removedPaths: ['Data/Reports/q3.md'], withdrawn: true, stillProposed: [], keptForSaves: false },
     ]);
     // #12 still proposes its file outside the folder and stays open; #40
     // proposed nothing else and is withdrawn; #50 was never touched.
@@ -313,9 +323,40 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     // Alice is neither admin nor writer: authorship alone is enough.
     const { svc, closed } = makeHarness([only]);
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([
-      { number: 7, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true },
+      { number: 7, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true, stillProposed: [], keptForSaves: false },
     ]);
     expect(closed).toEqual([7]);
+  });
+
+  it('names a file proposed under the folder while the removal ran, and leaves that request open', async () => {
+    const { svc, git, changed, closed } = makeHarness([bobRequest], { admins: [ALICE.email] });
+    // Bob's save lands after the paths were read, as the revert publishes.
+    const revert = vi.mocked(git.revertPathsAndPush).getMockImplementation()!;
+    vi.mocked(git.revertPathsAndPush).mockImplementation(async (user, plans) => {
+      const outcome = await revert(user, plans);
+      changed.get(bobRequest.branch)!.add('Data/Reports/notes.md');
+      return outcome;
+    });
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([
+      {
+        number: 40,
+        removedPaths: ['Data/Reports/q3.md'],
+        withdrawn: false,
+        stillProposed: ['Data/Reports/notes.md'],
+        keptForSaves: false,
+      },
+    ]);
+    expect(closed).toEqual([]);
+  });
+
+  it('keeps a request open, and says so, when it looks empty while a save to its branch is still landing', async () => {
+    const { svc, closed, pendingCommits } = makeHarness([bobRequest], { admins: [ALICE.email] });
+    // Bob's save is on disk, its commit still queued: not in the diff yet.
+    vi.mocked(pendingCommits.hasAnyForWorkspace).mockImplementation(async (ws) => ws === bobWs);
+    await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([
+      { number: 40, removedPaths: ['Data/Reports/q3.md'], withdrawn: false, stillProposed: [], keptForSaves: true },
+    ]);
+    expect(closed).toEqual([]);
   });
 
   it('refuses as a whole, touching nothing, when one request is not the caller’s to change', async () => {
@@ -438,8 +479,8 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     });
     const { svc, git, closed, fileLocks } = makeHarness([first, second]);
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([
-      { number: 12, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true },
-      { number: 13, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true },
+      { number: 12, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true, stillProposed: [], keptForSaves: false },
+      { number: 13, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true, stillProposed: [], keptForSaves: false },
     ]);
     expect(fileLocks.acquire).toHaveBeenCalledTimes(1);
     expect(plansOf(git)).toEqual([
@@ -493,5 +534,29 @@ describe('WorkflowService.removeFolderFromChangeRequests', () => {
     const { svc, git } = makeHarness([elsewhere]);
     await expect(svc.removeFolderFromChangeRequests('Data/Reports', ALICE)).resolves.toEqual([]);
     expect(git.revertPathsAndPush).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowService.closeEmptyChangeRequest', () => {
+  const emptied = summary({ number: 40, branch: 'suggestions/bob-u-bob/knowledge', touchedNodePaths: [] });
+
+  it('withdraws a request whose diff is empty and whose branch has nothing landing', async () => {
+    const { svc, closed } = makeHarness([emptied]);
+    await expect(svc.closeEmptyChangeRequest(40, ALICE)).resolves.toBe(true);
+    expect(closed).toEqual([40]);
+  });
+
+  it('never withdraws one while a save holds a lock on its branch — retiring it would delete that save', async () => {
+    const { svc, closed, fileLocks } = makeHarness([emptied]);
+    vi.mocked(fileLocks.hasAnyActive).mockResolvedValue(true);
+    await expect(svc.closeEmptyChangeRequest(40, ALICE)).resolves.toBe(false);
+    expect(closed).toEqual([]);
+  });
+
+  it('keeps it open when whether saves are landing cannot be read', async () => {
+    const { svc, closed, pendingCommits } = makeHarness([emptied]);
+    vi.mocked(pendingCommits.hasAnyForWorkspace).mockRejectedValue(new Error('db down'));
+    await expect(svc.closeEmptyChangeRequest(40, ALICE)).resolves.toBe(false);
+    expect(closed).toEqual([]);
   });
 });

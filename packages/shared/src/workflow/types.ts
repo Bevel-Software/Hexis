@@ -155,6 +155,16 @@ export interface FolderChangeRequestRemoval {
   removedPaths: string[];
   /** The request proposed nothing else, so it was withdrawn. */
   withdrawn: boolean;
+  /**
+   * Files under the folder it still proposes: added while the removal ran,
+   * so never judged, and left alone.
+   */
+  stillProposed: string[];
+  /**
+   * It proposes nothing now but was kept open, because a save to its branch
+   * was still landing — withdrawing would have deleted that save.
+   */
+  keptForSaves: boolean;
 }
 
 /**

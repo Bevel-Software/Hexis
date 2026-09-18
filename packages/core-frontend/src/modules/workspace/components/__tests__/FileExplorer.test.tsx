@@ -1872,11 +1872,20 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
     json: async () => body,
   });
 
-  function answer(requests: unknown[]) {
+  const removal = (over: Record<string, unknown> = {}) => ({
+    number: 12,
+    removedPaths: ['Data/Reports/proposed.md'],
+    withdrawn: true,
+    stillProposed: [],
+    keptForSaves: false,
+    ...over,
+  });
+
+  function answer(requests: unknown[], results: unknown[] = [removal()]) {
     mockAuthFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.startsWith('/api/workflow/change-requests/under-folder?')) return json({ requests });
       if (url === '/api/workflow/change-requests/under-folder/remove' && init?.method === 'POST') {
-        return json({ results: [{ number: 12, removedPaths: ['Data/Reports/proposed.md'], withdrawn: true }] });
+        return json({ results });
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -1980,6 +1989,28 @@ describe('FileExplorer: deleting a folder with proposed files', () => {
       window.removeEventListener('bevel:suggestions-retracted', onRetract);
       window.removeEventListener('bevel:pr-stale', onStale);
     }
+  });
+
+  it('says what the removal left behind: a file proposed meanwhile, a request kept open for a save still landing', async () => {
+    answer(
+      [request(), request({ number: 40, mine: false, authorName: 'Ana', paths: ['Data/Reports/q3.md'] })],
+      [
+        removal({ withdrawn: false, stillProposed: ['Data/Reports/notes.md'] }),
+        removal({ number: 40, removedPaths: ['Data/Reports/q3.md'], withdrawn: false, keptForSaves: true }),
+      ],
+    );
+    renderWithProposal();
+    await chooseDelete('Reports');
+    const both = await screen.findByRole('button', { name: 'Delete folder and its proposed changes' });
+    await waitFor(() => expect(both).toBeEnabled());
+    await act(async () => {
+      fireEvent.click(both);
+    });
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+    const message = String(alertSpy.mock.calls[0]![0]);
+    expect(message).toContain('Deleted Reports and its proposed changes, except:');
+    expect(message).toContain('#12 still proposes Data/Reports/notes.md — added while the folder was being deleted.');
+    expect(message).toContain('#40 stays open: a save to it was still landing.');
   });
 
   it('does not touch the requests when the branch delete was called off', async () => {

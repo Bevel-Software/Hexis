@@ -2421,7 +2421,26 @@ export class WorkflowService implements IWorkflowService {
     const results: FolderChangeRequestRemoval[] = [];
     for (const plan of finished) {
       const withdrawn = await this.closeEmptyChangeRequest(plan.number, user);
-      results.push({ number: plan.number, removedPaths: plan.paths, withdrawn });
+      // A request still open is read once more, to say why: a file under the
+      // folder proposed while this ran (never judged, so left alone), or —
+      // proposing nothing at all — a save still landing kept it open.
+      let stillProposed: string[] = [];
+      let keptForSaves = false;
+      if (!withdrawn) {
+        try {
+          const summary = await this.prs.getPr(plan.number);
+          if (summary?.state === 'open') {
+            const now = await this.git.changedPathsForPr(plan.wsId, summary.base, summary.branch);
+            stillProposed = now.filter((p) => p.startsWith(prefix) && !isFolderPlaceholder(p));
+            keptForSaves = now.length === 0;
+          }
+        } catch (err) {
+          log.warn(
+            `could not re-read #${plan.number} after removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
+          );
+        }
+      }
+      results.push({ number: plan.number, removedPaths: plan.paths, withdrawn, stillProposed, keptForSaves });
     }
     if (pushFailure) {
       const failed = pushFailure.group.plans.map((plan) => `#${plan.number}`).join(', ');
@@ -2539,20 +2558,29 @@ export class WorkflowService implements IWorkflowService {
    * is AUTHORITATIVE — recomputed, and a diff failure aborts rather than
    * closes, so a transient git error can never eat a live request.
    *
+   * An empty diff is not yet an empty request while a save to its branch is
+   * still landing: one under a held lock or queued for the commit worker is
+   * on disk but not in the diff. Retiring the branch deletes its checkout and
+   * that save with it, so such a request stays open — the save commits and it
+   * proposes something again, or a later look closes it.
+   *
    * Returns true when THIS call closed it.
    */
   async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
     const summary = await this.prs.getPr(number);
     if (!summary || summary.state !== 'open') return false;
     let paths: string[];
+    let wsId: string;
     try {
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
+      wsId = ws.id;
       paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
     } catch (err) {
       crLog.warn(`empty-check for change request #${number} failed — leaving it open:`, { err });
       return false;
     }
     if (paths.length > 0) return false;
+    if (await this.savesInFlight(wsId)) return false;
 
     // Guard on `state = 'open'` so a concurrent merge or withdraw wins the
     // race and this becomes a no-op.
@@ -2567,6 +2595,21 @@ export class WorkflowService implements IWorkflowService {
     this.events?.emit({ kind: 'change-request-rejected', number });
     await this.retireMergedSourceBranch(number, summary.base, user);
     return true;
+  }
+
+  /**
+   * Whether a save to this branch's checkout is still landing: a live file
+   * lock (the write is mid-flight) or any queued commit, stuck ones included
+   * (their file is still only on disk). An answer that cannot be read is a
+   * yes — the caller is about to delete the checkout.
+   */
+  private async savesInFlight(wsId: string): Promise<boolean> {
+    try {
+      return (await this.fileLocks.hasAnyActive(wsId)) || (await this.pendingCommits.hasAnyForWorkspace(wsId));
+    } catch (err) {
+      crLog.warn(`could not tell whether saves are landing on ${printable(wsId)} — keeping its request open:`, { err });
+      return true;
+    }
   }
 
   /**
