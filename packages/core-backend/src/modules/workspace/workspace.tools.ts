@@ -22,6 +22,8 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 // relies on) — not a workflow service, so this stays inside the module boundary.
 import { assertValidBranchName } from '../kb-fs/branch-name.js';
 import { assertInsideRepo, normalizePathArgs } from '../kb-fs/repo-path.js';
+import { GitGuardedFilesystem } from '../kb-fs/git-guarded-filesystem.js';
+import { assertNoGitInternalsSegment, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { isRolesYamlPath } from '../access-model/roles-yaml-guard.js';
 import type { ISessionSink } from './session-sink.js';
 import { isAbsence } from '../../shared/fs.contract.js';
@@ -405,7 +407,7 @@ async function grepWalk(
   entries = await filterReadableEntries(gate, dir, entries);
   for (const e of entries) {
     if (out.length >= max) return;
-    if (e.name === '.git' || e.name === 'node_modules') continue;
+    if (hasGitInternalsSegment(e.name) || e.name === 'node_modules') continue;
     const p = dir ? `${dir}/${e.name}` : e.name;
     if (e.type === 'directory') {
       await grepWalk(fs, p, re, out, max, depth + 1, gate, recordOntologyRead, docs);
@@ -462,6 +464,41 @@ export function registerWorkspaceTools(
     workspaceId: workspaceIdForBranch(branch),
     userEmail: ctx.user.email,
   });
+
+  /**
+   * Refuse a file tool call that names the repository's git folder, in any
+   * input, before any gate, lock or read runs (see `shared/git-internals.ts`).
+   * Every spelling first, then the resolved form against the branch's
+   * workspace, so a link into the folder is refused the same way. The resolved
+   * check only runs on a branch that is already cloned: bootstrapping a clone
+   * here would happen before the handler's access and ontology gates. A branch
+   * not cloned yet (or that does not resolve) is left to the handler; the
+   * filesystem refuses again underneath regardless.
+   */
+  const assertToolPathsNotGitInternals = async (args: Record<string, unknown>, ctx: ToolContext): Promise<void> => {
+    const paths: string[] = [];
+    for (const key of ['path', 'src', 'dest', 'destination'] as const) {
+      if (typeof args[key] === 'string') paths.push(args[key]);
+    }
+    if (Array.isArray(args.files)) {
+      for (const f of args.files as unknown[]) {
+        const fp = f && typeof f === 'object' ? (f as Record<string, unknown>).path : undefined;
+        if (typeof fp === 'string') paths.push(fp);
+      }
+    }
+    for (const p of paths) assertNoGitInternalsSegment(p);
+    const onDisk = paths.filter((p) => !spillStore.isSpillRef(p));
+    if (onDisk.length === 0 || typeof args.branch !== 'string' || args.branch === '') return;
+    let fs: LocalFilesystem;
+    try {
+      if (!(await ctx.workspaceService.hasBootstrappedWorkspace(workspaceIdForBranch(args.branch)))) return;
+      fs = await ctx.getFilesystem(args.branch);
+    } catch {
+      return;
+    }
+    if (!(fs instanceof GitGuardedFilesystem)) return;
+    for (const p of onDisk) await fs.assertNotGitInternals(p);
+  };
 
   // ── preflight for moves and deletes ─────────────────────────────────────
   // What an agent is told before (and instead of) a destructive operation:
@@ -673,7 +710,7 @@ export function registerWorkspaceTools(
    * walk cannot wander into a folder elsewhere, and is ALSO named in `links`:
    * the per-file delete cannot remove a link (it stats through it, so a dangling
    * link or a link to a folder fails), so a folder holding one is refused before
-   * anything is deleted. `.git` metadata is skipped.
+   * anything is deleted. The git folder is skipped, in any spelling of its name.
    */
   const filesUnder = async (
     fs: LocalFilesystem,
@@ -694,7 +731,7 @@ export function registerWorkspaceTools(
       for (const e of (await fs.readdir(d)) as DirEntry[]) {
         if (truncated) return;
         const child = `${d.replace(/\/+$/, '')}/${e.name}`;
-        if (e.name === '.git') continue;
+        if (hasGitInternalsSegment(e.name)) continue;
         if (e.type === 'directory' && !e.isSymlink) {
           await walk(child);
         } else {
@@ -776,21 +813,25 @@ export function registerWorkspaceTools(
       // A leading slash is the root-anchored form Copy path gives and names
       // the same workspace path — normalised once here, for every path input.
       toolHandler(
-        spec.proposable
-          ? async (args, ctx) => {
-              try {
-                // Awaited here so a refusal is caught; proposable tools never stream.
-                return await spec.handler(normalizePathArgs(args), ctx);
-              } catch (err) {
-                return rethrowAsWriteDenial(
-                  err,
-                  { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
-                  accessControl,
-                  kbDirName,
-                );
-              }
-            }
-          : (args, ctx) => spec.handler(normalizePathArgs(args), ctx),
+        async (args, ctx) => {
+          const normalized = normalizePathArgs(args);
+          // The git folder is refused before the handler — and so before the
+          // write-denial wrapper below, which would otherwise offer to propose
+          // a change to it.
+          if (spec.fileTool !== false) await assertToolPathsNotGitInternals(normalized, ctx);
+          if (!spec.proposable) return spec.handler(normalized, ctx);
+          try {
+            // Awaited here so a refusal is caught; proposable tools never stream.
+            return await spec.handler(normalized, ctx);
+          } catch (err) {
+            return rethrowAsWriteDenial(
+              err,
+              { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
+              accessControl,
+              kbDirName,
+            );
+          }
+        },
         { write: spec.write },
       ),
     );

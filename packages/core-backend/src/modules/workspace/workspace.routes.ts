@@ -21,6 +21,8 @@ import type { WorkflowEventBus } from '../workflow/event-bus.js';
 import { PathTraversalError, WorkflowDomainError } from '../../shared/domain-errors.js';
 import { domainErrorBody } from '../../shared/http-errors.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { hasGitInternalsSegment } from '../../shared/git-internals.js';
+import { createGitInternalsRouteGuard } from './git-internals.middleware.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import '../auth/auth.middleware.js'; // Express Request augmentation
 
@@ -73,6 +75,13 @@ export function createWorkspaceRoutes(
   disk: ITreeWalker,
 ): express.Router {
   const router = express.Router();
+  const gitInternalsRouteGuard = createGitInternalsRouteGuard(workspaceService);
+
+  // The git folder is refused ahead of every route here by
+  // `createGitInternalsRouteGuard`, which the app mounts once for the whole
+  // `/workspace/:id` prefix (see `git-internals.middleware.ts`). Mounted here
+  // too so this router carries the rule wherever it is mounted on its own.
+  router.use("/workspace/:id", gitInternalsRouteGuard);
 
   function authenticated(
     req: express.Request,
@@ -1191,8 +1200,8 @@ export function createWorkspaceRoutes(
  * a recursive directory delete into per-file lock+release cycles so each
  * deletion lands as its own one-file change.
  *
- * Skips `.git` to avoid trying to commit the internal git index when a
- * caller targets it accidentally. Returns paths in the walk's order — stable
+ * Skips the git folder, in any spelling (`hasGitInternalsSegment`), so a
+ * folder delete never enumerates — or deletes — the repository's git data. Returns paths in the walk's order — stable
  * and lexical — for predictable commit sequencing. A link counts as a file:
  * it is deleted as one, never followed. A folder that cannot be listed is
  * the delete's error: an enumeration with a hole in it would delete what it
@@ -1203,7 +1212,7 @@ async function enumerateFilesUnder(disk: ITreeWalker, absoluteDir: string, works
   const relOf = (dir: string, name: string) =>
     path.relative(workspaceDir, path.join(absoluteDir, dir, name)).replace(/\\/g, '/');
   try {
-    await disk.walk(absoluteDir, { skip: (e) => e.name === '.git' && e.isDirectory(), unreadable: 'throw' }, [
+    await disk.walk(absoluteDir, { skip: (e) => hasGitInternalsSegment(e.name), unreadable: 'throw' }, [
       {
         onFile: (dir, name) => void out.push(relOf(dir, name)),
         onOther: (dir, e) => void out.push(relOf(dir, e.name)),

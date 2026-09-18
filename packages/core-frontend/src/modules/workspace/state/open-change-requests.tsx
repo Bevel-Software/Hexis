@@ -5,7 +5,11 @@ import {
   listOpenChangeRequests,
 } from '../../change-requests/services/change-requests.api';
 import { useWorkspace } from './workspace.context';
-import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
+import {
+  PR_STALE_EVENT,
+  PR_STALE_FALLBACK_MS,
+  SUGGESTIONS_OPTIMISTIC_EVENT,
+} from '../../../core/events';
 import {
   NO_CHANGE_REQUESTS,
   OpenChangeRequestsContext,
@@ -65,6 +69,12 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
 
   useEffect(() => {
     let cancelled = false;
+    // Loads overlap — the fallback poll, a stale event, a tab coming back into
+    // view — and each list's newest load is the only one allowed to publish:
+    // an older response resolving last would put an applied request's markers
+    // back in the tree. Numbered per list, since the two requests settle apart.
+    let requestsSeq = 0;
+    let mineSeq = 0;
     const load = (opts: { fresh?: boolean } = {}) => {
       // When THIS fetch left the building — only a fetch that STARTED after
       // an announcement may declare its request gone. The announce and the
@@ -72,19 +82,21 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
       // still race the server's own row; timestamps make "predates the
       // announcement" checkable instead of assumed.
       const startedAt = Date.now();
+      const requestsLoad = ++requestsSeq;
+      const mineLoad = ++mineSeq;
       listOpenChangeRequests(opts)
         .then((data) => {
-          if (!cancelled) setRequests(data);
+          if (!cancelled && requestsLoad === requestsSeq) setRequests(data);
         })
         .catch((err) => {
           // A queue that cannot load is not an error state on a page about a
           // document. The dots and the banner simply do not appear.
           console.warn('[OpenChangeRequests] load failed:', err);
-          if (!cancelled) setRequests([]);
+          if (!cancelled && requestsLoad === requestsSeq) setRequests([]);
         });
       listMyChangeRequests(opts)
         .then((data) => {
-          if (cancelled) return;
+          if (cancelled || mineLoad !== mineSeq) return;
           const open = data.filter((c) => c.state === 'open');
           setMine(open);
           // Reconcile: an announced entry whose every path the real list now
@@ -104,7 +116,7 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
         .catch((err) => {
           // Same degradation contract: no suggestion rows, not an error page.
           console.warn('[OpenChangeRequests] mine load failed:', err);
-          if (!cancelled) setMine([]);
+          if (!cancelled && mineLoad === mineSeq) setMine([]);
         });
     };
     load();
@@ -116,6 +128,20 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     // rows for a just-uploaded file would sit invisible until the TTL).
     const onStale = () => load({ fresh: true });
     window.addEventListener(PR_STALE_EVENT, onStale);
+    // The fallback for a stale event that never came. Stale events now follow
+    // the bus's merge / reject / apply-failed broadcasts, so a dropped bus
+    // event would otherwise leave an applied request's markers in this tree
+    // until a reload. Cached reads (a merge, a recorded refusal and a cleared
+    // one all evict the server's list cache, so the first read after any of
+    // them is already true), and only while visible — a
+    // hidden tab catches up the moment it is shown instead.
+    const reconcile = setInterval(() => {
+      if (!document.hidden) load();
+    }, PR_STALE_FALLBACK_MS);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     const onAnnounce = (e: Event) => {
       const cr = (e as CustomEvent<PullRequestSummary>).detail;
       if (!cr || typeof cr.number !== 'number') return;
@@ -127,6 +153,8 @@ export function OpenChangeRequestsProvider({ children }: { children: ReactNode }
     window.addEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     return () => {
       cancelled = true;
+      clearInterval(reconcile);
+      document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener(PR_STALE_EVENT, onStale);
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
     };

@@ -37,7 +37,6 @@ import { logger } from '../../shared/logging.js';
 
 const log = logger('locking-fs');
 import {
-  LocalFilesystem,
   type LocalFilesystemOptions,
   type CopyOptions,
   type FileContent,
@@ -49,6 +48,7 @@ import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
 import { assertInsideRepo } from './repo-path.js';
+import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
 
 /** How many times to retry a contended acquire before giving up. */
@@ -127,7 +127,7 @@ export interface LockingFilesystemContext {
   creatorAccess?: ICreatorAccess;
 }
 
-export class LockingFilesystem extends LocalFilesystem {
+export class LockingFilesystem extends GitGuardedFilesystem {
   private readonly lockContext: LockingFilesystemContext;
 
   constructor(
@@ -143,6 +143,7 @@ export class LockingFilesystem extends LocalFilesystem {
     content: FileContent,
     options?: WriteOptions,
   ): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
     // Pre-disk gate (e.g. reject a roles.yaml edit that would lock out admins).
     // Runs OUTSIDE the lock first so an ordinary refusal never acquires one,
@@ -167,6 +168,7 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async appendFile(inputPath: string, content: FileContent): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
     const candidate = async () =>
       Buffer.concat([asBuffer((await this.readIfExists(inputPath)) ?? ''), asBuffer(content)]);
@@ -184,10 +186,13 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async deleteFile(inputPath: string, options?: RemoveOptions): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     return this.withLock(inputPath, () => super.deleteFile(inputPath, options));
   }
 
   override async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    await this.assertNotGitInternals(src);
+    await this.assertNotGitInternals(dest);
     this.assertInsideRepo(dest);
     await this.validateResultingWrite(dest, () => this.readFile(src));
     // Lock on `dest`. `src` is read-only from this op's perspective — copy
@@ -208,6 +213,8 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async moveFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    await this.assertNotGitInternals(src);
+    await this.assertNotGitInternals(dest);
     // Only the destination is gated: moving a stray INTO the repository is how
     // a file the old behaviour left beside the clone gets rescued.
     this.assertInsideRepo(dest);
@@ -271,6 +278,8 @@ export class LockingFilesystem extends LocalFilesystem {
     const { workflow, workspaceId, branch, user } = this.lockContext;
     // Fail the whole batch before any plan, validator or lock: one stray path
     // must not let its siblings land while it silently misses git.
+    for (const w of writes) await this.assertNotGitInternals(w.path);
+    for (const d of deletes) await this.assertNotGitInternals(d);
     for (const w of writes) this.assertInsideRepo(w.path);
     // Creator read grants for the batch: transform new markdown files'
     // content in place, and fold any subtree access.md seeds into the SAME
@@ -566,6 +575,7 @@ export class LockingFilesystem extends LocalFilesystem {
   }
 
   override async mkdir(inputPath: string, options?: { recursive?: boolean }): Promise<void> {
+    await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
     // Creator read grant: planned BEFORE the dir exists (the plan's
     // new-directory detection needs the pre-creation tree), seeded right

@@ -18,6 +18,7 @@
  */
 
 import type { AuthUser } from '../auth/types.js';
+import type { ChangeRequestApplyFailureKind } from '../git/pr.types.js';
 import type {
   AcquireLockResult,
   Branch,
@@ -518,4 +519,24 @@ export interface IWorkflowService {
     workspaceId: string,
     opts?: { bypass?: boolean },
   ): Promise<MergeChangeRequestOutcome>;
+
+  /** Start an apply attempt on a request; the token scopes `recordApplyFailure`. */
+  beginApplyAttempt(number: number): number;
+
+  /** End an attempt `beginApplyAttempt` started, whatever its outcome. */
+  endApplyAttempt(number: number, attempt: number): void;
+
+  /**
+   * Persist why an apply did not land on the (still open) request, and
+   * announce `change-request-apply-failed` to every session so the author and
+   * other viewers re-read it — not only the user who clicked. Resolves false,
+   * recording and announcing nothing, when `attempt` is no longer the latest
+   * or the request is no longer open.
+   */
+  recordApplyFailure(
+    number: number,
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
+    user: AuthUser,
+    attempt: number,
+  ): Promise<boolean>;
 }

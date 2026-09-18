@@ -21,6 +21,7 @@ import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
+import { GIT_INTERNALS_MESSAGE } from '../../../shared/domain-errors.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
 
@@ -1925,16 +1926,27 @@ describe('preflight for moves and deletes', () => {
       expect((await call(base, 'file_stat', { path: KB('Sales/Access.md') })).body).toMatchObject({ managed: false, movable: true });
     });
 
+    // The git folder is not merely "managed": it is not reachable at all, so
+    // every one of these is the one sanitized refusal (`shared/git-internals.ts`)
+    // rather than this preflight's own "git metadata" answer — a dry run
+    // included, since even describing what is in there is not on offer.
     it('git metadata is refused, and a folder walk never enters it', async () => {
       const base = await seeded();
       await fs.writeFile(KB('.git/HEAD'), 'ref: refs/heads/main\n');
       await fs.writeFile(KB('Sales/sub/.git/HEAD'), 'ref: refs/heads/main\n');
-      const dry = await call(base, 'delete_folder', { path: KB('.git'), dryRun: true });
-      expect(dry.body).toMatchObject({ allowed: false });
-      expect(dry.body.reason).toContain('git metadata');
-      expect((await call(base, 'delete_folder', { path: KB('.git'), confirm: true })).status).toBe(400);
-      expect((await call(base, 'delete_file', { path: KB('.git/HEAD') })).status).toBe(400);
-      expect((await call(base, 'move_file', { src: KB('.git'), dest: KB('Sales/git') })).status).toBe(400);
+      for (const call_ of [
+        { tool: 'delete_folder', args: { path: KB('.git'), dryRun: true } },
+        { tool: 'delete_folder', args: { path: KB('.git'), confirm: true } },
+        { tool: 'delete_file', args: { path: KB('.git/HEAD') } },
+        { tool: 'move_file', args: { src: KB('.git'), dest: KB('Sales/git') } },
+      ]) {
+        const res = await call(base, call_.tool, call_.args);
+        expect({ tool: call_.tool, status: res.status, error: res.body.error }).toEqual({
+          tool: call_.tool,
+          status: 403,
+          error: GIT_INTERNALS_MESSAGE,
+        });
+      }
       expect(await exists(KB('.git/HEAD'))).toBe(true);
       expect((await call(base, 'file_stat', { path: KB('Sales/sub') })).body).toMatchObject({ descendants: 0 });
     });

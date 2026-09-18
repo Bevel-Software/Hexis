@@ -44,9 +44,14 @@ const REDACTIONS: Array<readonly [RegExp, string]> = [
 /**
  * Normalise an unknown thrown value into a single-line string with secrets
  * masked and length capped. Safe to log, persist, or interpolate into an
- * LLM prompt.
+ * LLM prompt. `maxLen` raises the cap for text a person reads in full (a
+ * gate refusal naming every file it waits on runs well past a prompt line).
  */
-export function sanitizeError(err: unknown): string {
+export function sanitizeError(err: unknown, opts: { maxLen?: number } = {}): string {
+  // Only a finite positive whole cap overrides: NaN / Infinity would disable
+  // truncation, and zero or less would slice into a malformed result.
+  const maxLen =
+    Number.isSafeInteger(opts.maxLen) && (opts.maxLen as number) > 0 ? (opts.maxLen as number) : MAX_LEN;
   const raw = err instanceof Error ? err.message : String(err);
   // Collapse newlines + control chars so the result is a single line. Stack
   // traces are deliberately dropped — `err.message` is the meaningful part;
@@ -55,8 +60,8 @@ export function sanitizeError(err: unknown): string {
   for (const [pattern, replacement] of REDACTIONS) {
     out = out.replace(pattern, replacement);
   }
-  if (out.length > MAX_LEN) {
-    out = out.slice(0, MAX_LEN - 1) + '…';
+  if (out.length > maxLen) {
+    out = out.slice(0, maxLen - 1) + '…';
   }
   return out;
 }
