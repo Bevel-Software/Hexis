@@ -187,7 +187,52 @@ describe('UserAccessRemovalService', () => {
       files: ['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml'],
       removable: true,
       blockedReason: null,
+      unwritable: [],
     });
+  });
+
+  it('reads the candidate files through a bounded pool, not all at once', async () => {
+    // 200 nodes, only one of which names the user. The old unbounded
+    // Promise.all opened every one of them simultaneously — EMFILE on a real
+    // knowledge base, three times per deletion.
+    for (let i = 0; i < 200; i++) {
+      await write(repo, `Bulk/Note-${i}.md`, `---\nnodeType: note\nread:\n  - Product\n---\n# Note ${i}\n`);
+    }
+    await write(repo, 'Bulk/Note-7.md', '---\nnodeType: note\nread:\n  - Lee <lee@x.io>\n---\n# Note 7\n');
+    let inFlight = 0;
+    let peak = 0;
+    const plain = workspace.readFile.bind(workspace);
+    workspace.readFile = async (id: string, wsRel: string) => {
+      peak = Math.max(peak, ++inFlight);
+      try {
+        return await plain(id, wsRel);
+      } finally {
+        inFlight--;
+      }
+    };
+
+    const report = await build().service.report(LEE);
+
+    expect(peak).toBeLessThanOrEqual(16);
+    // Bounding the reads did not lose a file: the one bulk note that names
+    // them is counted, the 199 that do not are not.
+    expect(report.files).toEqual(['Bulk/Note-7.md', 'Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml']);
+    expect(report.fileGrants).toBe(2);
+  });
+
+  it('names the files the acting admin cannot write, before the delete', async () => {
+    const canWrite = vi
+      .spyOn(AccessControlService.prototype, 'canWriteBatchAtRef')
+      .mockImplementation(async (_ws, _ref, _email, paths) => new Map(paths.map((p) => [p, p !== 'Sales/Plan.md'])));
+    try {
+      const { service } = build();
+      const report = await service.report('LEE@x.io', 'admin@x.io');
+      expect(report.unwritable).toEqual(['Sales/Plan.md']);
+      // Judged for the ACTING admin, against every file that names the target.
+      expect(canWrite).toHaveBeenCalledWith(expect.any(String), 'HEAD', 'admin@x.io', report.files);
+    } finally {
+      canWrite.mockRestore();
+    }
   });
 
   it('removes the address from all four kinds of file in ONE commit named by the anonymised id', async () => {
@@ -223,6 +268,33 @@ describe('UserAccessRemovalService', () => {
     const result = await service.remove(ADMIN, LEE, 'deleted-1');
     expect(workflow.commits[0].paths).not.toContain(`${KB}/synced-groups.yaml`);
     expect(result.stillNamedIn).toEqual(['synced-groups.yaml']);
+  });
+
+  it('cleans every writable file in ONE commit and reports the one it may not write', async () => {
+    // A grant in a folder that excludes Admin (see #210): the lock gate would
+    // refuse that ONE file, and the cleanup used to abort entirely — leaving
+    // roles.yaml, groups.yaml and the other access.md naming the user too.
+    const canWrite = vi
+      .spyOn(AccessControlService.prototype, 'canWriteBatchAtRef')
+      .mockImplementation(async (_ws, _ref, _email, paths) => new Map(paths.map((p) => [p, p !== 'Sales/Plan.md'])));
+    try {
+      const { service, workflow } = build();
+      const result = await service.remove(ADMIN, LEE, 'deleted-1');
+
+      expect(workflow.commits).toHaveLength(1);
+      expect(workflow.commits[0].paths.sort()).toEqual(
+        ['Sales/access.md', 'groups.yaml', 'roles.yaml'].map((p) => `${KB}/${p}`).sort(),
+      );
+      expect(result.removedFrom.sort()).toEqual(['Sales/access.md', 'groups.yaml', 'roles.yaml']);
+      expect(result.stillNamedIn).toEqual(['Sales/Plan.md']);
+      // The unwritable file is untouched; the rest really were cleaned.
+      expect(await read('Sales/Plan.md')).toBe(NODE);
+      expect(await read('roles.yaml')).not.toContain('lee@x.io');
+      expect(await read('Sales/access.md')).not.toContain('lee@x.io');
+      expect(workflow.locks.size).toBe(0);
+    } finally {
+      canWrite.mockRestore();
+    }
   });
 
   it('refuses the deployment owner and the last Admin, writing nothing', async () => {

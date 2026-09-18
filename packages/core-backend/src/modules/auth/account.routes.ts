@@ -83,7 +83,9 @@ export function createAccountRoutes(
         res.status(404).json({ error: 'No such user' });
         return;
       }
-      res.json(await accessRemoval.report(user.email));
+      // The ACTING admin's address, not the target's: `unwritable` answers
+      // "which of these files can *you* not clean up?".
+      res.json(await accessRemoval.report(user.email, req.userEmail ?? ''));
     } catch (err) {
       sendError(res, err, 'accounts');
     }

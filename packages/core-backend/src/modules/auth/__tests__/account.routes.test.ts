@@ -199,6 +199,7 @@ describe('account routes — removing the erased address from access files', () 
         files: ['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml'],
         removable: true,
         blockedReason: null,
+        unwritable: ['Sales/Plan.md'],
       })),
       assertRemovable: vi.fn(async () => {}),
       remove: vi.fn(async () => ({ removedFrom: ['roles.yaml'], stillNamedIn: [] as string[] | null })),
@@ -221,7 +222,10 @@ describe('account routes — removing the erased address from access files', () 
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(JSON.parse(text)).toMatchObject({ total: 5, roles: 1, groups: 1, accessRules: 2, fileGrants: 1 });
-    expect(accessRemoval.report).toHaveBeenCalledWith('lee@example.com');
+    // The TARGET's address is counted; the ACTING admin's decides what they
+    // can write, so the dialog can warn before the delete.
+    expect(accessRemoval.report).toHaveBeenCalledWith('lee@example.com', 'caller@example.com');
+    expect(JSON.parse(text).unwritable).toEqual(['Sales/Plan.md']);
     expect(text).not.toContain('lee@example.com');
     expect((await fetch(`${base}/api/admin/accounts/ghost/references`)).status).toBe(404);
   });

@@ -19,6 +19,15 @@
  * write it), so it is counted but never written — its entries go away when
  * the identity provider stops sending the person, and until then the file is
  * reported as still naming them.
+ *
+ * The cleanup is NOT all-or-nothing across files the acting admin cannot
+ * write. A subfolder may exclude Admin, and the lock gate refuses per file, so
+ * one such grant would otherwise abort everything and leave the address in
+ * `roles.yaml`, the group file and every other `access.md` too. Those files
+ * are skipped, reported in `stillNamedIn`, and named in the confirmation
+ * dialog beforehand (`UserReferenceReport.unwritable`). A folder that cannot
+ * be LISTED remains a hard refusal: an incomplete scan would commit a partial
+ * cleanup that looks complete.
  */
 
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -56,6 +65,29 @@ const log = logger('user-access-removal');
 
 const ROLES_YAML = 'roles.yaml';
 
+/**
+ * How many access files are read at once. A knowledge base holds thousands of
+ * `.md`/`.tool` files and the scan runs three times per deletion (dialog,
+ * plan, re-scan); an unbounded `Promise.all` over that set opens every file
+ * simultaneously and trips EMFILE on a large base.
+ */
+const READ_CONCURRENCY = 16;
+
+/** `items.map(fn)` with at most `limit` in flight, results in input order. */
+async function mapPooled<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 /** A removal this service refuses (guard) or cannot run. */
 export class UserAccessRemovalError extends WorkflowDomainError {
   constructor(message: string, status = 422, payload?: Record<string, unknown>) {
@@ -84,6 +116,12 @@ export interface UserReferenceReport extends UserReferenceCounts {
   removable: boolean;
   /** Why removal is refused, in words the dialog shows; null when removable. */
   blockedReason: string | null;
+  /**
+   * Of `files`, the ones the ACTING ADMIN may not write (a folder that
+   * excludes Admin, or the machine-owned `synced-groups.yaml`). The cleanup
+   * skips these and reports them; the dialog says so before the delete.
+   */
+  unwritable: string[];
 }
 
 /** The outcome of a committed removal. */
@@ -358,17 +396,55 @@ export class UserAccessRemovalService {
     return { files: out, holes };
   }
 
-  /** Read every file that could name an address: roles, both group files, access files. */
-  private async readAll(workspaceId: string): Promise<{ texts: Map<string, string>; holes: string[] }> {
+  /**
+   * Read every file that could name `email`: roles, both group files, and the
+   * access files whose text actually contains the address. Reads run through a
+   * bounded pool, and a candidate the address does not even appear in is
+   * dropped before either parser sees it — the parsers only ever confirm and
+   * count entries for this one address, so a file without the substring can
+   * hold none. The roster files are always kept: `blockedReason` reads
+   * `roles.yaml` whether or not the address is in it.
+   */
+  private async readAll(workspaceId: string, email: string): Promise<{ texts: Map<string, string>; holes: string[] }> {
     const { files: candidates, holes } = await this.accessFiles(workspaceId);
-    const paths = [ROLES_YAML, GROUPS_YAML, SYNCED_GROUPS_YAML, ...candidates];
-    const texts = await Promise.all(paths.map((p) => this.locked.readKbFile(workspaceId, p)));
+    const roster = [ROLES_YAML, GROUPS_YAML, SYNCED_GROUPS_YAML];
     const out = new Map<string, string>();
-    paths.forEach((p, i) => {
-      const text = texts[i];
+    const rosterTexts = await mapPooled(roster, READ_CONCURRENCY, (p) => this.locked.readKbFile(workspaceId, p));
+    roster.forEach((p, i) => {
+      const text = rosterTexts[i];
       if (text !== null) out.set(p, text);
     });
+    const needle = email.toLowerCase();
+    const hits = await mapPooled(candidates, READ_CONCURRENCY, async (p) => {
+      const text = await this.locked.readKbFile(workspaceId, p);
+      return text !== null && text.toLowerCase().includes(needle) ? ([p, text] as const) : null;
+    });
+    for (const hit of hits) if (hit) out.set(hit[0], hit[1]);
     return { texts: out, holes };
+  }
+
+  /**
+   * Of `files`, the ones `actorEmail` may not write on the default branch.
+   * Since #210 a subfolder may exclude Admin, and the lock gate refuses per
+   * file: without this split ONE such grant would abort the whole cleanup —
+   * nothing committed, and the address left in `roles.yaml`, the group file
+   * and every other `access.md` too, with the admin learning it only from the
+   * outcome. A verdict the access model cannot give (`null` — the ref or
+   * `roles.yaml` won't resolve) counts as writable: the lock gate remains the
+   * authority, and guessing "unwritable" would silently skip a file the admin
+   * can in fact clean.
+   */
+  private async unwritableAmong(workspaceId: string, actorEmail: string, files: string[]): Promise<string[]> {
+    if (files.length === 0 || !actorEmail) return [];
+    let verdicts: Map<string, boolean> | null = null;
+    try {
+      verdicts = await this.accessControl.canWriteBatchAtRef(workspaceId, 'HEAD', actorEmail, files);
+    } catch (err) {
+      log.warn(`could not judge write access to the files naming the account: ${printable(err instanceof Error ? err.message : String(err))}`);
+      return [];
+    }
+    if (!verdicts) return [];
+    return files.filter((f) => verdicts.get(f) === false);
   }
 
   private countIn(texts: Map<string, string>, email: string): UserReferenceCounts {
@@ -414,13 +490,20 @@ export class UserAccessRemovalService {
     return null;
   }
 
-  /** Counts + guard verdict for the delete confirmation. */
-  async report(rawEmail: string): Promise<UserReferenceReport> {
+  /**
+   * Counts + guard verdict for the delete confirmation. `actorEmail` is the
+   * ADMIN doing the deleting (not the account being deleted): the same write
+   * check `remove` applies, so the dialog can say up front which files will
+   * keep the address because this admin may not write them.
+   */
+  async report(rawEmail: string, actorEmail = ''): Promise<UserReferenceReport> {
     const email = canonicalEmail(rawEmail);
     const workspaceId = await this.ensureWorkspace();
-    const { texts } = await this.readAll(workspaceId);
+    const { texts } = await this.readAll(workspaceId, email);
     const blockedReason = this.blockedReason(texts.get(ROLES_YAML), email);
-    return { ...this.countIn(texts, email), removable: blockedReason === null, blockedReason };
+    const counts = this.countIn(texts, email);
+    const unwritable = await this.unwritableAmong(workspaceId, canonicalEmail(actorEmail), counts.files);
+    return { ...counts, removable: blockedReason === null, blockedReason, unwritable };
   }
 
   /** Throws a 409 when the guards refuse removing `email`. */
@@ -436,16 +519,19 @@ export class UserAccessRemovalService {
   async filesNaming(rawEmail: string): Promise<string[]> {
     const email = canonicalEmail(rawEmail);
     const workspaceId = await this.ensureWorkspace();
-    return this.countIn((await this.readAll(workspaceId)).texts, email).files;
+    return this.countIn((await this.readAll(workspaceId, email)).texts, email).files;
   }
 
   /**
-   * Remove `email` from roles.yaml, groups.yaml and every access file in ONE
-   * commit. `erasedId` names the account in the commit message. Throws on any
-   * failure BEFORE the commit (guard, a folder that cannot be listed, lock
-   * contention, invalid candidate, commit) with nothing committed. Once the
-   * commit has landed it never throws: a push that needs resolution is
-   * reported as `publishPending`, and a failed re-scan as `stillNamedIn: null`.
+   * Remove `email` from roles.yaml, groups.yaml and every access file the
+   * ACTING ADMIN may write, in ONE commit. `erasedId` names the account in the
+   * commit message. A file naming the address that this admin may not write is
+   * skipped rather than aborting the cleanup, and comes back in
+   * `stillNamedIn`. Throws on any failure BEFORE the commit (guard, a folder
+   * that cannot be listed, lock contention, invalid candidate, commit) with
+   * nothing committed. Once the commit has landed it never throws: a push that
+   * needs resolution is reported as `publishPending`, and a failed re-scan as
+   * `stillNamedIn: null`.
    */
   async remove(actor: AuthUser, rawEmail: string, erasedId: string): Promise<UserAccessRemovalResult> {
     const email = canonicalEmail(rawEmail);
@@ -453,7 +539,7 @@ export class UserAccessRemovalService {
     const workspaceId = await this.ensureWorkspace();
     // Plan once to learn which files to lock, then re-read and re-plan UNDER
     // those locks so a concurrent edit can't be overwritten.
-    const { texts, holes } = await this.readAll(workspaceId);
+    const { texts, holes } = await this.readAll(workspaceId, email);
     if (holes.length > 0) {
       // A partial scan would commit a partial cleanup that looks complete.
       throw new UserAccessRemovalError(
@@ -462,7 +548,17 @@ export class UserAccessRemovalService {
         { kind: 'access-removal-incomplete-scan' },
       );
     }
-    const planned = this.countIn(texts, email).files.filter((f) => f !== SYNCED_GROUPS_YAML);
+    const named = this.countIn(texts, email).files.filter((f) => f !== SYNCED_GROUPS_YAML);
+    // Clean what this admin CAN write; the rest stay named and are reported.
+    // A scan hole is still a hard refusal above — not knowing what exists is
+    // not the same as knowing a file is out of reach.
+    const unwritable = new Set(await this.unwritableAmong(workspaceId, canonicalEmail(actor.email), named));
+    if (unwritable.size > 0) {
+      log.warn(
+        `erased account ${printable(erasedId)}: ${unwritable.size} file(s) naming them are not writable by the acting admin and keep the address`,
+      );
+    }
+    const planned = named.filter((f) => !unwritable.has(f));
     let removedFrom: string[] = [];
     let publishPending = false;
     if (planned.length > 0) {

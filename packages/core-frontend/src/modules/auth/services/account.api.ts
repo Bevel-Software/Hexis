@@ -56,8 +56,9 @@ export async function createAccount(
 
 /**
  * How many places in the knowledge base name an account's address
- * (`GET /api/admin/accounts/:id/references`), and whether removing them is
- * allowed — the deployment owner and the last Admin never are.
+ * (`GET /api/admin/accounts/:id/references`), whether removing them is
+ * allowed — the deployment owner and the last Admin never are — and which of
+ * those files the signed-in admin cannot write, so will keep the address.
  */
 export interface AccountReferences {
   roles: number;
@@ -68,6 +69,12 @@ export interface AccountReferences {
   files: string[];
   removable: boolean;
   blockedReason: string | null;
+  /**
+   * Of `files`, the ones the signed-in admin may not write (a folder that
+   * excludes Admin, the machine-owned `synced-groups.yaml`). The cleanup
+   * skips these and they keep the address.
+   */
+  unwritable: string[];
 }
 
 export async function getAccountReferences(userId: string): Promise<AccountReferences> {

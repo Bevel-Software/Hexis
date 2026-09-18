@@ -28,6 +28,7 @@ const REFS = {
   files: ['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml'],
   removable: true,
   blockedReason: null,
+  unwritable: [] as string[],
 };
 
 const ME = { id: 'admin-1', email: 'admin@example.com', name: 'Admin' };
@@ -260,6 +261,28 @@ describe('UserAccountsPage', () => {
     await waitFor(() =>
       expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
     );
+  });
+
+  it('names the files this admin cannot write, which will keep the address', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        '1 file you cannot write will keep the address: Sales/Plan.md.',
+      ),
+    );
+    // The removal still runs — it cleans everything else.
+    expect(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+    // Turning the option off makes the warning moot: nothing is cleaned.
+    await userEvent.click(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    );
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/you cannot write/);
   });
 
   it('the deployment owner / last Admin cannot be removed this way: option disabled with the reason', async () => {
