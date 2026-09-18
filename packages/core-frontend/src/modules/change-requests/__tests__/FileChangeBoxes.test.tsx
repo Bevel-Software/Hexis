@@ -100,8 +100,9 @@ beforeEach(() => {
         eligibleApprovers: { roles: ['Docs'], users: [] },
         approvedBy: [],
         isApproved: false,
-        viewerCanApprove: true,
+        // An owned markdown file: the merge gate binds it, so Apply approves it.
         inMergeGate: true,
+        viewerCanApprove: true,
       },
     ],
   });

@@ -2,7 +2,12 @@ import { isUtf8 } from 'node:buffer';
 import { fileExtension } from './doc-extract.types.js';
 import { displayPath, type FileKind, type FileReader, type ReadResult } from './file-reader.js';
 
-/** Minimal extension→mime map for the binary-read notice (fallback: octet-stream). */
+/**
+ * Extension→mime for the binary-read notice and for the `mime` `file_stat`
+ * reports (fallback: octet-stream, or text/plain for sniffed text). Every
+ * extension a reader registers must name its mime here or in that reader's
+ * own `mimeFor` — the registry test enforces it.
+ */
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -11,8 +16,13 @@ const MIME_BY_EXT: Record<string, string> = {
   '.webp': 'image/webp',
   '.bmp': 'image/bmp',
   '.ico': 'image/x-icon',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.heic': 'image/heic',
+  '.avif': 'image/avif',
   '.zip': 'application/zip',
   '.gz': 'application/gzip',
+  '.tgz': 'application/gzip',
   '.tar': 'application/x-tar',
   '.7z': 'application/x-7z-compressed',
   '.rar': 'application/vnd.rar',
@@ -21,15 +31,36 @@ const MIME_BY_EXT: Record<string, string> = {
   '.xls': 'application/vnd.ms-excel',
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
   '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.eml': 'message/rfc822',
+  '.msg': 'application/vnd.ms-outlook',
   '.wasm': 'application/wasm',
   '.exe': 'application/vnd.microsoft.portable-executable',
+  '.dll': 'application/vnd.microsoft.portable-executable',
+  '.so': 'application/x-sharedlib',
+  // `.bin` itself names raw bytes: an extension-given type, not the fallback.
+  '.bin': 'application/octet-stream',
 };
+
+/** The mime `path`'s extension names, or undefined when the table has none. */
+export function extensionMime(path: string): string | undefined {
+  return MIME_BY_EXT[fileExtension(path)];
+}
 
 /**
  * Text is what the fallback reader may hand to the text tools: no NUL byte
@@ -81,10 +112,14 @@ export class TextReader implements FileReader {
     return isTextBytes(bytes) ? bytes.toString('utf8') : null; // skip binary (NUL / invalid UTF-8)
   }
 
+  mimeFor(path: string): string | undefined {
+    return extensionMime(path);
+  }
+
   /** The honest one-line notice returned INSTEAD of raw bytes for unreadable binary content. */
   protected binaryNotice(path: string, sizeBytes: number): string {
     const ext = fileExtension(path);
-    const mime = MIME_BY_EXT[ext] ?? 'application/octet-stream';
+    const mime = extensionMime(path) ?? 'application/octet-stream';
     const zipHint = ext === '.zip' ? ' Use the unzip tool to extract its contents.' : '';
     return `[${displayPath(path)} is a binary file (${mime}, ${sizeBytes} bytes) — not readable as text.${zipHint}]`;
   }

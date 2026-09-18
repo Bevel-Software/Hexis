@@ -4,6 +4,7 @@ import { useWorkspace } from '../state/workspace.context';
 import { WorkspaceApiError } from '../services/workspace.api';
 import { useGit } from '../../git/state/git.context';
 import { readPersistedTabs } from '../utils/tab-persistence';
+import { syncFileTraceFlag, traceFiles } from '../utils/file-trace';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import {
   NODE_ID_LINK_RE,
@@ -79,9 +80,14 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   // (workspaceId, branch) pair we've successfully hydrated tabs for. Reset to
   // null on branch switch so re-hydration fires for the new branch.
   const lastHydratedKeyRef = useRef<string | null>(null);
+  // `?trace=files` diagnostics only (see `utils/file-trace`): numbers each
+  // hydration so overlapping ones show in the console in start/settle order.
+  const hydrateSeqRef = useRef(0);
+  const traceOn = syncFileTraceFlag(location.search);
 
   const {
     workspaceId,
+    workspaceBranch,
     openFilePath,
     addTab,
     hydrateTabs,
@@ -140,13 +146,76 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
 
   // ── Branch sync + hydrate + URL → state (forward direction) ──────────────
 
+  // Everything the decisions below read, so one console line says which gate
+  // held the page. A no-op unless the trace is on.
+  const trace = (decision: string, extra: Record<string, unknown> = {}) => {
+    if (!traceOn) return;
+    traceFiles(decision, {
+      url: location.pathname,
+      branchFromUrl,
+      pathFromUrl,
+      segment,
+      gitStatusBranch: currentBranch,
+      gitAvailability: git.availability,
+      gitLastError: git.lastError,
+      workspaceId,
+      workspaceBranch,
+      bootstrapError: workspace.bootstrapError,
+      hydrationKey: `${workspaceId}.${branchFromUrl}`,
+      lastHydratedKey: lastHydratedKeyRef.current,
+      openTabs: workspace.openTabs.map((t) => t.path),
+      openFilePath,
+      hasUnsavedEdits,
+      ...extra,
+    });
+  };
+
+  // Trace only: a failed first bootstrap leaves `workspaceId` null and changes
+  // only `bootstrapError`, which the effect below does not re-run on (and must
+  // not: a re-run cancels an in-flight hydration). Log that wait from here, and
+  // again for each file click made while it lasts, so the console names the
+  // URL that stayed blank.
+  useEffect(() => {
+    if (!workspaceId) trace('wait:no-workspace');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, workspace.bootstrapError, location.pathname, traceOn]);
+
   useEffect(() => {
     if (!workspaceId) return;
     if (!branchFromUrl) return;
 
     let cancelled = false;
     const branchKnown = currentBranch !== null;
-    const branchMatches = branchKnown && currentBranch === branchFromUrl;
+    // BOTH the workspace and the status it reported have to be on the URL's
+    // branch. They are two different facts:
+    //   - `workspaceBranch` is what `workspaceId` IS (decoded straight off the
+    //     id, so it moves in the same tick as the workspace).
+    //   - `currentBranch` is what the last status refresh said, which is
+    //     fetched against a workspace and lags a switch — and `useGitState`
+    //     RETAINS the previous branch when a refresh fails.
+    // A retained status can therefore name the URL's branch while
+    // `workspaceId` already serves a different one: switch main → alice/draft,
+    // the status refresh against alice/draft's workspace fails and keeps
+    // saying `main`, then the user goes back to /workspace/main/... On the
+    // status alone that reads as a match, and the hydrate below would read
+    // main's paths out of alice/draft's workspace. Requiring the workspace
+    // itself to agree makes that impossible; the mismatch falls through to the
+    // re-bootstrap below, which is the recovery.
+    const branchMatches =
+      branchKnown && currentBranch === branchFromUrl && workspaceBranch === branchFromUrl;
+
+    // Nothing is read until we know which branch `workspaceId` is serving.
+    // Before, an unknown status (`gitStatusBranch=null` — every fresh browser
+    // session) fell straight through to the hydrate below and read the URL's
+    // path out of whatever workspace the first bootstrap happened to return.
+    // On a URL for a file that only exists on another branch that is a 404,
+    // dropped on the floor, followed by a silent wait for the next status
+    // poll. A read against the wrong branch is never useful: at best it is
+    // the wrong file's bytes, at worst a 404 for a file that exists.
+    if (!branchKnown) {
+      trace('wait:git-status');
+      return;
+    }
 
     (async () => {
       // 1) URL points at a different branch than the workspace currently
@@ -166,8 +235,9 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       //    state is NOT a gate here: per the save=share invariant the
       //    working tree is never dirty, and even if a bug leaves it dirty
       //    the user is moving to a different on-disk workspace anyway.
-      if (branchKnown && !branchMatches) {
+      if (!branchMatches) {
         if (hasUnsavedEdits) {
+          trace('blocked:dirty');
           setError({
             kind: 'dirty',
             current: currentBranch,
@@ -176,6 +246,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           });
           return;
         }
+        trace('wait:branch-mismatch');
         setError(null);
         setPersistenceBranch(branchFromUrl);
         // Bail out and wait for the bootstrap to update workspaceId +
@@ -198,9 +269,37 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
         }
         const activePath = pathFromUrl || persisted.activePath;
         setPersistenceBranch(branchFromUrl);
+        const hydrateSeq = ++hydrateSeqRef.current;
+        trace('hydrate:start', { hydrateSeq, paths, activePath });
         try {
-          const { dropped, denied } = await hydrateTabs(paths, activePath);
+          const { surviving, dropped, denied, superseded } = await hydrateTabs(paths, activePath);
+          // The shared `openTabs`/`openFilePath` are this render's, from before
+          // the hydration; log what it left open, picking the active tab the
+          // way `hydrateTabs` does.
+          trace('hydrate:settled', {
+            hydrateSeq,
+            cancelled,
+            surviving,
+            dropped,
+            denied,
+            openTabs: surviving,
+            openFilePath:
+              activePath && surviving.includes(activePath)
+                ? activePath
+                : (surviving[surviving.length - 1] ?? null),
+          });
           if (cancelled) return;
+          // A hydration that never reached the tab strip — the workspace moved
+          // to another branch, or a newer restore overtook it — is not a
+          // hydration of this key. Recording it would mark the branch done
+          // while its tabs were never opened, and (`hydratedKeyRef` unset on
+          // the hook's side) never persisted again either. Leave the marker
+          // alone so the next run redoes it, and classify nothing: these
+          // results describe a strip that isn't on screen.
+          if (superseded) {
+            trace('hydrate:superseded', { hydrateSeq });
+            return;
+          }
           lastHydratedKeyRef.current = hydrationKey;
           // If the URL deeplinked to a path that 404'd or 403'd, say why
           // nothing is showing. Persisted (non-deeplinked) tabs that fell in
@@ -213,6 +312,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
             setError(null);
           }
         } catch (err) {
+          trace('hydrate:failed', { hydrateSeq, cancelled, ...describeError(err) });
           if (!cancelled) {
             if (err instanceof WorkspaceApiError && err.status === 410) {
               setError({ kind: 'branch-gone', branch: branchFromUrl });
@@ -228,27 +328,34 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       // 3) URL → state delta (after hydrate; fires when the user navigates to
       // a different file within the same branch).
       if (pathFromUrl) {
-        if (openFilePath !== pathFromUrl) {
-          try {
-            await addTab(pathFromUrl);
-            if (!cancelled) setError(null);
-          } catch (err) {
-            if (cancelled) return;
-            if (err instanceof WorkspaceApiError && err.status === 404) {
-              setError({ kind: 'file-missing', path: pathFromUrl });
-            } else if (err instanceof WorkspaceApiError && err.status === 403) {
-              setError({ kind: 'file-denied', path: pathFromUrl });
-            } else if (err instanceof WorkspaceApiError && err.status === 410) {
-              setError({ kind: 'branch-gone', branch: branchFromUrl });
-            } else {
-              const message = err instanceof Error ? err.message : 'Unknown error';
-              setError({ kind: 'file-load-failed', path: pathFromUrl, message });
-            }
+        // `addTab` runs even when this file is ALREADY the open one. It costs
+        // no read (the tab is reused) and it is the only way to say "this is
+        // the newest thing the user asked for" — skipping it left an older,
+        // still-in-flight `addTab` counting as the latest, so a burst of tree
+        // clicks ending on an open tab settled on whichever file that older
+        // read carried, with the URL naming this one and no way back but a
+        // reload.
+        trace(openFilePath === pathFromUrl ? 'add-tab:already-open' : 'add-tab:start');
+        try {
+          const added = await addTab(pathFromUrl);
+          trace('add-tab:settled', { added, cancelled });
+          if (!cancelled) setError(null);
+        } catch (err) {
+          trace('add-tab:failed', { cancelled, ...describeError(err) });
+          if (cancelled) return;
+          if (err instanceof WorkspaceApiError && err.status === 404) {
+            setError({ kind: 'file-missing', path: pathFromUrl });
+          } else if (err instanceof WorkspaceApiError && err.status === 403) {
+            setError({ kind: 'file-denied', path: pathFromUrl });
+          } else if (err instanceof WorkspaceApiError && err.status === 410) {
+            setError({ kind: 'branch-gone', branch: branchFromUrl });
+          } else {
+            const message = err instanceof Error ? err.message : 'Unknown error';
+            setError({ kind: 'file-load-failed', path: pathFromUrl, message });
           }
-        } else if (!cancelled) {
-          setError(null);
         }
       } else if (!cancelled) {
+        trace('noop:no-path');
         // URL with no path = "no active tab"; tabs in the strip stay open.
         setError(null);
       }
@@ -272,6 +379,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     branchFromUrl,
     pathFromUrl,
     workspaceId,
+    workspaceBranch,
     currentBranch,
     hasUnsavedEdits,
   ]);
@@ -301,6 +409,122 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
       setRetrying(false);
     }
   };
+
+  /**
+   * Manual retry for a git status refresh that failed. Until it answers, the
+   * route can't tell whether `workspaceId` is serving the URL's branch, so it
+   * reads nothing — which without this button was an indefinite silent wait
+   * for the 30 s poll (and if the failure persisted, forever).
+   */
+  const retryStatus = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await git.refreshStatus();
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  // ── Which of this route's screens is showing, and why ────────────────────
+  // All computed together, above the returns, so the `?trace=files` effect
+  // below can log the ONE state that won — and so the precedence between them
+  // is readable in one place instead of spread across eight early returns.
+
+  // The branch was deleted on the git host and its clone retired; there is
+  // nothing here to load or to retry. Two ways to learn it: a file read on a
+  // workspace we already had (410 from the read → `error`), or the bootstrap
+  // of the branch itself failing before there was a workspace at all (410
+  // from `GET /workspace` → `bootstrapError`, matched to THIS branch so a
+  // stale failure from a branch we left cannot paint over the current one).
+  const goneBranch =
+    error?.kind === 'branch-gone'
+      ? error.branch
+      : workspace.bootstrapError?.status === 410 && workspace.bootstrapError.branch === branchFromUrl
+        ? branchFromUrl
+        : null;
+
+  /**
+   * A bootstrap that failed for a reason OTHER than "the branch is gone" —
+   * a 500, a 502, a dropped connection. It used to leave the page on its
+   * empty state for good: `workspaceId` stays where it was, the effect above
+   * either waits for a branch that will never arrive or reads from the wrong
+   * workspace, and nothing on screen says a thing.
+   *
+   * Shown when the failure is about the branch the URL names, and ALSO when
+   * there is no workspace at all — the first bootstrap runs against the
+   * default branch before any route has asked for one, so its failure is
+   * reported under the default branch's name while the URL may name another.
+   * Either way nothing can open until a bootstrap succeeds.
+   */
+  const bootstrapFailure =
+    goneBranch === null &&
+    workspace.bootstrapError &&
+    (workspace.bootstrapError.branch === branchFromUrl || workspaceId === null)
+      ? workspace.bootstrapError
+      : null;
+
+  /**
+   * The git status refresh failed and the last branch we know of is not the
+   * one the URL names. `useGitState` keeps the previous `status.branch` on a
+   * failure and only flips `availability`, so this is indistinguishable from
+   * "still switching" — and the route waited on it silently, with
+   * `bootstrapError` null, until a later poll happened to succeed.
+   */
+  const statusUnknown =
+    !bootstrapFailure && git.availability === 'error' && currentBranch !== branchFromUrl;
+
+  // What the viewer would render right now. It falls back to "Open a page to
+  // start reading." whenever there is no active tab carrying content — which,
+  // while the URL names a file, is the blank page this ticket is about.
+  const viewerIsBlank = !openFilePath || workspace.activeTab?.content == null;
+
+  /**
+   * The viewer is showing the file the URL names, read from the branch the URL
+   * names. Blankness alone is not the question: navigating from one open file
+   * to another (or to the same path on another branch) leaves the PREVIOUS
+   * tab's content on screen for the whole read, so a blank-only test called
+   * that "ready" and showed the old file with no sign that a new one was
+   * coming. Anything short of "the target, on the target's branch, with bytes
+   * in hand" is still loading.
+   */
+  const viewerShowsTarget =
+    !viewerIsBlank &&
+    openFilePath === pathFromUrl &&
+    currentBranch === branchFromUrl &&
+    workspaceBranch === branchFromUrl;
+
+  /**
+   * An id segment whose path we haven't resolved yet: `pathFromUrl` is empty,
+   * so there is no path to compare and `viewerShowsTarget` is false by
+   * construction. Canonicalizing an open file (path URL → its id URL) passes
+   * through exactly this state with the file already on screen and nothing at
+   * all in flight — treating it as "not the target" would flash a loading
+   * screen over a page the user is reading, on every single file open. So
+   * while an id resolves, only true blankness counts as loading.
+   */
+  const resolvingId = segmentIsId && pathFromUrl === '';
+
+  const loadingFile =
+    !error &&
+    !goneBranch &&
+    !bootstrapFailure &&
+    !statusUnknown &&
+    segment !== '' &&
+    (resolvingId ? viewerIsBlank : !viewerShowsTarget)
+      ? pathFromUrl || segment
+      : null;
+
+  const screen =
+    error?.kind === 'dirty' ? 'dirty'
+      : goneBranch !== null ? 'branch-gone'
+        : bootstrapFailure ? 'bootstrap-failed'
+          : statusUnknown ? 'git-status-failed'
+            : error ? error.kind
+              : loadingFile ? 'loading'
+                : 'viewer';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { trace('screen', { screen, loadingFile }); }, [screen, loadingFile, traceOn]);
 
   // No state→URL effect. The URL is the single authority for "what's active",
   // and only one direction of sync runs at a time:
@@ -339,18 +563,6 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     );
   }
 
-  // The branch was deleted on the git host and its clone retired; there is
-  // nothing here to load or to retry. Two ways to learn it: a file read on a
-  // workspace we already had (410 from the read → `error`), or the bootstrap
-  // of the branch itself failing before there was a workspace at all (410
-  // from `GET /workspace` → `bootstrapError`, matched to THIS branch so a
-  // stale failure from a branch we left cannot paint over the current one).
-  const goneBranch =
-    error?.kind === 'branch-gone'
-      ? error.branch
-      : workspace.bootstrapError?.status === 410 && workspace.bootstrapError.branch === branchFromUrl
-        ? branchFromUrl
-        : null;
   if (goneBranch !== null) {
     return (
       <ErrorScreen title="This branch no longer exists">
@@ -360,6 +572,41 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           <span className="font-mono text-ink">{DEFAULT_BRANCH}</span>.
         </p>
         <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
+      </ErrorScreen>
+    );
+  }
+
+  if (bootstrapFailure) {
+    return (
+      <ErrorScreen title={`Couldn't open ${bootstrapFailure.branch}`}>
+        <p className="text-ui text-ink-muted">
+          Loading the workspace for{' '}
+          <span className="font-mono text-ink">{bootstrapFailure.branch}</span> failed
+          {bootstrapFailure.status ? ` with HTTP ${bootstrapFailure.status}` : ', the request never completed'}.
+          Nothing on this branch can open until it succeeds.
+        </p>
+        <p className="font-mono text-meta text-ink-faint">{bootstrapFailure.message}</p>
+        <Button onClick={workspace.retryBootstrap}>Retry</Button>
+      </ErrorScreen>
+    );
+  }
+
+  if (statusUnknown) {
+    return (
+      <ErrorScreen title="Couldn't check which branch this workspace is on">
+        <p className="text-ui text-ink-muted">
+          This link is on{' '}
+          <span className="font-mono text-ink">{branchFromUrl}</span>
+          {currentBranch
+            ? <> and the workspace was last on <span className="font-mono text-ink">{currentBranch}</span></>
+            : null}
+          . Opening the file now could read it from the wrong branch, so it waits for
+          the check to answer.
+        </p>
+        {git.lastError && <p className="font-mono text-meta text-ink-faint">{git.lastError}</p>}
+        <Button onClick={retryStatus} disabled={retrying}>
+          {retrying ? 'Retrying…' : 'Retry'}
+        </Button>
       </ErrorScreen>
     );
   }
@@ -419,7 +666,38 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
     );
   }
 
+  // The URL names a file and the viewer has nothing to show yet — a bootstrap,
+  // a git status or the read itself is still in flight. Say which file is
+  // coming. The viewer's "Open a page to start reading." is for a URL that
+  // names NO file; showing it here is what made a working page look empty.
+  if (loadingFile) {
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-canvas px-6">
+        <div role="status" aria-live="polite" className="max-w-md space-y-3 text-center">
+          <h2 className="text-head text-ink">Opening {basename(loadingFile)}…</h2>
+          <p className="text-ui text-ink-muted">
+            <span className="font-mono text-ink">{loadingFile}</span> on{' '}
+            <span className="font-mono text-ink">{branchFromUrl}</span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return <FileViewer />;
+}
+
+function basename(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/** The status and message of a failed read, for the `?trace=files` log. */
+function describeError(err: unknown): { status: number | null; message: string } {
+  return {
+    status: err instanceof WorkspaceApiError ? err.status : null,
+    message: err instanceof Error ? err.message : String(err),
+  };
 }
 
 /**

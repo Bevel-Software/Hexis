@@ -37,6 +37,9 @@ const TREE: Record<string, string> = {
   'Knowledge/Deal.md': '---\nnodeType: process\ndownload:\n  - Felix <felix@x.io>\n---\n# Deal\n',
   'Plugins/GTM/plugin.json': '{"name":"gtm"}',
   'Plugins/GTM/access.md': '---\nread:\n  - everyone\n---\nread:\n  - Pat <pat@x.io>\n',
+  'Home.md': '---\nwrite:\n  - deny role/Admin\n---\n# Home\n',
+  'Locked/access.md': '---\nwrite:\n  - deny role/Admin\n---\n',
+  'Locked/chart.png': 'not really a png',
 };
 
 let root = '';
@@ -104,34 +107,64 @@ afterAll(async () => {
 type Source = { kind: 'folder' | 'frontmatter'; path: string; inherited: boolean } | null;
 type Decision = { allowed: boolean; source: Source; via: string; principal: string | null };
 type Entry = { kind: string; name: string; email?: string; sources: Source[] };
+type Verb = 'read' | 'write' | 'download' | 'owner';
 type Stat = {
   type: string;
-  access?: {
-    self: Record<'read' | 'write' | 'download' | 'owner', Decision>;
-    roster: Record<'read' | 'write' | 'download' | 'owner', Entry[]> | null;
+  access: Record<Verb, boolean> & {
+    why?: Record<Verb, Omit<Decision, 'allowed'>> | null;
+    roster?: Record<Verb, Entry[]> | null;
     rosterReason?: string;
   };
 };
 
-async function stat(as: string, path: string, access = true): Promise<Stat> {
+/**
+ * `file_stat` as `as`, with the access block's verdict and its reason put back
+ * together per verb as `self`, so each case reads as one decision.
+ */
+async function stat(
+  as: string,
+  path: string,
+  explain = true,
+): Promise<Stat & { access: Stat['access'] & { self: Record<Verb, Decision> } }> {
   caller = as;
   const res = await fetch(`${base}/api/agent/tools/file_stat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer x' },
-    body: JSON.stringify({ branch: BRANCH, path, ...(access ? { access: true } : {}) }),
+    body: JSON.stringify({ branch: BRANCH, path, ...(explain ? { explainAccess: true } : {}) }),
   });
   expect(res.status).toBe(200);
-  return (await res.json()) as Stat;
+  const out = (await res.json()) as Stat;
+  const verbs = ['read', 'write', 'download', 'owner'] as const;
+  const self = Object.fromEntries(verbs.map((v) => [v, { allowed: out.access[v], ...out.access.why?.[v] }])) as Record<Verb, Decision>;
+  return { ...out, access: { ...out.access, self } };
 }
 
 const DEAL = `${KB}/Knowledge/Deal.md`;
 const KNOWLEDGE_FOLDER = { kind: 'folder', path: `${KB}/Knowledge` };
 
 describe('file_stat access', () => {
-  it('without the flag the response carries no access block', async () => {
+  it('without the flag the access block carries the verdicts only', async () => {
     const out = await stat('olive@x.io', DEAL, false);
     expect(out.type).toBe('file');
-    expect(out).not.toHaveProperty('access');
+    expect(Object.keys(out.access).filter((k) => k !== 'self').sort()).toEqual(['download', 'owner', 'read', 'write']);
+  });
+
+  it('admin floor: Admin keeps write on a root file whose own rules deny Admin', async () => {
+    const { access } = await stat('admin@x.io', `${KB}/Home.md`);
+    expect(access.self.write).toEqual({
+      allowed: true,
+      source: { kind: 'frontmatter', path: `${KB}/Home.md`, inherited: false },
+      via: 'admin-floor',
+      principal: 'Admin',
+    });
+  });
+
+  it('a file that cannot carry rules gets the roster when the caller can write its folder rules', async () => {
+    // Locked/ denies Admin write, so Admin cannot write the image — but may
+    // always write the folder's access.md, which is where its rules live.
+    const { access } = await stat('admin@x.io', `${KB}/Locked/chart.png`);
+    expect(access.write).toBe(false);
+    expect(access.roster).not.toBeNull();
   });
 
   it('inherited: a person granted owner on the folder sees it decided there, inherited', async () => {
@@ -152,8 +185,16 @@ describe('file_stat access', () => {
       via: 'person',
       principal: 'felix@x.io',
     });
-    // read comes from `everyone` at the repository root.
+    // download includes read, so the same frontmatter line decides read too,
+    // ahead of `everyone` at the repository root.
     expect(access!.self.read).toMatchObject({
+      allowed: true,
+      source: { kind: 'frontmatter', path: DEAL, inherited: false },
+      via: 'person',
+    });
+    // Someone the file names nothing for reads through `everyone` at the root.
+    const { access: other } = await stat('nobody@x.io', DEAL);
+    expect(other.self.read).toMatchObject({
       allowed: true,
       source: { kind: 'folder', path: KB, inherited: true },
       via: 'everyone',

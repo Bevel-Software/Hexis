@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
@@ -58,8 +59,14 @@ export function PluginPage() {
   // neither is a place you would link someone to.
   const [filterOn, setFilterOn] = useState(false);
   const [refreshState, setRefreshState] = useState<'idle' | 'spin' | 'done'>('idle');
-  /** Repo-relative folder whose `access.md` the Manage-access dialog is on. */
-  const [manageFolder, setManageFolder] = useState<string | null>(null);
+  /**
+   * Which folder's `access.md` the Manage-access dialog is on, as the dialog
+   * itself addresses it. Held as the ENTRY rather than the repo-relative
+   * folder every opener here names, because retargeting at an ancestor hands
+   * back an entry — and the gallery and the skill page hold it the same way.
+   * `setManageFolder` is the openers' door in, and builds one from a folder.
+   */
+  const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
   /** Bumped when an access edit lands, so the join-request surface refetches. */
   const [accessRevision, setAccessRevision] = useState(0);
   /** The proposed skill being reviewed, if the reader opened one. */
@@ -167,26 +174,52 @@ export function PluginPage() {
   }
 
   /**
+   * Open the access dialog on a repo-relative folder — what every opener on
+   * this page names, from the title row's `Share` to a skill card's.
+   *
+   * `kbDirName` gates it because the resolver addresses files repo-relative
+   * and the dialog strips that prefix — without it the path we would hand over
+   * is not the path we mean. Same guard the skill dialog uses.
+   */
+  const setManageFolder = useCallback(
+    (folder: string) => {
+      if (!kbDirName) return;
+      setManageTarget({
+        name: folder.split('/').pop() ?? folder,
+        relativePath: `${kbDirName}/${folder}`,
+        type: 'directory',
+      });
+    },
+    [kbDirName],
+  );
+
+  /**
    * THE access surface — one dialog, two openers: the title row's `Share` and
    * the Manage-access affordances. There is deliberately no read-only sibling:
    * the dialog itself degrades to read-only when the resolved verdict says the
    * caller cannot write, so a second "view access" panel would be the same
    * information twice.
-   *
-   * `kbDirName` gates it because the resolver addresses files repo-relative and
-   * the dialog strips that prefix — without it the path we would hand over is
-   * not the path we mean. Same guard the skill dialog uses.
    */
   const manageDialog =
-    manageFolder && kbDirName ? (
+    manageTarget ? (
       <ManageAccessDialog
-        entry={{
-          name: manageFolder.split('/').pop() ?? manageFolder,
-          relativePath: `${kbDirName}/${manageFolder}`,
-          type: 'directory',
-        }}
+        // Keyed on the path, so retargeting at an ancestor remounts it against
+        // that folder — the gallery's arrangement exactly.
+        key={manageTarget.relativePath}
+        // The Library speaks the DEFAULT branch: this page lists what is on
+        // it, so the rules it shares are edited where it read them, whatever
+        // branch the ambient workspace happens to be on. Same choice the
+        // gallery's Share and the skill page's make.
+        workspaceId={encodeURIComponent(DEFAULT_BRANCH)}
+        entry={manageTarget}
+        // The `Manage <Folder> →` walk. A skill card's Share lands on a folder
+        // that usually inherits its rules from this plugin, and without this
+        // the only act available on an inherited grant is the destructive one
+        // behind Remove — the skill page offers the walk, so its twin here
+        // must too.
+        onManageAncestor={setManageTarget}
         onClose={() => {
-          setManageFolder(null);
+          setManageTarget(null);
           // Granting through the dialog can settle a pending join request —
           // refresh the roster, the catalog and the request surface together.
           data.reloadPlugins();
@@ -368,6 +401,15 @@ export function PluginPage() {
         skillItems={shownSkills}
         toolItems={toolItems}
         onOpen={openItem}
+        // A skill's OWN rules, from its card — the skill page's Share, on the
+        // skill's folder rather than the plugin's. It reuses this page's one
+        // access dialog (`manageTarget`), the same one the title row's Share
+        // and the join-request banner open, and that dialog wires
+        // `onManageAncestor`, so a rule the skill inherits from the plugin is
+        // managed by walking up to it from here rather than being read-only.
+        // `kbDirName` gates it for the reason the dialog itself does: the path
+        // we would hand over is not the path we mean without it.
+        onShare={kbDirName ? (item) => setManageFolder(item.path) : undefined}
         // Removal is the PLUGIN MANAGER's verb — the same canWrite that lets
         // them answer join requests. The backend's per-path gate enforces it
         // for real; this only decides who sees the affordance.

@@ -218,6 +218,22 @@ export class PathTraversalError extends WorkflowDomainError {
 }
 
 /**
+ * The caller named a path inside the repository's internal git folder: any
+ * `.git` segment, in any case, however it was spelled or reached (see
+ * `shared/git-internals.ts`). One message for every such path, whether or not
+ * anything is there, so the refusal is not an existence oracle.
+ */
+export const GIT_INTERNALS_MESSAGE = "That path is inside the repository's internal git data and is not available.";
+
+export class GitInternalsError extends WorkflowDomainError {
+  readonly kind = 'git-internals' as const;
+  constructor() {
+    super(GIT_INTERNALS_MESSAGE, 403, { kind: 'git-internals' });
+    this.name = 'GitInternalsError';
+  }
+}
+
+/**
  * Generic 400 for workflow-input validation (malformed branch names, missing
  * fields, etc.). Carries an optional payload so callers can attach typed
  * discriminators (`kind: '...'`) when the frontend needs to switch on the
