@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -9,6 +9,7 @@ import {
 } from '../../workspace/state/workspace.context';
 import {
   checkToolConnection,
+  deleteAdminVar,
   setAdminVar,
   type ProbeVerdict,
   type ToolSecrets,
@@ -32,6 +33,7 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolConnectionSection } from '../components/tool-page/ToolConnectionSection';
+import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 // `checkToolConnection` is one module-level mock shared by every test here.
 // `resetAllMocks`, not `clearAllMocks`: clearing kept whatever implementation
@@ -493,6 +495,92 @@ describe('ToolConnectionSection', () => {
       });
       expect(screen.getByRole('alert')).toHaveTextContent('Invalid API key.');
       expect(screen.queryByTestId('tool-health')).toBeNull();
+    });
+  });
+
+  /**
+   * What this section owes the REST of the app.
+   *
+   * The stale-status bug never showed here: a save re-probes, so the page the
+   * key was typed on was always right. It showed one click later, on the
+   * plugin page and the cards, which read a catalog loaded before the write.
+   * So the thing worth pinning is the announcement, not the local repaint.
+   */
+  describe('announcing a landed credential', () => {
+    const heard = vi.fn();
+    beforeEach(() => {
+      heard.mockReset();
+      window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard);
+    });
+    afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
+
+    /** One admin key a writer can set, replace and remove. */
+    const withKey = (adminConfigured: boolean) =>
+      tool({
+        canWrite: true,
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'admin',
+            label: null,
+            key: 'github_API_KEY',
+            adminConfigured,
+            userConfigured: false,
+          },
+        ],
+      });
+
+    it('announces a save without waiting for the probe to answer', async () => {
+      // The catalog's answer does not depend on whether the provider likes the
+      // key, so making the reload wait on a round-trip nobody is watching only
+      // keeps the plugin page stale for longer.
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+      vi.mocked(checkToolConnection).mockReturnValue(new Promise<ProbeVerdict>(() => {}));
+      renderSection(withKey(false));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      // The probe is started and will never answer, so an announcement that
+      // arrives at all is one that did not wait for a verdict.
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+      expect(checkToolConnection).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces a removal, which starts no probe of its own', async () => {
+      vi.mocked(deleteAdminVar).mockResolvedValue(undefined);
+      renderSection(withKey(true));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+      await waitFor(() => expect(heard).toHaveBeenCalledTimes(1));
+      expect(checkToolConnection).not.toHaveBeenCalled();
+    });
+
+    it('announces nothing when the save fails', async () => {
+      // A failed save changed nothing. Reloading on it would blink every card
+      // in the Library for no reason — and teach the reader that the blink
+      // means something landed.
+      vi.mocked(setAdminVar).mockRejectedValue(new Error('Nope.'));
+      const onError = vi.fn();
+      render(
+        wrap(
+          <ToolConnectionSection
+            tool={withKey(false)}
+            configRevision={0}
+            onChanged={vi.fn()}
+            onError={onError}
+          />,
+        ),
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: 'Set key' }));
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: 'k' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(onError).toHaveBeenCalledWith('Nope.'));
+      expect(heard).not.toHaveBeenCalled();
     });
   });
 });

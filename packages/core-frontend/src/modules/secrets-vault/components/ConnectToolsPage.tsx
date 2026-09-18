@@ -6,6 +6,7 @@ import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
+import { announceToolCredentialsChanged } from '../../../core/events';
 import {
   getConnectPending,
   startToolOAuth,
@@ -126,6 +127,10 @@ export function ConnectToolsPage() {
     else if (params.has('error')) setError(params.get('error') || 'Authorization failed.');
     if (params.has('authorized') || params.has('error')) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      // Whichever way the round-trip went, a provider has just had its say
+      // about a sign-in this page did not perform itself — so the Library's
+      // view of the tool is from before the browser left.
+      announceToolCredentialsChanged();
     }
   }, []);
 
@@ -181,6 +186,10 @@ export function ConnectToolsPage() {
       setWiping((s) => new Set(s).add(id));
       try {
         await wipe();
+        // Before this page's own refetch, not after it: the Library is a
+        // different store with a different round-trip, and there is nothing
+        // for it to wait on.
+        announceToolCredentialsChanged();
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -416,7 +425,10 @@ export function ConnectToolsPage() {
                                 name={v.name}
                                 label={v.label}
                                 configured={v.configured}
-                                onSaved={() => void refresh()}
+                                onSaved={() => {
+                                  announceToolCredentialsChanged();
+                                  void refresh();
+                                }}
                                 onError={setError}
                               />
                             ))}
