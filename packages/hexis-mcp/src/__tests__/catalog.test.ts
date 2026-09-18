@@ -5,6 +5,7 @@ import { localManualTemplates, remoteManualTemplate, REMOTE_MANUAL_NAME } from '
 import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { discoverTools, getSkillPrompt, listSkillPrompts, listedTools, withoutRemoteMetaTools } from '../server.js';
 import {
+  ConnectionKeyRejectedError,
   DeploymentError,
   fetchAgentInstructions,
   fetchAllManuals,
@@ -320,6 +321,13 @@ describe('fetchAgentInstructions', () => {
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('without an "instructions" string'));
   });
 
+  it('lets a rejected connection key through instead of degrading quietly', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(fetchAgentInstructions(config)).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('a 500 logs one line and resolves to undefined', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })));
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -343,6 +351,24 @@ describe('getJson unauthorized messaging', () => {
   it('blames the connection key only on a request that actually carried it', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
     await expect(fetchAllManuals(config)).rejects.toThrow(/connection key was rejected/);
+  });
+
+  it('says exactly what to do with a rejected key, naming the deployment and never the key', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
+    const err = (await fetchAllManuals({ ...config, baseUrl: 'https://x.example/hexis' }).catch((e: unknown) => e)) as Error;
+    expect(err).toBeInstanceOf(DeploymentError);
+    expect(err.message).toBe(
+      'The connection key was rejected by https://x.example/hexis. Mint a new one in External agent access. ' +
+        '(Claude Code hides this message; run `claude mcp get <name>` or start the command in a terminal to see it.)',
+    );
+    expect(err.message).not.toContain('bevel_k');
+  });
+
+  it('does not tell a key holder to mint a new key over a 403 — the key is valid', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 403 })));
+    const err = (await fetchAllManuals(config).catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/denied access \(HTTP 403\)/);
+    expect(err.message).not.toMatch(/Mint a new one/);
   });
 
   it('keeps the key out of the story when the failing request carried no credentials', async () => {
