@@ -2503,18 +2503,36 @@ export class GitService implements IGitService {
    * Just the repo-relative paths changed by a change request (three-dot), no
    * patches — the cheap version used to build CR-list summaries and owner
    * routing. `changedFilesForPr` is the full version with statuses + diffs.
+   *
+   * `fetch: false` skips the per-request ref fetch, for a caller that has
+   * ALREADY refreshed the clone's remote-tracking refs — which is the whole
+   * clone in one round trip, against one per request here. A CR list is
+   * exactly that caller: at five open requests the per-request fetch was
+   * measured at ~0.55s each, and the list is re-read on every proposal and
+   * every 60s poll. Only pass it when a fetch of the clone really has just
+   * happened; the refs are otherwise as old as the last one, and the diff
+   * would describe a stale head.
+   *
+   * It is a skip, not a promise never to fetch: a branch this clone has
+   * never heard of is fetched anyway. That case is not a stale diff, it is
+   * NO diff — an empty touched-path set, which is a change request missing
+   * from its own author's tree. Two local `rev-parse`s are worth not being
+   * that.
    */
   async changedPathsForPr(
     workspaceId: string,
     baseBranch: string,
     headBranch: string,
+    opts: { fetch?: boolean } = {},
   ): Promise<string[]> {
     assertValidBranchName(baseBranch);
     assertValidBranchName(headBranch);
     // Fetch outside the mutex (network round-trip) so origin latency can't hold
     // the workspace lock; the lock guards only the local diff below.
     const cwd = await this.repoDir(workspaceId);
-    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    if (opts.fetch !== false || !(await this.knowsBothBranches(cwd, baseBranch, headBranch))) {
+      await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    }
     return this.mutex.run(workspaceId, async () => {
       const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
       const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
@@ -2779,6 +2797,25 @@ export class GitService implements IGitService {
     return relativePath.startsWith(`${this.kbDirName}/`)
       ? relativePath.slice(this.kbDirName.length + 1)
       : relativePath;
+  }
+
+  /**
+   * Whether both of a change request's branches resolve in this clone
+   * already — the question behind `changedPathsForPr`'s `fetch: false`. Only
+   * git's own "no such ref" answers false; every other failure is the
+   * caller's to see, and treating it as "not here" would spend a network
+   * fetch on a clone that is broken for some other reason.
+   */
+  private async knowsBothBranches(cwd: string, ...branches: string[]): Promise<boolean> {
+    for (const branch of branches) {
+      try {
+        await this.resolvePublishedBranchRef(cwd, branch);
+      } catch (err) {
+        if (err instanceof WorkflowValidationError) return false;
+        throw err;
+      }
+    }
+    return true;
   }
 
   /**

@@ -372,3 +372,107 @@ describe('GitService.changedFilesForPr / resolvePrShas', () => {
     ).rejects.toThrow();
   });
 });
+
+/**
+ * `changedPathsForPr` fetches the two refs it is about before diffing them —
+ * one network round trip per call. A change-request LIST calls it once per
+ * open request, which is where the "very slow loading" reported against the
+ * request list came from (~0.55s per additional open request, measured).
+ * `fetch: false` lets the list refresh the whole clone once instead and then
+ * diff locally; every other caller keeps the fetch.
+ */
+describe('GitService.changedPathsForPr: who pays for the fetch', () => {
+  let root: string;
+  const workspaceId = 'current-company-state';
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-pr-paths-'));
+  });
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  /**
+   * Push a change request's head branch to the remote from a DIFFERENT
+   * clone, so the workspace clone has never seen it — which is exactly what
+   * the flag decides about.
+   */
+  async function pushedElsewhere(upstream: string, file: string): Promise<string> {
+    const other = path.join(root, `.other-${file}`);
+    await runGit(root, ['clone', upstream, other]);
+    await runGit(other, ['config', 'user.email', 'test@bevel.local']);
+    await runGit(other, ['config', 'user.name', 'Test Runner']);
+    await runGit(other, ['checkout', '-b', 'biz/proposal']);
+    await fs.writeFile(path.join(other, file), 'proposed\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'propose']);
+    await runGit(other, ['push', '-u', 'origin', 'biz/proposal']);
+    return other;
+  }
+
+  it('finds a branch pushed since the last fetch — the default', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await pushedElsewhere(upstream, 'brief.pdf');
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal'),
+    ).toEqual(['brief.pdf']);
+  });
+
+  it('with fetch: false, reads the refs the clone already has and skips the network', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    const other = await pushedElsewhere(upstream, 'brief.pdf');
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    // The clone now knows the branch — this stands in for the one fetch a
+    // list does for the whole clone before asking about every request.
+    await runGit(repo, ['fetch', '--prune', 'origin']);
+    // A second file lands on the branch afterwards.
+    await fs.writeFile(path.join(other, 'extra.pdf'), 'more\n');
+    await runGit(other, ['add', '-A']);
+    await runGit(other, ['commit', '-m', 'second']);
+    await runGit(other, ['push', 'origin', 'biz/proposal']);
+
+    // Skipped: the answer is the clone's own refs, one push behind — which
+    // is the trade the flag makes, and why only a caller that has JUST
+    // refreshed the clone may pass it.
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
+        fetch: false,
+      }),
+    ).toEqual(['brief.pdf']);
+    // The default pays for the round trip and sees both.
+    expect(
+      (await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal')).sort(),
+    ).toEqual(['brief.pdf', 'extra.pdf']);
+  });
+
+  /**
+   * The one case `fetch: false` must NOT honour. A branch this clone has
+   * never heard of does not give a stale diff, it gives NO diff — an empty
+   * touched-path set, which is a change request missing from its own
+   * author's tree. So the skip only applies to refs that are actually here.
+   */
+  it('fetches anyway for a branch the clone has never seen', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await pushedElsewhere(upstream, 'brief.pdf');
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    // Nothing has refreshed this clone since the branch was pushed.
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
+        fetch: false,
+      }),
+    ).toEqual(['brief.pdf']);
+  });
+});
