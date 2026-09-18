@@ -48,6 +48,17 @@ export interface ChangeRequestScope {
 interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
   scope?: ChangeRequestScope;
+  /**
+   * The file to land on, repo-relative — for a surface that opened the
+   * dialog ABOUT one file (a proposed row in the explorer). Without it the
+   * dialog lands on the request's first changed file, as it always has.
+   *
+   * Read once, as the initial selection: the reader is free to click away,
+   * and re-imposing the caller's file on every render would take the dialog
+   * back off them. A caller that needs to re-point an OPEN dialog remounts it
+   * (key on the path), which is what the explorer does.
+   */
+  initialPath?: string;
   onClose(): void;
   /** Applying is the only verdict this view reaches. Declining a change
    *  request lives on the skill page, beside the request's own row. */
@@ -72,6 +83,7 @@ interface ChangeRequestDialogProps {
 export function ChangeRequestDialog({
   cr,
   scope,
+  initialPath,
   onClose,
   onResolved,
 }: ChangeRequestDialogProps) {
@@ -191,8 +203,15 @@ export function ChangeRequestDialog({
    * the landing happens on the render the detail arrives rather than one render
    * later. `picked` staying null is what keeps "I haven't chosen yet" distinct
    * from "I chose the first file".
+   *
+   * A caller that opened the dialog ABOUT a file seeds the pick with it: the
+   * row the user clicked IS a choice, made before the dialog existed, and
+   * seeding is what makes it survive the detail arriving. It is seeded even
+   * when the detail does not (yet) list the file — the tree shows what the
+   * detail names, so an unlisted seed simply shows nothing selected rather
+   * than silently landing somewhere the user did not click.
    */
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initialPath ?? null);
   const selected =
     picked ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
   const setSelected = setPicked;
