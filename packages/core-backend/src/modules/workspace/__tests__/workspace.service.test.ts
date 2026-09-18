@@ -1150,6 +1150,18 @@ describe('WorkspaceService.unzipFile — ontology-session write guard', () => {
     await expect(fs.stat(path.join(workspaceDir, 'out'))).rejects.toThrow();
   });
 
+  // The zip reader cannot tell a missing file from a corrupt one: it answers
+  // "ADM-ZIP: Invalid filename" for both, and unzip used to dress that up as a
+  // 422 unreadable archive — blaming bytes that were never there. Absence is
+  // asked first, so the tool can give it the one 404 every file tool gives.
+  it('a .zip that is not there is a 404 not_found, not an unreadable archive', async () => {
+    await expect(svc.unzipFile(workspaceId, 'nope.zip')).rejects.toMatchObject({
+      name: 'PathNotFoundError',
+      status: 404,
+      payload: { kind: 'not_found', path: 'nope.zip' },
+    });
+  });
+
   it('extracts everything when no guard is supplied (human / non-agent path)', async () => {
     await writeZip('b.zip', { 'x.md': '1', 'y.md': '2' });
     const res = await svc.unzipFile(workspaceId, 'b.zip', 'out');

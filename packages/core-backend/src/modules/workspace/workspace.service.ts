@@ -20,6 +20,7 @@ import { assertWithinDirectory } from '../../shared/path-containment.js';
 import { assertNoGitInternalsSegment, assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import {
   GitInternalsError,
+  PathNotFoundError,
   PathTraversalError,
   UnreadableArchiveError,
   WorkflowValidationError,
@@ -1502,6 +1503,17 @@ export class WorkspaceService implements IWorkspaceService {
     // entry's own target is checked again below, once it is known.
     await this.assertNotThroughLink(zipAbsolute, workspaceDir);
     if (destAbsolute !== workspaceDir) await this.assertNotThroughLink(destAbsolute, workspaceDir);
+
+    // Absence is asked BEFORE the archive is opened, because the zip reader
+    // cannot tell the two apart: on a path with nothing at it `AdmZip` throws
+    // "ADM-ZIP: Invalid filename", which would be dressed up as an unreadable
+    // archive (422) and blame the bytes for a name that never existed.
+    try {
+      await fs.stat(zipAbsolute);
+    } catch (err) {
+      if (isAbsence(err)) throw new PathNotFoundError(zipRelativePath);
+      throw err;
+    }
 
     let zip: AdmZip;
     try {

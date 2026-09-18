@@ -50,6 +50,7 @@ import {
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
 
@@ -1035,7 +1036,8 @@ export function registerWorkspaceTools(
       // read is still a KB read. ONE registry dispatch picks the reader by
       // extension; everything below just maps its ReadResult onto the tool's
       // result shape.
-      const result = await readers.readerFor(p).read(asBytes(await fs.readFile(p)), p);
+      const bytes = await orNotFound(p, async () => asBytes(await fs.readFile(p)));
+      const result = await readers.readerFor(p).read(bytes, p);
       // Images return the picture itself as an MCP image content block, so a
       // multimodal model SEES it. The handler returns the `McpImageResult`
       // sentinel; the MCP result shaping (`toCallToolResult` in
@@ -1192,9 +1194,8 @@ export function registerWorkspaceTools(
       await recordOntologyRead(sessionOntologyGate, ctx, p);
       await assertCanRead(readGateFor(branch, ctx), p);
       // Nothing there is a 404, and the placeholder — never content — gets
-      // exactly that answer.
-      const nothingThere = () => new ToolError(`There is no file or directory at "${displayPath(p)}".`, 404);
-      if (isFolderPlaceholder(p)) throw nothingThere();
+      // exactly that answer: the one every file tool gives (see not-found.ts).
+      if (isFolderPlaceholder(p)) throw notFound(p);
       const fs = await ctx.getFilesystem(branch);
       const root = await workspaceRoot(branch, ctx);
       // Judged before `stat`, which follows links: a link anywhere on the path
@@ -1210,7 +1211,7 @@ export function registerWorkspaceTools(
         if (viaLink !== undefined) {
           throw new ToolError(`"${p}" goes through the symbolic link "${viaLink}", which leads nowhere; the agent tools never follow links.`, 400);
         }
-        if (isAbsence(err)) throw nothingThere();
+        if (isAbsence(err)) throw notFound(p);
         throw err;
       }
       // The filesystem's own `mimeType` comes from a second extension table
@@ -1282,7 +1283,9 @@ export function registerWorkspaceTools(
       // `kind` and `mime` come from that same reader too, so stat never calls
       // a file binary that read_file returns as text.
       const reader = readers.readerFor(p);
-      const bytes = needsContent(reader) ? asBytes(await fs.readFile(p)) : undefined;
+      const bytes = needsContent(reader)
+        ? await orNotFound(p, async () => asBytes(await fs.readFile(p)))
+        : undefined;
       return { ...out, ...fileTypeOf(reader, p, bytes) };
     },
   });
@@ -1373,17 +1376,15 @@ export function registerWorkspaceTools(
         // That ordering holds even when the stat itself failed: a denied path
         // gets the 403, never the filesystem's complaint about it.
         await assertCanRead(gate, searchRoot);
-        if (kind === 'missing') {
-          throw new ToolError(
-            `Nothing to search: there is no file or directory at "${displayPath(searchRoot)}" in this workspace. ` +
-              `Paths are workspace-relative and content lives under \`${kbDirName}/\` — use list_files to find the right one.`,
-            404,
-          );
-        }
+        if (kind === 'missing') throw notFound(searchRoot, 'Nothing to search');
         // A named FILE is searched directly: routing it through the walk would
         // fail its readdir and answer an empty match list, which the caller
         // cannot tell from "the pattern is not in this file".
-        const outcome = await grepOneFile(fs, searchRoot, re, out, max, docs);
+        const outcome = await orNotFound(
+          searchRoot,
+          () => grepOneFile(fs, searchRoot, re, out, max, docs),
+          'Nothing to search',
+        );
         if (outcome === 'no-text') {
           fileNote =
             `"${displayPath(searchRoot)}" has no searchable text — it is an image, binary content, or a document ` +
@@ -1540,8 +1541,10 @@ export function registerWorkspaceTools(
       const newStr = a.new_string as string;
       // The overwrite gate already read the file when its reader asked the
       // binary question — reuse those bytes instead of reading twice.
-      const existing = await assertNotBinaryOverwrite(readers,path, fs);
-      const content = asText(existing ?? (await fs.readFile(path)));
+      const content = await orNotFound(path, async () => {
+        const existing = await assertNotBinaryOverwrite(readers, path, fs);
+        return asText(existing ?? (await fs.readFile(path)));
+      });
       const count = oldStr ? content.split(oldStr).length - 1 : 0;
       if (count === 0) throw new ToolError('old_string not found in the file.', 400);
       if (count > 1 && a.replace_all !== true) {
@@ -1599,7 +1602,7 @@ export function registerWorkspaceTools(
       }
       await assertNoSymlinkOnPath(root, path, true);
       if ((await writeBlocked(branch, ctx, [path])).length > 0) throw await writeRefusal(branch, path);
-      await fs.deleteFile(path);
+      await orNotFound(path, () => fs.deleteFile(path), 'Nothing to delete');
       // Deleting content is not deleting structure: an emptied folder stays.
       await keepFolderOf(fs, ctx, branch, path, kbDirName);
       return { path, deleted: true };
@@ -1831,7 +1834,7 @@ export function registerWorkspaceTools(
       await assertNoSymlinkOnPath(root, src);
       await assertNoSymlinkOnPath(root, dest);
       const kind = await kindOf(fs, src);
-      if (kind === null) throw new ToolError(`"${src}" does not exist.`, 404);
+      if (kind === null) throw notFound(src, 'Nothing to move');
       const srcFiles = kind === 'folder' ? (await filesUnder(fs, src)).files : [src];
       // A restricted run is judged on what it would actually write: each file
       // at its old and its new path, not an extensionless folder path.
@@ -1934,7 +1937,14 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
-      await (await ctx.getFilesystem(a.branch as string)).copyFile(a.src as string, a.dest as string);
+      const copyFs = await ctx.getFilesystem(a.branch as string);
+      // The SOURCE is probed on its own, as move_file probes its own: the
+      // filesystem reports every absence under a copy against the source,
+      // including one that is really the destination's (a parent segment that
+      // is a file), and a 404 naming a source that is sitting right there
+      // would send the caller to re-spell the wrong argument.
+      if ((await kindOf(copyFs, a.src as string)) === null) throw notFound(a.src as string, 'Nothing to copy');
+      await copyFs.copyFile(a.src as string, a.dest as string);
       return { src: a.src, dest: a.dest, copied: true };
     },
   });
@@ -1978,29 +1988,38 @@ export function registerWorkspaceTools(
       // Reading the source archive pins/records the source ontology, so a session
       // can't unzip from ontology A into ontology B without the A read counting.
       await recordOntologyRead(sessionOntologyGate, ctx, zipPath);
-      return ctx.workspaceService.unzipFile(
-        workspaceIdForBranch(a.branch as string),
-        zipPath,
-        typeof a.destination === 'string' ? a.destination : undefined,
-        // Each extracted file is a write: a cross-ontology or write-blocked entry
-        // is skipped (not extracted), so an archive can't bypass the boundary — the
-        // extension policy applies per entry too, so a restricted run can't unzip a
-        // `.md` into the graph.
-        (wsRelPath) => {
-          // An entry that would land beside the repository is skipped with the
-          // corrected-path reason, like any other refused entry.
-          assertInsideRepo(wsRelPath, kbDirName);
-          // Extraction writes straight to disk, past the filesystem's roles.yaml
-          // gate — so an archive may not carry one at all.
-          if (isRolesYamlPath(wsRelPath, kbDirName)) {
-            throw new ToolError(
-              'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
-              422,
-            );
-          }
-          writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
-          return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
-        },
+      // A .zip that is not there is a missing PATH, not an unreadable archive:
+      // the service now says so (PathNotFoundError) and the helper turns it
+      // into the same 404 every other file tool answers. Only that declared
+      // answer maps — a failure part-way through an extraction is not the
+      // archive going missing.
+      return orDeclaredNotFound(
+        () =>
+          ctx.workspaceService.unzipFile(
+            workspaceIdForBranch(a.branch as string),
+            zipPath,
+            typeof a.destination === 'string' ? a.destination : undefined,
+            // Each extracted file is a write: a cross-ontology or write-blocked entry
+            // is skipped (not extracted), so an archive can't bypass the boundary — the
+            // extension policy applies per entry too, so a restricted run can't unzip a
+            // `.md` into the graph.
+            (wsRelPath) => {
+              // An entry that would land beside the repository is skipped with the
+              // corrected-path reason, like any other refused entry.
+              assertInsideRepo(wsRelPath, kbDirName);
+              // Extraction writes straight to disk, past the filesystem's roles.yaml
+              // gate — so an archive may not carry one at all.
+              if (isRolesYamlPath(wsRelPath, kbDirName)) {
+                throw new ToolError(
+                  'roles.yaml is never extracted from an archive — change it with edit_file or write_file, where the change is checked.',
+                  422,
+                );
+              }
+              writePolicy.assertPathWritable(ctx.sessionId, wsRelPath);
+              return assertOntologyWriteAllowed(sessionOntologyGate, ctx, wsRelPath);
+            },
+          ),
+        'Nothing to extract',
       );
     },
   });

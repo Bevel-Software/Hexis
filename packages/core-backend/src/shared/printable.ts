@@ -21,3 +21,18 @@ export function printable(text: string): string {
     (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
   );
 }
+
+/**
+ * A path (or any short text) as it may be interpolated into a ONE-LINE
+ * message: the CR and LF a caller could put in a filename are escaped, so a
+ * refusal naming the path stays one line and cannot forge a second.
+ *
+ * Unquoted, unlike {@link printable}: this text is read by a person or an
+ * agent inside a sentence that already quotes it, not by an operator scanning
+ * a log. THE spelling for that job — `displayPath` in the file readers is this
+ * function, and the missing-path refusals use it too, so a path reads the same
+ * however it is refused.
+ */
+export function sanitizedPath(text: string): string {
+  return text.replace(/[\r\n]/g, (c) => (c === '\r' ? '\\r' : '\\n'));
+}

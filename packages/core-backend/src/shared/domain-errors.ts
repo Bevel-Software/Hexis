@@ -247,6 +247,31 @@ export class WorkflowValidationError extends WorkflowDomainError {
 }
 
 /**
+ * Nothing is at the path the caller named.
+ *
+ * Raised by a SERVICE that probed the path itself, where the file tools' own
+ * `not-found` helper (modules/workspace/not-found.ts) cannot reach: the zip
+ * reader, for instance, answers "ADM-ZIP: Invalid filename" for a missing
+ * archive, which is not a filesystem error at all and would otherwise be
+ * dressed up as an unreadable archive. The helper recognises this class and
+ * the raw `ENOENT`/`ENOTDIR` shapes alike, so both end as the one 404.
+ *
+ * 404 with a `not_found` kind and the requested path, which is also what the
+ * HTTP routes answer — a path that is not there gets one answer whichever
+ * surface asked.
+ */
+export class PathNotFoundError extends WorkflowDomainError {
+  readonly kind = 'not_found' as const;
+  constructor(readonly path: string) {
+    super(`There is no file or directory at "${path}" in this workspace.`, 404, {
+      kind: 'not_found',
+      path,
+    });
+    this.name = 'PathNotFoundError';
+  }
+}
+
+/**
  * An archive the caller uploaded that the zip reader cannot open. 422, not
  * 400: the request is well-formed and the path is fine — the BYTES are not a
  * readable zip, which is the caller's to fix but not their spelling's.
