@@ -22,7 +22,11 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-ws-fetch-'));
-    await fs.mkdir(path.join(root, 'main', 'knowledge-base'), { recursive: true });
+    // `.git` and not just the directory: `resolveWorkspaceDir` probes for it,
+    // and without it every first call falls through to the lazy-clone
+    // bootstrap before the fetch-cache logic under test even starts. These
+    // tests count fetches — they must count this method's, not a clone's.
+    await fs.mkdir(path.join(root, 'main', 'knowledge-base', '.git'), { recursive: true });
     runs = [];
     runner = {
       defaultTimeoutMs: 1000,
@@ -64,28 +68,42 @@ describe('WorkspaceService.ensureRemotesFetched', () => {
   });
 
   it('force still joins a fetch already in flight — that is the storm guard', async () => {
+    let hold: Promise<void> | null = null;
     let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
     runner = {
       defaultTimeoutMs: 1000,
       run: vi.fn(async (_cwd: string, args: string[]) => {
         runs.push(args);
-        await gate;
+        if (hold) await hold;
         return { stdout: '', stderr: '' };
       }),
     } as unknown as IGitRunner;
     const svc = service();
+
+    // One call first, so the clone's directory is resolved and cached — which
+    // it is for every request after a process's first. The join under test is
+    // about the FETCH; a COLD workspace lookup is an async step of its own,
+    // long enough for one caller's whole fetch to finish inside the other's,
+    // and it would decide this test instead of the thing it is about.
+    await svc.ensureRemotesFetched('main');
+    const beforeTheRace = fetches().length;
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
 
     // The two list endpoints the tree asks together, both forced.
     const both = Promise.all([
       svc.ensureRemotesFetched('main', { force: true }),
       svc.ensureRemotesFetched('main', { force: true }),
     ]);
+    // Held until both callers have reached the in-flight check: releasing on
+    // the tick they were started lets the first fetch settle, and be cleared,
+    // before the second one looks. A real fetch is a network round trip; this
+    // is what "already in flight" looks like.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     release();
     await both;
 
-    expect(fetches()).toHaveLength(1);
+    expect(fetches().length - beforeTheRace).toBe(1);
   });
 });

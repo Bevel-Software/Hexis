@@ -24,11 +24,29 @@ import { isUploadNoise } from './readDroppedEntries';
  *    subfolder of the drop brings a new directory into existence, and the
  *    grant is seeded on that directory's `access.md`, covering the subtree
  *    whatever the file extensions are.
+ *
+ * THE ONE CASE THIS CANNOT SEE: a dropped subfolder whose name already exists
+ * inside the unreadable target. The backend seeds on the topmost segment that
+ * is NOT on disk, so a colliding name means no new directory and no grant,
+ * and the files under it go quiet without being asked about. The client
+ * cannot tell the two apart — existence inside a folder the caller may not
+ * read is exactly what the access model declines to answer, and guessing
+ * either way is worse than this gap: warning on every folder drop would warn
+ * about files that WILL be visible, which is the same broken promise pointed
+ * the other way. The server still logs the ungranted create
+ * (`creator-access.ts`), and the file still reaches the folder's owners.
  */
 
-/** Carries frontmatter, so the creator grant can ride along inside it. */
+/**
+ * Carries frontmatter, so the creator grant can ride along inside it.
+ *
+ * EXACT CASE, because the grant it mirrors is exact case: `planForCreate`
+ * splices the per-file grant for `rel.endsWith('.md')` only, and the access
+ * resolver registers `.md` the same way. `NOTES.MD` is governed by its folder
+ * like any other file, gets no grant, and therefore has to be asked about.
+ */
 export function isMarkdownName(name: string): boolean {
-  return /\.md$/i.test(name);
+  return /\.md$/.test(name);
 }
 
 /**
@@ -46,8 +64,10 @@ export function directChildNames(input: UploadInput): string[] {
         .filter((it) => !isUploadNoise(it.relativePath) && !it.relativePath.includes('/'))
         .map((it) => it.relativePath);
     case 'items':
-      // A directory entry is a new folder: its subtree gets the seeded
-      // `access.md` grant, so nothing under it needs warning about.
+      // A directory entry is taken to be a NEW folder: its subtree gets the
+      // seeded `access.md` grant, so nothing under it needs warning about.
+      // See the module docstring for the one drop where that is not true and
+      // why the client cannot know it.
       return input.entries
         .filter((e) => e.isFile && !isUploadNoise(e.name))
         .map((e) => e.name);

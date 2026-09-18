@@ -1514,6 +1514,10 @@ export function TreeChrome({
     pending: unreadableCreate,
     answer: answerUnreadableCreate,
   } = useUnreadableCreateGateState({
+    // Stamped with the workspace it was asked in, exactly as the move/delete
+    // confirmation below is: a switch while the question is open drops it
+    // rather than letting Continue upload into a tree nobody is looking at.
+    identity: workspaceId ?? null,
     toRepoRelative: (folder) => {
       if (!workspaceId || !kbDirName) return null;
       if (folder === kbDirName) return '';

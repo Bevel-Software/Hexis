@@ -7,6 +7,7 @@ import os from 'node:os';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import { WorkflowHooks } from '../../workflow-hooks.js';
 import { GitService, parseNameStatusZ, parseNumstatZ, withoutPlaceholderRename } from '../git.service.js';
+import { WorkspaceMutex } from '../../../kb-fs/mutex.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -469,6 +470,45 @@ describe('GitService.changedPathsForPr: who pays for the fetch', () => {
       'knowledge-base',
     );
     // Nothing has refreshed this clone since the branch was pushed.
+    expect(
+      await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
+        fetch: false,
+      }),
+    ).toEqual(['brief.pdf']);
+  });
+
+  /**
+   * The skip decision and the diff must be ONE reading of the refs. Both
+   * fetches in this flow (`ensureRemotesFetched` for the list,
+   * `fetchPrRefs` here) run outside the workspace mutex deliberately, so a
+   * `fetch --prune origin` CAN land between "the clone knows both branches"
+   * and the diff itself. Re-resolving inside the mutex would then fail, and
+   * `touchedPathsFor` turns that failure into an empty touched-path set —
+   * the request missing from its own author's tree that this whole path
+   * exists to prevent.
+   */
+  it('diffs the commits it decided on, even if a concurrent prune drops the ref', async () => {
+    const { repo, upstream } = await seedWorkspace(root, workspaceId);
+    await pushedElsewhere(upstream, 'brief.pdf');
+    // The list's one fetch for the whole clone.
+    await runGit(repo, ['fetch', '--prune', 'origin']);
+
+    /** Runs the race exactly in the window, then the real critical section. */
+    class PrunedMidCall extends WorkspaceMutex {
+      override async run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+        return super.run(key, async () => {
+          await runGit(repo, ['update-ref', '-d', 'refs/remotes/origin/biz/proposal']);
+          return fn();
+        });
+      }
+    }
+    const git = new GitService(
+      stubWorkspaceService(workspaceId, repo),
+      new WorkflowHooks(),
+      'knowledge-base',
+      new PrunedMidCall(),
+    );
+
     expect(
       await git.changedPathsForPr(workspaceId, 'current-company-state', 'biz/proposal', {
         fetch: false,

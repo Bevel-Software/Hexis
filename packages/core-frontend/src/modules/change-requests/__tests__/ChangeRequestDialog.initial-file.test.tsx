@@ -106,6 +106,26 @@ describe('ChangeRequestDialog: the file it opens at', () => {
     expect(branchApi.readFileOnBranch).not.toHaveBeenCalledWith(CR.branch, 'Knowledge/first.md');
   });
 
+  it('falls back to the first file for a link the request no longer contains', async () => {
+    // A `?cr=&file=` link outlives the request it was copied from: the file
+    // is renamed, or reverted out of it, or the link is simply old. The seed
+    // holds while the detail is in flight — that is the landing it exists
+    // for — and the detail is what ends it: a file the request does not
+    // contain leaves the pane reporting that file unreadable, which is the
+    // request not opening at all as far as the reader can tell.
+    render(
+      <ChangeRequestDialog
+        cr={CR}
+        initialPath="Sales/gone.md"
+        onClose={() => {}}
+        onResolved={() => {}}
+      />,
+    );
+    await waitFor(() => expect(selectedInTree()).toContain('first.md'));
+    expect(await screen.findByText(/Knowledge\/first\.md/)).toBeInTheDocument();
+    expect(branchApi.readFileOnBranch).toHaveBeenCalledWith(CR.branch, 'Knowledge/first.md');
+  });
+
   it('seeds the selection rather than pinning it — the reader can still click away', async () => {
     render(
       <ChangeRequestDialog

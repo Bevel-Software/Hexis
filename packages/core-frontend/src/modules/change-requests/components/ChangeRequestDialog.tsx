@@ -206,14 +206,22 @@ export function ChangeRequestDialog({
    *
    * A caller that opened the dialog ABOUT a file seeds the pick with it: the
    * row the user clicked IS a choice, made before the dialog existed, and
-   * seeding is what makes it survive the detail arriving. It is seeded even
-   * when the detail does not (yet) list the file — the tree shows what the
-   * detail names, so an unlisted seed simply shows nothing selected rather
-   * than silently landing somewhere the user did not click.
+   * seeding is what makes it survive the detail arriving. The seed holds
+   * while the detail is in flight — that is the landing this exists for.
+   *
+   * Once the detail is here it decides: a pick the request does not contain
+   * is DROPPED for the ordinary first-file landing. A `?cr=&file=` link
+   * outlives the request it was copied from — the file gets renamed, reverted
+   * out of the request, or the link is simply old — and keeping such a seed
+   * would read a path off the branch that is not part of the request at all,
+   * leaving the pane reporting an unreadable or stale file. Nothing selected
+   * is the honest version of that, and the request still opens.
    */
   const [picked, setPicked] = useState<string | null>(initialPath ?? null);
+  const pickHolds =
+    detail === null || (picked !== null && (changedFiles.has(picked) || mainFiles.includes(picked)));
   const selected =
-    picked ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
+    (pickHolds ? picked : null) ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
   const setSelected = setPicked;
 
   /**

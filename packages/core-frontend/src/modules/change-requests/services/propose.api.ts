@@ -107,7 +107,12 @@ export function ensureKnowledgeSuggestionWorkspace(
 ): Promise<KnowledgeSuggestionTarget> {
   const branch = knowledgeSuggestionBranchFor(user);
   const inFlight = ensuringByBranch.get(branch);
-  if (inFlight) return inFlight;
+  // Joining saves a duplicate of work that would have reached the same
+  // answer — it does not make the first flow's FAILURE this caller's answer.
+  // The map entry is already gone by the time this rejects (the `finally`
+  // below is attached first), so the fallback is a fresh attempt, not a
+  // re-join of the same dead promise.
+  if (inFlight) return inFlight.catch(() => ensureKnowledgeSuggestionWorkspace(user));
   const ensuring = ensureFresh(branch).finally(() => {
     if (ensuringByBranch.get(branch) === ensuring) ensuringByBranch.delete(branch);
   });
@@ -204,7 +209,13 @@ export function ensureKnowledgeChangeRequest(
 ): Promise<PullRequestSummary | null> {
   if (target.existingCr) return Promise.resolve(target.existingCr);
   const inFlight = openingByBranch.get(target.branch);
-  if (inFlight) return inFlight;
+  // A joined open that fails is not this caller's verdict. The first flow's
+  // error says nothing about what this one's own attempt would meet — and in
+  // the case that matters (the connection dropped AFTER the server created
+  // the row) its own attempt meets the duplicate refusal and adopts the
+  // request, where joining would report "Couldn't add change request" about a
+  // request that exists. So a rejection falls back to one attempt of its own.
+  if (inFlight) return inFlight.catch(() => ensureKnowledgeChangeRequest(target, userName));
   const opening = openKnowledgeChangeRequest(target, userName).finally(() => {
     if (openingByBranch.get(target.branch) === opening) openingByBranch.delete(target.branch);
   });

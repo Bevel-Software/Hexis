@@ -17,7 +17,11 @@ const entry = (name: string, isFile: boolean): FileSystemEntry =>
 describe('which names would land invisible', () => {
   it('exempts markdown — it carries the creator grant in its own frontmatter', () => {
     expect(isMarkdownName('Notes.md')).toBe(true);
-    expect(isMarkdownName('NOTES.MD')).toBe(true);
+    // EXACT case, exactly as `planForCreate` splices the grant: `.MD` gets no
+    // frontmatter grant, so it is a file that would go missing unannounced.
+    expect(isMarkdownName('NOTES.MD')).toBe(false);
+    expect(isMarkdownName('notes.Md')).toBe(false);
+    expect(unreadableAmong(['a.md', 'A.MD'])).toEqual(['A.MD']);
     expect(isMarkdownName('Sample file')).toBe(false);
     expect(isMarkdownName('brief.pdf')).toBe(false);
     // Not a markdown file — the extension is the whole name's tail.

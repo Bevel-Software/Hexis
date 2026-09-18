@@ -47,6 +47,7 @@ import { GitApiError } from '../../git/services/git.api';
 import {
   ensureKnowledgeChangeRequest,
   ensureKnowledgeSuggestionWorkspace,
+  proposeKnowledgeChange,
   type KnowledgeSuggestionTarget,
 } from '../services/propose.api';
 
@@ -78,6 +79,8 @@ beforeEach(() => {
   gitApi.createBranch.mockReset().mockResolvedValue(undefined);
   gitApi.deleteBranch.mockReset().mockResolvedValue(undefined);
   openApi.openChangeRequest.mockReset();
+  wsApi.writeFile.mockClear();
+  wsApi.getOrCreateWorkspace.mockClear();
   detailApi.fetchPrDetail.mockReset();
   listMine.mockReset().mockResolvedValue([]);
 });
@@ -163,6 +166,99 @@ describe('a second proposal started while the first is still loading', () => {
     expect(listMine).toHaveBeenCalledTimes(1);
     expect(gitApi.createBranch).toHaveBeenCalledTimes(1);
     expect(a).toBe(b);
+  });
+
+  it('runs the WHOLE flow twice over, and still opens one request', async () => {
+    // The two in-flight maps above are tested one at a time; the flow the
+    // ticket describes crosses both. `ensureKnowledgeSuggestionWorkspace`
+    // keys on the branch it derives from the user,
+    // `ensureKnowledgeChangeRequest` on the branch it is handed back — a
+    // mismatch between the two un-dedups the open and brings the 409 back
+    // while every isolated test above still passes.
+    let releaseList: (v: unknown[]) => void = () => {};
+    listMine.mockReturnValue(
+      new Promise((resolve) => {
+        releaseList = resolve;
+      }),
+    );
+    openApi.openChangeRequest.mockResolvedValue({
+      number: 3,
+      branch: BRANCH,
+      state: 'open',
+      touchedNodePaths: [],
+    });
+
+    const proposal = (file: string) =>
+      proposeKnowledgeChange({
+        repoRelativePath: file,
+        content: '# hi',
+        userEmail: rae.email,
+        userId: rae.id,
+        userName: 'Biz Two',
+      });
+    // Both fired before the slow list read has answered either — the exact
+    // "proposing again while one loads" window.
+    const both = Promise.all([proposal('Shared/one.md'), proposal('Shared/two.md')]);
+    releaseList([]);
+    const [a, b] = await both;
+
+    expect(listMine).toHaveBeenCalledTimes(1);
+    expect(gitApi.createBranch).toHaveBeenCalledTimes(1);
+    expect(openApi.openChangeRequest).toHaveBeenCalledTimes(1);
+    // Both files were written, which is the point of not serialising them.
+    expect(wsApi.writeFile).toHaveBeenCalledTimes(2);
+    expect(a.branch).toBe(BRANCH);
+    expect(b.branch).toBe(BRANCH);
+  });
+
+  it('gives a joined proposal its own attempt when the one it joined fails', async () => {
+    // The first flow's failure is not the second's answer. The case that
+    // matters: the connection dropped AFTER the server created the row, so
+    // the second flow's own open meets the duplicate refusal and adopts the
+    // request — where joining would have reported "Couldn't add change
+    // request" about a request that exists.
+    let reject: (e: unknown) => void = () => {};
+    openApi.openChangeRequest
+      .mockReturnValueOnce(
+        new Promise((_resolve, rej) => {
+          reject = rej;
+        }),
+      )
+      .mockRejectedValueOnce(duplicate409(9));
+    detailApi.fetchPrDetail.mockResolvedValue({
+      number: 9,
+      branch: BRANCH,
+      state: 'open',
+      touchedNodePaths: ['Shared/two.pdf'],
+    });
+
+    const first = ensureKnowledgeChangeRequest(target(), 'Biz Two');
+    const second = ensureKnowledgeChangeRequest(target(), 'Biz Two');
+    reject(new Error('network error'));
+
+    await expect(first).rejects.toThrow('network error');
+    const adopted = await second;
+    expect(adopted?.number).toBe(9);
+    expect(openApi.openChangeRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives a joined workspace-ensure its own attempt when the one it joined fails', async () => {
+    let reject: (e: unknown) => void = () => {};
+    listMine
+      .mockReturnValueOnce(
+        new Promise((_resolve, rej) => {
+          reject = rej;
+        }),
+      )
+      .mockResolvedValue([{ number: 5, state: 'open', branch: BRANCH }]);
+
+    const first = ensureKnowledgeSuggestionWorkspace(rae);
+    const second = ensureKnowledgeSuggestionWorkspace(rae);
+    reject(new Error('offline'));
+
+    await expect(first).rejects.toThrow('offline');
+    expect((await second).existingCr).toMatchObject({ number: 5 });
+    expect(listMine).toHaveBeenCalledTimes(2);
   });
 
   it('re-reads the list for a proposal made after the last one settled', async () => {
