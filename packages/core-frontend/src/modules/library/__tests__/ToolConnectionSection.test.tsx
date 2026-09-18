@@ -541,21 +541,40 @@ describe('ToolConnectionSection', () => {
         .filter((c) => md.has(c));
     })();
 
-    /**
-     * Every action on screen that is NOT small, named by what it reads as —
-     * so a failure says which control drifted rather than only how many did.
-     */
-    function notSmall(): string[] {
-      const controls = [
+    /** Every action the section is currently offering. */
+    function actions(): HTMLElement[] {
+      return [
         ...screen.queryAllByRole('button'),
         ...screen
           .queryAllByRole('link')
           .filter((el) => FRAME.every((c) => el.className.split(' ').includes(c))),
       ];
-      // A case that rendered no controls at all would satisfy every assertion
-      // below while proving nothing.
-      expect(controls.length).toBeGreaterThan(0);
-      return controls
+    }
+
+    /**
+     * What those actions call themselves. Size alone cannot hold a case
+     * honest: `notSmall()` reads nothing into a control that is absent, and
+     * every fixture below carries Open Secrets — a link that is always small —
+     * so a branch that stopped rendering its action entirely would leave
+     * `notSmall()` just as empty as one that sized it correctly. Each case
+     * names the actions it expects first, and the size assertion then speaks
+     * about a cast already known to be complete.
+     */
+    function actionNames(): string[] {
+      return actions()
+        .map(
+          (el) =>
+            el.getAttribute('aria-label') ?? (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        )
+        .sort();
+    }
+
+    /**
+     * Every action on screen that is NOT small, named by what it reads as —
+     * so a failure says which control drifted rather than only how many did.
+     */
+    function notSmall(): string[] {
+      return actions()
         .filter((el) => {
           const classes = el.className.split(' ');
           return !SMALL.every((c) => classes.includes(c)) || TINY.some((c) => classes.includes(c));
@@ -581,6 +600,7 @@ describe('ToolConnectionSection', () => {
       renderSection(tool());
       const link = screen.getByRole('link', { name: 'Open Secrets' });
       expect(SMALL.every((c) => link.className.split(' ').includes(c))).toBe(true);
+      expect(actionNames()).toEqual(['Open Secrets', 'Test connection: github'].sort());
       expect(notSmall()).toEqual([]);
     });
 
@@ -610,19 +630,24 @@ describe('ToolConnectionSection', () => {
 
     // Between them these cover every button the section can render: the header
     // pair, the banner's action, and each branch of the row matrix.
-    it.each<[string, ToolSecrets]>([
+    it.each<[string, ToolSecrets, string[]]>([
       [
-        // Test connection, Open Secrets, Reconnect, Replace client secret,
-        // Replace, Remove.
         'a settled tool an owner is looking at',
         tool({
           setup: { kind: 'oauth-manual' },
           canWrite: true,
           variables: [signIn({ authorized: true }), sharedKey()],
         }),
+        [
+          'Test connection: github',
+          'Open Secrets',
+          'Reconnect',
+          'Replace client secret',
+          'Replace',
+          'Remove',
+        ],
       ],
       [
-        // The banner's Set key, plus the rows' Set key and Add key.
         'a tool still waiting on its keys',
         tool({
           canWrite: true,
@@ -638,21 +663,28 @@ describe('ToolConnectionSection', () => {
             },
           ],
         }),
+        // The banner's Set key, plus the rows' own Set key and Add key.
+        ['Open Secrets', 'Set key', 'Set key: API_KEY', 'Add key'],
       ],
-      ['a sign-in nobody has done yet', tool({ variables: [signIn()] })],
+      ['a sign-in nobody has done yet', tool({ variables: [signIn()] }), ['Open Secrets', 'Sign in']],
       [
         'a sign-in that has to be done again',
         tool({ variables: [signIn({ authorized: true, needsReauth: true })] }),
+        ['Open Secrets', 'Sign in again'],
       ],
-      // Edit the tool file.
-      ['an oauth-manual setup the owner has not started', tool({ setup: OAUTH_MANUAL, canWrite: true })],
       [
-        // Set client secret.
+        'an oauth-manual setup the owner has not started',
+        tool({ setup: OAUTH_MANUAL, canWrite: true }),
+        ['Open Secrets', 'Edit the tool file'],
+      ],
+      [
         'a declared sign-in still missing its client secret',
         tool({ setup: OAUTH_MANUAL, canWrite: true, variables: [signIn({ adminConfigured: false })] }),
+        ['Open Secrets', 'Set client secret'],
       ],
-    ])('sizes every action small on %s', (_name, t) => {
+    ])('sizes every action small on %s', (_name, t, expected) => {
       renderSection(t);
+      expect(actionNames()).toEqual([...expected].sort());
       expect(notSmall()).toEqual([]);
     });
 
@@ -660,6 +692,12 @@ describe('ToolConnectionSection', () => {
       renderSection(tool({ canWrite: true, variables: [sharedKey()] }));
       fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
       expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
+      // The row keeps its own actions while the editor is open, so Save and
+      // Cancel are joining a row rather than replacing it — which is exactly
+      // why they have to match the height of what they stand next to.
+      expect(actionNames()).toEqual(
+        ['Test connection: github', 'Open Secrets', 'Replace', 'Remove', 'Save', 'Cancel'].sort(),
+      );
       expect(notSmall()).toEqual([]);
     });
   });
