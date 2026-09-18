@@ -7,14 +7,29 @@ import { AuthContext, type AuthContextValue } from '../../auth/state/auth.contex
 import {
   createAccount,
   deleteAccount,
+  getAccountReferences,
   listAccounts,
+  type AccountReferences,
 } from '../../auth/services/account.api';
 
 vi.mock('../../auth/services/account.api', () => ({
   createAccount: vi.fn(),
   deleteAccount: vi.fn(),
+  getAccountReferences: vi.fn(),
   listAccounts: vi.fn(),
 }));
+
+const REFS = {
+  roles: 1,
+  groups: 2,
+  accessRules: 3,
+  fileGrants: 1,
+  total: 7,
+  files: ['Sales/Plan.md', 'Sales/access.md', 'groups.yaml', 'roles.yaml'],
+  removable: true,
+  blockedReason: null,
+  unwritable: [] as string[],
+};
 
 const ME = { id: 'admin-1', email: 'admin@example.com', name: 'Admin' };
 const ALICE = {
@@ -86,7 +101,8 @@ beforeEach(() => {
       { ...ME, hasPassword: true, isEnvAdmin: false, createdAt: '2026-01-01T00:00:00Z' },
       ALICE,
     ]);
-  vi.mocked(deleteAccount).mockReset().mockResolvedValue(undefined);
+  vi.mocked(deleteAccount).mockReset().mockResolvedValue(null);
+  vi.mocked(getAccountReferences).mockReset().mockResolvedValue(REFS);
   vi.mocked(createAccount).mockReset().mockResolvedValue(undefined);
 });
 
@@ -218,9 +234,188 @@ describe('UserAccountsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
     const dialog = within(screen.getByRole('dialog'));
     await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
-    await waitFor(() => expect(deleteAccount).toHaveBeenCalledWith('u-alice'));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: true }),
+    );
     // List reloaded after the delete.
     expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('the confirmation counts where the address is named and offers removal, checked by default', async () => {
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        'Their address is named in 7 places: 1 role, 2 groups, 3 access rules and 1 file grant.',
+      ),
+    );
+    expect(getAccountReferences).toHaveBeenCalledWith('u-alice');
+    const option = dialog.getByRole('checkbox', {
+      name: 'Also remove them from roles, groups and access rules',
+    });
+    expect(option).toBeChecked();
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/will remain in those files/);
+  });
+
+  it('with the option off the dialog says the address remains, and the delete does not ask for removal', async () => {
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await userEvent.click(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    );
+    expect(screen.getByRole('dialog')).toHaveTextContent('Their address will remain in those files.');
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('names the files this admin cannot write, and still runs the removal for the rest', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    vi.mocked(deleteAccount).mockResolvedValueOnce({
+      ok: true,
+      removedFrom: ['Sales/access.md', 'groups.yaml', 'roles.yaml'],
+      stillNamedIn: ['Sales/Plan.md'],
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        '1 file you cannot write will keep the address: Sales/Plan.md.',
+      ),
+    );
+    expect(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+
+    // The removal really runs with the option ON — it cleans everything else.
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: true }),
+    );
+    // And the file it could not write is named again in the outcome.
+    await waitFor(() => screen.getByText(/Some files still name them/));
+    expect(screen.getByText('Sales/Plan.md')).toBeInTheDocument();
+  });
+
+  it('with the option off, the unwritable-files warning goes away', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: ['Sales/Plan.md'] });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent(/you cannot write/));
+    await userEvent.click(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    );
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/you cannot write/);
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('says so when it could not tell which files this admin can write', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({ ...REFS, unwritable: null });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        /Which of these files you can write could not be checked/,
+      ),
+    );
+    // Unknown is not "none", and not a reason to refuse the removal. The
+    // definite "N files ...: <list>" line belongs to a check that DID run.
+    expect(screen.getByRole('dialog')).not.toHaveTextContent(/\d+ files? you cannot write/);
+    expect(
+      dialog.getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+  });
+
+  it('the deployment owner / last Admin cannot be removed this way: option disabled with the reason', async () => {
+    vi.mocked(getAccountReferences).mockResolvedValue({
+      ...REFS,
+      removable: false,
+      blockedReason: 'This is the last Admin; the Admin role must keep at least one direct email member.',
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent(/last Admin/));
+    const option = dialog.getByRole('checkbox', {
+      name: 'Also remove them from roles, groups and access rules',
+    });
+    expect(option).toBeDisabled();
+    expect(option).not.toBeChecked();
+    expect(screen.getByRole('dialog')).toHaveTextContent('Their address will remain in those files.');
+    await userEvent.click(dialog.getByRole('button', { name: 'Delete account' }));
+    await waitFor(() =>
+      expect(deleteAccount).toHaveBeenCalledWith('u-alice', { removeFromAccess: false }),
+    );
+  });
+
+  it('a failed removal commit still reloads the (deleted) list and lists the files that still name the user', async () => {
+    vi.mocked(deleteAccount).mockResolvedValueOnce({
+      ok: false,
+      error: 'Roles are being edited by Sam. Try again in a moment.',
+      removedFrom: [],
+      stillNamedIn: ['Sales/access.md', 'roles.yaml'],
+    });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(/The account was deleted, but removing them .* failed: Roles are being edited by Sam/);
+    expect(within(alert).getByText('Sales/access.md')).toBeInTheDocument();
+    expect(within(alert).getByText('roles.yaml')).toBeInTheDocument();
+    expect(listAccounts).toHaveBeenCalledTimes(2);
+  });
+
+  it('a slower references answer for an account opened earlier does not land in a later dialog', async () => {
+    vi.mocked(listAccounts).mockResolvedValue([ALICE, BOB]);
+    let answerAlice: (refs: AccountReferences) => void = () => {};
+    vi.mocked(getAccountReferences).mockImplementation((id: string) =>
+      id === 'u-alice'
+        ? new Promise((resolve) => {
+            answerAlice = resolve;
+          })
+        : Promise.resolve({ ...REFS, total: 1, roles: 1, groups: 0, accessRules: 0, fileGrants: 0 }),
+    );
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account bob@example.com' }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('named in 1 place: 1 role'));
+    answerAlice({ ...REFS, removable: false, blockedReason: 'This is the last Admin.' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('named in 1 place: 1 role');
+    expect(dialog).not.toHaveTextContent(/last Admin/);
+    expect(
+      within(dialog).getByRole('checkbox', { name: 'Also remove them from roles, groups and access rules' }),
+    ).toBeChecked();
+  });
+
+  it('a removal whose re-scan failed says the remaining files could not be checked', async () => {
+    vi.mocked(deleteAccount).mockResolvedValueOnce({ ok: true, removedFrom: ['roles.yaml'], stillNamedIn: null });
+    renderPage();
+    await waitFor(() => screen.getByText('Alice'));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete account alice@example.com' }));
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete account' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/could not be checked/));
+    expect(screen.getByRole('alert')).toHaveTextContent(/roles, groups, access rules and file grants/);
   });
 
   it('a failed delete closes the dialog, surfaces the error, and does not reload', async () => {

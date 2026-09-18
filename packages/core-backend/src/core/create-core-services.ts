@@ -55,6 +55,7 @@ import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
 import { AccessControlService } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
+import { UserAccessRemovalService } from '../modules/access/user-access-removal.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
 import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
@@ -224,6 +225,8 @@ export interface CoreServices {
   adminAccess: AdminAccessService;
   /** Manual-mode groups CRUD + the manual→IdP retirement half. */
   groupsAdminService: GroupsAdminService;
+  /** Removes a deleted account's address from roles, groups and access rules. */
+  userAccessRemovalService: UserAccessRemovalService;
   /**
    * Build the debounced directory → `synced-groups.yaml` materializer for a
    * directory source an OVERLAY provides (e.g. a SCIM mirror fed by the IdP's
@@ -990,6 +993,19 @@ export async function createCoreServices(
     () => DEFAULT_BRANCH,
     eventBus,
   );
+  // Account deletion's optional half: the erased address out of roles.yaml,
+  // groups.yaml and every access rule, in one commit on the default branch.
+  // The deployment owner is never removed this way.
+  const userAccessRemovalService = new UserAccessRemovalService(
+    workspaceService,
+    workflowService,
+    accessControl,
+    disk,
+    kbDirName,
+    () => DEFAULT_BRANCH,
+    eventBus,
+    [config.adminEmail],
+  );
 
   return {
     config,
@@ -1039,6 +1055,7 @@ export async function createCoreServices(
     recoveryBot,
     adminAccess,
     groupsAdminService,
+    userAccessRemovalService,
     createSyncedGroupsMaterializer,
     updateCheckService,
     secretsVaultService,
