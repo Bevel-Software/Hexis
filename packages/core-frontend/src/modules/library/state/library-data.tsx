@@ -1,4 +1,4 @@
-import { PR_STALE_EVENT } from '../../../core/events';
+import { PR_STALE_EVENT, TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode,  } from 'react';
 import { LibraryContext } from './library-context';
 import { SKILLS_DIR } from '@bevel-software/platform-shared';
@@ -290,6 +290,18 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     const onStale = () => reloadAll();
     window.addEventListener(PR_STALE_EVENT, onStale);
     return () => window.removeEventListener(PR_STALE_EVENT, onStale);
+  }, [reloadAll]);
+
+  // A credential landing anywhere in the app is a catalog change here: every
+  // "needs setup" in the Library — the cards, the plugin page's banner, the
+  // sidebar count — is derived from the tool rows this catalog carries, and
+  // they were loaded before the save. The tool page re-probes itself, which is
+  // why the bug only ever showed up one click LATER: on the page the reader
+  // went back to.
+  useEffect(() => {
+    const onCredentials = () => reloadAll();
+    window.addEventListener(TOOL_CREDENTIALS_STALE_EVENT, onCredentials);
+    return () => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, onCredentials);
   }, [reloadAll]);
 
   const value = useMemo(

@@ -1,7 +1,8 @@
 /**
- * Window-level custom-event names shared across modules. Centralised here so
- * core and registry-contributed (enterprise) modules agree on the same wire
- * names without importing each other's components.
+ * Window-level custom-event names — and the one announcer that goes with one —
+ * shared across modules. Centralised here so core and registry-contributed
+ * (enterprise) modules agree on the same wire names without importing each
+ * other's components.
  */
 
 /**
@@ -57,4 +58,34 @@ export interface OpenComparisonDetail {
   path: string;
   fromBranch: string;
   toBranch: string;
+}
+
+/**
+ * A tool credential LANDED — a key stored or removed, an OAuth round-trip
+ * returned. Every surface that can write one (the tool page, "Connect your
+ * tools", the Secrets vault, the `.tool` editor's panel) announces it, and the
+ * Library reloads its catalog AND its plugin summaries in response: the cards,
+ * the plugin banner and the sidebar count all read "needs setup" off that
+ * catalog, so without the reload they keep describing the state from before
+ * the write until the reader reaches for the browser's own reload button.
+ *
+ * An event rather than a direct call because the writing surfaces do not all
+ * live under the Library's provider: `/connect` and `/secrets` are shell
+ * routes of their own, so there is nothing to reach for from inside them.
+ * Announcing regardless keeps ONE rule for every surface — with no listener
+ * the announcement is simply unheard, which is the right outcome for a
+ * provider that will refetch on its next mount anyway.
+ */
+export const TOOL_CREDENTIALS_STALE_EVENT = 'bevel:tool-credentials-stale';
+
+/**
+ * Announce a landed credential change.
+ *
+ * Call it ONLY once the write has SUCCEEDED. A failed save changed nothing,
+ * and a reload triggered by one would make every card and banner in the
+ * Library blink for no reason — worse, it would teach the reader that the
+ * blink means something happened.
+ */
+export function announceToolCredentialsChanged(): void {
+  window.dispatchEvent(new Event(TOOL_CREDENTIALS_STALE_EVENT));
 }

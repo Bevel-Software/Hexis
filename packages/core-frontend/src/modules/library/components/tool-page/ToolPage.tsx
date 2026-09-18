@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
+import { announceToolCredentialsChanged } from '../../../../core/events';
 import { useToolPage } from '../../hooks/useToolPage';
 import { useToolSource } from '../../hooks/useToolSource';
 import { McpServerSection } from './McpServerSection';
@@ -65,9 +66,14 @@ export function ToolPage({
     // mcp-declared tool the `?server=<slug>` param is the page's identity, and
     // replacing with the bare pathname stranded a refresh (or any URL copy) on
     // the ambiguous mcp.json address, which bounces to the plugin page.
-    if (oauthOutcome) {
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    }
+    if (!oauthOutcome) return;
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    // Authorized OR error: a round-trip we did not perform ourselves has just
+    // had its say about this tool's sign-in, so what the catalog believes
+    // about it is an answer from before the browser left. An error is not a
+    // failed save — nothing here wrote anything, and the outcome we were
+    // handed is the only evidence either way — so both outcomes re-read.
+    announceToolCredentialsChanged();
   }, [oauthOutcome]);
 
   // Same rule as the skill page: back goes to the page the tool LIVES on —
