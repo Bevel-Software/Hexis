@@ -72,7 +72,15 @@ export const AGENT_CLIENTS: AgentClient[] = [
   {
     id: 'local',
     label: 'Desktop agents',
-    hint: 'For Claude Code, Claude Desktop, Cursor, Windsurf, Cline and any agent that runs on your machine: everything the hosted address gives, plus your plugins’ local-only tools. Needs Node. The first time it starts, your browser opens so you can sign in.',
+    // The PATH sentence is the second half of this hint because it is the
+    // failure people actually hit. A GUI-launched app — Cursor, or Claude
+    // Desktop on macOS — is started by the window server rather than by a
+    // login shell, so it never sources the profile that put Homebrew's or
+    // nvm's `npx` on PATH: the configuration is correct and the client still
+    // reports that npx was not found. The way out is a substitution the
+    // READER makes in their own copy, which is why the snippet itself stays
+    // the plain `npx` that works everywhere else.
+    hint: 'For Claude Code, Claude Desktop, Cursor, Windsurf, Cline and any agent that runs on your machine: everything the hosted address gives, plus your plugins’ local-only tools. Needs Node 22 or 24. The first time it starts, your browser opens so you can sign in. If the client reports that npx was not found, it was launched from the Dock or a desktop icon and cannot see your shell’s PATH — run `which npx` in a terminal and put the full path it prints in place of "npx" in the configuration below.',
     // The passed endpoint is deliberately unused: the local server takes the
     // WORKSPACE address and asks it for the MCP endpoint itself
     // (`GET /api/config`), so the URL every other client pastes is the wrong

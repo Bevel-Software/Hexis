@@ -311,6 +311,21 @@ export function ExternalAgentAccessPage() {
                   </p>
                   <CopyBlock label={null} value={hexisMcpJsonSnippet(workspaceUrl)} rows={12} />
                 </div>
+                {/* The same note the welcome page's Desktop agents hint carries,
+                    and for the same reason: this is the config a GUI-launched
+                    client reads, and that client was started by the window
+                    server rather than by a login shell, so it never sourced the
+                    profile that put Homebrew's or nvm's `npx` on PATH. The
+                    snippet above stays plain `npx` — it is right for every
+                    client launched from a terminal — and this says what to
+                    substitute in the copy that is not. */}
+                <p className="text-meta text-ink-muted leading-snug">
+                  Needs Node 22 or 24 on the machine. If the client reports that{' '}
+                  <span className="font-mono">npx</span> was not found, it was launched from the
+                  Dock or a desktop icon and cannot see your shell's PATH: run{' '}
+                  <span className="font-mono">which npx</span> in a terminal and use the full path
+                  it prints as the <span className="font-mono">"command"</span> above.
+                </p>
               </div>
             </details>
 

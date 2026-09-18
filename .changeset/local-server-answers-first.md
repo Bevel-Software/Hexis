@@ -1,0 +1,13 @@
+---
+'@bevel-software/hexis-mcp': minor
+'@bevel-software/platform-mcp-core': patch
+'@bevel-software/platform-core-frontend': patch
+---
+
+The local MCP server now answers its client's `initialize` straight away and discovers the workspace's tools in the background. Everything expensive — fetching the manuals, downloading every plugin archive, spawning each plugin's local server, building the UTCP client, discovering tools — used to run *before* `server.connect`, so a cold `npx -y @bevel-software/hexis-mcp` had to finish all of it inside the client's handshake timeout (Claude Code allows 30 seconds) and did not. Only the two small JSON reads that the handshake's own answer depends on stay in front of it: `GET /api/config`, and the agent instructions, which travel in the `initialize` result. `tools/list`, `tools/call`, `prompts/list` and `prompts/get` wait for discovery and then answer exactly as before.
+
+A discovery failure no longer kills the process. The server stays connected and says why on stderr, and `tools/list` answers with a single tool named `hexis_unavailable` whose description carries the reason (`tools/call` gets the standard MCP error). An empty toolset is what a correctly configured but tool-less workspace looks like, so a client showing one would have given its reader nothing to act on. Whatever the failed discovery had already built — including any spawned plugin servers — is released; only the MCP server survives, because it is how the reason reaches the client.
+
+The supported Node range is widened from `>=22.13 <23` to `>=22.13 <23 || >=24 <25`, which is exactly the majors `isolated-vm@6.1.2` publishes a prebuilt binary for (abi127 and abi137); Node 23 is excluded deliberately, since a range that included it would promise a version that compiles C++ on the user's machine. CI now runs the `hexis-mcp` suite on both majors, and a test fails if the constant, the `engines` field, the CI matrix and the documentation ever disagree. On an unsupported major — or when the native module resolves but will not load — the command prints one sentence naming the supported versions and how to select one, then exits non-zero, instead of dying in an `ERR_DLOPEN_FAILED` stack trace while `@utcp/code-mode` is being imported.
+
+The Desktop agents instructions, on the welcome page and on External agent access, now say that a client launched from the Dock or a desktop icon (Cursor, Claude Desktop on macOS) was not started by a login shell and may not see `npx` on PATH at all, and that `which npx` prints the full path to use as `"command"`. The JSON snippet itself is unchanged — an absolute path is specific to one machine. The README and the troubleshooting guide state the supported Node versions and the same PATH note.

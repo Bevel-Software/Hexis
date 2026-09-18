@@ -10,6 +10,10 @@ This command closes that gap by being where those tools actually are, without gi
 npx @bevel-software/hexis-mcp --url https://your-workspace.example
 ```
 
+**Needs Node 22 or 24.** Those are the majors this server's sandbox (`isolated-vm`) publishes a prebuilt binary for; on any other version it would compile C++ on your machine, so the command refuses with one sentence instead. Select one with `nvm use 22`, or point your MCP client's `"command"` straight at that version's `node`.
+
+The server answers a client's `initialize` immediately and discovers your workspace's tools in the background, so a first run that downloads the package and every plugin does not trip a client's handshake timeout. `tools/list` waits for that discovery and then answers normally; if it fails, the failure arrives as a tool named `hexis_unavailable` whose description says why, and on stderr — the process stays up rather than disappearing.
+
 ## Signing in
 
 Two ways in, and whether you pass a key decides:
@@ -75,6 +79,10 @@ The MCP endpoint itself is not a setting: the server asks the deployment for it 
 
 Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surface them as server logs.
 
+- **The client says `npx` (or `ENOENT`) was not found** — the client was launched from the Dock, the Start menu or a desktop icon, so it was started by the window server rather than by a login shell and never read the profile that put Homebrew's or nvm's `npx` on PATH. Cursor and Claude Desktop on macOS are the usual pair. Run `which npx` in a terminal and use the full path it prints as `"command"`; the `args` stay as they are. (Running the same configuration from a terminal-launched client works, which is what makes this look like a broken config rather than a missing PATH.)
+- *"hexis-mcp runs on Node 22 or 24"* — this process is on some other major. The sandbox is a native module with no prebuilt binary there, and building it would be a C++ compile on your machine. `nvm use 22`, or set `"command"` to a supported version's `node` binary — a GUI-launched client cannot be fixed by switching versions in a terminal, because it never reads that shell.
+- *"hexis-mcp could not load its native sandbox"* — the Node major is supported but the binary will not load: usually an install that was copied between machines or architectures. Reinstall (`npx -y` again, or delete `node_modules` and install) on the machine that runs it.
+- **The only tool listed is `hexis_unavailable`** — discovery failed after the handshake; its description carries the reason, and the same sentence is in the server's stderr log. The server stays connected on purpose, so the reason reaches you instead of the client reporting that it died. Fix the cause and restart it.
 - *"The connection key was rejected"* — the key is invalid or revoked, or belongs to another workspace. Mint a new one in External agent access. The process exits instead of offering a browser sign-in. Claude Code shows only that the server failed; `claude mcp get <name>` or running the command in a terminal shows the message.
 - *"Your sign-in was rejected"* / *"could not be refreshed"* — the workspace revoked the sign-in, or it expired. Restart the command to sign in through your browser again.
 - *"This deployment is too old for browser sign-in"* — the workspace predates the sign-in exchange. Upgrade it, or pass a connection key.

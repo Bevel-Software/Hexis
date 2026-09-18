@@ -65,4 +65,20 @@ export {
   type OAuthModeOptions,
 } from './oauth.js';
 export { REMOTE_MANUAL_NAME, remoteManualTemplate, localManualTemplates } from './manuals.js';
-export { createHexisMcpServer, listedTools, type HexisMcpHandle } from './server.js';
+export {
+  createHexisMcpServer,
+  listedTools,
+  discoveryNoticeTool,
+  DISCOVERY_NOTICE_TOOL,
+  type HexisMcpHandle,
+} from './server.js';
+export {
+  SUPPORTED_NODE_MAJORS,
+  preflight,
+  nodeMajor,
+  unsupportedNodeSentence,
+  nativeSandboxSentence,
+  loadNativeSandbox,
+  type PreflightOptions,
+  type NativeSandboxProbe,
+} from './preflight.js';

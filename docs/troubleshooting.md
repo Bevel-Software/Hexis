@@ -34,6 +34,31 @@ repository. The setup screen's test tells you which half failed. On GitHub,
 fine-grained tokens also need the repository explicitly selected, not just the
 right scopes.
 
+## Desktop agents (the local MCP server)
+
+The `npx -y @bevel-software/hexis-mcp` command from **Connect** → Desktop
+agents, on the machine the agent runs on.
+
+**The client says `npx` was not found, but it runs fine in a terminal**
+The client was launched from the Dock, the Start menu or a desktop icon, so it
+was started by the window server rather than by a login shell and never read
+the profile that puts Homebrew's or nvm's `npx` on PATH. Cursor and Claude
+Desktop on macOS are the usual pair. Run `which npx` in a terminal and use the
+full path it prints as the `"command"` in the configuration; leave `args`
+alone.
+
+**The server prints one sentence about Node and exits**
+It runs on **Node 22 or 24** — exactly the majors its sandbox (`isolated-vm`)
+publishes a prebuilt binary for; on any other major it would compile C++ on the
+user's machine, so it refuses instead. `nvm use 22` fixes a terminal-launched
+client. A GUI-launched one never reads that shell, so point its `"command"` at
+a supported version's `node` binary.
+
+**The only tool is `hexis_unavailable`**
+Discovery failed after the handshake. Its description carries the reason, and
+the same sentence is on the server's stderr (MCP clients show this as the
+server log). The server stays up deliberately, so the reason reaches you.
+
 ## Local development
 
 **`pnpm install` fails on Node version**

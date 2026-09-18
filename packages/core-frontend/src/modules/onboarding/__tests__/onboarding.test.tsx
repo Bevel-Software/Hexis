@@ -439,6 +439,25 @@ describe('WelcomePage', () => {
   });
 
   /**
+   * The two ways this snippet fails on a machine where it is otherwise
+   * right: the wrong Node major, and a client launched from the Dock, which
+   * was started by the window server and so never read the shell profile
+   * that put `npx` on PATH (Cursor and Claude Desktop on macOS). The fix for
+   * the second is an absolute path, which is specific to one machine — so it
+   * belongs in the hint and NOT in the snippet, which has to stay right for
+   * every reader whose PATH was fine all along.
+   */
+  it('warns Desktop agents about Node and PATH, leaving the snippet on bare npx', async () => {
+    mountPage();
+    await userEvent.click(screen.getByRole('radio', { name: 'Desktop agents' }));
+    expect(screen.getByText(/Needs Node 22 or 24/)).toBeInTheDocument();
+    expect(screen.getByText(/cannot see your shell’s PATH/)).toBeInTheDocument();
+    expect(screen.getByText(/run `which npx` in a terminal/)).toBeInTheDocument();
+    const snippet = screen.getByText(/mcpServers/).textContent!;
+    expect(JSON.parse(snippet).mcpServers['skills-tools-knowledge'].command).toBe('npx');
+  });
+
+  /**
    * One click instead of a menu path. It is Claude-only because Claude is the
    * only client with a documented install link, and it appears only when
    * Anthropic could actually reach this deployment — see `canDeepLink`. The

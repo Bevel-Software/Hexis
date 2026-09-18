@@ -226,6 +226,27 @@ describe('the interactive tab: Claude and ChatGPT first, each family on its own 
   });
 
   /**
+   * The two things that stop this configuration working on a machine where it
+   * is otherwise correct: the wrong Node major, and a client that cannot see
+   * `npx` because it was launched from the Dock rather than from a shell. The
+   * SNIPPET must not try to fix the second one — an absolute path is specific
+   * to one machine, and baking one in would break every reader whose PATH was
+   * fine — so the prose beside it is the only place this can be said.
+   */
+  it('warns Desktop agents about Node and PATH without touching the snippet', () => {
+    mount(PUBLIC_URL);
+    const desktop = screen
+      .getByText('Desktop agents: Claude Code, Claude Desktop, Cursor, Windsurf, Cline and similar')
+      .closest('details') as HTMLElement;
+    expect(within(desktop).getByText(/Needs Node 22 or 24/)).toBeInTheDocument();
+    expect(within(desktop).getByText(/cannot see your shell's PATH/)).toBeInTheDocument();
+    expect(within(desktop).getByText('which npx')).toBeInTheDocument();
+    // The snippet still spawns the bare `npx`, for every client that can find it.
+    const json = snippets().find((v) => v.includes('mcpServers') && v.includes('"command"'));
+    expect(JSON.parse(json!).mcpServers['skills-tools-knowledge'].command).toBe('npx');
+  });
+
+  /**
    * The regression stated as a negative, per family: a hosted snippet
    * quoting the origin means one of the six sites quietly went back to
    * deriving it, and a local snippet quoting the configured endpoint would
