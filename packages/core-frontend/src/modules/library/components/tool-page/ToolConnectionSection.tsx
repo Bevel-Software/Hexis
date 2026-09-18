@@ -275,7 +275,7 @@ export function ToolConnectionSection({
           {settled && (
             <Button
               variant="quiet"
-              size="tiny"
+              size="sm"
               disabled={checking}
               onClick={() => void runCheck()}
               aria-label={`Test connection: ${tool.name}`}
@@ -283,7 +283,7 @@ export function ToolConnectionSection({
               {checking ? 'Testing…' : 'Test connection'}
             </Button>
           )}
-          <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'tiny' })}>
+          <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'sm' })}>
             Open Secrets
           </Link>
         </div>
@@ -315,7 +315,7 @@ export function ToolConnectionSection({
               {kbDirName && !isMcpJsonServer && (
                 <Button
                   variant="quiet"
-                  size="tiny"
+                  size="sm"
                   className="mt-1.5"
                   // `rawFile` asks the item route for the raw editor: this
                   // URL is the tool page's own canonical address, and the
