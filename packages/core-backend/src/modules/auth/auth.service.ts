@@ -96,15 +96,13 @@ export class AuthService {
 
     const provided = password ?? '';
     const isEnvAdmin =
-      this.config.adminEmail.length > 0 &&
-      this.config.adminPassword.length > 0 &&
-      normalizedEmail === this.config.adminEmail &&
+      this.isEnvAdminEmail(normalizedEmail) &&
       timingSafeStringEqual(provided, this.config.adminPassword);
 
     if (isEnvAdmin) {
       const defaultName = normalizedEmail.split('@')[0] || normalizedEmail;
       const user = await this.upsertUserByEmail(normalizedEmail, defaultName);
-      return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
+      return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
     }
 
     const [user] = await this.db
@@ -121,7 +119,7 @@ export class AuthService {
     if (!user?.passwordHash || !matches) {
       throw new Error('Invalid credentials');
     }
-    return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
+    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
 
   /**
@@ -142,7 +140,7 @@ export class AuthService {
     this.assertAllowedDomain(normalizedEmail);
     const displayName = (name ?? '').trim() || normalizedEmail.split('@')[0] || normalizedEmail;
     const user = await this.upsertUserByEmail(normalizedEmail, displayName);
-    return { token: this.signToken(user.id, user.email), user: toAuthUser(user) };
+    return { token: this.signToken(user.id, user.email), user: this.toClientUser(user) };
   }
 
   /**
@@ -178,23 +176,71 @@ export class AuthService {
           : { passwordHash, updatedAt: new Date() },
       })
       .returning();
-    return toAuthUser(row);
+    return this.toClientUser(row);
+  }
+
+  /**
+   * Is `email` the deployment admin — the account whose password is set in
+   * the deployment environment (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set)
+   * rather than stored on its row? The single definition behind
+   * {@link loginWithPassword} (which additionally verifies the environment
+   * password), {@link changePassword} (which refuses), {@link toClientUser}
+   * and {@link listAccounts}, so those four can never disagree about who the
+   * deployment admin is. `email` must already be canonical.
+   */
+  private isEnvAdminEmail(email: string): boolean {
+    return (
+      this.config.adminEmail.length > 0 &&
+      this.config.adminPassword.length > 0 &&
+      email === this.config.adminEmail
+    );
+  }
+
+  /**
+   * {@link toAuthUser} plus the one fact that is not on the row: whether this
+   * is the deployment admin. Computed from the configuration on each read
+   * rather than stored, so unsetting `ADMIN_PASSWORD` turns the flag off at
+   * once and the account goes back to being an ordinary one — the same
+   * reasoning that keeps the credential itself out of the database. Every
+   * path that hands a user to a client goes through here, so the Account page
+   * sees the same answer whether it came from a fresh login or `/auth/me`.
+   */
+  private toClientUser(user: Parameters<typeof toAuthUser>[0]): AuthUser {
+    return { ...toAuthUser(user), isEnvAdmin: this.isEnvAdminEmail(user.email) };
   }
 
   /**
    * Self-service password change (the Account page). The current password is
    * required whenever one is set; an SSO-only account (no hash yet) may set
-   * its first password without one. The env bootstrap-admin credential is not
-   * affected — it lives in the environment, not in this row.
+   * its first password without one.
+   *
+   * The deployment admin is refused outright. Its password lives in the
+   * environment, so a stored hash would not replace it: both credentials
+   * would then sign in, the planted one would survive rotating
+   * `ADMIN_PASSWORD`, and every later change typing the environment password
+   * as the current one would be refused against that stray hash. Worse, the
+   * account starts with no hash, so without this guard the "SSO-only first
+   * password" path below accepts a WRONG current password — any holder of the
+   * session could plant a lasting credential without knowing one. The
+   * environment password is the platform's rescue path into a deployment and
+   * is changed there, which is what the Account page says in place of the
+   * form.
    */
   async changePassword(
     userId: string,
     currentPassword: string | undefined,
     newPassword: string,
   ): Promise<void> {
-    this.assertPasswordPolicy(newPassword);
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) throw new Error('User not found');
+    // Before the policy check, so the deployment admin is told the real reason
+    // rather than being sent to fix a password that would be refused anyway.
+    if (this.isEnvAdminEmail(user.email)) {
+      throw new Error(
+        "This account's password is set in the deployment environment and cannot be changed here",
+      );
+    }
+    this.assertPasswordPolicy(newPassword);
     if (user.passwordHash) {
       if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
         throw new Error('Current password is incorrect');
@@ -225,16 +271,12 @@ export class AuthService {
     }>
   > {
     const rows = await this.db.select().from(users).orderBy(users.email);
-    const envAdminEmail =
-      this.config.adminEmail.length > 0 && this.config.adminPassword.length > 0
-        ? this.config.adminEmail
-        : null;
     return rows.map((row) => ({
       id: row.id,
       email: row.email,
       name: row.name,
       hasPassword: row.passwordHash != null,
-      isEnvAdmin: envAdminEmail !== null && row.email === envAdminEmail,
+      isEnvAdmin: this.isEnvAdminEmail(row.email),
       createdAt: row.createdAt,
     }));
   }
@@ -318,7 +360,7 @@ export class AuthService {
 
     if (!user) return null;
 
-    return toAuthUser(user);
+    return this.toClientUser(user);
   }
 
   /**

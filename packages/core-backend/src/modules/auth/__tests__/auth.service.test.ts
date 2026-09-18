@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../database/connection.js';
 import type { CoreConfig } from '../../../core-config.js';
 import { AuthService } from '../auth.service.js';
-import { hashPassword } from '../password-hash.js';
+import { hashPassword, verifyPassword } from '../password-hash.js';
 
 /**
  * Minimal drizzle chain stub (same idiom as the secrets-vault tests): each
@@ -195,6 +195,158 @@ describe('AuthService.createAccount / changePassword', () => {
     await new AuthService(db, makeConfig()).changePassword('user-1', undefined, 'first-password');
     const set = captured.set[0] as { passwordHash: string };
     expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
+  });
+});
+
+/**
+ * The three kinds of account that reach the Account page's password change,
+ * and what separates them.
+ *
+ * The reported bug was "an administrator cannot change their password", and
+ * the first two cases pin down that ROLE is not the dividing line: the Admin
+ * role lives in `roles.yaml` and is read by `IAdminAccessService` for the
+ * admin routes — it never reaches this service, so an Admin-role account is
+ * the same row as a business user's and takes byte-identical paths here. The
+ * real divide is the DEPLOYMENT admin, whose password is in the environment.
+ */
+describe('AuthService.changePassword — the three account kinds', () => {
+  const ENV_ADMIN = { adminEmail: 'root@example.com', adminPassword: 'sup3r-secret' };
+
+  // (a) an Admin-role account and (b) a business user: same table, same code.
+  // Parameterised deliberately — one body proves the two are not distinguished
+  // rather than two bodies that could drift apart.
+  for (const kind of [
+    { label: 'an Admin-role account', email: 'admin-role@example.com', id: 'user-admin' },
+    { label: 'a business user', email: 'bob@example.com', id: 'user-bob' },
+  ]) {
+    describe(kind.label, () => {
+      const row = async () => ({
+        ...ROW,
+        id: kind.id,
+        email: kind.email,
+        passwordHash: await hashPassword('old-password'),
+      });
+
+      it('refuses a wrong current password', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        await expect(
+          new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+            kind.id,
+            'not-it',
+            'new-password-1',
+          ),
+        ).rejects.toThrow('Current password is incorrect');
+      });
+
+      it('refuses an omitted current password once one is set', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        await expect(
+          new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+            kind.id,
+            undefined,
+            'new-password-1',
+          ),
+        ).rejects.toThrow('Current password is incorrect');
+      });
+
+      it('applies the same password policy', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        await expect(
+          new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(kind.id, 'old-password', 'short'),
+        ).rejects.toThrow(/at least/);
+      });
+
+      it('stores a new hash for the right current password', async () => {
+        const { db, captured } = makeFakeDb([[await row()], undefined]);
+        await new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          kind.id,
+          'old-password',
+          'new-password-1',
+        );
+        const set = captured.set[0] as { passwordHash: string };
+        expect(set.passwordHash.startsWith('scrypt:')).toBe(true);
+        // The stored hash is the NEW password and no longer the old one, so
+        // the next sign-in behaves the way the tester expected.
+        expect(await verifyPassword('new-password-1', set.passwordHash)).toBe(true);
+        expect(await verifyPassword('old-password', set.passwordHash)).toBe(false);
+      });
+
+      it('is not flagged as the deployment admin', async () => {
+        const { db } = makeFakeDb([[await row()]]);
+        const user = await new AuthService(db, makeConfig(ENV_ADMIN)).getUserById(kind.id);
+        expect(user?.isEnvAdmin).toBe(false);
+      });
+    });
+  }
+
+  // (c) the deployment admin. Its password is the environment's, so a stored
+  // hash would not replace it — it would ADD a credential that also signs in,
+  // outlives rotating ADMIN_PASSWORD, and then makes every later attempt that
+  // types the environment password as the current one fail against the stray
+  // hash. Refused in the service, not only hidden on the page.
+  describe('the deployment admin', () => {
+    const rootRow = { ...ROW, id: 'user-root', email: 'root@example.com', passwordHash: null };
+
+    it('is refused, and nothing is written', async () => {
+      const { db, captured } = makeFakeDb([[rootRow], undefined]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          'user-root',
+          'sup3r-secret',
+          'new-password-1',
+        ),
+      ).rejects.toThrow(/set in the deployment environment/);
+      expect(captured.set).toHaveLength(0);
+    });
+
+    it('is refused without a current password too — the no-hash path no longer lets a session holder plant one', async () => {
+      const { db, captured } = makeFakeDb([[rootRow], undefined]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          'user-root',
+          undefined,
+          'new-password-1',
+        ),
+      ).rejects.toThrow(/cannot be changed here/);
+      expect(captured.set).toHaveLength(0);
+    });
+
+    it('is refused even once a hash exists, and the refusal names the real reason', async () => {
+      const passwordHash = await hashPassword('planted-password');
+      const { db } = makeFakeDb([[{ ...rootRow, passwordHash }], undefined]);
+      await expect(
+        new AuthService(db, makeConfig(ENV_ADMIN)).changePassword(
+          'user-root',
+          'planted-password',
+          'short',
+        ),
+        // Refused BEFORE the policy check: being sent to pick a longer password
+        // would be a lie about why the change cannot happen.
+      ).rejects.toThrow(/deployment environment/);
+    });
+
+    it('carries the flag to the client without any part of the credential', async () => {
+      const { db } = makeFakeDb([[rootRow]]);
+      const user = await new AuthService(db, makeConfig(ENV_ADMIN)).getUserById('user-root');
+      expect(user?.isEnvAdmin).toBe(true);
+      expect(JSON.stringify(user)).not.toContain('sup3r-secret');
+    });
+
+    it('is an ordinary account — form and all — while ADMIN_PASSWORD is unset', async () => {
+      const passwordHash = await hashPassword('old-password');
+      const config = makeConfig({ adminEmail: 'root@example.com', adminPassword: '' });
+      const flagged = await new AuthService(
+        makeFakeDb([[{ ...rootRow, passwordHash }]]).db,
+        config,
+      ).getUserById('user-root');
+      expect(flagged?.isEnvAdmin).toBe(false);
+
+      const { db, captured } = makeFakeDb([[{ ...rootRow, passwordHash }], undefined]);
+      await new AuthService(db, config).changePassword('user-root', 'old-password', 'new-password-1');
+      expect((captured.set[0] as { passwordHash: string }).passwordHash.startsWith('scrypt:')).toBe(
+        true,
+      );
+    });
   });
 });
 
