@@ -28,6 +28,7 @@
 export { type HexisMcpConfig, type ResolvedCliConfig, ConfigError, resolveConfig, USAGE } from './config.js';
 export {
   DeploymentError,
+  ConnectionKeyRejectedError,
   resolveMcpUrl,
   resolveDeployment,
   fetchAgentInstructions,
