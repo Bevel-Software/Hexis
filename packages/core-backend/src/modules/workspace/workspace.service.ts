@@ -1108,14 +1108,15 @@ export class WorkspaceService implements IWorkspaceService {
     assertNoGitInternalsSegment(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
-    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     // Under the path's turn like every other single-file mutation: a delete
     // landing between a conditional write's compare and its write would let
     // that write recreate the file the delete had just removed. The diff
     // baseline is updated inside the same turn, so two mutations of one path
-    // update it in the order they landed on disk.
+    // update it in the order they landed on disk. The resolved git check runs
+    // inside the turn too (see `withPathTurn`), so it cannot reorder callers.
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await fs.rm(absolutePath, { recursive: true, force: true });
       await this.diffService?.markUserDeleted(workspaceId, relativePath);
     });
@@ -1227,9 +1228,15 @@ export class WorkspaceService implements IWorkspaceService {
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
-    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
-    return this.withResolvedPathTurn(absolutePath, op);
+    // The resolved check reads the disk, and how long that takes depends on
+    // the spelling. Run before the queue, it let a later call overtake an
+    // earlier one for the same file; inside the turn, callers keep their order
+    // and `op` still never runs on a path that resolves into the git folder.
+    return this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
+      return op();
+    });
   }
 
   /**
@@ -1303,9 +1310,10 @@ export class WorkspaceService implements IWorkspaceService {
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
-    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     await this.withResolvedPathTurn(absolutePath, async () => {
+      // Inside the turn, beside the link check (see `withPathTurn`).
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await this.assertNotThroughLink(absolutePath, workspaceDir);
       // Compare BEFORE creating anything. The parent chain used to be made
       // first, so a refused save at `x/new-folder/note.md` left an empty
@@ -1360,13 +1368,13 @@ export class WorkspaceService implements IWorkspaceService {
     assertValidPath(relativePath);
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const absolutePath = path.resolve(workspaceDir, relativePath);
-    await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
     this.assertWithinWorkspace(absolutePath, workspaceDir);
     // An upload over a path is a mutation of that path, so it takes the same
     // turn as a text write: see {@link withPathTurn}. The whole of it — the
     // parent chain too, so a folder delete serialized before this turn
     // cannot remove the parent between its creation and the write.
     await this.withResolvedPathTurn(absolutePath, async () => {
+      await assertNotGitInternals(workspaceDir, relativePath, absolutePath);
       await this.assertNotThroughLink(absolutePath, workspaceDir);
       await fs.mkdir(path.dirname(absolutePath), { recursive: true });
       await fs.writeFile(absolutePath, data);
