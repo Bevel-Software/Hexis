@@ -40,6 +40,7 @@ import type {
   Change,
   ChangeInput,
   ChangeRequest,
+  ChangeRequestApplyFailureKind,
   ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestState,
@@ -53,7 +54,7 @@ import type {
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
 import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -88,6 +89,9 @@ const execFileAsync = promisify(execFile);
 
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
+
+/** Cap on a persisted apply refusal — long enough to name the files a gate waits on. */
+const APPLY_FAILURE_MAX_LEN = 1000;
 
 /**
  * True only for a Postgres unique violation (23505) on the open-CR-per-pair
@@ -575,6 +579,15 @@ export class WorkflowService implements IWorkflowService {
    * workspace, merged with whatever that sync finds.
    */
   private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
+
+  /**
+   * The latest RUNNING apply attempt per change-request number (see
+   * `beginApplyAttempt`). Entries leave when their attempt ends, so the map
+   * holds only attempts in flight, never every number anyone ever posted.
+   */
+  private readonly applyAttempts = new Map<number, number>();
+  /** Process-wide attempt counter: a token is never reissued, even after its entry leaves. */
+  private applyAttemptSeq = 0;
 
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
@@ -1820,6 +1833,9 @@ export class WorkflowService implements IWorkflowService {
         { kind: 'change-request-not-open', state: detail.state },
       );
     }
+    // Taken BEFORE the head moves: only a refusal recorded earlier describes
+    // the revision this replaces (see `clearApplyFailure`).
+    const headMovedAfter = new Date();
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,
@@ -1833,6 +1849,8 @@ export class WorkflowService implements IWorkflowService {
     // already up to date there's nothing to share — short-circuit the push.
     if (!outcome.alreadyUpToDate) {
       await this.trackedPush(workspaceId, user);
+      // The source head moved: the refusal described a revision that is gone.
+      await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -1889,6 +1907,8 @@ export class WorkflowService implements IWorkflowService {
     authorIdHash: string | null,
     workspaceId: string,
   ): Promise<FileApproval[]> {
+    // Taken BEFORE the approval lands (see `clearApplyFailure`).
+    const approvedAfter = new Date();
     const approvals = await this.reviewWorkflow.approveFile(
       number,
       path,
@@ -1899,6 +1919,14 @@ export class WorkflowService implements IWorkflowService {
       authorIdHash,
       workspaceId,
     );
+    // A recorded approval can answer a GATE refusal only — a conflict or a git
+    // error still describes the request — and only once the gate that refused
+    // would now pass: approving one file of several leaves the rest waiting,
+    // and the refusal naming them still stands. Warnings count too, since an
+    // apply without bypass is refused on them.
+    if (this.gateWouldPass(number, approvals)) {
+      await this.clearApplyFailure(number, { kinds: ['gate'], recordedBefore: approvedAfter });
+    }
     this.prs.invalidateDetailCache(number);
     this.events?.emit({
       kind: 'approval-changed',
@@ -1970,6 +1998,8 @@ export class WorkflowService implements IWorkflowService {
     }
     const baseBranch = summary.base;
     const headBranch = summary.branch;
+    // Taken BEFORE the head moves (see `clearApplyFailure`).
+    const headMovedAfter = new Date();
 
     const ws = await this.workspaceService.getOrCreateForBranch(headBranch);
     // Best-effort freshen of the source checkout: the diff below reads origin
@@ -2027,6 +2057,8 @@ export class WorkflowService implements IWorkflowService {
       // a duplicate commit through releaseLock.
       await this.fileLocks.release(ws.id, headBranch, lockPath, user);
     }
+    // The source head moved: the refusal described a revision that is gone.
+    await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
@@ -2501,6 +2533,139 @@ export class WorkflowService implements IWorkflowService {
     // and branch retirement is git IO it must never wait behind.
     await this.retireMergedSourceBranch(number, baseBranch, user);
     return { kind: 'merged', result };
+  }
+
+  /**
+   * Start an apply attempt on `number` and return its token. Only the latest
+   * attempt may record a refusal: when two people apply the same request at
+   * once, an older attempt that finishes last must not overwrite the newer
+   * one's verdict. In-process, like the detail and list caches this reads with.
+   * Every attempt must be ended with `endApplyAttempt`.
+   */
+  beginApplyAttempt(number: number): number {
+    const attempt = ++this.applyAttemptSeq;
+    this.applyAttempts.set(number, attempt);
+    return attempt;
+  }
+
+  /**
+   * An attempt finished. Its entry leaves only if no newer attempt replaced it;
+   * an older attempt ending later then finds no entry and records nothing,
+   * because its token can never match one issued again.
+   */
+  endApplyAttempt(number: number, attempt: number): void {
+    if (this.applyAttempts.get(number) === attempt) this.applyAttempts.delete(number);
+  }
+
+  /**
+   * Persist why an apply did not land and tell every session. The apply route
+   * already answers the clicker directly (user-scoped `merge-failed`); this is
+   * for everyone else who can see the still-open request — above all its
+   * author, who otherwise sees it pending forever with no word of the refusal.
+   * The event carries only the number: the reason is read back through the
+   * list and detail endpoints, so a session that misses the event gets the
+   * same answer on its next fetch.
+   *
+   * Returns false, writing and announcing nothing, when a newer attempt has
+   * started since `attempt` or the request is no longer open (a concurrent
+   * apply landed it) — a refusal nobody can act on must not reach anyone.
+   */
+  async recordApplyFailure(
+    number: number,
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
+    user: AuthUser,
+    attempt: number,
+  ): Promise<boolean> {
+    if (this.applyAttempts.get(number) !== attempt) return false;
+    const at = failure.at ?? new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({
+        applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
+        applyFailureConflicts: failure.kind === 'conflicts',
+        applyFailureKind: failure.kind,
+        applyFailedAt: at,
+        applyFailedByName: user.name,
+      })
+      // The write itself refuses to go backwards: the attempt map above is an
+      // early exit within this process, but an older UPDATE still in flight (or
+      // one from another replica) must never replace a newer refusal.
+      .where(
+        and(
+          eq(changeRequests.number, number),
+          eq(changeRequests.state, 'open'),
+          or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
+        ),
+      )
+      .returning({ number: changeRequests.number });
+    if (updated.length === 0) return false;
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-apply-failed', number });
+    return true;
+  }
+
+  /**
+   * Forget a request's recorded refusal because a change made it obsolete.
+   * Otherwise the request keeps saying "<name> could not apply this: Waiting on
+   * approval…" after the approval arrived, with nothing dating it.
+   *
+   * WHICH refusals a change makes obsolete is `kinds`: an approval answers only
+   * the gate — a conflict or a git error is untouched by it and must keep
+   * saying so — while a moved source head replaces the revision every kind of
+   * refusal described (omit `kinds` to clear any). A row with no recorded kind
+   * is only cleared by the latter. `recordedBefore` is taken before the change
+   * starts: a refusal recorded after it is newer than the change and stays. Announced on the same event a new refusal
+   * uses — every list and open dialog re-reads the request. Best-effort: the
+   * mutation that triggered it already happened and must not fail on this.
+   */
+  /**
+   * Whether the merge gate would now let an apply through without bypass — no
+   * hard reason, no warning. Part of the best-effort clear: an evaluation that
+   * fails answers "no" (the refusal stays) instead of failing the approval.
+   */
+  private gateWouldPass(number: number, approvals: FileApproval[]): boolean {
+    try {
+      const gate = this.reviewWorkflow.evaluateMergeGate({ prNumber: number, state: 'open', approvals });
+      return gate?.mergeable === true && gate.warnings.length === 0;
+    } catch (err) {
+      crLog.warn(`could not re-evaluate the merge gate of change request #${number}; keeping its refusal:`, { err });
+      return false;
+    }
+  }
+
+  private async clearApplyFailure(
+    number: number,
+    scope: { kinds?: readonly ChangeRequestApplyFailureKind[]; recordedBefore: Date },
+  ): Promise<void> {
+    const { kinds, recordedBefore } = scope;
+    try {
+      const cleared = await this.db
+        .update(changeRequests)
+        .set({
+          applyFailureReason: null,
+          applyFailureConflicts: null,
+          applyFailedAt: null,
+          applyFailedByName: null,
+          applyFailureKind: null,
+        })
+        .where(
+          and(
+            eq(changeRequests.number, number),
+            isNotNull(changeRequests.applyFailedAt),
+            // Only a refusal that PREDATES the change: one an apply recorded
+            // while the change was landing may already have seen it, and is
+            // the newer verdict — never erase it.
+            lt(changeRequests.applyFailedAt, recordedBefore),
+            kinds ? inArray(changeRequests.applyFailureKind, [...kinds]) : undefined,
+          ),
+        )
+        .returning({ number: changeRequests.number });
+      if (cleared.length === 0) return;
+      this.prs.invalidateDetailCache(number);
+      this.events?.emit({ kind: 'change-request-apply-failed', number });
+    } catch (err) {
+      crLog.warn(`could not clear the recorded apply failure of change request #${number}:`, { err });
+    }
   }
 
   /**

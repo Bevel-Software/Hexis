@@ -99,9 +99,13 @@ describe('DeploymentPage', () => {
     expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
     expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
-    // After the settings form, not before it.
+    // After the settings fields, and BEFORE "Save and continue": the button is
+    // the last thing on the page, so a reader meets this section before the
+    // control that leaves the screen. The button is tied to the form it sits
+    // outside of by `form=`.
     const save = screen.getByRole('button', { name: 'Save and continue' });
-    expect(save.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(save.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(save).toHaveAttribute('form', 'setup-settings-form');
     expect(await screen.findByRole('button', { name: 'Mark as registered' })).toBeInTheDocument();
     expect(facadeMock.fetchGitHubFacade).not.toHaveBeenCalled();
   });

@@ -11,6 +11,8 @@ export * from './workspace/filename.js';
 export * from './workspace/kb-layout.js';
 export * from './workspace/join-request.js';
 export * from './workspace/frontmatter.js';
+export * from './workspace/frontmatter-carriers.js';
+export * from './workspace/platform-files.js';
 
 // Git
 export * from './git/types.js';

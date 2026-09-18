@@ -52,6 +52,7 @@ async function makeHarness(opts: {
   } as unknown as IAccessControl;
 
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const v = files.get(wsRel);
@@ -62,6 +63,9 @@ async function makeHarness(opts: {
       }
       return v;
     }),
+    readFileBinary: vi.fn(async (_id: string, wsRel: string) =>
+      Buffer.from(await (workspaceService.readFile as (id: string, p: string) => Promise<string>)(_id, wsRel), 'utf-8'),
+    ),
     writeFile: vi.fn(async (_id: string, wsRel: string, content: string) => {
       files.set(wsRel, content);
     }),
