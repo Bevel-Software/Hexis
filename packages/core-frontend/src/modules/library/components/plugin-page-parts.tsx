@@ -6,6 +6,7 @@ import { cn } from '../../../lib/utils';
 import { Banner, Button, Dialog, IconButton } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
 import type { LibraryItem } from '../state/library-data';
+import { linkedHomeOf } from '../utils/status';
 import { removeLibraryItem } from '../services/library.api';
 import { unlinkSkill } from '../services/plugins.api';
 import { LibraryCard } from './LibraryCard';
@@ -114,6 +115,8 @@ export function CardGrid({
   onShare,
   onRemove,
   canRemove,
+  linkedIn,
+  linkedRoots,
 }: {
   items: LibraryItem[];
   onOpen(item: LibraryItem): void;
@@ -140,6 +143,24 @@ export function CardGrid({
    * item. A verb the server would refuse is not offered.
    */
   canRemove?(item: LibraryItem): boolean;
+  /**
+   * The plugin whose page this grid is on. With it, a card whose membership in
+   * that plugin is by LINK wears the Linked pill, naming on hover the folder
+   * the item actually lives in.
+   *
+   * Absent on every surface that is not one plugin's page: your own space has
+   * no manifest to link from, and a gallery card belongs to as many plugins as
+   * it belongs to — there is no "this plugin" for it to be linked from.
+   */
+  linkedIn?: string;
+  /**
+   * That plugin's `linkedRoots` — the folders its manifest names. The pill's
+   * tooltip names the root a card came in through, and only the manifest
+   * knows which root that is (see `linkedHomeOf`). Absent or empty when the
+   * summary has not arrived, which the tooltip degrades around rather than
+   * waiting for.
+   */
+  linkedRoots?: readonly string[];
 }) {
   return (
     <div
@@ -183,6 +204,9 @@ export function CardGrid({
             status={item.status}
             version={item.version}
             lifecycle={item.lifecycle}
+            // Null (inline, or no plugin in question) has to become `undefined`
+            // — the prop is "there is a folder to name", and `null` is not it.
+            linkedHome={(linkedIn ? linkedHomeOf(item, linkedIn, linkedRoots) : null) ?? undefined}
             pending={
               item.pending && {
                 authorName: item.pending.authorName,
@@ -325,6 +349,8 @@ export function PluginItemSections({
   hideEmpty = false,
   skillControls,
   skillControlsActive = false,
+  linkedIn,
+  linkedRoots,
 }: {
   skillItems: LibraryItem[];
   toolItems: LibraryItem[];
@@ -335,6 +361,10 @@ export function PluginItemSections({
   onRemove?(item: LibraryItem): void;
   /** See {@link CardGrid}. */
   canRemove?(item: LibraryItem): boolean;
+  /** See {@link CardGrid} — the plugin a card can be linked FROM. */
+  linkedIn?: string;
+  /** See {@link CardGrid} — that plugin's linked roots, for the pill's tooltip. */
+  linkedRoots?: readonly string[];
   /**
    * A plain sentence, or an `EmptySkillsNudge`. A string still gets the band's
    * standard paragraph; a node is trusted to bring its own — the nudge carries
@@ -383,6 +413,8 @@ export function PluginItemSections({
               onShare={onShare}
               onRemove={onRemove}
               canRemove={canRemove}
+              linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
             />
           )}
         </PluginSection>
@@ -393,7 +425,14 @@ export function PluginItemSections({
           {toolItems.length === 0 ? (
             <p className="text-ui text-ink-faint">{emptyTools}</p>
           ) : (
-            <CardGrid items={toolItems} onOpen={onOpen} onRemove={onRemove} canRemove={canRemove} />
+            <CardGrid
+              items={toolItems}
+              onOpen={onOpen}
+              onRemove={onRemove}
+              canRemove={canRemove}
+              linkedIn={linkedIn}
+              linkedRoots={linkedRoots}
+            />
           )}
         </PluginSection>
       )}
