@@ -782,7 +782,12 @@ export function registerWorkspaceTools(
                 // Awaited here so a refusal is caught; proposable tools never stream.
                 return await spec.handler(normalizePathArgs(args), ctx);
               } catch (err) {
-                return rethrowAsWriteDenial(err, { tool: spec.name, branch: args.branch, userEmail: ctx.user.email }, accessControl, kbDirName);
+                return rethrowAsWriteDenial(
+                  err,
+                  { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
+                  accessControl,
+                  kbDirName,
+                );
               }
             }
           : (args, ctx) => spec.handler(normalizePathArgs(args), ctx),

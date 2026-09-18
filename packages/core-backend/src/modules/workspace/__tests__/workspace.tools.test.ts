@@ -19,7 +19,7 @@ import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
 import { OCTET_STREAM_FALLBACK_NOTE } from '../file-readers/content-mode.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
-import { isBranchAuthoredBy } from '@bevel-software/platform-shared';
+import { isBranchAuthoredBy, isOwnSuggestionsBranch } from '@bevel-software/platform-shared';
 import { assertValidBranchName } from '../../kb-fs/branch-name.js';
 import { AccessDeniedError } from '../../access-model/access-errors.js';
 import { PROPOSAL_ROUTE_NOTE, proposalTitleFor } from '../write-denial.js';
@@ -2303,6 +2303,26 @@ describe('a write refused for permissions says whether and how to propose it', (
     expect(draft).toBe('john-doe-kb/propose-deal');
     // The step the agent actually runs carries that same name.
     expect(json.proposal.steps[0].args).toEqual({ name: draft, branch: TARGET });
+  });
+
+  it('an address with no usable localpart is given a draft under its own suggestions prefix, still one it owns', async () => {
+    // `branchAuthorLocalpart` answers null for a local part with no letter or
+    // digit, rather than inventing an identity. The draft must still be one
+    // the caller can later delete, so it comes from the second authorship
+    // convention — keyed by user id — and is judged by that convention's own
+    // predicate, as the branch-delete path judges it.
+    const email = '+++@example.com';
+    const { ac } = readVerdict(true);
+    const base = await start('write', ac, email);
+    denyWrites();
+
+    const { json } = await call(base, 'write_file', CALLS[0][1]);
+
+    const draft = json.proposal.draftBranch as string;
+    expect(isBranchAuthoredBy(draft, email)).toBe(false);
+    expect(isOwnSuggestionsBranch(draft, { email, id: 'u' })).toBe(true);
+    expect(draft.startsWith('suggestions/')).toBe(true);
+    expect(draft.endsWith('/propose-deal')).toBe(true);
   });
 
   it('without read access the denial says so in one sentence and offers no proposal', async () => {
