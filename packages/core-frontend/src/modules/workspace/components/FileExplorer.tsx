@@ -47,7 +47,7 @@ import { useFileNav } from '../routing/kb-routes';
 import { rawFileUrl } from '../services/workspace.api';
 import { downloadViaBlob } from './renderers/downloadFile';
 import { cn } from '../../../lib/utils';
-import { MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
+import { Banner, MenuPanel, MenuItem, TextField, IconButton } from '../../../shared/components';
 import { useDismissableMenu, usePointerMenuPosition } from '../../../shared/components';
 import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
@@ -259,6 +259,55 @@ function findEntryByPath(node: FileTreeEntry, path: string): FileTreeEntry | nul
   return null;
 }
 
+// ── Download permission ──
+
+/**
+ * The tooltip on a Download the caller may not use, and the reason a late
+ * refusal gives. One string, because the menu and the 403 notice are two
+ * views of the SAME verdict and must not drift.
+ */
+export const DOWNLOAD_DENIED_MESSAGE = "You don't have download permission for this item";
+
+/**
+ * The entry's `download:` verdict, asked ONCE — the menu mounts when it
+ * opens and unmounts when it closes, so the request is per menu open, never
+ * per tree render (one request per row was the alternative, and it is why
+ * this lives here and not on the row).
+ *
+ * `null` means "not known": the lookup is in flight, there is nothing to ask
+ * about, or it failed. The item stays ENABLED on null — a flash of disabled
+ * on every menu open would be worse than the 403 this preflight exists to
+ * avoid, and the backend's own gate is authoritative either way.
+ *
+ * The path goes to the server workspace-relative, exactly as the download
+ * URLs send it: the access route strips `<kbDirName>/` itself, with the same
+ * strip the download gate applies, so the preflight asks the question the
+ * gate will answer. A path the route refuses outright (the tree root's `.`)
+ * throws and leaves the verdict unknown, which is the enabled-as-today case.
+ */
+function useDownloadVerdict(entry: FileTreeEntry | null): boolean | null {
+  const { workspaceId } = useWorkspace();
+  const [verdict, setVerdict] = useState<boolean | null>(null);
+  const path = entry?.relativePath ?? null;
+  const kind = entry?.type === 'directory' ? 'folder' : 'file';
+  useEffect(() => {
+    if (!workspaceId || path === null) return;
+    let cancelled = false;
+    fetchFileAccess(workspaceId, path, kind)
+      .then((res) => {
+        if (!cancelled) setVerdict(res.canDownload);
+      })
+      .catch(() => {
+        // Default-allow, as `useFileAccess` does: a transient lookup failure
+        // must not take an action away from someone who has it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, path, kind]);
+  return verdict;
+}
+
 // ── Context Menu ──
 
 function ContextMenu({
@@ -304,6 +353,10 @@ function ContextMenu({
   const confirm = useTreeConfirm();
   const pinned = isPinned(entry.relativePath);
   const [unzipping, setUnzipping] = useState(false);
+  // Asked only where a Download is on offer — a proposed row or an absent
+  // folder has none, and must not spend a request finding that out.
+  const canDownload = useDownloadVerdict(onDownload ? entry : null);
+  const downloadDenied = canDownload === false;
   // Outside-click, Escape, and focus return — none of which `MenuPanel`
   // provides (it is presentation only, by design).
   const ref = useDismissableMenu<HTMLDivElement>({ open: true, onClose, returnFocusTo });
@@ -427,7 +480,20 @@ function ContextMenu({
         </MenuItem>
       )}
       {onDownload && (
-        <MenuItem role="menuitem" onClick={() => { onDownload(); onClose(); }}>
+        <MenuItem
+          role="menuitem"
+          // `aria-disabled`, not `disabled`: the item keeps its tooltip and
+          // its place in the tab order, so the reason is reachable by mouse
+          // AND by keyboard. Activation is refused here instead — which is
+          // what stops Enter and Space on the focused item, not just a click.
+          aria-disabled={downloadDenied || undefined}
+          title={downloadDenied ? DOWNLOAD_DENIED_MESSAGE : undefined}
+          onClick={() => {
+            if (downloadDenied) return;
+            onDownload();
+            onClose();
+          }}
+        >
           <span className="flex items-center gap-2">
             <Download size={14} />
             {entry.type === 'directory' ? 'Download as zip' : 'Download'}
@@ -615,30 +681,43 @@ export function FileTreeNode({
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
 
+  /**
+   * A refused download, said in place under the row. Never an `alert()`: the
+   * menu's preflight already turns the KNOWN refusal into a disabled item, so
+   * what reaches here is the rare late one — permission changed while the
+   * menu was open — and a modal popup for it stops the whole app to report
+   * something the row itself can say.
+   */
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
   const handleDownload = useCallback(async () => {
     if (!workspaceId) return;
     // Files hit /file/raw; folders hit /folder/zip and arrive as <name>.zip.
     // Both endpoints share the same per-path `download:` access gate, the
     // same `?download=1` flag shape, and the same Content-Disposition
     // handling on the backend — branching here just picks the URL.
-    // No preflight: a 403 surfaces in the alert below.
+    // The menu preflights the gate's verdict (`useDownloadVerdict`); a 403
+    // still reaching here is a permission that changed since it opened.
     const isFolder = entry.type === 'directory';
     const url = isFolder
       ? `/api/workspace/${workspaceId}/folder/zip?path=${encodeURIComponent(entry.relativePath)}&download=1`
       : rawFileUrl(workspaceId, entry.relativePath, { download: true });
     const savedAs = isFolder ? `${entry.name}.zip` : entry.name;
+    setDownloadError(null);
     try {
       const outcome = await downloadViaBlob(url, savedAs);
       if (!outcome.ok) {
-        alert(
-          `Failed to download ${entry.name} (HTTP ${outcome.status})${outcome.body ? `: ${outcome.body}` : ''}`,
+        setDownloadError(
+          outcome.status === 403
+            ? `Couldn't download ${entry.name}. ${DOWNLOAD_DENIED_MESSAGE}.`
+            : `Couldn't download ${entry.name} (HTTP ${outcome.status})${outcome.body ? `: ${outcome.body}` : ''}`,
         );
         return;
       }
     } catch (err) {
       console.error('Failed to download:', err);
       const msg = err instanceof Error ? err.message : String(err);
-      alert(`Failed to download ${entry.name}:\n${msg}`);
+      setDownloadError(`Couldn't download ${entry.name}: ${msg}`);
     }
   }, [workspaceId, entry.relativePath, entry.name, entry.type]);
   // `null` = no explicit user intent; fall through to the auto-expand / depth
@@ -728,6 +807,32 @@ export function FileTreeNode({
     e.stopPropagation();
     setContextMenu({ x: e.clientX, y: e.clientY });
   }, []);
+
+  // Rendered directly under the row it belongs to, at the row's own indent,
+  // so the failure is attached to the file it is about — the sidebar shows
+  // many rows and a banner at the top would name one of them in prose.
+  const downloadNotice = downloadError && (
+    <Banner
+      role="alert"
+      tone="danger"
+      data-testid="tree-download-error"
+      className="items-center gap-1 rounded-none px-2 py-1 text-xs"
+      style={{ paddingLeft }}
+    >
+      <span className="flex items-start gap-1">
+        <span className="flex-1">{downloadError}</span>
+        <IconButton
+          size={18}
+          tone="danger"
+          title="Dismiss"
+          aria-label="Dismiss download error"
+          onClick={() => setDownloadError(null)}
+        >
+          <X size={12} />
+        </IconButton>
+      </span>
+    </Banner>
+  );
 
   // ── Drag source (internal reorder) ──
   const handleDragStart = useCallback((e: React.DragEvent) => {
@@ -950,6 +1055,7 @@ export function FileTreeNode({
           </div>
           {isRoot && pickerButtons}
         </div>
+        {downloadNotice}
         {isExpanded && (
           <div>
             {creating && (
@@ -1148,6 +1254,7 @@ export function FileTreeNode({
           />
         )}
       </button>
+      {downloadNotice}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -1487,11 +1594,11 @@ export function FileExplorer() {
   const { openFilePath, dispatchUpload, kbDirName } = useWorkspace();
   const { openFile } = useFileNav();
   const [dragOver, setDragOver] = useState(false);
-  // Download is now a per-path permission (resolved server-side from the
-  // access tree's `download:` verb), so there's no global preflight gate
-  // here anymore. The menu items always render; if the user clicks on a
-  // file they don't have download permission for, the backend returns 403
-  // and `handleDownload` shows the error.
+  // Download is a per-path permission (resolved server-side from the access
+  // tree's `download:` verb), so there is no global gate here: the menu asks
+  // about the entry it was opened on (`useDownloadVerdict`) and disables the
+  // item with the reason. A 403 that still lands — the permission changed
+  // while the menu was open — becomes the row's own inline notice.
   const { tree: mergedTree, suggestionOnlyPaths } = useMergedWorkspaceTree();
   // The pane workspace's own navigation: the open tab is the current row, and
   // a click opens the file on the checked-out branch.

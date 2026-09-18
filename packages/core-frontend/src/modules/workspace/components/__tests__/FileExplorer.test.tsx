@@ -369,69 +369,238 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     ],
   };
 
+  /** The `/access` body, with only the verdict this menu reads varying. */
+  function accessBody(canDownload: boolean) {
+    return {
+      canRead: true,
+      canWrite: true,
+      canDownload,
+      canOwner: false,
+      eligible: { roles: [], users: [] },
+      readers: { restricted: false, roles: [], users: [] },
+      owners: { roles: [], users: [] },
+      downloaders: { roles: [], users: [] },
+      sources: {},
+    };
+  }
+
+  /**
+   * One `authFetch` for two very different calls: the menu's access preflight
+   * on open, and the download itself on click. Routed by URL so a test can
+   * state the verdict and the download outcome independently — which is the
+   * whole point of the late-403 case, where they disagree.
+   */
+  function routeAuthFetch(opts: { canDownload: boolean; download?: unknown }) {
+    mockAuthFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes('/access?')
+          ? { ok: true, status: 200, json: async () => accessBody(opts.canDownload), text: async () => '' }
+          : opts.download,
+      ),
+    );
+  }
+
+  /** The access lookups made so far, in order. */
+  const accessCalls = () =>
+    mockAuthFetch.mock.calls.map((c) => c[0] as string).filter((u) => u.includes('/access?'));
+  /** The download requests made so far — everything that is not a lookup. */
+  const downloadCalls = () =>
+    mockAuthFetch.mock.calls.map((c) => c[0] as string).filter((u) => !u.includes('/access?'));
+
+  /**
+   * The blob-URL pair the download path uses. `Object.assign` rather than a
+   * cast: happy-dom's URL has no object-URL methods to widen, and the cast
+   * every caller used to write is the one thing a helper should absorb.
+   */
+  function stubObjectUrls(url = 'blob:fake-url') {
+    const createObjectURL = vi.fn(() => url);
+    const revokeObjectURL = vi.fn();
+    Object.assign(globalThis.URL, { createObjectURL, revokeObjectURL });
+    return { createObjectURL, revokeObjectURL };
+  }
+
   function renderWithTree() {
     return renderExplorer({ fileTree: TREE_WITH_BOTH });
   }
 
-  // Under the path-scoped `download:` verb model there is no global
-  // preflight: the menu items always render. The backend returns 403 at
-  // click time for users without permission on that specific path; the
-  // click handler surfaces it via an alert.
+  /** Right-click a row and wait for the menu's access lookup to land. */
+  async function openMenuOn(label: string) {
+    fireEvent.contextMenu(screen.getByText(label));
+    await act(async () => {});
+  }
 
-  it('shows Download on files (no preflight gate)', () => {
+  it('asks for the entry access once when the menu opens, and enables Download', async () => {
+    routeAuthFetch({ canDownload: true });
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    expect(accessCalls()).toHaveLength(1);
+    expect(accessCalls()[0]).toContain('/api/workspace/ws-1/access?path=brief.md');
+    expect(accessCalls()[0]).toContain('kind=file');
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    expect(item).not.toHaveAttribute('aria-disabled');
+    expect(item).not.toHaveAttribute('title');
+  });
+
+  it('disables Download with the reason on a file the caller may only read', async () => {
+    routeAuthFetch({ canDownload: false });
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(item).toHaveAttribute('title', "You don't have download permission for this item");
+    // Nothing is attempted on a click, and the menu stays open saying why.
+    fireEvent.click(item);
+    expect(downloadCalls()).toHaveLength(0);
+    expect(screen.getByRole('menuitem', { name: 'Download' })).toBeInTheDocument();
+  });
+
+  it('disables Download as zip with the reason on a folder, asked as a folder', async () => {
+    routeAuthFetch({ canDownload: false });
+    renderWithTree();
+    await openMenuOn('reports');
+
+    expect(accessCalls()).toHaveLength(1);
+    expect(accessCalls()[0]).toContain('path=reports');
+    expect(accessCalls()[0]).toContain('kind=folder');
+    const item = screen.getByRole('menuitem', { name: 'Download as zip' });
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(item).toHaveAttribute('title', "You don't have download permission for this item");
+    fireEvent.click(item);
+    expect(downloadCalls()).toHaveLength(0);
+  });
+
+  /**
+   * `aria-disabled`, not `disabled`, is what keeps the reason reachable — so
+   * the item is still focusable, and refusing the ACTIVATION (not the click
+   * event) is what has to stop the keyboard path.
+   */
+  it('cannot be triggered from the keyboard while it is disabled', async () => {
+    const user = userEvent.setup();
+    routeAuthFetch({ canDownload: false });
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    item.focus();
+    expect(document.activeElement).toBe(item);
+    await user.keyboard('{Enter}');
+    await user.keyboard(' ');
+    expect(downloadCalls()).toHaveLength(0);
+    // The menu did not close either: nothing happened at all.
+    expect(screen.getByRole('menuitem', { name: 'Download' })).toBeInTheDocument();
+  });
+
+  // The control for the test above: the same keys DO activate the item when
+  // the verdict allows it, so the refusal above is the guard working and not
+  // a menu that simply cannot be driven from the keyboard.
+  it('activates Download from the keyboard when the verdict allows it', async () => {
+    const user = userEvent.setup();
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: true, status: 200, blob: async () => new Blob(['bytes']), text: async () => '' },
+    });
+    stubObjectUrls();
+    renderWithTree();
+    await openMenuOn('brief.md');
+
+    screen.getByRole('menuitem', { name: 'Download' }).focus();
+    await act(async () => {
+      await user.keyboard('{Enter}');
+    });
+    expect(downloadCalls()).toHaveLength(1);
+  });
+
+  it('leaves Download enabled while the lookup is still in flight', async () => {
+    // Never resolves: the verdict is unknown for the whole test.
+    mockAuthFetch.mockImplementation(() => new Promise(() => {}));
     renderWithTree();
     fireEvent.contextMenu(screen.getByText('brief.md'));
-    expect(screen.getByText('Download')).toBeInTheDocument();
+
+    const item = screen.getByRole('menuitem', { name: 'Download' });
+    expect(item).not.toHaveAttribute('aria-disabled');
   });
 
-  it('shows Download as zip on folders (no preflight gate)', () => {
+  it('leaves Download enabled when the lookup itself fails', async () => {
+    mockAuthFetch.mockImplementation((url: string) =>
+      url.includes('/access?')
+        ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }), text: async () => 'boom' })
+        : Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(['b']), text: async () => '' }),
+    );
     renderWithTree();
-    fireEvent.contextMenu(screen.getByText('reports'));
-    expect(screen.getByText('Download as zip')).toBeInTheDocument();
+    await openMenuOn('brief.md');
+
+    expect(screen.getByRole('menuitem', { name: 'Download' })).not.toHaveAttribute('aria-disabled');
   });
 
-  it('surfaces a 403 from the backend as an alert when the user lacks download on the clicked path', async () => {
-    mockAuthFetch.mockResolvedValue({
-      ok: false,
-      status: 403,
-      text: async () => '{"error":"Download permission required"}',
+  /**
+   * The late 403 — permission changed between the menu opening and the click.
+   * It is reported where the row is, never through `window.alert`: a modal
+   * popup for a refused download stops the whole app to say one line.
+   */
+  it('shows an inline notice, not an alert, when a download is refused after the menu opened', async () => {
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: false, status: 403, text: async () => '{"error":"Download permission required"}' },
     });
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     try {
       renderWithTree();
-      fireEvent.contextMenu(screen.getByText('brief.md'));
+      await openMenuOn('brief.md');
       await act(async () => {
-        fireEvent.click(screen.getByText('Download'));
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
       });
-      expect(alertSpy).toHaveBeenCalledTimes(1);
-      const msg = alertSpy.mock.calls[0][0] as string;
-      expect(msg).toContain('brief.md');
-      expect(msg).toContain('403');
+
+      expect(alertSpy).not.toHaveBeenCalled();
+      const notice = await screen.findByTestId('tree-download-error');
+      expect(notice).toHaveAttribute('role', 'alert');
+      expect(notice.textContent).toContain('brief.md');
+      expect(notice.textContent).toContain("You don't have download permission for this item");
+
+      // Dismissible, like every other banner in this tree.
+      fireEvent.click(screen.getByRole('button', { name: /Dismiss download error/i }));
+      expect(screen.queryByTestId('tree-download-error')).toBeNull();
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('reports a non-403 download failure inline too', async () => {
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: false, status: 500, text: async () => 'boom' },
+    });
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      renderWithTree();
+      await openMenuOn('brief.md');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      const notice = await screen.findByTestId('tree-download-error');
+      expect(notice.textContent).toContain('500');
     } finally {
       alertSpy.mockRestore();
     }
   });
 
   it('calls /file/raw?download=1 with the entry path and saves the blob', async () => {
-    mockAuthFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: async () => new Blob(['bytes']),
-      text: async () => '',
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: true, status: 200, blob: async () => new Blob(['bytes']), text: async () => '' },
     });
-    const createObjectURL = vi.fn(() => 'blob:fake-url');
-    const revokeObjectURL = vi.fn();
-    (globalThis.URL as any).createObjectURL = createObjectURL;
-    (globalThis.URL as any).revokeObjectURL = revokeObjectURL;
+    const { createObjectURL, revokeObjectURL } = stubObjectUrls();
 
     renderWithTree();
-    fireEvent.contextMenu(screen.getByText('brief.md'));
+    await openMenuOn('brief.md');
     await act(async () => {
-      fireEvent.click(screen.getByText('Download'));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }));
     });
 
-    expect(mockAuthFetch).toHaveBeenCalledTimes(1);
-    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(downloadCalls()).toHaveLength(1);
+    const url = downloadCalls()[0];
     expect(url).toContain('/api/workspace/ws-1/file/raw');
     expect(url).toContain('path=brief.md');
     expect(url).toContain('download=1');
@@ -442,16 +611,11 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
   });
 
   it('calls /folder/zip?download=1 and triggers a <folder>.zip save when clicking Download as zip on a folder', async () => {
-    mockAuthFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: async () => new Blob(['PK', 'bytes']),
-      text: async () => '',
+    routeAuthFetch({
+      canDownload: true,
+      download: { ok: true, status: 200, blob: async () => new Blob(['PK', 'bytes']), text: async () => '' },
     });
-    const createObjectURL = vi.fn(() => 'blob:fake-zip-url');
-    const revokeObjectURL = vi.fn();
-    (globalThis.URL as any).createObjectURL = createObjectURL;
-    (globalThis.URL as any).revokeObjectURL = revokeObjectURL;
+    stubObjectUrls('blob:fake-zip-url');
 
     // Spy on anchor `.download` to confirm we save as <folder>.zip.
     const anchorDownloadValues: string[] = [];
@@ -473,13 +637,13 @@ describe('FileExplorer right-click: Download menu (per-path access)', () => {
     // level and contaminates later tests.
     try {
       renderWithTree();
-      fireEvent.contextMenu(screen.getByText('reports'));
+      await openMenuOn('reports');
       await act(async () => {
-        fireEvent.click(screen.getByText('Download as zip'));
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }));
       });
 
-      expect(mockAuthFetch).toHaveBeenCalledTimes(1);
-      const url = mockAuthFetch.mock.calls[0][0] as string;
+      expect(downloadCalls()).toHaveLength(1);
+      const url = downloadCalls()[0];
       expect(url).toContain('/api/workspace/ws-1/folder/zip');
       expect(url).toContain('path=reports');
       expect(url).toContain('download=1');

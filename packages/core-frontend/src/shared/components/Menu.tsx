@@ -35,6 +35,14 @@ export function MenuPanel({ className, children, ...rest }: MenuPanelProps) {
   );
 }
 
+/**
+ * `aria-disabled` is styled the same as `disabled`, and is the spelling to
+ * reach for when the item must still be HOVERABLE and FOCUSABLE — a native
+ * `disabled` button suppresses pointer events on most engines, which takes its
+ * `title` tooltip with it, and drops the item out of the tab order so the
+ * keyboard user never learns it exists. It does not block activation on its
+ * own: an `aria-disabled` item's `onClick` must return early.
+ */
 export interface MenuItemProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   tone?: 'default' | 'danger';
   /** Visual checked/current state. Set `aria-checked`/`aria-current` yourself. */
@@ -58,6 +66,7 @@ export function MenuItem({
       className={cn(
         'flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-left text-ui',
         'transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+        'aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-disabled:hover:bg-transparent',
         tone === 'danger'
           ? 'text-danger hover:bg-danger-soft'
           : 'text-ink-muted hover:bg-hover hover:text-ink',
