@@ -83,15 +83,27 @@ describe('PluginIndexService', () => {
    * access.md that makes it exist to the index (a legacy folder without a
    * manifest gets one from the boot step before the index ever runs).
    */
-  const pluginDir = async (name: string, linkedRoots: string[] = []) => {
-    await mkdir(join(kb(), 'Plugins', name), { recursive: true });
-    const manifest: Record<string, unknown> = { name: name.toLowerCase() };
+  const pluginDir = async (
+    folder: string,
+    linkedRoots: string[] = [],
+    names?: { name: string; displayName: string },
+  ) => {
+    await mkdir(join(kb(), 'Plugins', folder), { recursive: true });
+    // Both names, as every manifest carries them: the identity the folder
+    // folds to, and the spelling people see. The folder itself is not an
+    // input to either — creation writes both, and the boot backfill gave
+    // them to the manifests written before the field was mandatory. Pass
+    // `names` for a folder spelled like neither, which is what makes a
+    // reader that consulted it fail.
+    const manifest: Record<string, unknown> = names
+      ? { ...names }
+      : { name: folder.toLowerCase(), displayName: folder };
     // The roots a manifest links, where `linkedSkillRoots` reads them.
     if (linkedRoots.length > 0) {
       manifest.extensions = { [HEXIS_EXTENSION_NS]: { [HEXIS_LINKED_SKILLS_KEY]: linkedRoots } };
     }
-    await writeFile(join(kb(), 'Plugins', name, 'plugin.json'), JSON.stringify(manifest));
-    await writeFile(join(kb(), 'Plugins', name, 'access.md'), '---\nread:\n  - everyone\n---\n');
+    await writeFile(join(kb(), 'Plugins', folder, 'plugin.json'), JSON.stringify(manifest));
+    await writeFile(join(kb(), 'Plugins', folder, 'access.md'), '---\nread:\n  - everyone\n---\n');
   };
 
   beforeEach(async () => {
@@ -103,11 +115,17 @@ describe('PluginIndexService', () => {
   test('enumerates Plugins/ folders carrying an access.md, sorted by name', async () => {
     await pluginDir('GTM');
     await pluginDir('Engineering');
+    // A folder spelled like NEITHER of its names: both answers can only have
+    // come from the file, so a reader that fell back to the folder would say
+    // 'mktg' here, or call it 'Mktg'.
+    await pluginDir('Mktg', [], { name: 'marketing', displayName: 'Marketing Platform' });
 
     const catalog = await svc().catalog();
-    // The manifest name is the identity; the folder is what people see.
-    expect(catalog.map((g) => g.name)).toEqual(['engineering', 'gtm']);
+    // The manifest's `name` is the identity and its `displayName` what people
+    // see — both read from the file, neither from the folder.
+    expect(catalog.map((g) => g.name)).toEqual(['engineering', 'gtm', 'marketing']);
     expect(catalog[1]).toMatchObject({ displayName: 'GTM', folders: ['Plugins/GTM'] });
+    expect(catalog[2]).toMatchObject({ displayName: 'Marketing Platform', folders: ['Plugins/Mktg'] });
   });
 
   test('a folder without an access.md is not a plugin', async () => {

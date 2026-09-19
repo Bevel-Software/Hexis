@@ -78,7 +78,16 @@ describe('PluginProvisionService.createPlugin', () => {
     const result = await h.svc.createPlugin(USER, 'GTM');
     // The folder is where it lives; the name is what it IS (the identity the
     // page navigates to and the grants spell).
-    expect(result).toEqual({ folder: 'GTM', path: 'Plugins/GTM', skillsDir: 'Plugins/GTM/skills', name: 'gtm', created: true });
+    expect(result).toEqual({
+      folder: 'GTM',
+      path: 'Plugins/GTM',
+      skillsDir: 'Plugins/GTM/skills',
+      name: 'gtm',
+      // The name its creator typed, trimmed — persisted, and reported back
+      // exactly as persisted.
+      displayName: 'GTM',
+      created: true,
+    });
 
     const accessMd = await fs.readFile(path.join(h.dir, KB, 'Plugins/GTM/access.md'), 'utf-8');
     // Discoverable FILE (frontmatter read: everyone), creator-run FOLDER
@@ -122,6 +131,7 @@ describe('PluginProvisionService.createPlugin', () => {
       path: 'Plugins/Teams/EU/Sales',
       skillsDir: 'Plugins/Teams/EU/Sales/skills',
       name: 'sales',
+      displayName: 'Sales',
       created: true,
     });
     const manifest = JSON.parse(await fs.readFile(path.join(h.dir, KB, 'Plugins/Teams/EU/Sales/plugin.json'), 'utf-8'));
@@ -526,6 +536,7 @@ describe('PluginProvisionService.ensurePersonalPlugin', () => {
       path: `Plugins/${folder}`,
       skillsDir: `Plugins/${folder}/skills`,
       name: folder,
+      displayName: folder,
       created: true,
     });
     const accessMd = await fs.readFile(

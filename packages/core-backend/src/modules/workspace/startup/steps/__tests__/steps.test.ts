@@ -9,6 +9,7 @@ import { KbStartupRunner } from '../../kb-startup-runner.js';
 import { NodeGitRunner } from '../../../../workflow/git/node-git-runner.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../../on-server-start.js';
 import { GroupsToPluginsStep } from '../groups-to-plugins.step.js';
+import { PluginDisplayNamesStep } from '../plugin-display-names.step.js';
 import { PluginManifestsStep } from '../plugin-manifests.step.js';
 import { PersonalSpacesStep } from '../personal-spaces.step.js';
 import { RolesYamlStep } from '../roles-yaml.step.js';
@@ -65,7 +66,11 @@ afterEach(async () => {
 });
 
 /** A populated upstream carrying `files`: one commit, both protected refs. Returns the seed clone. */
-async function seedUpstream(files: Record<string, string>): Promise<string> {
+async function seedUpstream(
+  files: Record<string, string>,
+  /** Symlinks to seed beside them: path in the repo → the target it points at. */
+  symlinks: Record<string, string> = {},
+): Promise<string> {
   const seed = path.join(root, '.seed');
   await fs.mkdir(seed, { recursive: true });
   await git(seed, ['init', '-b', DEFAULT_BRANCH]);
@@ -73,6 +78,11 @@ async function seedUpstream(files: Record<string, string>): Promise<string> {
     const abs = path.join(seed, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, content, 'utf8');
+  }
+  for (const [rel, target] of Object.entries(symlinks)) {
+    const abs = path.join(seed, rel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.symlink(target, abs);
   }
   await git(seed, ['add', '-A']);
   await git(seed, ['commit', '-m', 'init']);
@@ -113,6 +123,10 @@ async function checkout(branch: string): Promise<string> {
 
 async function exists(dir: string, rel: string): Promise<boolean> {
   return fs.access(path.join(dir, rel)).then(() => true, () => false);
+}
+
+async function readJson(dir: string, rel: string): Promise<Record<string, any>> {
+  return JSON.parse(await fs.readFile(path.join(dir, rel), 'utf8'));
 }
 
 const norm = (text: string) => text.replace(/\r\n?/g, '\n');
@@ -901,6 +915,155 @@ describe('PluginManifestsStep', () => {
   });
 });
 
+describe('PluginDisplayNamesStep', () => {
+  /**
+   * The one-time repair behind the display-name rule: a manifest is now the
+   * only thing any reader consults for what a plugin is called, so every
+   * manifest written under the old rule — which stored the field only when
+   * the folder was spelled differently from the identifier — has to be told
+   * what its plugin was already called, or it would appear to rename itself
+   * on the boot that introduces the rule.
+   */
+  it('writes the folder\'s spelling into the manifests that lack the field, and touches nothing else', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Spelled differently from its identifier and saying nothing about it:
+      // exactly the plugin that would start showing `sales-team`.
+      'Plugins/Sales Team/plugin.json': '{\n  "name": "sales-team",\n  "version": "1.2.0"\n}\n',
+      'Plugins/Sales Team/access.md': '---\n---\nread:\n  - everyone\n',
+      // Nested just as deep as discovery looks.
+      'Plugins/Teams/EU Field/plugin.json': '{"name":"eu-field"}',
+      // Already spelled as its identifier: called the same thing under both
+      // rules, so there is nothing the folder knows that the manifest does not.
+      'Plugins/imported-tools/plugin.json': '{"name":"imported-tools"}',
+      // Already carries the field — the author's own answer, never overwritten,
+      // even though the folder disagrees with both of its names.
+      'Plugins/Ops Desk/plugin.json': '{"name":"ops","displayName":"Operations"}',
+      // A bundle: a foreign repository's file this platform reads, never writes.
+      'Plugins/functional/cluster/example/plugin.bundle.json': '{"name":"example"}',
+    });
+
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    for (const branch of PROTECTED) {
+      const dir = await checkout(branch);
+      // Backfilled from the folder — what the plugin was called the moment
+      // before the boot — with everything else in the manifest kept, and the
+      // field where the renderer puts it.
+      const sales = await readJson(dir, 'Plugins/Sales Team/plugin.json');
+      expect(sales).toEqual({ name: 'sales-team', displayName: 'Sales Team', version: '1.2.0' });
+      expect(Object.keys(sales)).toEqual(['name', 'displayName', 'version']);
+      expect(await readJson(dir, 'Plugins/Teams/EU Field/plugin.json')).toEqual({
+        name: 'eu-field',
+        displayName: 'EU Field',
+      });
+      // Untouched, byte for byte.
+      expect(await fs.readFile(path.join(dir, 'Plugins/imported-tools/plugin.json'), 'utf8')).toBe(
+        '{"name":"imported-tools"}',
+      );
+      expect(await fs.readFile(path.join(dir, 'Plugins/Ops Desk/plugin.json'), 'utf8')).toBe(
+        '{"name":"ops","displayName":"Operations"}',
+      );
+      expect(await fs.readFile(path.join(dir, 'Plugins/functional/cluster/example/plugin.bundle.json'), 'utf8')).toBe(
+        '{"name":"example"}',
+      );
+    }
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Record the display names of 2 plugins in their manifests');
+    expect(log).toContain('Plugins/Sales Team: displayName "Sales Team"');
+
+    // Idempotent: every manifest it would touch now carries the field.
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
+  });
+
+  /**
+   * The three shapes the plain "lacks the field, folder differs" reading gets
+   * wrong: a field that is present and says nothing, a manifest naming the
+   * folder's own spelling without being an identifier, and a `plugin.json`
+   * that is not this platform's file to write.
+   */
+  it('repairs a blank field, leaves a manifest that already shows its folder, and never writes through a link', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream(
+      {
+        ...scaffold,
+        // Present but BLANK. The new reader falls through it to `name` where
+        // the old one fell through to the folder, so leaving it be is leaving
+        // the rename this step exists to prevent: blank is absent, and repaired.
+        'Plugins/Growth Team/plugin.json': '{"name":"growth-team","displayName":"   "}',
+        // A `name` that is no identifier but IS the folder's spelling: the
+        // identity is the slug `my-plugin`, and what people see is already
+        // "My Plugin". The folder knows nothing the manifest does not.
+        'Plugins/My Plugin/plugin.json': '{"name":"My Plugin"}',
+        // An own `__proto__` key — `JSON.parse` makes it one. Copied as DATA:
+        // assignment would have set the object's prototype instead, dropping
+        // the field and letting a prototype `displayName` stand in for the
+        // one being written.
+        'Plugins/Odd One/plugin.json': '{"name":"odd-one","__proto__":{"displayName":"from the prototype"}}',
+        // A bundle makes this folder a plugin; the `plugin.json` beside it is
+        // a LINK, which discovery does not count as a native manifest.
+        'Plugins/Kit Pro/plugin.bundle.json': '{"name":"kit"}',
+        'vendor-manifest.json': '{"name":"kit"}',
+      },
+      { 'Plugins/Kit Pro/plugin.json': '../../vendor-manifest.json' },
+    );
+
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await readJson(dir, 'Plugins/Growth Team/plugin.json')).toEqual({
+      name: 'growth-team',
+      displayName: 'Growth Team',
+    });
+    // Untouched, byte for byte.
+    expect(await fs.readFile(path.join(dir, 'Plugins/My Plugin/plugin.json'), 'utf8')).toBe('{"name":"My Plugin"}');
+    expect(await fs.readFile(path.join(dir, 'Plugins/Odd One/plugin.json'), 'utf8')).toBe(
+      '{\n  "name": "odd-one",\n  "displayName": "Odd One",\n  "__proto__": {\n    "displayName": "from the prototype"\n  }\n}\n',
+    );
+    // Still a link, and the file it points at is still the vendor's own.
+    expect((await fs.lstat(path.join(dir, 'Plugins/Kit Pro/plugin.json'))).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(path.join(dir, 'vendor-manifest.json'), 'utf8')).toBe('{"name":"kit"}');
+
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Record the display names of 2 plugins in their manifests');
+    expect(log).toContain('Plugins/Growth Team: displayName "Growth Team"');
+    expect(log).not.toContain('Kit Pro');
+
+    // Idempotent over all of it: the next boot finds nothing to write.
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
+  });
+
+  it('leaves a plugin the manifests step just made alone — that manifest already says it', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream({
+      ...scaffold,
+      // Legacy: no manifest at all. The manifests step renders one, which the
+      // renderer has already given both names; the backfill then finds nothing.
+      'Plugins/Sales Team/access.md': '---\n---\nread:\n  - everyone\n',
+    });
+
+    await makeRunner([new PluginManifestsStep(new NodeFs()), new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await readJson(dir, 'Plugins/Sales Team/plugin.json')).toEqual({
+      $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+      name: 'sales-team',
+      displayName: 'Sales Team',
+    });
+    // ONE commit — the backfill declared nothing of its own to caption.
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Add plugin manifests to a legacy plugin folder');
+    expect(log).not.toContain('Record the display name');
+  });
+});
+
 describe('PersonalSpacesStep', () => {
   // A personal folder as the previous template seeded it: the owner's grants
   // and nothing else — private only while nothing above grants read.
@@ -1107,10 +1270,6 @@ describe('GroupsToPluginsStep', () => {
 describe('GroupsToPluginsStep — migration edge cases', () => {
   async function migrate(): Promise<void> {
     await makeRunner([new GroupsToPluginsStep(new NodeFs())]).runAll();
-  }
-
-  async function readJson(dir: string, rel: string): Promise<Record<string, any>> {
-    return JSON.parse(await fs.readFile(path.join(dir, rel), 'utf8'));
   }
 
   /** What the runner's `partial` warning carried — the named refusals. */
