@@ -228,6 +228,11 @@ describe('createShutdown', () => {
             order.push('commitWorker.stop');
           },
         },
+        backgroundJobs: {
+          stopSweeping() {
+            order.push('backgroundJobs.stopSweeping');
+          },
+        },
         db: {
           $client: {
             async end() {
@@ -255,6 +260,37 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'commitWorker.stop',
+      'backgroundJobs.stopSweeping',
+      'db.end',
+    ]);
+  });
+
+it('stops the background sweep before the pool goes, so no tick can query a closed client', async () => {
+    const d = deps();
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await done;
+
+    // Order is the point, not just presence: the sweep ticks a query, and a
+    // tick that fired after `db.end` would hit a client that is gone.
+    expect(d.order.indexOf('backgroundJobs.stopSweeping')).toBeLessThan(d.order.indexOf('db.end'));
+  });
+
+  it('shuts down cleanly when no background jobs were built yet', async () => {
+    const d = deps();
+    // A stop that lands mid-boot: the services exist, the jobs do not.
+    delete (d.deps as { backgroundJobs?: unknown }).backgroundJobs;
+    const shutdown = createShutdown(d.deps as never);
+    const done = shutdown('SIGTERM');
+    await settle();
+    d.finishClose();
+    await expect(done).resolves.toBeUndefined();
+    expect(d.order).toEqual([
+      'server.close',
+      'server.closeAllConnections',
+      'commitWorker.stop',
       'db.end',
     ]);
   });
@@ -269,6 +305,7 @@ describe('createShutdown', () => {
       'server.close',
       'server.closeAllConnections',
       'commitWorker.stop',
+      'backgroundJobs.stopSweeping',
       'db.end',
     ]);
   });

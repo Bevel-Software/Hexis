@@ -1,4 +1,4 @@
-export { PluginIndexService, pluginsWorkspaceId } from './plugins.service.js';
+export { PluginIndexService, pluginsWorkspaceId, pluginFolderBelowRoot } from './plugins.service.js';
 export {
   PluginProvisionService,
   PluginProvisionError,
@@ -6,6 +6,18 @@ export {
   personalAccessMd,
 } from './plugin-provision.service.js';
 export { JoinRequestsService, type JoinRequest } from './join-requests.service.js';
+export {
+  PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
+  type JoinRequestJobsDeps,
+  type JoinRequestTarget,
+} from './join-request-jobs.service.js';
+export {
+  DbJoinRequestStore,
+  type JoinRequestRecord,
+  type JoinRequestStatus,
+  type JoinRequestStore,
+} from './join-request-records.store.js';
 export { PluginLinkIndex, type LinkMembership, type PluginLinks } from './plugin-links.js';
 export { PluginLinksService, PluginLinkError } from './plugin-links.service.js';
 export { PluginRenameService, PluginRenameError, renamePluginPrincipalInText } from './plugin-rename.service.js';

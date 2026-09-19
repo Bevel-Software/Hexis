@@ -61,6 +61,7 @@ function renderLocked(plugin: PluginSummary = finance()) {
 }
 
 const askButton = () => screen.getByRole('button', { name: 'Subscribe to this plugin' });
+const pendingButton = () => screen.getByRole('button', { name: 'Requesting…' });
 
 describe('LockedPluginView', () => {
   beforeEach(() => {
@@ -100,7 +101,7 @@ describe('LockedPluginView', () => {
     expect(screen.getByText('1 skill · 0 tools. Visible once you have access.')).toBeInTheDocument();
   });
 
-  it('asks once, disables while in flight, and flips to the Requested box', async () => {
+  it('says "Requesting…" in the render after the click, refuses a second, and flips to the Requested box', async () => {
     let release = () => {};
     apiMock.requestPluginAccess.mockReturnValue(
       new Promise<void>((resolve) => {
@@ -110,8 +111,12 @@ describe('LockedPluginView', () => {
     const { onRequested } = renderLocked();
 
     fireEvent.click(askButton());
-    expect(askButton()).toBeDisabled();
-    fireEvent.click(askButton());
+    // The acknowledgement is the LABEL, not just the greying-out: the click
+    // used to leave a disabled button that still said "Subscribe", which is
+    // what read as a freeze for as long as the clone took.
+    expect(pendingButton()).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Subscribe to this plugin' })).toBeNull();
+    fireEvent.click(pendingButton());
     expect(apiMock.requestPluginAccess).toHaveBeenCalledTimes(1);
     expect(apiMock.requestPluginAccess).toHaveBeenCalledWith('Finance');
 
@@ -139,6 +144,54 @@ describe('LockedPluginView', () => {
     expect(
       screen.queryByRole('button', { name: 'Subscribe to this plugin' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('hands the button back with the reason when the background work failed', () => {
+    renderLocked(
+      finance({ hasRequested: false, requestFailure: 'the remote refused the push' }),
+    );
+    expect(
+      screen.getByText(
+        'Your request to join Finance could not be sent: the remote refused the push. Try again.',
+      ),
+    ).toBeInTheDocument();
+    expect(askButton()).not.toBeDisabled();
+    expect(screen.queryByText(/^Requested/)).not.toBeInTheDocument();
+  });
+
+  it('names the plugin the way people read it in the failure sentence', () => {
+    renderLocked(
+      finance({ name: 'finance', displayName: 'Finance & Ops', requestFailure: 'the branch was refused' }),
+    );
+    expect(
+      screen.getByText(
+        'Your request to join Finance & Ops could not be sent: the branch was refused. Try again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('never shows a stale failure next to a standing request', () => {
+    // The two are mutually exclusive on the wire; the view does not rely on
+    // that, because a card saying "Requested" above a sentence saying it
+    // could not be sent is the one thing it must never render.
+    renderLocked(finance({ hasRequested: true, requestFailure: 'the remote refused the push' }));
+    expect(screen.getByText('Requested: Olga Ivanova decides who gets access.')).toBeInTheDocument();
+    expect(screen.queryByText(/could not be sent/)).toBeNull();
+  });
+
+  it('retrying after a failure asks again through the same endpoint', async () => {
+    const { onRequested } = renderLocked(
+      finance({ requestFailure: 'the remote refused the push' }),
+    );
+    fireEvent.click(askButton());
+    expect(apiMock.requestPluginAccess).toHaveBeenCalledWith('Finance');
+    // On the answer the card takes over — the failure sentence goes with the
+    // button it was explaining.
+    expect(
+      await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not be sent/)).toBeNull();
+    expect(onRequested).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the admins, in the plural, when nobody is named', async () => {
@@ -192,6 +245,29 @@ describe('LockedPluginView', () => {
   it('offers no Manage access to somebody who cannot write the folder', () => {
     renderLocked();
     expect(screen.queryByRole('button', { name: 'Manage access' })).not.toBeInTheDocument();
+  });
+
+  it('announces the in-flight request to a screen reader, not just on the button', async () => {
+    let release = () => {};
+    apiMock.requestPluginAccess.mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = () => resolve();
+      }),
+    );
+    renderLocked(finance({ name: 'finance', displayName: 'Finance & Ops' }));
+
+    const live = screen.getByRole('status', { name: 'Request progress' });
+    expect(live).toHaveTextContent('');
+
+    fireEvent.click(askButton());
+    // Pressing the button disables it, and a disabled button drops focus —
+    // so the label change alone is never read out. The live region is what
+    // carries the acknowledgement this whole ticket exists to give.
+    expect(live).toHaveAttribute('aria-live', 'polite');
+    expect(live).toHaveTextContent('Requesting access to Finance & Ops…');
+
+    release();
+    await screen.findByText('Requested: Olga Ivanova decides who gets access.');
   });
 });
 
