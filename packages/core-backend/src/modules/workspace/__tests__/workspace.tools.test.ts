@@ -14,6 +14,7 @@ import type { ToolContext } from '../../tool-helpers/tool.contract.js';
 import type { ToolAuth } from '../../tool-auth/tool-auth.middleware.js';
 import { CONTENT_RULE, registerWorkspaceTools } from '../workspace.tools.js';
 import { RoutineWritePolicyService } from '../routine-write-policy.js';
+import { UuidSessionSink, type ISessionSink } from '../session-sink.js';
 import { WorkflowHooks } from '../../workflow/workflow-hooks.js';
 import { SpillStore } from '../spill-store.js';
 import { DocExtractService } from '../file-readers/doc-extract.service.js';
@@ -1384,7 +1385,14 @@ describe('start_session', () => {
   let server: HttpServer | undefined;
   let created: Array<{ userId: string; startedAt: Date }> = [];
 
-  async function startSessionApp(source: 'external' | 'internal' = 'external'): Promise<string> {
+  async function startSessionApp(
+    source: 'external' | 'internal' = 'external',
+    // The default fake returns one fixed id, which is what most of these
+    // assertions want. The load reproduction below substitutes the REAL
+    // `UuidSessionSink`, because "did fifty first calls collide?" is a question
+    // only the real minting can answer.
+    sink?: ISessionSink,
+  ): Promise<string> {
     created = [];
     const registry = new ToolRegistry();
     const resolve = async (auth: ToolAuth, signal: AbortSignal): Promise<ToolContext> => ({
@@ -1418,7 +1426,7 @@ describe('start_session', () => {
       new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
       { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
       new RoutineWritePolicyService(),
-      fakeSessionSink,
+      sink ?? fakeSessionSink,
     );
     app.use('/api', router);
     server = await new Promise<HttpServer>((r) => {
@@ -1454,6 +1462,101 @@ describe('start_session', () => {
     const res = await post(`${base}/api/agent/tools/start_session`);
     expect(res.status).toBe(403);
     expect(created).toHaveLength(0);
+  });
+
+  /**
+   * The load reproduction, platform side.
+   *
+   * The report behind this was one first call on a fresh connection failing
+   * with a generic error, an immediate retry working, and the error carrying a
+   * `req_011…` id — the Anthropic API's request-id shape, which nothing here
+   * mints. The hypothesis was that the failure never reached the tool. These
+   * run the real `UuidSessionSink` behind the real route, fifty calls at once,
+   * so the hypothesis stops being the only account of what the route does
+   * under a burst.
+   *
+   * `first-call-probe.ts` (and its suite) does the same over a real MCP
+   * transport; this one strips the transport away so a future failure can be
+   * placed on one side of it or the other.
+   */
+  describe('fifty first calls at once', () => {
+    it('answers every one of them with a session id of its own', async () => {
+      const base = await startSessionApp('external', new UuidSessionSink());
+
+      const responses = await Promise.all(Array.from({ length: 50 }, () => post(`${base}/api/agent/tools/start_session`)));
+      const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<{ sessionId?: string }>;
+
+      expect(responses.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));
+      // Fifty ids, no collision and no blank: a burst is not one id handed out
+      // repeatedly, and it is not a partially-served queue either.
+      expect(new Set(bodies.map((b) => b.sessionId)).size).toBe(50);
+      expect(bodies.every((b) => typeof b.sessionId === 'string' && b.sessionId.length > 0)).toBe(true);
+    });
+
+    it('mints nothing when the call fails, so the retry the description promises is safe', async () => {
+      // A sink that fails the first call and serves the second is the reported
+      // sequence exactly. What the retry must NOT inherit is any state the
+      // failed call left — and there is none to inherit, because a failed mint
+      // never reached the point of producing an id.
+      let calls = 0;
+      const flaky: ISessionSink = {
+        createSession: async () => {
+          calls++;
+          if (calls === 1) throw new Error('sink unavailable');
+          return { sessionId: `session-${calls}` };
+        },
+      };
+      const base = await startSessionApp('external', flaky);
+
+      // The route logs the sink's failure — correct behaviour, and expected
+      // here, so it is kept out of the suite's output rather than left to look
+      // like a real fault.
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const failed = await post(`${base}/api/agent/tools/start_session`);
+      errorLog.mockRestore();
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+
+      const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      expect(retried.sessionId).toBe('session-2');
+      expect(calls).toBe(2);
+    });
+
+    it('gives a retry that lands after a success a NEW id, leaving the first one usable', async () => {
+      // The harmless case the description calls out: a client that retries a
+      // call which had in fact succeeded ends up holding two ids. Neither
+      // supersedes the other — the run keeps using the one it already passed
+      // to other tools, and the spare is simply never mentioned again.
+      const base = await startSessionApp('external', new UuidSessionSink());
+
+      const first = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+      const retry = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
+
+      expect(retry.sessionId).not.toBe(first.sessionId);
+      expect(first.sessionId).toBeTruthy();
+    });
+  });
+
+  it('tells the caller, in the tool description, that a failed call can be retried', async () => {
+    const registry = new ToolRegistry();
+    const router = express.Router();
+    const noopAuth: express.RequestHandler = (_req, _res, next) => next();
+    registerWorkspaceTools(
+      registry, router, noopAuth, (() => () => {}) as never,
+      new SpillStore(join(tmpdir(), 'bevel-test-spills')), new DocExtractService(join(tmpdir(), 'bevel-test-doc-extract')), allowAll, KB_DIR,
+      { service: {} as never, enabled: false, kbDirName: KB_DIR, recoveryBotEmail: 'recovery-bot@bevel.local', hooks: new WorkflowHooks() },
+      new RoutineWritePolicyService(),
+      {} as never,
+    );
+
+    const description = (await registry.listExternal()).find((t) => t.name === 'start_session')?.description ?? '';
+
+    // The three things a caller has to be told, and the reason the ticket asked
+    // for them: without the first two a transport hiccup reads as a dead end,
+    // and without the third a client that already retried thinks it has
+    // corrupted its own run.
+    expect(description).toMatch(/retry/i);
+    expect(description).toMatch(/created nothing/i);
+    expect(description).toMatch(/harmless/i);
   });
 });
 
