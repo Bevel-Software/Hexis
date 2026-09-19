@@ -1387,15 +1387,25 @@ export function ManageAccessDialog({
                   {pickedChips.map((c) => {
                     const label = principalLabel(c);
                     return (
+                      // `max-w-full` bounds the chip by the field it sits in, so a
+                      // long email can never push its own border past the box;
+                      // `min-w-0` lets the label inside it actually shrink (a flex
+                      // item's automatic minimum is its content, ellipsis or not).
                       <span
                         key={principalKey(c)}
-                        className="inline-flex items-center gap-1 rounded-sm bg-sunken px-2 py-0.5 text-detail text-ink"
+                        className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-sunken px-2 py-0.5 text-detail text-ink"
                       >
-                        {label}
+                        {/* The label is the only part that gives way — it
+                            truncates and carries the full name as its tooltip. */}
+                        <span className="min-w-0 truncate" title={label}>
+                          {label}
+                        </span>
                         <button
                           type="button"
                           onClick={() => removeChip(c)}
-                          className="rounded-xs text-ink-faint hover:text-danger"
+                          // `shrink-0`: the remove control stays whole and visible
+                          // at the end of the chip however long the label is.
+                          className="shrink-0 rounded-xs text-ink-faint hover:text-danger"
                           aria-label={`Remove ${label}`}
                         >
                           <X size={12} />
