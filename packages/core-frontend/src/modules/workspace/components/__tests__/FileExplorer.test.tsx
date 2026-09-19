@@ -1766,6 +1766,161 @@ describe('FileExplorer: delete and move ask first', () => {
     });
   });
 
+  /**
+   * A rename or a drop onto a name that is taken is refused by the server —
+   * nothing is overwritten — and the sentence it sends ("A file named X
+   * already exists in Y.") is what the sidebar shows, where the action was.
+   * Neither refusal goes through `window.alert`, and neither moves a row.
+   */
+  describe('a destination that is already taken', () => {
+    const TAKEN = 'A file named nda.md already exists in Legal.';
+
+    async function startRename(rowName: string) {
+      fireEvent.contextMenu(screen.getByText(rowName));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: /Rename/i }));
+      });
+      return screen.getByRole('textbox') as HTMLInputElement;
+    }
+
+    async function typeAndSubmit(input: HTMLInputElement, name: string) {
+      await act(async () => {
+        fireEvent.change(input, { target: { value: name } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+      });
+    }
+
+    it('shows the refusal in the rename box and keeps the box open on the name that was typed', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const moveEntry = vi.fn().mockRejectedValue(new Error(TAKEN));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        const input = await startRename('contract.pdf');
+        await typeAndSubmit(input, 'nda.md');
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+        expect(screen.getByTestId('rename-error')).toHaveTextContent(TAKEN);
+        // Still open, still holding what was typed: the name is there to fix.
+        expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+        expect(alertSpy).not.toHaveBeenCalled();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('sends the rename once more after the name is changed, and closes the box when it lands', async () => {
+      const moveEntry = vi.fn()
+        .mockRejectedValueOnce(new Error(TAKEN))
+        .mockResolvedValueOnce(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(screen.getByTestId('rename-error')).toBeInTheDocument();
+
+      // Editing clears the refusal — the new name has not been refused.
+      await act(async () => {
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'deal.pdf' } });
+      });
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+      });
+      expect(moveEntry).toHaveBeenLastCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/deal.pdf`);
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('ignores edits made while the rename is in flight, so the answer lands on the name it was about', async () => {
+      // A name typed while the request is out would be thrown away by the row
+      // unmounting on success, and a refusal coming back would appear under a
+      // name it was never about. The box is frozen for that window instead.
+      let land: (() => void) | undefined;
+      const moveEntry = vi.fn().mockImplementation(
+        () => new Promise<void>((resolve) => { land = resolve; }),
+      );
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      const inFlight = screen.getByRole('textbox') as HTMLInputElement;
+      expect(inFlight).toHaveAttribute('readonly');
+      await act(async () => {
+        fireEvent.change(inFlight, { target: { value: 'something-else.md' } });
+        fireEvent.keyDown(inFlight, { key: 'Enter' });
+      });
+      // Neither the edit nor the second Enter took: one request, one name.
+      expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      await act(async () => { land?.(); });
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+    });
+
+    it('an ordinary rename closes the box and moves the file, as before', async () => {
+      const moveEntry = vi.fn().mockResolvedValue(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'agreement.pdf');
+
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/agreement.pdf`);
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('a refused drop says so under the row and leaves both entries where they were', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const clash = 'A file named contract.pdf already exists in Sales.';
+        const moveEntry = vi.fn().mockRejectedValue(new Error(clash));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        await dropOn('Sales', CONTRACT);
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+        });
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+        const notice = screen.getByTestId('tree-move-error');
+        expect(notice).toHaveTextContent(clash);
+        expect(notice).toHaveAttribute('role', 'alert');
+        expect(alertSpy).not.toHaveBeenCalled();
+        // The dragged row and the row it was dropped on both stayed.
+        expect(screen.getByText('contract.pdf')).toBeInTheDocument();
+        expect(screen.getByText('Sales')).toBeInTheDocument();
+
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Dismiss move error' }));
+        });
+        expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('a drop that lands says nothing', async () => {
+      renderExplorer({ fileTree: TREE });
+      openLegal();
+
+      await dropOn('Sales', CONTRACT);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+
+      expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+    });
+  });
+
   describe('keyboard', () => {
     it('confirms on Enter and moves focus to the row it was dropped on', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });

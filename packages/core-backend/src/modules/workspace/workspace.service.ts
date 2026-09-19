@@ -12,8 +12,15 @@ import {
   DEFAULT_BRANCH,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
+  entryExistsMessage,
+  type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import {
+  DestinationTakenError,
+  inspectDestination,
+  renameNoReplace,
+} from '../../shared/rename-no-replace.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
@@ -96,6 +103,29 @@ export class FolderTooLargeError extends Error {
   constructor(public readonly limitBytes: number) {
     super(`Folder exceeds the ${limitBytes}-byte download size limit`);
     this.name = 'FolderTooLargeError';
+  }
+}
+
+/**
+ * A rename or move would land on a name something else already has. 409, like
+ * every other precondition the caller has to clear first: nothing was moved,
+ * and the entry already there is untouched.
+ *
+ * Lives here rather than in `shared/domain-errors.ts` because the sentence is
+ * built by `entryExistsMessage` and that file deliberately imports no VALUE
+ * from `@bevel-software/platform-shared`, only a type. It still extends
+ * `WorkflowDomainError`, so the routes' `sendError` maps it to 409 with
+ * `{ kind: 'entry-exists', … }` without knowing this class exists.
+ */
+export class EntryExistsError extends WorkflowDomainError {
+  readonly kind = 'entry-exists' as const;
+  constructor(readonly entryKind: ExistingEntryKind, readonly destination: string) {
+    super(entryExistsMessage(entryKind, destination), 409, {
+      kind: 'entry-exists',
+      entryKind,
+      destination,
+    });
+    this.name = 'EntryExistsError';
   }
 }
 
@@ -1188,12 +1218,49 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
+    // Before `mkdir`, so a refused move leaves no empty folder behind — and
+    // it is the look that produces the sentence naming what is in the way.
+    await this.assertDestinationFree(oldAbsolute, newAbsolute, newRelativePath);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });
-    await fs.rename(oldAbsolute, newAbsolute);
+    // The move itself cannot replace anything either, so a destination that
+    // appears between the look above and this line is refused rather than
+    // eaten (`shared/rename-no-replace.ts`). This path takes no lock on
+    // purpose — see the note above — so the atomicity has to come from the
+    // filesystem call.
+    try {
+      await renameNoReplace(oldAbsolute, newAbsolute, newRelativePath);
+    } catch (err) {
+      if (err instanceof DestinationTakenError) {
+        throw new EntryExistsError(err.entryKind, newRelativePath);
+      }
+      throw err;
+    }
     if (this.diffService) {
       await this.diffService.markUserDeleted(workspaceId, oldRelativePath);
       await this.diffService.syncFromDisk(workspaceId, newRelativePath);
     }
+  }
+
+  /**
+   * Refuse a move onto a name that is taken. `fs.rename` REPLACES an existing
+   * file on every platform — that is how renaming a `.docx` onto an existing
+   * `.md` handed the markdown file the Word bytes — so the destination is
+   * looked at first, and a move never overwrites a file or merges into a
+   * folder.
+   *
+   * Judged by `inspectDestination`, which reads a case-only rename on a
+   * case-insensitive filesystem — where `notes.md` → `Notes.md` finds the
+   * SOURCE at the destination — as the rename that was asked for rather than a
+   * clash, and everything else as a clash. It is the same reading the move
+   * itself uses, so the sentence and the refusal cannot drift apart.
+   */
+  private async assertDestinationFree(
+    oldAbsolute: string,
+    newAbsolute: string,
+    newRelativePath: string,
+  ): Promise<void> {
+    const verdict = await inspectDestination(oldAbsolute, newAbsolute);
+    if (verdict.state === 'taken') throw new EntryExistsError(verdict.kind, newRelativePath);
   }
 
   /**

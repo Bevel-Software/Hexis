@@ -1185,3 +1185,114 @@ describe('LockingFilesystem — the agent roles.yaml gate covers every op that l
     expect(validateWrite).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A move or a copy through this layer never replaces what is at its
+ * destination. The tools above it look first, for the sentence; this is the
+ * guarantee underneath, which holds for a name claimed after that look — so
+ * these call straight onto a taken name, which is what losing the race
+ * amounts to.
+ */
+describe('LockingFilesystem — a destination that is taken is refused, never replaced', () => {
+  const SOURCE = `${KB}/KnowledgeBase/source.md`;
+  const TAKEN = `${KB}/KnowledgeBase/taken.md`;
+  let root: string;
+  let fsLayer: LockingFilesystem;
+
+  const onDisk = (rel: string) => path.join(root, rel);
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    await fs.mkdir(path.join(root, KB, 'KnowledgeBase'), { recursive: true });
+    await fs.writeFile(onDisk(SOURCE), 'source');
+    fsLayer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow: makeWorkflow(), workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses a move onto a taken name with the clash sentence, and keeps both files', async () => {
+    await fs.writeFile(onDisk(TAKEN), 'taken');
+
+    await expect(fsLayer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      status: 409,
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('taken');
+    expect(await fs.readFile(onDisk(SOURCE), 'utf-8')).toBe('source');
+  });
+
+  it('refuses a copy onto a taken name with the same sentence, and copies nothing', async () => {
+    await fs.writeFile(onDisk(TAKEN), 'taken');
+
+    await expect(fsLayer.copyFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('taken');
+  });
+
+  /**
+   * The refusal must not cost a bystander their file. The destination of a
+   * lost race holds the WINNER's just-landed move, whose commit is still
+   * queued (the worker publishes it out of band). A discarding release resets
+   * that path to HEAD — it cannot know the dirty bytes are not the loser's —
+   * so unwinding the loser that way deletes the winner's file. The refusal
+   * writes nothing (the no-clobber call fails without creating anything), so
+   * every lock it unwinds releases untouched.
+   */
+  it('releases UNTOUCHED when the destination is taken, so a lost race cannot eat the winner', async () => {
+    const workflow = makeWorkflow();
+    const layer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await fs.writeFile(onDisk(TAKEN), 'the winner of the race');
+
+    await expect(layer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({ name: 'DestinationTakenError' });
+
+    // Both ends of the move: the destination is the one holding the winner's
+    // bytes, and the source was not written either.
+    for (const p of [SOURCE, TAKEN]) {
+      expect(workflow.releaseLockUntouched, p).toHaveBeenCalledWith('ws-feat', 'feat', p, USER);
+    }
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('the winner of the race');
+  });
+
+  it.skipIf(process.platform === 'win32')('answers the clash sentence when a DANGLING link holds the name', async () => {
+    // A link to nothing still owns the directory entry, so the exclusive
+    // create fails — and an existence probe that follows links would say the
+    // name is free and let the raw filesystem error out as a 500 instead.
+    await fs.symlink(onDisk(`${KB}/KnowledgeBase/gone.md`), onDisk(TAKEN));
+
+    await expect(fsLayer.copyFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+    await expect(fsLayer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({
+      name: 'DestinationTakenError',
+      message: 'A file named taken.md already exists in KnowledgeBase.',
+    });
+
+    expect((await fs.lstat(onDisk(TAKEN))).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(onDisk(SOURCE), 'utf-8')).toBe('source');
+  });
+
+  it('moves and copies onto a free name exactly as before', async () => {
+    await fsLayer.copyFile(SOURCE, `${KB}/KnowledgeBase/copy.md`);
+    await fsLayer.moveFile(SOURCE, `${KB}/KnowledgeBase/moved.md`);
+
+    expect(await fs.readFile(onDisk(`${KB}/KnowledgeBase/copy.md`), 'utf-8')).toBe('source');
+    expect(await fs.readFile(onDisk(`${KB}/KnowledgeBase/moved.md`), 'utf-8')).toBe('source');
+    await expect(fs.access(onDisk(SOURCE))).rejects.toBeDefined();
+  });
+});

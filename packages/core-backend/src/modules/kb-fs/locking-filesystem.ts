@@ -36,6 +36,7 @@
  */
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('locking-fs');
@@ -50,6 +51,7 @@ import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platfor
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
+import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
@@ -202,17 +204,58 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // creates a new file at dest without disturbing src on disk. Because `src`
     // is not locked, a claimed destination gets the source bytes read and
     // judged under the lock, and exactly those bytes are written.
+    //
+    // A copy lands bytes at a name of its own, so it never replaces what is
+    // already there — the rule a move follows. Unless the caller explicitly
+    // asks to overwrite, both landings below run exclusively: `copyFile` with
+    // `overwrite: false` uses `COPYFILE_EXCL` and `writeFile` the `wx` flag,
+    // each of which FAILS rather than replaces if the name was taken in the
+    // meantime. That is what makes the tool's own look at the destination a
+    // message rather than the whole guarantee.
+    const noReplace: CopyOptions = { ...options, overwrite: options?.overwrite === true };
     let checked: FileContent | null = null;
     return this.withLock(
       dest,
       () =>
-        checked === null
-          ? super.copyFile(src, dest, options)
-          : super.writeFile(dest, checked, { overwrite: options?.overwrite }),
+        this.asTakenRefusal(dest, () =>
+          checked === null
+            ? super.copyFile(src, dest, noReplace)
+            : super.writeFile(dest, checked, { overwrite: noReplace.overwrite }),
+        ),
       async () => {
         checked = await this.validateResultingWrite(dest, () => this.readFile(src));
       },
     );
+  }
+
+  /**
+   * Run `landing` and turn the filesystem's own "that name is taken" failure
+   * into the refusal every surface answers with — `A file named … already
+   * exists in ….` — so a copy that loses the race reads exactly like a copy
+   * that was refused by the look before it.
+   */
+  private async asTakenRefusal(dest: string, landing: () => Promise<void>): Promise<void> {
+    try {
+      await landing();
+    } catch (err) {
+      // Mastra's `FileExistsError` by name (this file avoids importing its
+      // error classes, and the name is its stable surface), plus the raw codes
+      // the exclusive flags answer with when the name is taken by something
+      // other than a plain file.
+      const name = (err as { name?: string } | null)?.name;
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      const taken = name === 'FileExistsError' || code === 'EEXIST' || code === 'EISDIR';
+      const absolute = taken ? this.resolveAbsolutePath(dest) : undefined;
+      // Only when something really is there: a code alone must not turn an
+      // unrelated failure into "already exists". `lstat`, not an existence
+      // probe that follows links — a DANGLING link holds the name against an
+      // exclusive create while resolving to nothing, and it is an entry the
+      // user can see, so it gets the clash sentence like any other.
+      if (absolute !== undefined && (await lstatOrNull(absolute)) !== null) {
+        throw await takenError(absolute, dest);
+      }
+      throw err;
+    }
   }
 
   override async moveFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
@@ -241,15 +284,57 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const check = async () => {
       await this.validateResultingWrite(dest, () => this.readFile(src));
     };
+    const move = () => this.moveNoReplace(src, dest, options);
     if (src === dest) {
-      return this.withLock(dest, () => super.moveFile(src, dest, options), check);
+      return this.withLock(dest, move, check);
     }
     const [first, second] = src < dest ? [src, dest] : [dest, src];
     // The inner cycle is the raw one, so its refusal reaches the outer lock
     // still marked as a refusal and both release untouched.
-    return this.withLock(first, () =>
-      this.lockedCycle(second, () => super.moveFile(src, dest, options), check),
-    );
+    return this.withLock(first, () => this.lockedCycle(second, move, check));
+  }
+
+  /**
+   * The move itself, refusing a destination that is taken instead of replacing
+   * it — `fs.rename`, which `LocalFilesystem.moveFile` calls, replaces an
+   * existing file on every platform, and that is how a `.docx` renamed onto an
+   * existing `.md` handed the markdown file the Word bytes.
+   *
+   * The caller above (`move_file`) has already looked at the destination and
+   * refused a taken one with the sentence naming what is in the way. This runs
+   * with both paths' locks held and is the backstop under that look: a
+   * destination created in between — by a writer this process does not
+   * serialize with, the sidebar's own `moveEntry` among them — is refused
+   * atomically by the filesystem rather than overwritten. See
+   * `shared/rename-no-replace.ts`.
+   *
+   * `overwrite: true` is still honoured, for a caller that means it; nothing
+   * in the app passes it today.
+   */
+  private async moveNoReplace(src: string, dest: string, options?: CopyOptions): Promise<void> {
+    if (options?.overwrite === true) return super.moveFile(src, dest, options);
+    const srcAbsolute = this.resolveAbsolutePath(src);
+    const destAbsolute = this.resolveAbsolutePath(dest);
+    // A path this filesystem cannot resolve is not one to do raw `fs` calls
+    // on; the base class refuses it with the message it always has.
+    if (srcAbsolute === undefined || destAbsolute === undefined) {
+      return super.moveFile(src, dest, options);
+    }
+    // `LocalFilesystem.moveFile` makes the destination's parent, and callers
+    // rely on a move into a new folder working.
+    await fs.mkdir(path.dirname(destAbsolute), { recursive: true });
+    try {
+      return await renameNoReplace(srcAbsolute, destAbsolute, dest);
+    } catch (err) {
+      // Across a mount point inside the workspace nothing can be renamed at
+      // all; the base class's copy-then-remove is the only way through, and
+      // `overwrite: false` keeps it exclusive (`COPYFILE_EXCL`) so it cannot
+      // replace anything either.
+      if ((err as NodeJS.ErrnoException | null)?.code !== 'EXDEV') throw err;
+      return this.asTakenRefusal(dest, () =>
+        super.moveFile(src, dest, { ...options, overwrite: false }),
+      );
+    }
   }
 
   /**
@@ -790,11 +875,18 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // before the throw doesn't accidentally land as a committed change
       // (the normal `releaseLock` would `commitFile` whatever's on disk
       // for `inputPath`, including the partial state). A check refusal wrote
-      // nothing, so it releases untouched instead. Best-effort: a failure to
-      // release here surfaces in logs but doesn't override the original op
-      // error the caller actually cares about.
+      // nothing, so it releases untouched instead — and so does a move or
+      // copy refused because the destination is taken: its no-clobber call
+      // (`link`, `mkdir`, `open` with `O_EXCL`) fails without creating
+      // anything. That one matters beyond tidiness. The discard resets the
+      // PATH rather than this call's changes, so on the destination of a lost
+      // race — where the winner's move has landed and its commit is still
+      // queued — discarding would throw the winner's file away on the way to
+      // reporting the loser's refusal. Best-effort: a failure to release here
+      // surfaces in logs but doesn't override the original op error the
+      // caller actually cares about.
       try {
-        if (err instanceof CheckRefusal) {
+        if (err instanceof CheckRefusal || err instanceof DestinationTakenError) {
           await workflow.releaseLockUntouched(workspaceId, branch, inputPath, user);
         } else {
           await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
