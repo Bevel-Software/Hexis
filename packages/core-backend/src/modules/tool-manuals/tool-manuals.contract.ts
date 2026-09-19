@@ -263,6 +263,28 @@ export interface ToolManualSummary {
   // The server reads probe config through `IToolManualService.probeTargetFor`.
 }
 
+/**
+ * A `.tool` file the scan REFUSED — reported instead of silently dropped.
+ *
+ * One unparseable manual is a finding about that file, never an outage for the
+ * catalog: every other manual is listed and callable, and the refused one comes
+ * back here so the listing can say which file and why. Nothing is cached about
+ * it beyond the scan's own TTL, so fixing (or deleting) the file restores it on
+ * the next listing — no reconnect, no restart.
+ *
+ * `reason` is the validation message with its LOCATION where the parser gave
+ * one (`line N, column M` for a YAML fault, the field name for a schema one),
+ * scrubbed of anything that could be a credential — see `describeManualFault`.
+ * A `.tool` is knowledge-base content an author may have pasted a literal token
+ * into, and this string reaches an agent transcript, a browser and a log.
+ */
+export interface InvalidToolManual {
+  /** KB-relative path of the refused file, spelled as the catalog spells a manual's `path`. */
+  path: string;
+  /** Why it was refused: the validation message + location, with no credential values. */
+  reason: string;
+}
+
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */
 export interface ToolCapability {
   name: string;
@@ -289,6 +311,18 @@ export interface ToolManualDetail extends Omit<ToolManualSummary, 'description'>
 export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
+  /**
+   * The manuals the scan REFUSED, filtered to the files this caller could read
+   * — the counterpart of `listAccessible`, from the same cached scan, so asking
+   * for both costs one disk read.
+   *
+   * Access-filtered for the same reason the listing is: a path is a fact about
+   * the knowledge base, and a caller who may not read the file may not learn it
+   * exists. The refused file's own frontmatter verbs are unparseable by
+   * definition, so the verdict comes from its folder's `access.md` chain —
+   * default-deny, as everywhere else.
+   */
+  listInvalid(userEmail: string): Promise<InvalidToolManual[]>;
   /**
    * One readable `.tool` by slug, with its description + capabilities, for the
    * browser tool page. `null` when no such slug exists OR the caller can't read

@@ -1,0 +1,13 @@
+---
+'@bevel-software/platform-core-backend': patch
+---
+
+A `.tool` file the scanner cannot parse is now reported instead of disappearing. The scan already skipped a malformed manual rather than throwing, so the other tools stayed listed — but it skipped it in total silence: no log line, no field in any response, nothing anywhere naming the file or the fault. From where the author stands that is indistinguishable from an outage. They wrote a tool, the tool is not in the catalog, and the platform has no opinion about why.
+
+Every listing that carries the catalog now carries `invalid: [{ path, reason }]` beside it — `list_tool_setup`, `GET /api/tools`, and `GET /api/secrets/tools`, the Library page's spine. Each entry names the file and says what was wrong with it: a YAML fault comes with the line and column the parser stopped at, a schema fault with the field and the rule it broke, a reserved-variable reference with the variable it named. A refused file is access-gated exactly like a listed one, so a path is never disclosed to someone who could not read that file anyway.
+
+The reason is built rather than forwarded. A `YAMLParseError`'s own message ends with the offending source lines, verbatim under a caret — and the line that fails to parse is as likely as any other to be the one holding a literal token an author pasted where a `${VAR}` belonged. Only the parser's prose survives the cut; the location is restated from the error's line/column, which is numbers rather than text, and the whole string then goes through the same credential scrub the rest of the backend logs through.
+
+Nothing about a refusal is remembered between scans, so fixing the file — or deleting it — restores the tool on the next listing, with nothing to restart and no connection to re-establish. The warnings reach the log once per change rather than once per scan: a file that stays broken would otherwise repeat itself every minute on every surface and bury the scan where something actually moved.
+
+Two faults that previously only reached the server log join the same report: a manual whose name collides with another's secret-variable namespace, and a `.tool` the walk found but the read could not open. Both cost a tool its place in the catalog, so both now say so where someone can see it.

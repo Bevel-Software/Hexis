@@ -198,8 +198,17 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
     if (!userId || !email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
       const pathFilter = typeof req.query.path === 'string' ? req.query.path : null;
-      let manuals = await toolManualService.listAccessible(email);
-      if (pathFilter) manuals = manuals.filter((m) => m.path === pathFilter);
+      // The Library page's spine, so it carries the refused files too: one
+      // unparseable `.tool` costs the page that tool and nothing else, and the
+      // page can say which file and why instead of rendering a gap. Narrowed
+      // by `?path=` exactly as the manuals are — the editor sidebar asking
+      // about one file gets that file's verdict, valid or not.
+      const [allManuals, allInvalid] = await Promise.all([
+        toolManualService.listAccessible(email),
+        toolManualService.listInvalid(email),
+      ]);
+      const manuals = pathFilter ? allManuals.filter((m) => m.path === pathFilter) : allManuals;
+      const invalid = pathFilter ? allInvalid.filter((i) => i.path === pathFilter) : allInvalid;
 
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));
       const status = await secretsVault.statusFor(userId, allKeys);
@@ -237,7 +246,7 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
           }),
         })),
       );
-      res.json({ tools });
+      res.json({ tools, invalid });
     } catch (err) {
       log.error('list tools failed:', { err });
       res.status(500).json({ error: 'Internal error' });

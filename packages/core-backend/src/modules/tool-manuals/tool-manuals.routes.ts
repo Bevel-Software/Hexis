@@ -339,7 +339,15 @@ export function createToolManualsBrowserRoutes(
     const email = req.userEmail;
     if (!email) return void res.status(401).json({ error: 'Not authenticated' });
     try {
-      res.json({ tools: await toolManualService.listAccessible(email) });
+      // `invalid` rides along with the catalog, from the same cached scan: a
+      // `.tool` the scan refused is the ONE reason a tool can be missing here,
+      // and a listing that dropped it in silence is indistinguishable from a
+      // workspace that never had it.
+      const [tools, invalid] = await Promise.all([
+        toolManualService.listAccessible(email),
+        toolManualService.listInvalid(email),
+      ]);
+      res.json({ tools, invalid });
     } catch (err) {
       log.error('list failed:', { err });
       res.status(500).json({ error: 'Internal error' });
