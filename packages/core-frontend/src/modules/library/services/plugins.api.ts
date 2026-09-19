@@ -92,6 +92,15 @@ export interface PluginSummary {
   hasRequested: boolean;
   /** That CR's number when `hasRequested` (deep-links the review UI). */
   requestNumber: number | null;
+  /**
+   * Why the caller's last request never reached the managers, in the words
+   * the platform received. Set only when a recorded request FAILED the git
+   * work that follows the click — the page says so and offers the button
+   * again, and the next click retries that same recorded request. Absent
+   * from an older server, which did the git work before answering and so
+   * could only fail the call itself.
+   */
+  requestFailure?: string | null;
 }
 
 export async function listPlugins(): Promise<PluginSummary[]> {
@@ -248,8 +257,32 @@ export class AlreadyReadableError extends Error {
   }
 }
 
-/** Open (or return the existing) join change request. Idempotent server-side. */
-export async function requestPluginAccess(name: string): Promise<{ number: number }> {
+/** What the server says once it has RECORDED a request to join. */
+export interface JoinRequestAnswer {
+  ok: true;
+  /**
+   * `pending` while the branch, commit and change request are still being
+   * made in the background; `opened` once they exist. Either one means the
+   * request is recorded and the page shows the "Requested" card — the
+   * difference is only whether the managers can see it yet. Absent from an
+   * older server, which answered only after opening the change request.
+   */
+  state?: 'pending' | 'opened' | 'failed';
+  /** The change request, once there is one. Null while `state` is `pending`. */
+  number: number | null;
+}
+
+/**
+ * Ask to join a locked plugin.
+ *
+ * Answers as soon as the request is RECORDED — the server does the branch,
+ * the clone, the grant commit, the push and the change request afterwards, so
+ * this returns in well under a second even on the caller's first-ever request
+ * (which is the one that clones the repository). Idempotent server-side per
+ * (caller, plugin): a second call returns the same recorded request, and one
+ * that failed its background work is retried rather than duplicated.
+ */
+export async function requestPluginAccess(name: string): Promise<JoinRequestAnswer> {
   const res = await authFetch(`/api/plugins/${encodeURIComponent(name)}/join-request`, {
     method: 'POST',
   });
@@ -262,7 +295,7 @@ export async function requestPluginAccess(name: string): Promise<{ number: numbe
       .catch(() => ({}))) as { kind?: string };
     if (body.kind === 'already-readable') throw new AlreadyReadableError();
   }
-  return handleApiResponse<{ ok: true; number: number }>(res);
+  return handleApiResponse<JoinRequestAnswer>(res);
 }
 
 /**

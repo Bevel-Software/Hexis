@@ -11,6 +11,7 @@ import {
   oauthAuthCodes,
   oauthTokens,
   pendingCommits,
+  pluginJoinRequests,
   prComments,
   prFileApprovals,
   prMergeLog,
@@ -136,6 +137,10 @@ export class AccountErasureService implements IAccountErasureService {
 
       // Personal-data rows the core owns.
       await tx.delete(fileLocks).where(eq(fileLocks.holderUserId, userId));
+      // Recorded plugin join requests. Deleted rather than anonymised: the
+      // row exists only to finish (or retry) one person's request, and a
+      // request nobody can make again is nothing but their address.
+      await tx.delete(pluginJoinRequests).where(eq(pluginJoinRequests.requesterEmail, target.email));
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
       await tx

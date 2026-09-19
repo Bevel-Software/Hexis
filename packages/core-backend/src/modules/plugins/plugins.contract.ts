@@ -114,6 +114,14 @@ export interface PluginSummary {
   hasRequested: boolean;
   /** The open join CR's number when `hasRequested` (deep-links the UI). */
   requestNumber: number | null;
+  /**
+   * Why the caller's last request never reached the managers, in the words
+   * the platform received — set only when a recorded request FAILED its
+   * background git work and no open change request exists. The page says so
+   * and offers the button again; the next click retries the same recorded
+   * request rather than opening a second one.
+   */
+  requestFailure: string | null;
 }
 
 /**

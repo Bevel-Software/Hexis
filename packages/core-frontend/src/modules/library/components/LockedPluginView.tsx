@@ -22,6 +22,15 @@ import { LockGlyph } from './LockGlyph';
  * It is the SAME frame as the member view — breadcrumb, h1, run-by lede — so
  * the two never read as different products. Only the middle changes.
  *
+ * Asking is answered at once. The button says "Requesting…" from the click,
+ * and the server replies as soon as it has RECORDED the request — the branch,
+ * the commit and the change request that carry it to the managers are made
+ * afterwards, in the background. Two consequences are visible here: the
+ * "Requested" card can appear before the change request exists (which is
+ * correct — the request is recorded, and a reload still shows the card), and
+ * the background work can fail after the person was told their request was
+ * sent, which is what `requestFailure` says on the next load.
+ *
  * `Manage access` is the escape hatch for a locked-out platform Admin. Admin
  * rescue applies to WRITING `access.md`, not to reading the folder, so an Admin
  * can genuinely be locked out of a plugin they are nevertheless the right person
@@ -50,8 +59,16 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
   const adminsText = ownersTextOf(plugin);
   const primaryFolder = primaryFolderOf(plugin);
   const pending = plugin.hasRequested || requested;
+  // The server finishes a request in the background, so it can fail after it
+  // has already been acknowledged. When it does, the index says so on the
+  // next load and the button comes back — this sentence is the only place
+  // the person ever learns their request did not arrive.
+  const failure = !pending && plugin.requestFailure ? failureSentence(plugin, plugin.requestFailure) : null;
 
   async function request() {
+    // The disabled button is the first guard; this is the one that holds when
+    // a click arrives before React has re-rendered it.
+    if (requesting) return;
     setRequesting(true);
     try {
       await requestPluginAccess(plugin.name);
@@ -111,9 +128,18 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
             </p>
           </Surface>
         ) : (
-          <Button variant="primary" disabled={requesting} onClick={() => void request()}>
-            Subscribe to this plugin
-          </Button>
+          <>
+            {failure && (
+              <p className="mb-2.5 max-w-lg text-body text-ink-muted">{failure}</p>
+            )}
+            {/* The label is the acknowledgement. The click is answered in well
+                under a second, so this is brief — but a button that only
+                greys out says nothing about whether the click was heard, and
+                that silence is what this whole flow exists to end. */}
+            <Button variant="primary" disabled={requesting} onClick={() => void request()}>
+              {requesting ? 'Requesting…' : 'Subscribe to this plugin'}
+            </Button>
+          </>
         )}
       </div>
 
@@ -126,6 +152,20 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
       )}
     </div>
   );
+}
+
+/**
+ * `Your request to join {plugin} could not be sent: {reason}. Try again.`
+ *
+ * The plain sentence comes FIRST and the platform's own words follow it, so a
+ * git error the person cannot act on never arrives instead of an explanation.
+ * The reason is trimmed of its own trailing punctuation — it is a clause in
+ * this sentence, not a sentence of its own.
+ */
+function failureSentence(plugin: Pick<PluginSummary, 'name' | 'displayName'>, reason: string): string {
+  const name = plugin.displayName || plugin.name;
+  const because = reason.trim().replace(/[.\s]+$/, '');
+  return `Your request to join ${name} could not be sent: ${because}. Try again.`;
 }
 
 /**

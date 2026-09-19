@@ -6,6 +6,13 @@ export {
   personalAccessMd,
 } from './plugin-provision.service.js';
 export { JoinRequestsService, type JoinRequest } from './join-requests.service.js';
+export {
+  PluginJoinRequestsQueue,
+  type JoinRequestRecord,
+  type JoinRequestStore,
+  type StoredRequest,
+} from './join-request-queue.service.js';
+export { PluginJoinRequestStore } from './join-request-store.js';
 export { PluginLinkIndex, type LinkMembership, type PluginLinks } from './plugin-links.js';
 export { PluginLinksService, PluginLinkError } from './plugin-links.service.js';
 export { PluginRenameService, PluginRenameError, renamePluginPrincipalInText } from './plugin-rename.service.js';

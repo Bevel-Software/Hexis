@@ -570,3 +570,71 @@ export const githubFacadeCodes = pgTable('github_facade_codes', {
   consumedAt: timestamp('consumed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+/**
+ * Join requests for a locked plugin, recorded BEFORE any git work happens.
+ *
+ * A join request is still, in the end, a plain change request that a manager
+ * settles by granting what it proposes — nothing about that changes. What
+ * this table adds is the moment before that request exists: the click is
+ * recorded here and answered, and the branch/clone/commit/push/change-request
+ * sequence runs afterwards in the background. The first request from a person
+ * clones the plugins repository, which takes many seconds on a real
+ * repository; doing it inside the HTTP call made the button look frozen.
+ *
+ * Why a table and not an in-memory queue (the `pending_commits` argument,
+ * again): a process that dies between "recorded" and "change request opened"
+ * would otherwise lose a request nobody can see failed — the user was told it
+ * was sent. A row survives, and the boot sweep finishes or fails it.
+ *
+ *   - `(requester_email, plugin_key)` is UNIQUE, and that is the whole
+ *     duplicate story: two tabs racing both INSERT, exactly one wins, and the
+ *     loser reads the winner's row. One recorded request, one change request,
+ *     with no lock and no read-then-write window to lose.
+ *   - `plugin_key` is the plugin's primary FOLDER path below the plugins root
+ *     — what the deterministic join branch is cut from (`joinBranchFor`), not
+ *     the manifest identity. A rename of the identity moves no folder, so it
+ *     orphans no recorded request, exactly as it orphans no branch.
+ *   - The requester and the plugin's display name are DENORMALISED: the boot
+ *     sweep runs before any request has named them, and the change request's
+ *     title ("Join request: <plugin>") has to read the same after a restart as
+ *     it would have read without one.
+ *   - `status` is `pending` → `opened` (with the change request's number) or
+ *     `failed` (with the reason the platform received). `failed` is not
+ *     terminal: the next click resets the SAME row to `pending`, which is what
+ *     makes a retry retry rather than open a second request.
+ *   - No FK onto `users`: the sweep and the index key by email, and account
+ *     erasure deletes these rows by email alongside the other personal-data
+ *     rows it owns.
+ */
+export const pluginJoinRequests = pgTable('plugin_join_requests', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  requesterEmail: text('requester_email').notNull(),  // canonicalEmail at insert
+  requesterName: text('requester_name').notNull(),
+  requesterUserId: text('requester_user_id').notNull(),
+  pluginKey: text('plugin_key').notNull(),
+  pluginFolder: text('plugin_folder').notNull(),
+  pluginDisplayName: text('plugin_display_name').notNull(),
+  status: text('status').notNull().default('pending'),
+  /** The change request this became, once `status = 'opened'`. */
+  changeRequestNumber: integer('change_request_number'),
+  /** Why the background work gave up, once `status = 'failed'`. */
+  failureReason: text('failure_reason'),
+  /** How many times the background work has been started for this row. */
+  attempts: integer('attempts').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (t) => ({
+  // The duplicate gate AND the index's read pattern (everything one caller
+  // has asked for, in one query).
+  byRequesterPlugin: uniqueIndex('plugin_join_requests_requester_plugin').on(
+    t.requesterEmail,
+    t.pluginKey,
+  ),
+  // The boot sweep: every row still waiting for its git work.
+  byStatus: index('plugin_join_requests_by_status').on(t.status),
+  statusCheck: check(
+    'plugin_join_requests_status',
+    sql`${t.status} IN ('pending', 'opened', 'failed')`,
+  ),
+}));
