@@ -1,0 +1,6 @@
+---
+'@bevel-software/platform-core-backend': patch
+'@bevel-software/platform-core-frontend': patch
+---
+
+The Connect your tools page now lists every integration the plugin banner counted, and says why when the reader cannot act on one. A plugin saying "4 integrations need setup" led to a page showing two: the banner counts every integration that is not ok, including ones waiting on a workspace key only an owner can set and ones the reader skipped, while the page listed only the reader's own keys and sign-ins and dropped skipped tools from its total. `GET /api/connect/pending` now carries the workspace-scoped variables that are unset — flagged `ownerOnly`, with the tool's `canWrite` — and the page renders them greyed as "Needs an owner to set `<VARIABLE>`"; an owner gets the ordinary row and sets the key in place. A skipped tool stays on the page, greyed as "Skipped by you" with an Include action, and an unconfigured tool now arrives included rather than pre-skipped. The outstanding count is per integration across both sections, so it equals the banner's. Tools the reader may not read are still absent entirely — the listing is built from what they can read, so no state of this page names one.
