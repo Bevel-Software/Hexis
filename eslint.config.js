@@ -30,8 +30,17 @@ export default defineConfig([
     // deployment's shell decides where lines go and what shape they take. A
     // bare `console.*` in a module bypasses that decision; the sink itself is
     // the one file allowed to call it, and suites may still spy on it.
+    //
+    // A `*.cli.ts` entry is the exception with a reason: it is not part of any
+    // deployment, it is a command someone runs by hand, and its stdout IS its
+    // output. Routing that through the logging port would hand a one-off
+    // diagnostic to whatever sink a shell happened to install.
     files: ['packages/core-backend/src/**/*.ts'],
-    ignores: ['packages/core-backend/src/**/__tests__/**', 'packages/core-backend/src/shared/logging.ts'],
+    ignores: [
+      'packages/core-backend/src/**/__tests__/**',
+      'packages/core-backend/src/shared/logging.ts',
+      'packages/core-backend/src/**/*.cli.ts',
+    ],
     rules: { 'no-console': 'error' },
   },
   {
