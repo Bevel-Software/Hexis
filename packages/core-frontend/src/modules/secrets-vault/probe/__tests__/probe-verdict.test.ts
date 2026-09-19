@@ -66,6 +66,22 @@ describe('probeWords', () => {
     expect(w.text).toBe('Unverified');
     expect(w.hint).not.toBe('');
   });
+
+  /**
+   * A blank detail is an absent one. The backend can produce it without meaning
+   * to: redaction on a rejection body that was nothing but the credential
+   * leaves an empty string behind, and `??` would carry it through to a word
+   * with nothing under it — `Not working.` followed by silence, which is the
+   * evidence-free claim this file exists to prevent.
+   */
+  it.each([
+    ['failed' as const, 'The provider rejected this credential.'],
+    ['unverifiable' as const, "This tool doesn't offer a way to test its connection."],
+  ])('falls back to the reason when a %s detail is blank', (status, fallback) => {
+    for (const detail of ['', '   ']) {
+      expect(probeWords(verdict({ status, detail })).hint).toBe(fallback);
+    }
+  });
 });
 
 /**

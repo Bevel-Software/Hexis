@@ -43,6 +43,12 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
    * credential set, not a test of one `${VAR}`. Giving each row its own would
    * leave the admin key's row still saying `Connected` after the user key
    * below it changed the very credentials that answer was about.
+   *
+   * The slug is not merely WHAT to call: it is part of the identity of every
+   * answer the hook holds. This panel is not always remounted when the tool
+   * under it changes — the workspace's `.tool` renderer swaps `tool` on a
+   * mounted panel — and the hook is where that is handled, so no host of this
+   * component has to remember to key it.
    */
   const probe = useSavedKeyProbe(tool.slug);
 

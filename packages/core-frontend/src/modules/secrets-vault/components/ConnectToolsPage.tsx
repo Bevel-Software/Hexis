@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
@@ -60,6 +60,8 @@ export function ConnectToolsPage() {
   const [oauth, setOauth] = useState<ConnectOAuth[]>([]);
   const [toolOAuth, setToolOAuth] = useState<ConnectToolOAuth[]>([]);
   const [loading, setLoading] = useState(true);
+  /** A refetch is in flight over a list that is already on screen. */
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Agent-connect mode: the signed authorization state + who is asking.
@@ -72,6 +74,16 @@ export function ConnectToolsPage() {
   const [wiping, setWiping] = useState<Set<string>>(new Set());
 
   /**
+   * Which load is allowed to publish. Saving two rows in quick succession
+   * starts two refetches, and the first can answer last: its list still says
+   * the second key is unset, so the row that was just saved flips back to
+   * `Needs a key` and stays there. The same newest-wins rule the probe itself
+   * follows, for the same reason — a late answer describing an earlier state
+   * is worse than no answer.
+   */
+  const loadSeq = useRef(0);
+
+  /**
    * @param quiet keep the list on screen while it refetches.
    *
    * The loud refresh drops the page to "Loading…", which UNMOUNTS every row —
@@ -81,17 +93,25 @@ export function ConnectToolsPage() {
    * fix `useToolPage` made for the tool page, for the same reason.
    */
   const refresh = useCallback(async (quiet = false) => {
+    const mine = ++loadSeq.current;
     if (!quiet) setLoading(true);
+    setRefreshing(true);
     try {
       const pending = await getConnectPending();
+      if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
       setToolOAuth(pending.toolOAuth);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Inside the guard too: an older load failing after a newer one
+      // succeeded would raise an alert about a request nobody is waiting on.
+      if (loadSeq.current === mine) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (loadSeq.current === mine) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -271,7 +291,18 @@ export function ConnectToolsPage() {
           {'‹ Skills & tools'}
         </Link>
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
-        <Button variant="quiet" size="sm" className="ml-auto" onClick={() => void refresh()}>
+        {/* Quiet, like the refetch a save triggers. A loud one drops the page
+            to "Loading…", which unmounts the row holding the verdict of the
+            probe its own save just started — and that state is the only copy
+            of it. Disabling is the feedback instead: the list a spinner would
+            replace is already on screen. */}
+        <Button
+          variant="quiet"
+          size="sm"
+          className="ml-auto"
+          disabled={loading || refreshing}
+          onClick={() => void refresh(true)}
+        >
           Refresh
         </Button>
       </header>

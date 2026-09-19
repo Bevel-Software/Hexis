@@ -1,5 +1,6 @@
 ---
 '@bevel-software/platform-core-frontend': patch
+'@bevel-software/platform-core-backend': patch
 ---
 
 Every surface that saves a tool key now probes it afterwards and says when the provider refused it. A tester saved a deliberately invalid key from the vault and from the Connect your tools page; both stored it, both said `Key saved`, and nothing anywhere mentioned that the provider had already rejected it. The tool page had run the manual's non-mutating health check after a save for a while — the other two stored the value and stopped, which made them the quietest places in the app to install a key that would fail hours later, in an agent, with the key no longer to hand.
@@ -8,4 +9,6 @@ The probe's lifecycle is now one hook (`useSavedKeyProbe`) and its words one fun
 
 Saving is never blocked by any of this: the value is stored and the field cleared before the probe starts, the call is not awaited, and a probe that hangs, fails or does not exist costs the person nothing. The submitted secret is not an input to the result — `probeWords` takes the verdict alone, so no rendering built on it has a value to leak.
 
-The Secrets page and the Connect page refetch quietly after a save. The loud refresh dropped both to `Loading…`, which unmounted the very row holding the answer its own save had just asked for; this is the fix `useToolPage` already made for the tool page, for the same reason.
+The Secrets page and the Connect page refetch quietly after a save, and their header `Refresh` buttons do the same. The loud refresh dropped both pages to `Loading…`, which unmounted the very row holding the answer its own save had just asked for; this is the fix `useToolPage` already made for the tool page, for the same reason. Those refetches are also newest-wins now: two saves in quick succession start two list loads, and the older one answering last used to flip the row that had just been filled in back to `Needs a key`.
+
+Two narrower corrections came out of review. A probe verdict's answer now carries the tool it is about as well as the revision of its definition, so the one caller that swaps tools without remounting — the workspace's `.tool` renderer — cannot show the previous tool's `Connected` beside a variable of the same name on the next one. And the server's rejection quote no longer has a length floor under what it will redact: a credential shorter than six characters was left in the provider's echoed words, which anyone able to read the tool could then read back out of a probe. Short values are matched only where they stand alone, so an incidentally resolved `${VERSION}` of `1` still cannot turn `answered 401` into nonsense.

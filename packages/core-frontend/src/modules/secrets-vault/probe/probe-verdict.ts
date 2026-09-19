@@ -85,7 +85,24 @@ export function probeWords(verdict: ProbeVerdict): ProbeWords {
     };
   }
   if (verdict.status === 'failed') {
-    return { tone: 'err', text: REJECTED_TEXT, hint: verdict.detail ?? REJECTED_FALLBACK };
+    return { tone: 'err', text: REJECTED_TEXT, hint: said(verdict.detail) ?? REJECTED_FALLBACK };
   }
-  return { tone: 'ok', text: UNVERIFIED_TEXT, hint: verdict.detail ?? UNVERIFIED_FALLBACK };
+  return { tone: 'ok', text: UNVERIFIED_TEXT, hint: said(verdict.detail) ?? UNVERIFIED_FALLBACK };
+}
+
+/**
+ * The detail, if the server actually said something in it.
+ *
+ * `??` is not enough: a detail of `''` is absent in every sense that matters
+ * here, and passing it through renders the word with nothing behind it —
+ * `Not working.` followed by silence — which is precisely the evidence-free
+ * claim this file exists to prevent. A whitespace-only detail is the same
+ * absence spelled differently. Redaction can produce one: a body that was
+ * nothing but the credential comes back blank.
+ *
+ * The UNTRIMMED value is returned when there is something in it, so the
+ * provider's own words reach the reader exactly as the server composed them.
+ */
+function said(detail: string | null | undefined): string | null {
+  return detail?.trim() ? detail : null;
 }

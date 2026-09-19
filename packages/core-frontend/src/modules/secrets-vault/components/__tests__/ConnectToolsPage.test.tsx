@@ -332,10 +332,82 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
       await saveKey(secret);
 
       await screen.findByTestId('saved-key-probe');
-      // The whole document, not just the result line: a password field still
-      // holding the value is the same leak one keystroke later.
+      // The FIELD first, checked as a field. A controlled input's value lives
+      // on the DOM property — neither `textContent` nor the serialized
+      // `innerHTML` carries it — so a password box still holding the key would
+      // pass both document-level checks below while sitting in plain sight of
+      // the next person at the desk, and of anything that reads the form.
+      expect(screen.getByLabelText('API_KEY value')).toHaveValue('');
+      // Then the whole document, for every other way it could have escaped:
+      // the verdict line, a title attribute, an error banner quoting a request.
       expect(document.body.textContent).not.toContain(secret);
       expect(document.body.innerHTML).not.toContain(secret);
+    });
+  });
+
+  /**
+   * A LIST load is an answer about the tools, and answers arrive out of order.
+   *
+   * Every save starts one, and the page had no way to tell a fresh answer from
+   * a late one — so the row a person had just filled in could flip back to
+   * `Needs a key` on the strength of a request that left before they typed it.
+   * The same newest-wins rule the probe follows, for the same reason.
+   */
+  describe('a late list load cannot undo a newer one', () => {
+    beforeEach(() => {
+      varsMock.checkToolConnection.mockResolvedValue({
+        status: 'ok',
+        detail: null,
+        checkedAt: new Date().toISOString(),
+      });
+    });
+
+    const save = async (value: string) => {
+      fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    };
+
+    it('shows the newest list even when an older load answers last', async () => {
+      /** Each load after the first is held open, so the order is ours to pick. */
+      const held: ((p: ConnectPending) => void)[] = [];
+      connectMock.getConnectPending
+        .mockReset()
+        .mockResolvedValueOnce(pending(false))
+        .mockImplementation(() => new Promise<ConnectPending>((resolve) => held.push(resolve)));
+
+      renderPage();
+      await include();
+      await save('a');
+      await waitFor(() => expect(held).toHaveLength(1));
+      await save('b');
+      await waitFor(() => expect(held).toHaveLength(2));
+
+      // The newer load lands first, then the one that left before the key was
+      // typed — the shape of the bug, which no amount of retrying fixes.
+      held[1](pending(true));
+      await screen.findByText('Set');
+      held[0](pending(false));
+
+      await waitFor(() => expect(screen.getByText('Set')).toBeInTheDocument());
+      expect(screen.queryByText('Needs a key')).toBeNull();
+    });
+
+    it('keeps a verdict on the row when the header Refresh is pressed', async () => {
+      // The loud refresh dropped the page to "Loading…", unmounting the row
+      // that holds the only copy of the probe's answer. Nothing persists a
+      // verdict, so the answer was simply gone — and pressing Refresh is
+      // exactly what someone does while waiting for one.
+      connectMock.getConnectPending.mockReset().mockResolvedValue(pending(false));
+      renderPage();
+      await include();
+      await save('a');
+      expect(await screen.findByTestId('saved-key-probe')).toHaveTextContent('Connected');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+      await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(3));
+      expect(screen.queryByText('Loading…')).toBeNull();
+      expect(screen.getByTestId('saved-key-probe')).toHaveTextContent('Connected');
     });
   });
 });

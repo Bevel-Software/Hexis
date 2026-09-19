@@ -31,9 +31,25 @@ export type ProbeResult =
   | { kind: 'verdict'; verdict: ProbeVerdict }
   | { kind: 'unreachable'; message: string };
 
-/** An answer, with the configuration revision it is an answer ABOUT. */
-interface Stamped {
+/**
+ * WHICH configuration an answer is an answer about: the tool, and the revision
+ * of its definition.
+ *
+ * The slug is half of it because a panel is not guaranteed to unmount when the
+ * tool under it changes — the `.tool` editor's sidebar swaps `tool` on a
+ * mounted `ToolSecretsPanel` — and a verdict left over from the previous tool
+ * would then sit beside a variable of the same name on the new one, saying
+ * `Connected` about a provider nobody has called. Keying the panel at each
+ * caller would fix the callers that remembered to; carrying the slug here
+ * fixes the ones that don't.
+ */
+interface Asked {
+  slug: string;
   stamp: number;
+}
+
+/** An answer, with the configuration it is an answer ABOUT. */
+interface Stamped extends Asked {
   result: ProbeResult;
 }
 
@@ -81,7 +97,10 @@ export interface SavedKeyProbe {
 }
 
 /**
- * @param slug  the tool to probe.
+ * @param slug  the tool to probe. Part of the identity of every answer the
+ *   hook holds, so a caller that swaps tools without remounting (the `.tool`
+ *   editor's sidebar) cannot show the previous tool's verdict beside the new
+ *   tool's variables.
  * @param stamp the revision of the configuration being probed — bump it when
  *   the tool's DEFINITION changes (an edited MCP server: different endpoint,
  *   different headers). An answer is stored with the stamp it was asked under
@@ -94,10 +113,10 @@ export interface SavedKeyProbe {
  */
 export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
   const [answer, setAnswer] = useState<Stamped | null>(null);
-  /** The stamp of the probe in flight, or null — `checking` is DERIVED from it. */
-  const [inFlight, setInFlight] = useState<number | null>(null);
-  /** The key whose save the current answer belongs to. */
-  const [subject, setSubject] = useState<string | null>(null);
+  /** What the probe in flight is about, or null — `checking` is DERIVED from it. */
+  const [inFlight, setInFlight] = useState<Asked | null>(null);
+  /** The key whose save the current answer belongs to, stamped like the answer. */
+  const [subject, setSubject] = useState<(Asked & { name: string | null }) | null>(null);
 
   /**
    * Which probe is allowed to publish. Two saves in quick succession start two
@@ -108,23 +127,28 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
    */
   const seq = useRef(0);
 
-  // In-flight against the CURRENT stamp only: a definition edit mid-probe
-  // hands the button back for the new definition immediately instead of
-  // waiting for the orphan to settle.
-  const checking = inFlight !== null && inFlight === stamp;
-  const result = answer && answer.stamp === stamp ? answer.result : null;
+  /** Is this what is on screen right now? */
+  const current = (asked: Asked) => asked.slug === slug && asked.stamp === stamp;
+
+  // In-flight against the CURRENT configuration only: a definition edit or a
+  // tool switch mid-probe hands the button back immediately instead of waiting
+  // for the orphan to settle.
+  const checking = inFlight !== null && current(inFlight);
+  const result = answer && current(answer) ? answer.result : null;
 
   const run = useCallback(async () => {
     const mine = ++seq.current;
-    const rev = stamp;
-    setInFlight(rev);
+    const asked: Asked = { slug, stamp };
+    setInFlight(asked);
     // A replacement probe makes a previous TRANSPORT failure history the
     // moment it starts — leaving that alert up while "Testing…" runs reads as
     // the new attempt already having failed. A previous VERDICT stays: it is
     // still the last thing the provider said, and blanking it would make a
     // re-test look like it had lost the answer.
     setAnswer((prev) =>
-      prev && prev.stamp === rev && prev.result.kind === 'verdict' ? prev : null,
+      prev && prev.slug === asked.slug && prev.stamp === asked.stamp && prev.result.kind === 'verdict'
+        ? prev
+        : null,
     );
     try {
       const verdict = await checkToolConnection(slug);
@@ -139,7 +163,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
       // is saving on.
       if (seq.current === mine) {
         setAnswer({
-          stamp: rev,
+          ...asked,
           result: verdict
             ? { kind: 'verdict', verdict }
             : { kind: 'unreachable', message: PROBE_UNREACHABLE },
@@ -153,7 +177,7 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
       // verdict that is currently correct.
       if (seq.current === mine) {
         setAnswer({
-          stamp: rev,
+          ...asked,
           result: {
             kind: 'unreachable',
             message: err instanceof Error && err.message ? err.message : PROBE_UNREACHABLE,
@@ -182,21 +206,21 @@ export function useSavedKeyProbe(slug: string, stamp = 0): SavedKeyProbe {
       // but the newest save is the only row where the claim is current, and a
       // stale one left behind on a sibling row is exactly the thing being
       // fixed here.
-      setSubject(nextSubject ?? null);
+      setSubject({ slug, stamp, name: nextSubject ?? null });
       // NOT awaited, and never on the save's critical path: the value is already
       // stored by the time this is called, and a probe that hangs, fails or is
       // missing entirely must cost the person nothing. The floating promise is
       // the point.
       void run();
     },
-    [run],
+    [run, slug, stamp],
   );
 
   return {
     result,
     verdict: result?.kind === 'verdict' ? result.verdict : null,
     checking,
-    subject,
+    subject: subject && current(subject) ? subject.name : null,
     run,
     probeSaved,
     forget,

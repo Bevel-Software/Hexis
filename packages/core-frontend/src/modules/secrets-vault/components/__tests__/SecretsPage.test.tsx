@@ -313,4 +313,92 @@ describe('SecretsPage', () => {
       expect(document.body.innerHTML).not.toContain(secret);
     });
   });
+
+  /**
+   * A LIST load is an answer about the vault, and answers arrive out of order.
+   *
+   * Every save starts one, and the page had no way to tell a fresh answer from
+   * a late one — so the row a person had just filled in could flip back to
+   * `Needs a key` on the strength of a request that left before they typed it.
+   * The same newest-wins rule the probe follows, for the same reason: this
+   * page's whole job now is to stop saying confident things it cannot back up.
+   */
+  describe('a late list load cannot undo a newer one', () => {
+    const heyreach: ToolSecrets = {
+      slug: 'heyreach',
+      name: 'heyreach',
+      path: 'Plugins/GTM/heyreach.tool',
+      type: 'inline',
+      setup: null,
+      canWrite: false,
+      variables: [
+        {
+          name: 'API_KEY',
+          scope: 'user',
+          label: null,
+          key: 'heyreach_API_KEY',
+          adminConfigured: true,
+          userConfigured: false,
+        },
+      ],
+    };
+    const withKey = (userConfigured: boolean): ToolSecrets[] => [
+      { ...heyreach, variables: [{ ...heyreach.variables[0], userConfigured }] },
+    ];
+
+    beforeEach(() => {
+      toolSecretsMock.setUserVar.mockReset().mockResolvedValue(undefined);
+      toolSecretsMock.checkToolConnection.mockReset().mockResolvedValue({
+        status: 'ok',
+        detail: null,
+        checkedAt: new Date().toISOString(),
+      });
+    });
+
+    const save = async (value: string) => {
+      fireEvent.change(await screen.findByLabelText('Value for API_KEY'), { target: { value } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    };
+
+    it('shows the newest list even when an older load answers last', async () => {
+      /** Each load after the first is held open, so the order is ours to pick. */
+      const held: ((tools: ToolSecrets[]) => void)[] = [];
+      toolSecretsMock.listToolSecrets
+        .mockReset()
+        .mockResolvedValueOnce(withKey(false))
+        .mockImplementation(() => new Promise<ToolSecrets[]>((resolve) => held.push(resolve)));
+
+      renderPage();
+      await save('a');
+      await waitFor(() => expect(held).toHaveLength(1));
+      await save('b');
+      await waitFor(() => expect(held).toHaveLength(2));
+
+      // The newer load lands first, then the one that left before the key was
+      // typed — the shape of the bug, which no amount of retrying fixes.
+      held[1](withKey(true));
+      await screen.findByText('Set');
+      held[0](withKey(false));
+
+      await waitFor(() => expect(screen.getByText('Set')).toBeInTheDocument());
+      expect(screen.queryByText('Needs a key')).toBeNull();
+    });
+
+    it('keeps a verdict on the row when the header Refresh is pressed', async () => {
+      // The loud refresh dropped the page to "Loading…", unmounting the panel
+      // that holds the only copy of the probe's answer. Nothing persists a
+      // verdict, so the answer was simply gone — and pressing Refresh is
+      // exactly what someone does while waiting for one.
+      toolSecretsMock.listToolSecrets.mockReset().mockResolvedValue(withKey(false));
+      renderPage();
+      await save('a');
+      expect(await screen.findByTestId('saved-key-probe')).toHaveTextContent('Connected');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+      await waitFor(() => expect(toolSecretsMock.listToolSecrets).toHaveBeenCalledTimes(3));
+      expect(screen.queryByText('Loading…')).toBeNull();
+      expect(screen.getByTestId('saved-key-probe')).toHaveTextContent('Connected');
+    });
+  });
 });

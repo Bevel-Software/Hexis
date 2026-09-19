@@ -597,20 +597,40 @@ describe('ToolConnectionSection', () => {
     });
 
     it('stores the value first: a probe that never answers never blocks the save', async () => {
+      // The store is held OPEN, so the order is observable rather than merely
+      // plausible. Asserting only that both happened would pass just as well
+      // if the probe ran first — and a probe that runs before the store
+      // completes asks the provider about the key being replaced, which is the
+      // confident stale answer this whole feature exists to remove.
+      let releaseStore = () => {};
       let stored = false;
-      vi.mocked(setAdminVar).mockImplementation(async () => {
-        stored = true;
-      });
+      vi.mocked(setAdminVar).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStore = () => {
+              stored = true;
+              resolve();
+            };
+          }),
+      );
       vi.mocked(checkToolConnection).mockReturnValue(new Promise<ProbeVerdict>(() => {}));
       renderSection(replaceable());
 
       saveKey();
 
-      // The editor closes and the value is gone from the DOM while the probe
-      // is still hanging — the save is complete on its own terms.
+      // While the write is in flight: nothing has been asked of the provider,
+      // and the editor is still open because the save has not landed.
+      await waitFor(() => expect(setAdminVar).toHaveBeenCalledTimes(1));
+      expect(checkToolConnection).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
+
+      releaseStore();
+
+      // Only now, and the editor closes with the value gone from the DOM while
+      // the probe is still hanging — the save is complete on its own terms.
+      await waitFor(() => expect(checkToolConnection).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(screen.queryByLabelText('Value for API_KEY')).toBeNull());
       expect(stored).toBe(true);
-      expect(checkToolConnection).toHaveBeenCalledTimes(1);
     });
 
     it('never repeats the submitted secret, whatever the probe says', async () => {
