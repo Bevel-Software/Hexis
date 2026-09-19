@@ -631,49 +631,82 @@ export function ManageAccessDialog({
   // take Escape without also closing this one.
 
   /**
-   * The emails suggest has TOLD us have an account, accumulated across every
-   * answer this dialog has received rather than read off the current one —
-   * so an answer landing after a chip was added still clears its note.
+   * The LATEST thing the server said about each email — from a suggestion or
+   * from the loaded view, whichever spoke most recently. Not a set of
+   * positives: an answer that explicitly says `hasAccount: false` about
+   * someone previously reported as having an account (an account erased while
+   * this dialog is open) has to be able to take the claim back, which an
+   * accumulate-only set cannot do.
    *
-   * Version skew: a server that says nothing (`hasAccount === undefined`)
-   * counts as HAVING an account, so an older build labels nobody it has named.
+   * It IS accumulated across answers rather than read off the current one, so
+   * an answer landing after a chip was added still corrects that chip.
+   *
+   * Version skew: a server that says nothing about a person it has named
+   * (`hasAccount === undefined`) is recorded as HAVING an account — silence is
+   * not a claim of absence, so an older build labels nobody.
    */
-  const [suggestedAccounts, setSuggestedAccounts] = useState<ReadonlySet<string>>(() => new Set());
+  const [accountStatus, setAccountStatus] = useState<ReadonlyMap<string, boolean>>(
+    () => new Map(),
+  );
   const learnAccounts = useCallback((people: readonly AccessUser[]) => {
-    const known = people
-      .filter((p) => p.hasAccount !== false)
-      .map((p) => p.email.trim().toLowerCase());
-    if (known.length === 0) return;
-    setSuggestedAccounts((prev) => {
-      const fresh = known.filter((e) => !prev.has(e));
-      return fresh.length === 0 ? prev : new Set([...prev, ...fresh]);
+    if (people.length === 0) return;
+    setAccountStatus((prev) => {
+      let next: Map<string, boolean> | null = null;
+      for (const p of people) {
+        const email = p.email.trim().toLowerCase();
+        if (!email) continue;
+        const has = p.hasAccount !== false;
+        if (prev.get(email) === has) continue;
+        next ??= new Map(prev);
+        next.set(email, has);
+      }
+      return next ?? prev;
     });
   }, []);
 
   /**
-   * Every email we have been told has an account — the suggestions above plus
-   * the loaded view, which is the other place accounts are named (someone
-   * already granted here and already signed in must not pick up the note when
-   * their address is typed again).
-   *
-   * A chip is labelled by ABSENCE from this set, which is the only way to say
-   * anything about a free-typed address: nobody has ever named it, so nobody
-   * has signed in as it. Rows do NOT consult it — a row reads its own
-   * `hasAccount` straight from the view.
+   * Addresses an account-aware suggest answer has actually RULED ON — the
+   * queries such an answer came back for, canonical. Absence from `people` is
+   * evidence of "no account" only for one of these: a lookup that failed, or
+   * one served by a build that does not report accounts, says nothing at all,
+   * and a chip must not be labelled on a guess in either case.
    */
-  const knownAccounts = useMemo<ReadonlySet<string>>(() => {
-    if (!data) return suggestedAccounts;
-    const all = new Set(suggestedAccounts);
-    for (const u of [
+  const [lookedUp, setLookedUp] = useState<ReadonlySet<string>>(() => new Set());
+  const noteLookedUp = useCallback((email: string) => {
+    setLookedUp((prev) => (prev.has(email) ? prev : new Set(prev).add(email)));
+  }, []);
+
+  /**
+   * Whether a CHIP earns the note. Two ways to know, and nothing else counts:
+   * the server said `hasAccount: false` about that address, or it answered a
+   * lookup of that exact address and did not name it — which, from a build
+   * that reports accounts, is the same fact stated by omission.
+   *
+   * Rows do NOT go through here — a row reads its own `hasAccount` straight
+   * from the view, which always names the person it is a row for.
+   */
+  const lacksAccount = useCallback(
+    (email: string): boolean => {
+      const key = email.trim().toLowerCase();
+      const status = accountStatus.get(key);
+      return status === undefined ? lookedUp.has(key) : !status;
+    },
+    [accountStatus, lookedUp],
+  );
+
+  // The loaded view is the other place accounts are named: someone already
+  // granted here and already signed in must not pick the note up when their
+  // address is typed again, and someone granted here who never signed in
+  // should carry it on the chip as well as on the row.
+  useEffect(() => {
+    if (!data) return;
+    learnAccounts([
       ...data.eligible.users,
       ...data.readers.users,
       ...data.owners.users,
       ...data.downloaders.users,
-    ]) {
-      if (u.hasAccount !== false) all.add(u.email.trim().toLowerCase());
-    }
-    return all;
-  }, [data, suggestedAccounts]);
+    ]);
+  }, [data, learnAccounts]);
 
   // Debounced autocomplete. People are withheld server-side until q ≥ 2 chars.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -690,13 +723,17 @@ export function ManageAccessDialog({
         .then((res) => {
           setSuggest(res);
           learnAccounts(res.people ?? []);
+          // Only a build that SAYS it reports accounts turns "not in the
+          // answer" into "no account". Without this flag the answer is silent
+          // on the question, so the address stays unjudged and unlabelled.
+          if (res.accountsKnown) noteLookedUp(q.toLowerCase());
         })
         .catch(() => setSuggest(null));
     }, 200);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query, workspaceId, repoRelative, learnAccounts]);
+  }, [query, workspaceId, repoRelative, learnAccounts, noteLookedUp]);
 
   const myEmail = user?.email?.toLowerCase() ?? '';
 
@@ -1477,10 +1514,10 @@ export function ManageAccessDialog({
                   {pickedChips.map((c) => {
                     const label = principalLabel(c);
                     // Nobody has signed in as this address — say so, and grant
-                    // it anyway. A person only reaches a chip by being typed
-                    // or picked, and both feed `knownAccounts`, so absence
-                    // from it is the server having named everyone but them.
-                    const noAccount = c.kind === 'user' && !knownAccounts.has(c.email.trim().toLowerCase());
+                    // it anyway. Only an answer that ruled on this exact
+                    // address earns the note (see `lacksAccount`); until one
+                    // arrives the chip is simply unlabelled, never guessed at.
+                    const noAccount = c.kind === 'user' && lacksAccount(c.email);
                     return (
                       // `max-w-full` bounds the chip by the field it sits in, so a
                       // long email can never push its own border past the box;

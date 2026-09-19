@@ -45,6 +45,7 @@ import {
 } from '../access-model/access-grammar.js';
 import { listAccessDeclarationsUnder } from './access-declarations.js';
 import { emailsInView, labelAccountHolders, resolveAccessView } from './access-view.js';
+import type { AccessView, LabelledAccessView } from './access-view.js';
 import { toHttpError as sharedToHttpError, requireNonEmptyString as sharedRequireNonEmptyString } from './admin-route-helpers.js';
 import { RolesAdminService } from './roles-admin.service.js';
 import type { Principal } from '../access-model/access-splice.js';
@@ -474,6 +475,12 @@ export function createAccessRoutes(
         const accountEmails = new Set(userRows.map((u) => u.email.trim().toLowerCase()));
         people = [...byEmail.values()]
           .filter((p) => p.email.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
+          // The address actually TYPED is never hidden by the cap. A chip made
+          // from a free-typed email labels itself by ABSENCE from this list, so
+          // an exact match dropped at the 15th match would say "hasn't signed
+          // in yet" about somebody who has. Exact email first, then the rest in
+          // the order they were unioned (sort is stable), then cap.
+          .sort((a, b) => Number(b.email.toLowerCase() === q) - Number(a.email.toLowerCase() === q))
           .slice(0, CAP)
           .map((p) => ({ ...p, hasAccount: accountEmails.has(p.email.trim().toLowerCase()) }));
       }
@@ -487,6 +494,13 @@ export function createAccessRoutes(
         pluginPrincipals: matchedPlugins,
         people,
         peopleWithheld: q.length < 2,
+        // This build ANSWERS the account question: every person above carries
+        // `hasAccount`, and an email absent from `people` is absent because no
+        // account exists for it — not because the build had nothing to say.
+        // The dialog labels a free-typed chip only on this evidence, so an
+        // older server (no such field) and a failed lookup (no response at
+        // all) both leave the address unjudged instead of labelled by guess.
+        accountsKnown: true,
         // DEPRECATED alias of `roles` — the shipped share dialog still reads
         // `plugins`. Kept populated for ONE release; remove in 0.2.0 together
         // with the dialog's rename to `roles`.
@@ -647,7 +661,22 @@ export function createAccessRoutes(
     // false`) without changing what the grant does. The flag is read from the
     // users table each time the view is built, so it flips to true on its own
     // the first time that person signs in.
-    const view = labelAccountHolders(resolved, await accountsAmong(emailsInView(resolved)));
+    //
+    // BEST-EFFORT, deliberately: this view is built AFTER the mutation has
+    // committed, so a users lookup that fails must not turn a grant that was
+    // written into a 500 the caller reads as "it did not save". On failure the
+    // flag is simply ABSENT — which the dialog reads as "the server did not
+    // say", not as "no account", so nobody is labelled on a guess.
+    let view: AccessView | LabelledAccessView = resolved;
+    try {
+      view = labelAccountHolders(resolved, await accountsAmong(emailsInView(resolved)));
+    } catch (err) {
+      logger('access.view.accounts').warn(
+        `users lookup failed for ws=${workspaceId} path=${repoRelTarget}; hasAccount omitted: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
 
     // A file that cannot carry frontmatter has no rules of its own: name the
     // folder whose rules govern it (repo-relative, `''` for the root), which

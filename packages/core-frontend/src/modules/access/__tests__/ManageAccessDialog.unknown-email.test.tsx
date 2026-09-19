@@ -90,6 +90,7 @@ describe('ManageAccessDialog: an email with no account is labelled, not refused'
       groups: [],
       people: [],
       peopleWithheld: false,
+      accountsKnown: true,
     });
   });
 
@@ -101,6 +102,7 @@ describe('ManageAccessDialog: an email with no account is labelled, not refused'
       groups: [],
       people: [],
       peopleWithheld: false,
+      accountsKnown: true,
     });
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
@@ -131,6 +133,7 @@ describe('ManageAccessDialog: an email with no account is labelled, not refused'
       groups: [],
       people: [{ ...KNOWN, hasAccount: true }],
       peopleWithheld: false,
+      accountsKnown: true,
     });
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
 
@@ -159,6 +162,77 @@ describe('ManageAccessDialog: an email with no account is labelled, not refused'
     await user.keyboard('{Enter}');
 
     expect(within(chipFor('alice')).queryByText(NOTE)).toBeNull();
+  });
+
+  it('an older server labels nobody even for an address it never names', async () => {
+    const user = userEvent.setup();
+    // Version skew again, this time with the address absent from the answer.
+    // An old build does not report accounts at all, so "not in the answer"
+    // carries no information about accounts and the chip stays unlabelled —
+    // the previous behaviour was to read that silence as "no account" and
+    // accuse every free-typed address.
+    api.suggestPrincipals.mockResolvedValue({
+      roles: [],
+      groups: [],
+      people: [],
+      peopleWithheld: false,
+    });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const input = await screen.findByPlaceholderText('Add people, groups, roles or plugins…');
+    await user.type(input, UNKNOWN.email);
+    await waitFor(() => expect(api.suggestPrincipals).toHaveBeenCalled());
+    await user.keyboard('{Enter}');
+
+    expect(within(chipFor(UNKNOWN.name)).queryByText(NOTE)).toBeNull();
+  });
+
+  it('autocomplete being DOWN labels nobody — and the grant still saves', async () => {
+    const user = userEvent.setup();
+    // No answer at all. Nothing was ruled on, so nothing is claimed: the note
+    // would otherwise appear on every address typed while suggest is failing.
+    api.suggestPrincipals.mockRejectedValue(new Error('suggest unavailable'));
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const input = await screen.findByPlaceholderText('Add people, groups, roles or plugins…');
+    await user.type(input, UNKNOWN.email);
+    await waitFor(() => expect(api.suggestPrincipals).toHaveBeenCalled());
+    await user.keyboard('{Enter}');
+
+    expect(within(chipFor(UNKNOWN.name)).queryByText(NOTE)).toBeNull();
+
+    // The point of the ticket survives the outage: the grant is never gated
+    // on knowing whether an account exists.
+    await user.click(screen.getByRole('button', { name: /^share$/i }));
+    await waitFor(() => expect(api.grantAccess).toHaveBeenCalled());
+  });
+
+  it('a later answer that says the account is GONE relabels the chip', async () => {
+    const user = userEvent.setup();
+    // An account can be erased while this dialog is open. The first answer
+    // said the address had one; the second explicitly says it does not, and
+    // that has to be able to take the earlier claim back.
+    let signedIn = true;
+    api.suggestPrincipals.mockImplementation(async () => ({
+      roles: [],
+      groups: [],
+      people: [{ ...KNOWN, hasAccount: signedIn }],
+      peopleWithheld: false,
+      accountsKnown: true,
+    }));
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const input = await screen.findByPlaceholderText('Add people, groups, roles or plugins…');
+    await user.type(input, KNOWN.email);
+    await waitFor(() => expect(api.suggestPrincipals).toHaveBeenCalled());
+    await user.keyboard('{Enter}');
+    expect(within(chipFor('alice')).queryByText(NOTE)).toBeNull();
+
+    signedIn = false;
+    await user.type(input, 'alice');
+    await waitFor(() =>
+      expect(within(chipFor('alice')).getByText(NOTE)).toBeInTheDocument(),
+    );
   });
 
   it('a direct-grant ROW for an unknown email carries the note beside the name', async () => {
