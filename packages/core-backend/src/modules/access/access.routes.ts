@@ -261,9 +261,17 @@ export function createAccessRoutes(
    * GET /api/workspace/:id/access?path=<relativePath>&kind=<folder|file>
    * Returns the resolved access view for the current user at a single path,
    * including a per-principal `sources` map (where each principal's access comes
-   * from) so the dialog can show inherited-vs-direct. `kind` defaults to `file`
-   * (the resolver treats a folder vs a file's own scope differently only for the
-   * `sources` direct/ancestor split; the eligible/verdict fields are identical).
+   * from) so the dialog can show inherited-vs-direct, the matching `denials` map
+   * (where each verb they do NOT hold is denied, same direct/ancestor split) and
+   * `deniedHere` — the principals this target restricts, who hold nothing and so
+   * appear in no eligible list. Together those two let the dialog decide its
+   * sections by LOCAL ENTRY, grant or denial, rather than by local grant alone:
+   * without them a person restricted here reads as merely inherited and drops
+   * into the collapsed parent section, looking removed.
+   *
+   * `kind` defaults to `file` (the resolver treats a folder vs a file's own scope
+   * differently only for the direct/ancestor split; the eligible/verdict fields
+   * are identical).
    */
   router.get('/workspace/:id/access', async (req, res) => {
     const user = await requireUser(req, res);

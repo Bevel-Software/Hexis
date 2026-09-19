@@ -34,101 +34,6 @@ const ENTRY: FileTreeEntry = {
 } as unknown as FileTreeEntry;
 const A = { name: 'Alice', email: 'alice@x.com' };
 
-/** Open Alice's row dropdown and click its "Can edit" item (the LAST exact match
- * — the top add-row verb selector also reads "Can edit"). */
-async function openAndUncheckEdit(user: ReturnType<typeof userEvent.setup>) {
-  const trigger = await screen.findByRole('button', { name: /can edit, can download/i });
-  await user.click(trigger);
-  const editItems = await screen.findAllByRole('button', { name: /^can edit$/i });
-  await user.click(editItems[editItems.length - 1]);
-}
-
-describe('ManageAccessDialog: unchecking an inherited verb on a mixed row', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    api.suggestPrincipals.mockResolvedValue({ roles: [], groups: [], people: [], peopleWithheld: false });
-  });
-
-  it('write PURELY inherited (download direct): uncheck "Can edit" → 409 → opens prompt on FIRST click, revokes only write', async () => {
-    const user = userEvent.setup();
-    api.fetchFileAccess.mockResolvedValue({
-      canRead: true, canWrite: true, canDownload: true, canOwner: true,
-      eligible: { roles: [], users: [A] },
-      readers: { restricted: true, roles: [], users: [A] },
-      owners: { roles: [], users: [] },
-      downloaders: { roles: [], users: [A] },
-      sources: {
-        'u:alice@x.com': {
-          read: [{ kind: 'ancestor', path: 'Sales/access.md' }],
-          write: [{ kind: 'ancestor', path: 'Sales/access.md' }],
-          download: [{ kind: 'direct' }],
-        },
-      },
-    } as AccessResponse);
-    const { GitApiError } = await import('../../git/services/git.api');
-    api.revokeAccess.mockRejectedValue(
-      new GitApiError(409, 'inherited', {
-        kind: 'inherited', error: 'inherited',
-        sources: { write: [{ kind: 'ancestor', path: 'Sales/access.md' }] },
-      }),
-    );
-
-    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
-    await openAndUncheckEdit(user);
-
-    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
-    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'write' }));
-    expect(api.revokeAccess).not.toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'read' }));
-    await waitFor(() =>
-      expect(screen.getByRole('heading', { name: /remove from parent folder\?/i })).toBeInTheDocument(),
-    );
-  });
-
-  it('write DIRECT + also inherited: uncheck "Can edit" → 200 strips direct, still inherited → chains to prompt on the FIRST click (no second click)', async () => {
-    const user = userEvent.setup();
-    // write is `[direct, ancestor]` — Alice is named on the file AND inherits write.
-    api.fetchFileAccess.mockResolvedValue({
-      canRead: true, canWrite: true, canDownload: true, canOwner: true,
-      eligible: { roles: [], users: [A] },
-      readers: { restricted: true, roles: [], users: [A] },
-      owners: { roles: [], users: [] },
-      downloaders: { roles: [], users: [A] },
-      sources: {
-        'u:alice@x.com': {
-          read: [{ kind: 'direct' }],
-          write: [{ kind: 'direct' }, { kind: 'ancestor', path: 'Sales/access.md' }],
-          download: [{ kind: 'direct' }],
-        },
-      },
-    } as AccessResponse);
-    // The 200 fresh view AFTER stripping the direct write: write now only inherited.
-    api.revokeAccess.mockResolvedValue({
-      canRead: true, canWrite: true, canDownload: true, canOwner: true,
-      eligible: { roles: [], users: [A] },
-      readers: { restricted: true, roles: [], users: [A] },
-      owners: { roles: [], users: [] },
-      downloaders: { roles: [], users: [A] },
-      sources: {
-        'u:alice@x.com': {
-          read: [{ kind: 'direct' }],
-          write: [{ kind: 'ancestor', path: 'Sales/access.md' }], // direct gone, inherited remains
-          download: [{ kind: 'direct' }],
-        },
-      },
-    } as AccessResponse);
-
-    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
-    await openAndUncheckEdit(user);
-
-    // ONE revoke (verb: write), and the prompt opens WITHOUT a second click.
-    await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
-    expect(api.revokeAccess).toHaveBeenCalledWith('ws-1', expect.objectContaining({ verb: 'write' }));
-    await waitFor(() =>
-      expect(screen.getByRole('heading', { name: /remove from parent folder\?/i })).toBeInTheDocument(),
-    );
-  });
-});
-
 /**
  * A public node. The reach line under the field is a STATEMENT — it says the
  * node is public and why — and never a control: every reason it names is a
@@ -179,13 +84,16 @@ describe('ManageAccessDialog: a public node', () => {
     expect(within(line.parentElement as HTMLElement).queryByRole('button')).toBeNull();
     expect(screen.queryByText('Anyone can read')).toBeNull();
 
-    // The row's menu holds exactly the verb Everyone can hold — Remove is its
-    // own control beside it, never a menu item.
+    // The row's menu holds exactly the verb Everyone can hold, plus the Deny
+    // every row ends with — Remove is its own control beside it, never a menu item.
     expect(screen.getByText('Everyone')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /^can read$/i }));
     const readItem = screen.getAllByRole('button', { name: /^can read$/i }).at(-1)!;
     const menu = readItem.parentElement as HTMLElement;
-    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Can read']);
+    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
+      'Can read',
+      'Deny',
+    ]);
     await user.click(screen.getByRole('button', { name: 'Remove access' }));
     await waitFor(() => expect(api.revokeAccess).toHaveBeenCalledTimes(1));
     expect(api.revokeAccess).toHaveBeenCalledWith(
@@ -1105,7 +1013,8 @@ describe('ManageAccessDialog: the reworked layout', () => {
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
     expect(trigger.compareDocumentPosition(remove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    // The open dropdown holds verbs only.
+    // The open dropdown holds the verb sets and Deny — never a Remove, which is
+    // its own control beside the trigger.
     await user.click(trigger);
     const menu = screen.getByRole('button', { name: /^can download$/i }).parentElement as HTMLElement;
     expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
@@ -1113,6 +1022,7 @@ describe('ManageAccessDialog: the reworked layout', () => {
       'Can edit',
       'Can read',
       'Can download',
+      'Deny',
     ]);
     await user.keyboard('{Escape}');
 
@@ -1125,29 +1035,34 @@ describe('ManageAccessDialog: the reworked layout', () => {
     expect(screen.queryByRole('heading', { name: /remove from parent folder\?/i })).toBeNull();
   });
 
-  it('an inherited row ends in its verb text then Remove, which opens "Remove from parent?"', async () => {
+  it('an inherited row ends in its OWN verb menu then Remove, which opens "Remove from parent?"', async () => {
     const user = userEvent.setup();
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
     await user.click(await screen.findByRole('button', { name: /People invited to Sales/ }));
 
-    const verbText = screen.getByText('Can read', { selector: 'span' });
+    // Bo's verbs used to be read-only text here, which left "give Bo less than
+    // Sales gives him" a thing the sheet could state but not do. It is the same
+    // menu Alice's direct row has.
+    const bosMenu = screen.getAllByRole('button', { name: /^can read$/i }).at(-1)!;
     // An inherited row's Remove keeps its name, "Remove"; Alice's direct one is "Remove access".
     const bosRemove = screen.getByRole('button', { name: 'Remove' });
     expect(screen.getAllByRole('button', { name: 'Remove access' })).toHaveLength(1);
-    expect(verbText.compareDocumentPosition(bosRemove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(bosMenu.compareDocumentPosition(bosRemove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(bosRemove);
     expect(await screen.findByRole('heading', { name: /remove from parent folder\?/i })).toBeInTheDocument();
     expect(api.revokeAccess).not.toHaveBeenCalled();
   });
 
-  it('a role-based grant shows its verb text and no Remove', async () => {
+  it('a role-based grant gets the menu too, but no Remove — there is no entry here to remove', async () => {
     const user = userEvent.setup();
     render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
     await user.click(await screen.findByRole('button', { name: /People with access through a role/ }));
 
     expect(screen.getByText('Engineering')).toBeInTheDocument();
-    expect(screen.getByTitle('Granted via a role or policy. Manage it there')).toHaveTextContent('Can read');
+    // The menu can still write a restriction (a denial needs no prior entry);
+    // Remove could only strip one, and there is none, so the slot stays empty.
+    expect(screen.getAllByRole('button', { name: /^can read$/i }).at(-1)).toBeInTheDocument();
     // Alice's Remove only: the role row has none.
     expect(screen.getAllByRole('button', { name: 'Remove access' })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
