@@ -20,6 +20,7 @@ export const USAGE = `probe-first-call — fresh connections, one first start_se
   --tool <name>         tool to call (default start_session)
   --timeout <ms>        per-request ceiling (default 30000)
   --json                print the full report as JSON instead of the log block
+  --help                print this and exit
 `;
 
 /**
@@ -34,20 +35,67 @@ export const USAGE = `probe-first-call — fresh connections, one first start_se
  */
 export class ConfigError extends Error {}
 
-/** `--flag value` pairs plus bare `--flag` switches, with no dependency. */
+/**
+ * Every flag this command takes, and whether a value has to follow it.
+ *
+ * The list exists so that anything NOT on it can be refused. A probe run is
+ * evidence that goes into a ticket log, and the way a mistyped flag fails is
+ * the worst way anything can fail here: `--concurency 1` used to be dropped on
+ * the floor and the default fifty-wide burst run instead, reported as the
+ * one-at-a-time run the operator thought they had asked for. A wrong number
+ * that looks right is worse than no number.
+ */
+const FLAGS = {
+  'base-url': 'value',
+  bearer: 'value',
+  connections: 'value',
+  concurrency: 'value',
+  mode: 'value',
+  tool: 'value',
+  timeout: 'value',
+  json: 'switch',
+  help: 'switch',
+  h: 'switch',
+} as const satisfies Record<string, 'value' | 'switch'>;
+
+export type FlagName = keyof typeof FLAGS;
+
+/** The flag table as data, so a test can hold the usage text to it. */
+export const FLAG_NAMES = Object.keys(FLAGS) as FlagName[];
+
+/**
+ * `--flag value` pairs plus bare `--flag` switches, with no dependency.
+ *
+ * Nothing is ignored. An unknown flag, a stray word, and a value flag left
+ * without its value are all refused: `--bearer` with nothing after it used to
+ * become the literal bearer `"true"`, so every attempt came back 401 and the
+ * report read as fifty platform failures — a reproduction of a bug that was
+ * never there.
+ */
 export function parseArgs(argv: readonly string[]): Record<string, string> {
   const args: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (!arg.startsWith('--')) continue;
-    const key = arg.slice(2);
-    const next = argv[i + 1];
-    if (next === undefined || next.startsWith('--')) {
-      args[key] = 'true';
-    } else {
-      args[key] = next;
-      i++;
+    // The conventional end-of-options separator. `pnpm run … -- --base-url x`
+    // normally eats it, but not every runner does and it is not a mistake.
+    if (arg === '--') continue;
+    if (!arg.startsWith('--')) {
+      throw new ConfigError(`unexpected argument ${printable(arg)} — every input to this command is a --flag`);
     }
+    const key = arg.slice(2);
+    if (!(key in FLAGS)) throw new ConfigError(`unknown option ${printable(arg)}`);
+    if (FLAGS[key as FlagName] === 'switch') {
+      args[key] = 'true';
+      continue;
+    }
+    const next = argv[i + 1];
+    // A following `--something` is the next flag, not this one's value: taking
+    // it would swallow the flag as well as leaving this one unset.
+    if (next === undefined || next.startsWith('--')) {
+      throw new ConfigError(`--${key} needs a value`);
+    }
+    args[key] = next;
+    i++;
   }
   return args;
 }

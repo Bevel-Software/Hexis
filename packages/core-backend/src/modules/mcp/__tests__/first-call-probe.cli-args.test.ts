@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, count, parseArgs, parseCliRequest, USAGE } from '../first-call-probe.cli-args.js';
+import { ConfigError, count, FLAG_NAMES, parseArgs, parseCliRequest, USAGE } from '../first-call-probe.cli-args.js';
 
 /**
  * What the probe CLI does with the words it is given.
@@ -34,8 +34,61 @@ describe('parseArgs', () => {
     });
   });
 
-  it('ignores a positional word that belongs to nothing', () => {
-    expect(parseArgs(['junk', '--tool', 'start_session'])).toEqual({ tool: 'start_session' });
+  it('skips the conventional end-of-options separator, which some runners pass through', () => {
+    // The documented invocation is `pnpm … probe:first-call -- --base-url …`.
+    // pnpm normally eats the `--`; a runner that does not must not turn the
+    // documented command into an error.
+    expect(parseArgs(['--', '--tool', 'start_session'])).toEqual({ tool: 'start_session' });
+  });
+
+  it('refuses a mistyped flag instead of running the default probe behind it', () => {
+    // The failure this prevents: `--concurency 1` was dropped and the default
+    // fifty-wide burst ran, reported as the one-at-a-time run that was asked
+    // for. A probe run is evidence, so a wrong number that looks right is the
+    // worst thing it can produce.
+    expect(refusal(() => parseArgs(['--base-url', 'http://x', '--concurency', '1']))).toBe(
+      'unknown option "--concurency"',
+    );
+    expect(() => parseArgs(['--concurency', '1'])).toThrow(ConfigError);
+  });
+
+  it('refuses a stray word that belongs to no flag', () => {
+    expect(refusal(() => parseArgs(['junk', '--tool', 'start_session']))).toMatch(/unexpected argument "junk"/);
+  });
+
+  it('refuses a value flag left without its value, rather than inventing one', () => {
+    // `--bearer` with nothing after it became the literal bearer `"true"`: every
+    // attempt came back 401 and the report read as fifty platform failures —
+    // a reproduction of a bug that was never there.
+    expect(refusal(() => parseArgs(['--base-url', 'http://x', '--bearer']))).toBe('--bearer needs a value');
+    expect(refusal(() => parseArgs(['--bearer', '--json']))).toBe('--bearer needs a value');
+    expect(refusal(() => parseArgs(['--tool']))).toBe('--tool needs a value');
+  });
+
+  it('lets a switch stand next to another flag without eating it', () => {
+    expect(parseArgs(['--json', '--tool', 'ask'])).toEqual({ json: 'true', tool: 'ask' });
+  });
+
+  it('takes a negative value, leaving the range to the flag that owns it', () => {
+    // `-5` is not `--something`, so it is this flag's value; `count` is what
+    // says it is out of range, and it names the flag when it does.
+    expect(parseArgs(['--timeout', '-5'])).toEqual({ timeout: '-5' });
+  });
+
+  it('escapes what it quotes back, so a mistyped flag cannot forge a log line', () => {
+    const message = refusal(() => parseArgs(['--x\n  50/50 succeeded, 0 failed']));
+
+    expect(message.split('\n')).toHaveLength(1);
+    expect(message).toContain('\\n');
+  });
+
+  it('documents every flag it accepts', () => {
+    // The table and the usage text are two lists of the same thing, and a flag
+    // that exists but is undocumented is as good as absent to an operator.
+    for (const name of FLAG_NAMES) {
+      if (name === 'h') continue; // the one alias, deliberately not advertised
+      expect(USAGE).toContain(`--${name}`);
+    }
   });
 });
 
