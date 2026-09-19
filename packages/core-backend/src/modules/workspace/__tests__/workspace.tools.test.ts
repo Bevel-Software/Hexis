@@ -83,6 +83,13 @@ let writePolicy: RoutineWritePolicyService;
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
+/**
+ * Another writer getting to a path in the window the real `LockingFilesystem`
+ * closes: the stand-ins below run it where that filesystem would be acquiring
+ * the lock — after the tool's preflight, before the under-lock `check`. Fires
+ * ONCE (it clears itself), so a test's later writes are ordinary ones.
+ */
+let raceHook: (() => Promise<void>) | null = null;
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -90,6 +97,7 @@ async function start(
   /** The signed-in caller's address — only the branch-naming tests vary it. */
   userEmail = 'e@x',
 ): Promise<string> {
+  raceHook = null;
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
@@ -102,12 +110,38 @@ async function start(
   // batch's own all-or-none behaviour is asserted where it lives, in
   // `locking-filesystem.test.ts` ("a DELETE batch whose later lock is
   // contended deletes nothing").
+  // Both stand-ins honour the caller's under-lock `check` the way the real
+  // filesystem does — run it with the paths "locked" (here: just before any
+  // byte lands), let a refusal through untouched, and in the batch case write
+  // only what the check keeps. That is what makes the outcome the tools report
+  // a verdict about the state they actually wrote over.
+  const runRaceHook = async (): Promise<void> => {
+    const hook = raceHook;
+    raceHook = null;
+    if (hook) await hook();
+  };
+  const plainWriteFile = fs.writeFile.bind(fs);
+  (fs as unknown as Record<string, unknown>).writeFile = async (
+    path: string,
+    content: string,
+    options?: unknown,
+    check?: () => Promise<void>,
+  ) => {
+    await runRaceHook();
+    await check?.();
+    return plainWriteFile(path, content, options as never);
+  };
   (fs as unknown as Record<string, unknown>).writeFiles = async (
     writes: { path: string; content: string }[],
     _summary: string,
     deletes: string[] = [],
+    check?: (
+      pending: readonly { path: string; content: string }[],
+    ) => Promise<{ path: string; content: string }[]>,
   ) => {
-    for (const w of writes) await fs.writeFile(w.path, w.content);
+    await runRaceHook();
+    const landing = check ? await check(writes) : writes;
+    for (const w of landing) await plainWriteFile(w.path, w.content);
     for (const p of deletes) await fs.deleteFile(p);
   };
   await fs.writeFile('a.md', 'hello\nworld\n');
@@ -655,6 +689,66 @@ describe('write modes and per-path outcomes', () => {
       expect(body.error).toContain('`create`, `overwrite`, `update`');
     }
     expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  /**
+   * The mode is a promise about the state the write lands on, so it has to be
+   * judged over a state no one else can move — i.e. with the path's lock held,
+   * not at a preflight anybody may invalidate before the bytes land. These
+   * four drive that window directly: `raceHook` is the other writer, running
+   * exactly where the real filesystem acquires the lock.
+   */
+  describe('the mode is judged over the state the write actually lands on', () => {
+    it('write_file create refuses a path another writer created after the preflight, and keeps their file', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('contested.md', 'theirs\n'); };
+      const res = await writeFile(base, { path: 'contested.md', content: 'mine' });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { code: string; path: string; error: string };
+      expect(body.code).toBe('exists');
+      expect(body.path).toBe('contested.md');
+      expect(body.error).toContain('pass mode: overwrite to replace it');
+      // The point of the whole feature: their bytes are still there.
+      expect(await onDisk('contested.md')).toBe('theirs\n');
+    });
+
+    it('write_file update refuses a path another writer deleted after the preflight, and does not recreate it', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.deleteFile('a.md'); };
+      const res = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toMatchObject({ code: 'missing', path: 'a.md' });
+      await expect(onDisk('a.md')).rejects.toThrow();
+    });
+
+    it('write_file overwrite reports `replaced`, not `created`, when the file appeared after the preflight', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('late.md', 'theirs\n'); };
+      const res = await writeFile(base, { path: 'late.md', content: 'mine', mode: 'overwrite' });
+      expect(res.status).toBe(200);
+      // The preflight saw nothing there and would have answered `created`.
+      expect(await res.json()).toMatchObject({ path: 'late.md', outcome: 'replaced' });
+      expect(await onDisk('late.md')).toBe('mine');
+    });
+
+    it('write_files drops only the path another writer took, lands the rest, and counts what landed', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('two.md', 'theirs\n'); };
+      const body = (await (await writeFiles(base, {
+        files: [
+          { path: 'one.md', content: 'first' },
+          { path: 'two.md', content: 'second' },
+          { path: 'three.md', content: 'third' },
+        ],
+      })).json()) as BatchAnswer;
+      expect(body.count).toBe(2);
+      expect(body.files.map((f) => f.path)).toEqual(['one.md', 'two.md', 'three.md']);
+      expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+      expect(body.files[1].error).toBe('exists');
+      expect(await onDisk('one.md')).toBe('first');
+      expect(await onDisk('three.md')).toBe('third');
+      expect(await onDisk('two.md')).toBe('theirs\n');
+    });
   });
 
   it('both descriptions state the default and all three modes, and `mode` is an input on each', async () => {

@@ -1537,14 +1537,41 @@ export function registerWorkspaceTools(
       // through (see `assertPathWritable`), so it does not limit other agents.
       writePolicy.assertPathWritable(ctx.sessionId, a.path as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
+      const mode = modeOf(a);
       const fs = await ctx.getFilesystem(a.branch as string);
       await assertNotBinaryOverwrite(readers,a.path as string, fs);
       // The mode is judged AFTER the content gates, so a file the tools may
       // not write as text is still answered with the capability refusal that
       // names the tool to use instead — not with "it already exists".
-      const outcome = decideWrite(modeOf(a), a.path as string, (await kindOf(fs, a.path as string)) !== null);
-      await fs.writeFile(a.path as string, a.content as string);
-      return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8'), outcome };
+      const decide = async (): Promise<WriteOutcome> =>
+        decideWrite(mode, a.path as string, (await kindOf(fs, a.path as string)) !== null);
+      // Judged twice, on purpose. This first verdict is the cheap one, taken
+      // before any lock so an ordinary refusal never contends for one — but it
+      // is a verdict about a path anyone may still change. The one the answer
+      // carries is taken again inside `writeFile`, with the path's lock HELD
+      // (`write: true` guarantees the locking filesystem, as the batch cast
+      // below does): only there can `create` be sure it is not about to
+      // replace a file a human editor saved a moment ago, and `update` sure it
+      // is not recreating one somebody just deleted. A filesystem without the
+      // hook runs no second verdict, so the preflight one stands.
+      const preflight = await decide();
+      let locked: WriteOutcome | null = null;
+      const locking = fs as unknown as {
+        writeFile(
+          path: string,
+          content: string,
+          options: undefined,
+          check: () => Promise<void>,
+        ): Promise<void>;
+      };
+      await locking.writeFile(a.path as string, a.content as string, undefined, async () => {
+        locked = await decide();
+      });
+      return {
+        path: a.path,
+        bytes: Buffer.byteLength(a.content as string, 'utf8'),
+        outcome: (locked ?? preflight) as WriteOutcome,
+      };
     },
   });
 
@@ -1624,28 +1651,70 @@ export function registerWorkspaceTools(
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
       // batch as one commit. Structural cast avoids a workflow-internal import.
       const batching = fs as unknown as {
-        writeFiles(writes: { path: string; content: string }[], summary: string): Promise<void>;
+        writeFiles(
+          writes: { path: string; content: string }[],
+          summary: string,
+          deletes: string[],
+          check: (
+            pending: readonly { path: string; content: string }[],
+          ) => Promise<{ path: string; content: string }[]>,
+        ): Promise<void>;
       };
       const writes: { path: string; content: string }[] = [];
       const outcomes: Record<string, unknown>[] = [];
+      /** The `files` entry for `writes[i]`, so the re-judgement can revise it. */
+      const entryOf: Record<string, unknown>[] = [];
+      /** Record on `entry` that this path was refused, as write_file would say it. */
+      const refuse = (entry: Record<string, unknown>, err: unknown): void => {
+        if (!(err instanceof ToolError)) throw err;
+        const details = (err.details ?? {}) as { code?: string; kind?: string };
+        entry.outcome = 'refused';
+        entry.error = details.code ?? details.kind ?? 'refused';
+        entry.message = err.message;
+      };
       for (const f of files) {
+        const entry: Record<string, unknown> = { path: f.path };
+        outcomes.push(entry);
         try {
           assertNotDocumentEdit(readers, f.path);
           await assertNotBinaryOverwrite(readers, f.path, fs);
           // An earlier entry in this same batch counts as existing: two `create`
           // entries for one path are a mistake the commit would otherwise hide.
           const exists = writes.some((w) => w.path === f.path) || (await kindOf(fs, f.path)) !== null;
-          const outcome = decideWrite(mode, f.path, exists);
+          entry.outcome = decideWrite(mode, f.path, exists);
           writes.push({ path: f.path, content: f.content });
-          outcomes.push({ path: f.path, outcome });
+          entryOf.push(entry);
         } catch (err) {
-          if (!(err instanceof ToolError)) throw err;
-          const details = (err.details ?? {}) as { code?: string; kind?: string };
-          outcomes.push({ path: f.path, outcome: 'refused', error: details.code ?? details.kind ?? 'refused', message: err.message });
+          refuse(entry, err);
         }
       }
-      if (writes.length > 0) await batching.writeFiles(writes, `Write ${writes.length} file(s)`);
-      return { count: writes.length, files: outcomes };
+      // The same mode gate again, run by `writeFiles` once EVERY path's lock is
+      // held — the verdict the answer carries, for the reason write_file states
+      // above. `pending` is this batch's writes in the order they were handed
+      // over, so `pending[i]` is `writes[i]` and `entryOf[i]` is its `files`
+      // entry. A path whose verdict changed under the lock is dropped from the
+      // batch and reported refused, leaving the rest of the batch to land.
+      const recheck = async (
+        pending: readonly { path: string; content: string }[],
+      ): Promise<{ path: string; content: string }[]> => {
+        const kept: { path: string; content: string }[] = [];
+        for (let i = 0; i < pending.length; i++) {
+          const entry = entryOf[i];
+          try {
+            const exists =
+              kept.some((k) => k.path === pending[i].path) || (await kindOf(fs, pending[i].path)) !== null;
+            entry.outcome = decideWrite(mode, pending[i].path, exists);
+            kept.push(pending[i]);
+          } catch (err) {
+            refuse(entry, err);
+          }
+        }
+        return kept;
+      };
+      if (writes.length > 0) {
+        await batching.writeFiles(writes, `Write ${writes.length} file(s)`, [], recheck);
+      }
+      return { count: outcomes.filter((o) => o.outcome !== 'refused').length, files: outcomes };
     },
   });
 
