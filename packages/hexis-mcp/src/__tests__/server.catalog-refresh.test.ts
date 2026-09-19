@@ -41,6 +41,12 @@ let deploymentTools: string[] = [];
  * which a poller would report as a dead connection key.
  */
 let advertisesCatalogRevision = true;
+/**
+ * Whether the deployment's MCP endpoint is refusing — a redeploy, a proxy
+ * blip. The catalog route keeps answering, so the watch sees the change and
+ * the re-registration that follows it is what fails.
+ */
+let mcpUnavailable = false;
 /** Its catalog fingerprint. Moves when — and only when — the list above does. */
 let revision = 'rev-1';
 /** Every catalog-revision poll's bearer, so the poll's credential is checkable. */
@@ -76,6 +82,7 @@ beforeAll(async () => {
           return json(200, { revision, tools: deploymentTools.length, skills: 0 });
         }
         if (pathname === '/api/mcp') {
+          if (mcpUnavailable) return json(503, { error: 'the deployment is restarting' });
           const parsed = body ? (JSON.parse(body) as unknown) : undefined;
           // Read at request time: a re-registration after a commit must see
           // the new list, exactly as it would against a real deployment.
@@ -122,6 +129,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   revisionPolls.length = 0;
   advertisesCatalogRevision = true;
+  mcpUnavailable = false;
 });
 
 async function waitFor(condition: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
@@ -211,6 +219,50 @@ describe('a manual added on the deployment reaches an already-connected client',
 
       expect(await listed(s.client)).not.toContain('retired_tool');
       expect(await listed(s.client)).toContain('ping');
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  /**
+   * A re-registration that FAILS must not cost the connection its toolset for
+   * good. The refresh deregisters first, so a registration that then fails
+   * leaves the manual absent — and the retry that follows has to get past its
+   * own cleanup step to put it back. (An already-absent manual is `false` from
+   * the client's `deregisterManual`, not an error; a cleanup step that took
+   * "nothing to remove" for "could not remove" would loop here forever and the
+   * connection would never see another tool.)
+   *
+   * Nothing is committed between the failure and the recovery: the change is
+   * still OWED, and the watch is what remembers that.
+   */
+  it('restores the toolset by retrying a re-registration that failed', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start(50);
+    try {
+      expect(await listed(s.client)).toContain('ping');
+
+      // The deployment goes away, and the commit lands while it is away: the
+      // watch sees the new revision, deregisters, and cannot register again.
+      mcpUnavailable = true;
+      commit(['ping', 'serper_search']);
+      await waitFor(
+        () => s.stderr.some((line) => line.includes('refreshing the toolset after a workspace change failed')),
+        'the refresh failure notice',
+      );
+      expect(s.notifications).toEqual([]); // nothing to tell a client yet
+
+      // It comes back. No new commit — the owed change is delivered by a retry.
+      mcpUnavailable = false;
+      await waitFor(() => s.notifications.includes('tools/list_changed'), 'the tool-list-changed notification');
+
+      const after = await listed(s.client);
+      expect(after).toContain('serper_search');
+      expect(after).toContain('ping');
+      // One line for the streak, not one per poll.
+      expect(
+        s.stderr.filter((line) => line.includes('refreshing the toolset after a workspace change failed')),
+      ).toHaveLength(1);
     } finally {
       await s.shutdown();
     }

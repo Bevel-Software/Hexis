@@ -444,26 +444,6 @@ export async function createHexisMcpServer(
    */
   let closed = false;
   let remoteManualRegistered = false;
-  /**
-   * Whether the remote manual may still be registered on the live client RIGHT
-   * NOW — distinct from `remoteManualRegistered`, which records that discovery
-   * got as far as registering it once and never goes back to false.
-   *
-   * The catalog refresh retries a failed re-registration on its next poll, and
-   * that retry must not open by deregistering a manual that is not there: the
-   * client answers with a throw, which would put one "deregistering … failed"
-   * line in the operator's log every three seconds for as long as the
-   * deployment stays unwell — burying the one line that says what is wrong.
-   *
-   * FALSE means "known absent", and only a deregistration that SUCCEEDED (or a
-   * registration that failed, which registers nothing) may say so. A
-   * deregistration that THREW leaves the registry entry's fate unknown, and
-   * unknown is kept here as live: re-registering over an entry that is still
-   * there is the failure this flag exists to avoid, so the next attempt tries
-   * the cleanup again rather than assuming it happened. The log line for a
-   * failing cleanup is throttled instead — see `deregisterFailing`.
-   */
-  let remoteManualLive = false;
   /** One line per cleanup-failure streak, for the same reason as the watch's. */
   let deregisterFailing = false;
   let inflightCalls = 0;
@@ -518,18 +498,29 @@ export async function createHexisMcpServer(
     return run;
   };
   /**
-   * Drop the remote manual's registration before it is re-made, and report what
-   * is known afterwards. `false` ⇒ the entry is gone (or was never there);
-   * `true` ⇒ it may still be registered, so the caller's next attempt must try
-   * this again. Shared by the credential swap and the catalog refresh, which
-   * must not disagree about what a failed cleanup means.
+   * Drop the remote manual's registration before it is re-made, and report
+   * whether anything may still be registered under that name afterwards:
+   * `false` ⇒ nothing is (it was removed, or it was not there to begin with),
+   * `true` ⇒ it may be, so the caller must not register over it and its next
+   * attempt has to try this again.
+   *
+   * ASKED, not remembered. The client is the only thing that knows what its
+   * repository holds, and it moves without us: a session recovery deregisters
+   * and re-registers this manual on its own, and a recovery whose registration
+   * failed leaves the name free while any belief we tracked would still say
+   * "registered". The client's answer cannot go stale that way — an absent
+   * manual is `false` from `deregisterManual`, not an error, so asking costs
+   * one lookup and never mistakes "already gone" for "could not remove".
+   *
+   * Shared by the credential swap and the catalog refresh, which must not
+   * disagree about what a failed cleanup means.
    */
   const deregisterRemoteManual = async (live: CodeModeUtcpClient, why: string): Promise<boolean> => {
-    if (!remoteManualLive) return false;
     try {
       // Closes the manual's MCP sessions and drops its repository entries.
+      // Returns false for a manual that is not registered, which is exactly
+      // the state the caller wants and not a failure.
       await live.deregisterManual(REMOTE_MANUAL_NAME);
-      remoteManualLive = false;
       deregisterFailing = false;
       return false;
     } catch (err) {
@@ -570,7 +561,6 @@ export async function createHexisMcpServer(
         );
         return;
       }
-      remoteManualLive = true;
       await removeRemoteMetaTools(live);
       // The manual now holds a session this swap created. A call that lost its
       // own session around the swap — the two often land together, a redeploy
@@ -644,7 +634,6 @@ export async function createHexisMcpServer(
       // until some later commit happened to move the catalog again. The
       // watcher owns the operator line, so this one only carries the reason.
       if (!result.ok) throw new Error(`re-registering the remote manual failed: ${result.error}`);
-      remoteManualLive = true;
       await removeRemoteMetaTools(live);
       noteManualReregistered(live, REMOTE_MANUAL_NAME);
       // Re-flattened from the repository rather than re-running discovery:
@@ -785,7 +774,6 @@ export async function createHexisMcpServer(
 
     const discovered = withoutRemoteMetaTools(await discoverTools(built.client, remote, local));
     remoteManualRegistered = true;
-    remoteManualLive = true;
     // A renewal that landed while registration was in flight hit the no-op
     // guard above; without this reconciliation the manual would keep the
     // retired bearer until the next renewal.
