@@ -265,10 +265,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
         console.error('Failed to bootstrap workspace:', err);
         // Surfaced, not just logged: a bootstrap that fails leaves
         // `workspaceId` where it was, and the route waiting on it needs to
-        // know why — a branch the host deleted (410) has its own screen, and
-        // every other status gets a named failure with a Retry. The message
-        // rides along so the screen can say what actually failed instead of
-        // only which branch it was.
+        // know why — a branch the host deleted (410) and a branch that never
+        // existed (404) each have their own screen, and every other status
+        // gets a named failure with a Retry. The message rides along so the
+        // screen can say what actually failed instead of only which branch
+        // it was.
         // No persistence branch means the server bootstrapped the DEFAULT
         // branch, so that is the branch this failure is about — an empty
         // name would never match the URL a route is on.

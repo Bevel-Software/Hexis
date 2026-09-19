@@ -487,6 +487,10 @@ export async function createCoreServices(
   // A fresh clone has already fetched every ref — let the git layer skip the
   // redundant implicit `git fetch` on the first `listBranches` after bootstrap.
   workspaceService.setWorkspaceClonedListener((id) => gitService.noteWorkspaceFetched(id));
+  // A branch listing is also the platform's memory of which branch names it
+  // has ever heard of — what tells a deleted branch (410) from one that never
+  // existed (404) when a bootstrap finds no such ref on origin.
+  gitService.setBranchesListedListener((names) => workspaceService.noteBranchesListed(names));
   const pullRequestService = new PullRequestService(
     db,
     workspaceService,
