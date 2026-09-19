@@ -14,6 +14,7 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 
 /**
@@ -215,30 +216,52 @@ export function KbPageHeader({
     !writeActionInPane && canWrite === false && !isReviewingPending && activeTab === 'content';
 
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-3">
-      {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
-          `.focus()` land on it — the standard way to hand focus to a region
-          after a view swap. No focus ring: this is a programmatic landing
-          after the user's own click, not a control they are about to use. */}
-      <h1
-        ref={titleRef}
-        tabIndex={-1}
-        className="min-w-0 text-display font-semibold text-ink focus:outline-none"
-      >
-        {titleOf(path)}
-      </h1>
+    // The shared header band: the same height as the sidebar's header row,
+    // from the same token, so the two rows under the toolbar read as one
+    // line. It used to be `flex-wrap` with no height at all — the row was as
+    // tall as whatever landed in it, which is why it could never agree with
+    // the sidebar. Wrapping is gone with the height: the title truncates
+    // instead (below), because a title bar that becomes two rows has already
+    // broken the seam this band exists to hold.
+    <div
+      data-testid={PAGE_HEADER_TESTID}
+      className={cn(HEADER_BAND, 'mb-2 w-full gap-3')}
+    >
+      {/* The title and its chips are the one part of this row allowed to run
+          out of space. They share a `min-w-0` group so that the row's
+          leftover width is taken from THEM and never from the actions: a
+          band cannot wrap, so something has to give first, and a file name
+          the reader can still hover for (`title`, below) is a far cheaper
+          loss than a Share button pushed off the side of the page. The
+          chips clip from the right in the order they are least urgent. */}
+      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+        {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
+            `.focus()` land on it — the standard way to hand focus to a region
+            after a view swap. No focus ring: this is a programmatic landing
+            after the user's own click, not a control they are about to use. */}
+        <h1
+          ref={titleRef}
+          tabIndex={-1}
+          // `title` because `truncate` hides the rest of a long file name, and
+          // a heading you cannot finish reading needs somewhere to say it.
+          title={titleOf(path)}
+          className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+        >
+          {titleOf(path)}
+        </h1>
 
-      {/* The three chips the deleted strip used to carry. */}
-      {isDirty && <Badge tone="wait">Unsaved</Badge>}
-      {waitingOnAgentUpdate && (
-        <Badge tone="wait">
-          <Clock4 size={12} />
-          Agent update waiting
-        </Badge>
-      )}
-      {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
+        {/* The three chips the deleted strip used to carry. */}
+        {isDirty && <Badge tone="wait">Unsaved</Badge>}
+        {waitingOnAgentUpdate && (
+          <Badge tone="wait">
+            <Clock4 size={12} />
+            Agent update waiting
+          </Badge>
+        )}
+        {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
+      </div>
 
-      <div className="ml-auto flex flex-none items-center gap-1.5">
+      <div className="flex flex-none items-center gap-1.5">
         {/* Share: bounded, and split. Bounded because it is the one action on
             this page with a consequence for other people. The chevron carries
             the quieter sibling errand — copying a link to the page — so that
