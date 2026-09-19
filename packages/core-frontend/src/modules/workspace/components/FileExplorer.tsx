@@ -711,7 +711,16 @@ function RenameInput({
         value={value}
         onClick={(e) => e.stopPropagation()}
         onMouseDown={(e) => e.stopPropagation()}
-        onChange={(e) => { setValue(e.target.value); setRefusal(null); }}
+        // Frozen while the rename is in flight: an edit made in that window
+        // would be discarded by the row unmounting on success, and a refusal
+        // coming back would land under a name it was never about. `readOnly`
+        // rather than `disabled` so the box keeps focus and the caret.
+        readOnly={submitting}
+        onChange={(e) => {
+          if (submitting) return;
+          setValue(e.target.value);
+          setRefusal(null);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') submit();
           if (e.key === 'Escape') onCancel();

@@ -123,17 +123,41 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
 
   it('allows a case-only rename: the entry found at the destination is the source itself', async () => {
     // A case-insensitive filesystem opens `Notes.md` and `notes.md` as ONE
-    // file. On the case-sensitive disk this suite runs on, a hard link is the
-    // same thing to the check that matters: two names, one inode. The rename
-    // must not read that as a clash with something else.
+    // file, which is the case this is about. On a case-sensitive disk a hard
+    // link is the same thing to the check that matters — two names, one inode
+    // — so the link stands in for it there. On a case-INsensitive one the two
+    // names are already the same entry and the link is refused as existing:
+    // that IS the state under test, so the setup goes on.
     await svc.writeFile(workspaceId, `${KB}/Sales/notes.md`, '# Notes\n');
-    await fs.link(abs(`${KB}/Sales/notes.md`), abs(`${KB}/Sales/Notes.md`));
+    await fs.link(abs(`${KB}/Sales/notes.md`), abs(`${KB}/Sales/Notes.md`)).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code !== 'EEXIST') throw err;
+    });
 
     await expect(
       svc.moveEntry(workspaceId, `${KB}/Sales/notes.md`, `${KB}/Sales/Notes.md`),
     ).resolves.toBeUndefined();
 
     expect(await fs.readFile(abs(`${KB}/Sales/Notes.md`), 'utf-8')).toBe('# Notes\n');
+  });
+
+  it.skipIf(process.platform !== 'linux')('refuses a move onto a hard link of the source under another name', async () => {
+    // One inode is not enough to read the destination as "the source itself".
+    // `twin.md` is a name of its own in the tree, and a move onto it would
+    // take that name away — a clash, exactly like any other. Only a case-only
+    // rename, where the two spellings fold to one name, is exempt.
+    await svc.writeFile(workspaceId, `${KB}/Sales/notes.md`, '# Notes\n');
+    await fs.link(abs(`${KB}/Sales/notes.md`), abs(`${KB}/Sales/twin.md`));
+
+    await expect(
+      svc.moveEntry(workspaceId, `${KB}/Sales/notes.md`, `${KB}/Sales/twin.md`),
+    ).rejects.toMatchObject({
+      name: 'EntryExistsError',
+      status: 409,
+      message: 'A file named twin.md already exists in Sales.',
+    });
+
+    expect(await fs.readFile(abs(`${KB}/Sales/twin.md`), 'utf-8')).toBe('# Notes\n');
+    expect(await fs.readFile(abs(`${KB}/Sales/notes.md`), 'utf-8')).toBe('# Notes\n');
   });
 
   it('renames onto a free name exactly as before', async () => {

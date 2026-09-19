@@ -10,4 +10,6 @@ The destination is now checked in the one place every surface goes through, so t
 
 In the sidebar the rename box shows the sentence under the name you typed and stays open, so the name is there to fix; a refused drag says so under the row it was dropped on and leaves both entries where they were. Neither is a popup any more. The agent's `move_file` and `copy_file` answer the same sentence with a 409 — `copy_file` never overwrote silently before either, and now says why.
 
-A case-only rename is not a clash with the entry itself: the check compares file identity rather than spelling, so `notes.md` → `Notes.md` is the rename it looks like on a case-insensitive filesystem, and an ordinary rename onto a free name is unchanged.
+A case-only rename is not a clash with the entry itself: `notes.md` → `Notes.md` finds the source's own file at the destination on a case-insensitive filesystem, and that is the rename it looks like. Two hard links to one file under unrelated names are still two names, and a move onto one of them is refused like any other. An ordinary rename onto a free name is unchanged.
+
+Looking at the destination is what produces the sentence; it is not what makes the refusal true. The move and the copy themselves now land exclusively — a file moves as `link` + `unlink`, a folder claims its name with `mkdir` first, a copy uses `COPYFILE_EXCL` — so a destination created in the moment between the look and the landing is refused by the filesystem rather than quietly replaced.

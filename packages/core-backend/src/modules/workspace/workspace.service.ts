@@ -16,6 +16,11 @@ import {
   type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import {
+  DestinationTakenError,
+  inspectDestination,
+  renameNoReplace,
+} from '../../shared/rename-no-replace.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
@@ -140,16 +145,6 @@ const CLONE_TIMEOUT_MS = 600_000;
  */
 const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
-
-/** The entry at `absolutePath` without following a link, or null when nothing is there. */
-async function lstatOrNull(absolutePath: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.lstat(absolutePath);
-  } catch (err) {
-    if (isAbsence(err)) return null;
-    throw err;
-  }
-}
 
 /** Redact any token that might leak into an error message. */
 function redactError(err: unknown): string {
@@ -1223,11 +1218,23 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
-    // Before `mkdir`, so a refused move leaves no empty folder behind, and
-    // long before `rename`, which would otherwise replace what is there.
+    // Before `mkdir`, so a refused move leaves no empty folder behind — and
+    // it is the look that produces the sentence naming what is in the way.
     await this.assertDestinationFree(oldAbsolute, newAbsolute, newRelativePath);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });
-    await fs.rename(oldAbsolute, newAbsolute);
+    // The move itself cannot replace anything either, so a destination that
+    // appears between the look above and this line is refused rather than
+    // eaten (`shared/rename-no-replace.ts`). This path takes no lock on
+    // purpose — see the note above — so the atomicity has to come from the
+    // filesystem call.
+    try {
+      await renameNoReplace(oldAbsolute, newAbsolute, newRelativePath);
+    } catch (err) {
+      if (err instanceof DestinationTakenError) {
+        throw new EntryExistsError(err.entryKind, newRelativePath);
+      }
+      throw err;
+    }
     if (this.diffService) {
       await this.diffService.markUserDeleted(workspaceId, oldRelativePath);
       await this.diffService.syncFromDisk(workspaceId, newRelativePath);
@@ -1241,29 +1248,19 @@ export class WorkspaceService implements IWorkspaceService {
    * looked at first, and a move never overwrites a file or merges into a
    * folder.
    *
-   * Judged by identity, not by spelling: on a case-insensitive filesystem
-   * `notes.md` → `Notes.md` finds the SOURCE at the destination (same device,
-   * same inode), which is the rename that was asked for, not a clash. On a
-   * case-sensitive one the two are different files and nothing is found.
-   *
-   * `lstat`, never `stat`: a link at the destination is an entry in its own
-   * right, and the moves that could reach one are refused above anyway.
-   *
-   * A source that is not there is left to `fs.rename`'s own ENOENT — "there is
-   * nothing to move" is the truer answer, and it is the one this path already
-   * gave.
+   * Judged by `inspectDestination`, which reads a case-only rename on a
+   * case-insensitive filesystem — where `notes.md` → `Notes.md` finds the
+   * SOURCE at the destination — as the rename that was asked for rather than a
+   * clash, and everything else as a clash. It is the same reading the move
+   * itself uses, so the sentence and the refusal cannot drift apart.
    */
   private async assertDestinationFree(
     oldAbsolute: string,
     newAbsolute: string,
     newRelativePath: string,
   ): Promise<void> {
-    const destination = await lstatOrNull(newAbsolute);
-    if (destination === null) return;
-    const source = await lstatOrNull(oldAbsolute);
-    if (source === null) return;
-    if (source.dev === destination.dev && source.ino === destination.ino) return;
-    throw new EntryExistsError(destination.isDirectory() ? 'folder' : 'file', newRelativePath);
+    const verdict = await inspectDestination(oldAbsolute, newAbsolute);
+    if (verdict.state === 'taken') throw new EntryExistsError(verdict.kind, newRelativePath);
   }
 
   /**

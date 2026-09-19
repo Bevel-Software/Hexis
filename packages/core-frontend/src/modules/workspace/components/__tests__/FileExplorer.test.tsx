@@ -1834,6 +1834,36 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     });
 
+    it('ignores edits made while the rename is in flight, so the answer lands on the name it was about', async () => {
+      // A name typed while the request is out would be thrown away by the row
+      // unmounting on success, and a refusal coming back would appear under a
+      // name it was never about. The box is frozen for that window instead.
+      let land: (() => void) | undefined;
+      const moveEntry = vi.fn().mockImplementation(
+        () => new Promise<void>((resolve) => { land = resolve; }),
+      );
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      const inFlight = screen.getByRole('textbox') as HTMLInputElement;
+      expect(inFlight).toHaveAttribute('readonly');
+      await act(async () => {
+        fireEvent.change(inFlight, { target: { value: 'something-else.md' } });
+        fireEvent.keyDown(inFlight, { key: 'Enter' });
+      });
+      // Neither the edit nor the second Enter took: one request, one name.
+      expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      await act(async () => { land?.(); });
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+    });
+
     it('an ordinary rename closes the box and moves the file, as before', async () => {
       const moveEntry = vi.fn().mockResolvedValue(undefined);
       renderExplorer({ fileTree: TREE, moveEntry });

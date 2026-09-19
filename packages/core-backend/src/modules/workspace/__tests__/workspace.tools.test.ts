@@ -2361,7 +2361,10 @@ describe('preflight for moves and deletes', () => {
       expect(await fs.readFile(KB('Sales/deal-copy.md'), { encoding: 'utf-8' })).toBe('deal');
     });
 
-    it.skipIf(process.platform === 'win32')('a destination that IS the source is the rename it looks like, not a clash', async () => {
+    // Only where the two spellings are distinct entries: on a case-insensitive
+    // disk `link(deal.md, Deal.md)` is EEXIST at setup, and the case-only
+    // rename it stands in for is covered by the service's own suite.
+    it.skipIf(!caseSensitiveDisk)('a destination that IS the source is the rename it looks like, not a clash', async () => {
       // What a case-insensitive disk does to `deal.md` → `Deal.md`: the
       // destination opens the source's own file. A hard link is that same
       // shape — two names, one inode — on the case-sensitive disk this runs
@@ -2377,6 +2380,21 @@ describe('preflight for moves and deletes', () => {
 
       const copied = await call(base, 'copy_file', { src: KB('Sales/Deal.md'), dest: KB('Sales/deal.md') });
       expect(copied.status).toBe(409);
+    });
+
+    it.skipIf(!caseSensitiveDisk)('a hard link under an unrelated name is a clash, inode or no inode', async () => {
+      // One inode is not enough to read a destination as "the source itself":
+      // these are two names a user can see separately, and moving onto the
+      // second one would take it away. Only a case-only rename — the same
+      // name, folded — is the rename it looks like.
+      const base = await seeded();
+      await link(join(tempDir, KB('Sales/deal.md')), join(tempDir, KB('Sales/twin.md')));
+
+      const run = await call(base, 'move_file', { src: KB('Sales/deal.md'), dest: KB('Sales/twin.md') });
+      expect(run.status).toBe(409);
+      expect(run.body.error).toBe('A file named twin.md already exists in Sales.');
+      expect(await exists(KB('Sales/twin.md'))).toBe(true);
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
     });
   });
 

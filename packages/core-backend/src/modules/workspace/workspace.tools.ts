@@ -54,6 +54,7 @@ import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
+import { DestinationTakenError } from '../../shared/rename-no-replace.js';
 
 const log = logger('workspace-tools');
 
@@ -794,12 +795,15 @@ export function registerWorkspaceTools(
    * free. The kind is what the refusal names, so the sentence says "A folder
    * named …" of a folder.
    *
-   * With `src`, judged by file identity rather than by spelling: a case-only
-   * rename finds its own source at `dest` on a case-insensitive disk (not a
-   * clash), while on a case-sensitive disk `Deal.md` beside `deal.md` is a
-   * different file (a clash). Without it — a copy, which creates a second
-   * entry rather than moving the first — anything at `dest` is a clash,
-   * the source's own alternate spelling included.
+   * With `src`, a case-only rename is not a clash: on a case-insensitive disk
+   * `deal.md` → `Deal.md` finds its own source at `dest`, which is the rename
+   * that was asked for, while on a case-sensitive disk the two are different
+   * files (a clash). Identity alone would be too generous — two hard links are
+   * one inode under two unrelated names, and a move onto one of them destroys
+   * that name — so the spellings must fold together too, exactly as
+   * `shared/rename-no-replace.ts` reads it. Without `src` — a copy, which
+   * creates a second entry rather than moving the first — anything at `dest`
+   * is a clash, the source's own alternate spelling included.
    */
   const existingAt = async (
     root: string,
@@ -813,11 +817,27 @@ export function registerWorkspaceTools(
       if (isAbsence(err)) return null;
       throw err;
     }
-    if (src !== undefined) {
+    if (src !== undefined && src.toLowerCase() === dest.toLowerCase()) {
       const srcStat = await nodeFs.lstat(join(root, src));
       if (srcStat.dev === destStat.dev && srcStat.ino === destStat.ino) return null;
     }
     return destStat.isDirectory() ? 'folder' : 'file';
+  };
+
+  /**
+   * Run a move or a copy and answer a lost race the way the look before it
+   * would have: 409 with the one sentence. The filesystem refuses a taken
+   * destination atomically (see `shared/rename-no-replace.ts`), which is what
+   * makes the refusal true even when the name is claimed after the look; this
+   * only carries that refusal out as a tool error rather than a 500.
+   */
+  const asEntryExists = async <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof DestinationTakenError) throw new ToolError(err.message, 409);
+      throw err;
+    }
   };
 
   const kindOf = async (fs: LocalFilesystem, path: string): Promise<'file' | 'folder' | null> => {
@@ -1913,7 +1933,11 @@ export function registerWorkspaceTools(
           message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
         };
       }
-      await fs.moveFile(src, dest);
+      // The look above is what produces the sentence; the filesystem's own
+      // no-replace move is what guarantees it. A destination created between
+      // the two — by another agent, or by the sidebar, which moves without
+      // taking this lock — comes back here as a refusal, not an overwrite.
+      await asEntryExists(() => fs.moveFile(src, dest));
       // Moving the last file — or a whole folder — out leaves the folder it
       // came from in place, like a delete.
       await keepFolderOf(fs, ctx, branch, src, kbDirName);
@@ -1966,7 +1990,11 @@ export function registerWorkspaceTools(
       assertPlainPath(dest);
       const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
       if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
-      await (await ctx.getFilesystem(branch)).copyFile(src, dest);
+      // The copy itself lands exclusively (`COPYFILE_EXCL`, under the
+      // destination's lock), so a name taken between the look and the landing
+      // is refused with the same sentence rather than overwritten.
+      const fs = await ctx.getFilesystem(branch);
+      await asEntryExists(() => fs.copyFile(src, dest));
       return { src, dest, copied: true };
     },
   });
