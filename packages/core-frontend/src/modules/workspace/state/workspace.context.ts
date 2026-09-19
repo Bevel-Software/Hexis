@@ -82,10 +82,10 @@ export interface WorkspaceContextValue {
    * Why the last workspace bootstrap failed, or null. A bootstrap that fails
    * leaves `workspaceId` on whatever it was, so without this a route could
    * only wait forever; `status` is the HTTP status the bootstrap answered
-   * (410: the branch no longer exists on the git host), 0 for a transport
-   * failure, and `message` is what the failure said, so a screen can name it
-   * rather than only naming the branch. Cleared by the next successful
-   * bootstrap and by `retryBootstrap`.
+   * (404: no branch by that name; 410: the branch no longer exists on the git
+   * host), 0 for a transport failure, and `message` is what the failure said,
+   * so a screen can name it rather than only naming the branch. Cleared by
+   * the next successful bootstrap and by `retryBootstrap`.
    */
   bootstrapError: { branch: string; status: number; message: string } | null;
   /**
