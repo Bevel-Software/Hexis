@@ -3,6 +3,7 @@ import { logger } from '../shared/logging.js';
 
 const startupLog = logger('kb-startup');
 const crLog = logger('cr');
+const pluginsLog = logger('plugins');
 import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
@@ -343,6 +344,20 @@ export async function createCoreServer(
     })
     .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
 
+  // Join requests recorded before this boot, resumed. SEQUENCED AFTER the
+  // startup phase for the same reason as the sweep above: the work needs the
+  // default-branch clone the runner maintains and the plugin catalog read
+  // from it, and a sweep that ran first would refuse every row for a
+  // knowledge base that simply was not ready — telling people their request
+  // could not be sent when nothing had gone wrong with it. Not awaited: a
+  // first request from a person is a full clone, and nothing else at boot
+  // depends on it. `sweep` returns once the work is under way and each row
+  // records its own outcome, so there is nothing here to report but the
+  // failure to read the table at all.
+  void core.pluginJoinRequestJobs
+    .sweep()
+    .catch((err) => pluginsLog.warn('could not resume recorded join requests:', { err }));
+
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(
     '/api',
@@ -615,7 +630,7 @@ export async function createCoreServer(
     core.accessControl,
     core.workflowService,
     core.joinRequestsService,
-    core.pluginJoinQueue,
+    core.pluginJoinRequestJobs,
     core.pluginProvisionService,
     async (req) => (req.userId ? ((await core.authService.getUserById(req.userId)) ?? null) : null),
     core.pluginLinksService,

@@ -305,3 +305,16 @@ function bucketByFolder(items: { path: string }[], folders: Map<string, string[]
 export function pluginsWorkspaceId(): string {
   return workspaceIdForBranch(DEFAULT_BRANCH);
 }
+
+/**
+ * A plugin folder's path BELOW the plugins root: `GTM`, or `teams/deep`.
+ *
+ * The key a join request is cut by — its branch, and the row that records it
+ * — so it lives here rather than in any one of the three places that need to
+ * compute it. The whole path, not the basename, so two plugins whose folders
+ * share a basename can never share a branch; and it survives a rename of the
+ * plugin's identity, which moves no folder.
+ */
+export function pluginFolderBelowRoot(folder: string): string {
+  return folder.slice(folder.indexOf('/') + 1);
+}

@@ -61,10 +61,11 @@ import { ToolManualService } from '../modules/tool-manuals/index.js';
 import { McpServerEditService } from '../modules/tool-manuals/mcp-server-edit.service.js';
 import {
   PluginIndexService,
+  pluginFolderBelowRoot,
   PluginProvisionService,
   JoinRequestsService,
-  PluginJoinRequestsQueue,
-  PluginJoinRequestStore,
+  PluginJoinRequestJobs,
+  DbJoinRequestStore,
   PluginLinkIndex,
   PluginLinksService,
   PluginRenameService,
@@ -196,8 +197,13 @@ export interface CoreServices {
   pluginIndexService: PluginIndexService;
   pluginProvisionService: PluginProvisionService;
   joinRequestsService: JoinRequestsService;
-  /** Where a subscribe click is recorded, and where its git work then runs. */
-  pluginJoinQueue: PluginJoinRequestsQueue;
+  /**
+   * Records a join request and finishes it in the background. Its `sweep()`
+   * runs once at boot — see `createCoreServer`, after the knowledge-base
+   * startup phase — so a request recorded before a restart is completed or
+   * marked failed after it rather than lost.
+   */
+  pluginJoinRequestJobs: PluginJoinRequestJobs;
   /** Which plugins hold which skills (inline or linked) — see `PluginLinkIndex`. */
   pluginLinkIndex: PluginLinkIndex;
   /** Link / unlink / repair shared skills into plugins. */
@@ -574,17 +580,27 @@ export async function createCoreServices(
   // only needs to read files at refs and to close a request whose proposals
   // have all landed.
   const joinRequestsService = new JoinRequestsService(workspaceService, workflowService);
-  // The other half of a join request: the click, recorded before any git
-  // work, so the button can answer at once. The queue does the branch, the
-  // clone, the grant commit and the change request afterwards, and its boot
-  // sweep (below, once the workspace is ready) finishes anything a restart
-  // caught mid-flight.
-  const pluginJoinQueue = new PluginJoinRequestsQueue(
-    new PluginJoinRequestStore(db),
+  // The OTHER half of a join request: the row the subscribe endpoint writes
+  // before it answers, and the branch/clone/commit/push/change-request work
+  // that runs against it afterwards. The row is what lets the click be
+  // answered in a database round-trip instead of a clone, and what survives a
+  // restart with the request still owed.
+  const pluginJoinRequestJobs = new PluginJoinRequestJobs(new DbJoinRequestStore(db), {
+    workflow: workflowService,
     workspaceService,
-    workflowService,
     kbDirName,
-  );
+    // A record keys on the plugin's primary FOLDER below the root, which the
+    // catalog is the only thing that can turn back into a path and a name
+    // people read. Null once nothing answers to the key — a deleted plugin,
+    // a moved folder — which the job records as a failure the requester sees.
+    target: async (pluginKey) => {
+      const entry = (await pluginIndexService.catalog()).find(
+        (g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey,
+      );
+      return entry ? { folder: entry.folders[0], displayName: entry.displayName } : null;
+    },
+    requester: (email) => authService.getUserByEmail(email),
+  });
   // Links land as ordinary default-branch commits and change what the plugin
   // index counts, so a link drops that cache too.
   const pluginLinksService = new PluginLinksService(
@@ -911,22 +927,12 @@ export async function createCoreServices(
   // runs under the commit-worker lease, right before the worker starts (see
   // `withStartupTask` below). At boot, before the lease, it would reset rows
   // the outgoing process of a redeploy is still committing.
-  const reconcileQueue = async () => {
-    await pendingCommitsService.startupReconcile(
+  const reconcileQueue = () =>
+    pendingCommitsService.startupReconcile(
       workspaceService.knownWorkspaces(),
       { scan: (ws) => workspaceService.scanOrphanedPaths(ws.id) },
       { email: recoveryBot.email, name: recoveryBot.name },
     );
-    // Join requests recorded before a restart: the person who clicked was
-    // told their request was sent, so it has to end up opened or failed
-    // rather than sitting in the table. Under the same lease as the commit
-    // worker, for the same reason — one process doing git work on the shared
-    // clones. Best-effort: a sweep that cannot run must not keep the commit
-    // worker from starting.
-    await pluginJoinQueue.sweep().catch((err) => {
-      logger('plugins').error('could not resume recorded join requests:', { err });
-    });
-  };
   const pendingCommitsWorker = new PendingCommitsWorker({
     service: pendingCommitsService,
     // The service IS the driver — passed directly rather than wrapped in a
@@ -1046,7 +1052,7 @@ export async function createCoreServices(
     pluginIndexService,
     pluginProvisionService,
     joinRequestsService,
-    pluginJoinQueue,
+    pluginJoinRequestJobs,
     pluginLinkIndex,
     pluginLinksService,
     pluginRenameService,

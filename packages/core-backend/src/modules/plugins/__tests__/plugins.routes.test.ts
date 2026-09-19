@@ -18,11 +18,9 @@ import type { IToolManualService, ToolManualSummary } from '../../tool-manuals/t
 import { PluginIndexService } from '../plugins.service.js';
 import { createPluginCreationRoutes, createPluginsRoutes } from '../plugins.routes.js';
 import type { JoinRequestsService } from '../join-requests.service.js';
-import type {
-  JoinRequestInput,
-  JoinRequestRecord,
-  PluginJoinRequestsQueue,
-} from '../join-request-queue.service.js';
+import { PluginJoinRequestJobs } from '../join-request-jobs.service.js';
+import { pluginFolderBelowRoot } from '../plugins.service.js';
+import { FakeJoinRequestStore } from './fake-join-request-store.js';
 import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js';
 
 /**
@@ -36,6 +34,7 @@ import type { PluginSummary, IPluginIndexService } from '../plugins.contract.js'
  */
 
 const KB = 'knowledge-base';
+const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
 const OLGA = { name: 'Olga Ivanova', email: 'olga@bevel.software' };
 const ALI = 'ali@bevel.software';
 const ALI_USER = { id: 'u-1', email: ALI, name: 'Ali Baba' };
@@ -61,8 +60,6 @@ interface HarnessOpts {
   tools?: ToolManualSummary[];
   /** More plugins: folder path below `Plugins/` → manifest name. */
   extraPlugins?: Record<string, string>;
-  /** Recorded join requests the queue reports for the caller, by plugin key. */
-  records?: [string, JoinRequestRecord][];
 }
 
 function cr(over: Partial<ChangeRequest>): ChangeRequest {
@@ -174,20 +171,24 @@ async function makeHarness(opts: HarnessOpts = {}) {
     reconcile: vi.fn(async () => false),
   } as unknown as JoinRequestsService;
 
-  // The queue is the route's only door to git now, so it is a stub here and
-  // its own suite (`join-request-queue.test.ts`) proves the git work. What
-  // these tests are about is what the route hands it and what it reports back.
-  const joinQueue = {
-    request: vi.fn(async (input: JoinRequestInput): Promise<JoinRequestRecord> => ({
-      id: 'rec-1',
-      pluginKey: input.pluginKey,
-      status: 'pending',
-      changeRequestNumber: null,
-      failureReason: null,
-    })),
-    byRequester: vi.fn(async () => new Map<string, JoinRequestRecord>(opts.records ?? [])),
-    retire: vi.fn(async () => undefined),
-  } as unknown as PluginJoinRequestsQueue;
+  // The records half is REAL over an in-memory table, because the route's
+  // whole contract now is "write a row, answer, then do the git" — a stub
+  // would assert the route called something, not that the row and the change
+  // request are one-to-one. The git it eventually does is the workflow stub
+  // above, as it always was.
+  const joinRequestStore = new FakeJoinRequestStore();
+  const joinRequestJobs = new PluginJoinRequestJobs(joinRequestStore, {
+    workflow,
+    workspaceService,
+    kbDirName: KB,
+    target: async (pluginKey) => {
+      const entry = (await index.catalog()).find(
+        (g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey,
+      );
+      return entry ? { folder: entry.folders[0], displayName: entry.displayName } : null;
+    },
+    requester: async (mail) => ({ ...ALI_USER, email: mail }),
+  });
 
   // Provisioning MECHANISM is exercised by its own service tests; the routes
   // here only need to prove what they hand it and when they refuse to.
@@ -212,7 +213,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       accessControl,
       workflow,
       joinRequests,
-      joinQueue,
+      joinRequestJobs,
       provision as never,
       async (req) => (req.userEmail ? { ...ALI_USER, email: req.userEmail } : null),
     ),
@@ -229,7 +230,8 @@ async function makeHarness(opts: HarnessOpts = {}) {
     workflow,
     workspaceService,
     joinRequests,
-    joinQueue,
+    joinRequestJobs,
+    joinRequestStore,
     provision,
   };
 }
@@ -496,49 +498,75 @@ describe('/api/plugins routes', () => {
     expect((await res.json()).kind).toBe('already-readable');
   });
 
-  it('join-request RECORDS the click and answers — no git work before the answer', async () => {
+  it('join-request: records the ask and answers BEFORE any git has run', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
+    // The one thing the endpoint may not do any more is wait for a clone. A
+    // workflow that never settles stands in for one: the answer must arrive
+    // anyway, and say the request is recorded and not yet carried.
+    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
+
     const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
-    // `number` is null because the change request does not exist yet. That IS
-    // the answer: the request is recorded, and the page shows the "Requested"
-    // card on it.
     expect(await res.json()).toEqual({ ok: true, state: 'pending', number: null });
-
-    // The record carries everything the background work will need — the key
-    // the branch is cut from, the folder the grant is written to, and the name
-    // the change request's title says.
-    expect(h.joinQueue.request).toHaveBeenCalledWith({
-      user: expect.objectContaining({ email: ALI, name: 'Ali Baba' }),
-      pluginKey: 'Finance',
-      pluginFolder: 'Plugins/Finance',
-      pluginDisplayName: 'Finance',
-    });
-    // Nothing git happened in the call itself. This is the whole ticket: the
-    // first request from a person clones the repository, and waiting for that
-    // is what made the button look frozen.
-    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.joinRequestStore.all()).toMatchObject([
+      { requesterEmail: ALI, pluginKey: 'Finance', status: 'pending', changeRequestNumber: null },
+    ]);
     expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
-    expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
   });
 
-  it('join-request answers well inside a second even when every git call would hang', async () => {
+  it('join-request: the recorded request is REPORTED as requested before its CR exists', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
-    // If the route still touched git, this is where it would stop.
-    const never = () => new Promise<never>(() => {});
-    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockImplementation(never);
-    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockImplementation(never);
-    (h.workflow.listChangeRequestsAuthoredBy as ReturnType<typeof vi.fn>).mockImplementation(never);
+    (h.workflow.createBranch as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
+    await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
 
-    const started = Date.now();
-    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
-    expect(res.status).toBe(200);
-    expect(Date.now() - started).toBeLessThan(1000);
+    // A reload one second after the click. No change request exists — the
+    // record is the only thing that can answer, and it does.
+    const { plugins } = await listPlugins(h.baseUrl);
+    expect(plugins[0]).toMatchObject({
+      name: 'finance',
+      hasRequested: true,
+      requestNumber: null,
+      requestFailure: null,
+    });
   });
 
-  it('keys a recorded request by the folder PATH below the root — two folders sharing a basename never share one', async () => {
+  it('join-request: branch + splice + commit + CR, on the deterministic join branch — after the answer', async () => {
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
+    server = h.server;
+    const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, state: 'pending', number: null });
+    await h.joinRequestJobs.drain();
+
+    // The branch is cut from the FOLDER name, as every join branch before the
+    // manifest became the identity was — so none of them is orphaned.
+    const branch = joinBranchFor(ALI, 'Finance');
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
+    // The write went to the plugin's access.md and added the caller to the
+    // BODY's read list (folder rules), leaving the discovery frontmatter alone.
+    const write = (h.workspaceService.writeFile as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(write[1]).toBe(`${KB}/Plugins/Finance/access.md`);
+    expect(write[2]).toContain('Ali Baba <ali@bevel.software>');
+    expect((write[2] as string).indexOf('everyone')).toBeLessThan(
+      (write[2] as string).indexOf('Ali Baba'),
+    );
+    expect(h.workflow.commitChanges).toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledWith(
+      workspaceIdForBranch(branch),
+      expect.objectContaining({ email: ALI }),
+      expect.objectContaining({
+        sourceBranch: branch,
+        targetBranch: DEFAULT_BRANCH,
+        title: 'Join request: Finance',
+      }),
+    );
+    // And the record now names the change request that carries it.
+    expect(h.joinRequestStore.all()).toMatchObject([{ status: 'opened', changeRequestNumber: 42 }]);
+  });
+
+  it('keys a join request by the folder PATH below the root — two folders sharing a basename never share a branch', async () => {
     const h = await makeHarness({
       extraPlugins: { 'teams/GTM': 'team-gtm' },
       readable: { [ALI]: ['Plugins/teams/GTM/access.md'] },
@@ -546,142 +574,121 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/plugins/team-gtm/join-request`, { method: 'POST' });
     expect(res.status).toBe(200);
-    expect(h.joinQueue.request).toHaveBeenCalledWith(
-      expect.objectContaining({ pluginKey: 'teams/GTM', pluginFolder: 'Plugins/teams/GTM' }),
-    );
-    expect(joinBranchFor(ALI, 'teams/GTM')).not.toBe(joinBranchFor(ALI, 'GTM'));
+    await h.joinRequestJobs.drain();
+    const branch = joinBranchFor(ALI, 'teams/GTM');
+    expect(branch).not.toBe(joinBranchFor(ALI, 'GTM'));
+    expect(h.workflow.createBranch).toHaveBeenCalledWith(wsId, branch, DEFAULT_BRANCH);
   });
 
-  it('join-request reports an already-opened record with its change request number', async () => {
-    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
-    (h.joinQueue.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 'rec-1',
-      pluginKey: 'Finance',
-      status: 'opened',
-      changeRequestNumber: 9,
-      failureReason: null,
+  it('join-request adopts an existing open join CR instead of opening a second one', async () => {
+    const h = await makeHarness({
+      readable: { [ALI]: ['Plugins/Finance/access.md'] },
+      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
-    expect(await res.json()).toEqual({ ok: true, state: 'opened', number: 9 });
+    expect(res.status).toBe(200);
+    await h.joinRequestJobs.drain();
+    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    // The record ends up pointing at the request that was already there.
+    expect(h.joinRequestStore.all()).toMatchObject([{ status: 'opened', changeRequestNumber: 9 }]);
   });
 
-  it('join-request still refuses before it records: the gates run first', async () => {
-    const h = await makeHarness({ readable: MEMBER_OF_BOTH });
-    server = h.server;
-    // Already a member — 409, and nothing recorded.
-    expect((await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' })).status).toBe(409);
-    // Unknown — 404, and nothing recorded.
-    expect((await fetch(`${h.baseUrl}/api/plugins/Nope/join-request`, { method: 'POST' })).status).toBe(404);
-    expect(h.joinQueue.request).not.toHaveBeenCalled();
-  });
-
-  it('join-request 500s without leaking the queue\'s words when recording fails', async () => {
+  it('join-request: two clicks leave ONE record and open ONE change request', async () => {
     const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
-    (h.joinQueue.request as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('database gone'));
+    server = h.server;
+    // Two tabs, at the same moment. Neither has seen the other's answer.
+    const [first, second] = await Promise.all([
+      fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' }),
+      fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' }),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    await h.joinRequestJobs.drain();
+
+    expect(h.joinRequestStore.all()).toHaveLength(1);
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('join-request: a failure is recorded, and the listing hands the plugin back with the reason', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
+    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('the remote refused the push'),
+    );
     server = h.server;
     const res = await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: 'Failed to request access' });
+    // The answer was still instant and still said the ask was recorded — the
+    // failure is a fact about what happened next.
+    expect(await res.json()).toEqual({ ok: true, state: 'pending', number: null });
+    await h.joinRequestJobs.drain();
+
+    expect(h.joinRequestStore.all()).toMatchObject([
+      { status: 'failed', failureReason: 'the remote refused the push' },
+    ]);
+    const { plugins } = await listPlugins(h.baseUrl);
+    expect(plugins[0]).toMatchObject({
+      name: 'finance',
+      hasRequested: false,
+      requestFailure: 'the remote refused the push',
+    });
     error.mockRestore();
   });
 
-  it('the index reports a PENDING record as requested, before any change request exists', async () => {
-    const h = await makeHarness({
-      readable: { [ALI]: ['Plugins/Finance/access.md'] },
-      records: [['Finance', { id: 'rec-1', pluginKey: 'Finance', status: 'pending', changeRequestNumber: null, failureReason: null }]],
-    });
+  it('join-request: a click after a failure RETRIES the recorded request rather than recording a second', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
+    (h.workflow.openChangeRequest as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('the remote refused the push'),
+    );
     server = h.server;
-    const { plugins } = await listPlugins(h.baseUrl);
-    // A reload one second after the click: no CR yet, and still "Requested".
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({
-      hasRequested: true,
-      requestNumber: null,
-      requestFailure: null,
-    });
-    expect(h.joinQueue.retire).not.toHaveBeenCalled();
+    await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
+    await h.joinRequestJobs.drain();
+    const [failed] = h.joinRequestStore.all();
+
+    await fetch(`${h.baseUrl}/api/plugins/finance/join-request`, { method: 'POST' });
+    await h.joinRequestJobs.drain();
+
+    const rows = h.joinRequestStore.all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(failed.id);
+    expect(rows[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42, failureReason: null });
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(2);
+    error.mockRestore();
   });
 
-  it('the index reports a FAILED record as not requested, with the reason to show', async () => {
-    const h = await makeHarness({
-      readable: { [ALI]: ['Plugins/Finance/access.md'] },
-      records: [['Finance', { id: 'rec-1', pluginKey: 'Finance', status: 'failed', changeRequestNumber: null, failureReason: 'remote: permission denied' }]],
-    });
+  it('a request recorded before a restart is picked up by the sweep', async () => {
+    const h = await makeHarness({ readable: { [ALI]: ['Plugins/Finance/access.md'] } });
     server = h.server;
-    const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({
-      hasRequested: false,
-      requestFailure: 'remote: permission denied',
+    // The row a dead process left behind: recorded, never carried.
+    h.joinRequestStore.seed({
+      requesterEmail: ALI,
+      requesterName: 'Ali Baba',
+      pluginKey: 'Finance',
+      status: 'pending',
+      failureReason: null,
+      changeRequestNumber: null,
     });
+
+    await h.joinRequestJobs.sweep();
+    await h.joinRequestJobs.drain();
+
+    expect(h.workflow.openChangeRequest).toHaveBeenCalledTimes(1);
+    expect(h.joinRequestStore.all()).toMatchObject([{ status: 'opened', changeRequestNumber: 42 }]);
   });
 
-  it('an OPEN change request outranks a failed record — the request did reach the managers', async () => {
-    const h = await makeHarness({
-      readable: { [ALI]: ['Plugins/Finance/access.md'] },
-      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
-      records: [['Finance', { id: 'rec-1', pluginKey: 'Finance', status: 'failed', changeRequestNumber: null, failureReason: 'push rejected' }]],
-    });
-    server = h.server;
-    const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({
-      hasRequested: true,
-      requestNumber: 9,
-      requestFailure: null,
-    });
-  });
-
-  it('an OPENED record whose change request is gone is retired, so the button comes back', async () => {
-    const h = await makeHarness({
-      readable: { [ALI]: ['Plugins/Finance/access.md'] },
-      // The manager settled it: no open CR of the caller's left.
-      records: [['Finance', { id: 'rec-1', pluginKey: 'Finance', status: 'opened', changeRequestNumber: 9, failureReason: null }]],
-    });
-    server = h.server;
-    const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({ hasRequested: false, requestFailure: null });
-    // And the record is forgotten, so the next click records a fresh request
-    // rather than reusing a settled one.
-    expect(h.joinQueue.retire).toHaveBeenCalledWith('rec-1');
-  });
-
-  it('an OPENED record with its change request still open reports that number', async () => {
-    const h = await makeHarness({
-      readable: { [ALI]: ['Plugins/Finance/access.md'] },
-      authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
-      records: [['Finance', { id: 'rec-1', pluginKey: 'Finance', status: 'opened', changeRequestNumber: 9, failureReason: null }]],
-    });
-    server = h.server;
-    const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({ hasRequested: true, requestNumber: 9 });
-    expect(h.joinQueue.retire).not.toHaveBeenCalled();
-  });
-
-  it('a MEMBER never reports a request, whatever records they still have', async () => {
-    const h = await makeHarness({
-      readable: MEMBER_OF_BOTH,
-      records: [['Finance', { id: 'rec-1', pluginKey: 'Finance', status: 'pending', changeRequestNumber: null, failureReason: null }]],
-    });
-    server = h.server;
-    const { plugins } = await listPlugins(h.baseUrl);
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({
-      canRead: true,
-      hasRequested: false,
-      requestFailure: null,
-    });
-  });
-
-  it('degrades to the change request alone when the record lookup throws', async () => {
+  it('degrades to the change requests alone when the recorded requests cannot be read', async () => {
     const h = await makeHarness({
       readable: { [ALI]: ['Plugins/Finance/access.md'] },
       authoredCrs: [cr({ branch: joinBranchFor(ALI, 'Finance'), number: 9 })],
     });
-    (h.joinQueue.byRequester as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('db down'));
+    vi.spyOn(h.joinRequestStore, 'forRequester').mockRejectedValueOnce(new Error('db down'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     server = h.server;
     const { status, plugins } = await listPlugins(h.baseUrl);
     expect(status).toBe(200);
-    expect(plugins.find((g) => g.name === 'finance')).toMatchObject({ hasRequested: true, requestNumber: 9 });
+    expect(plugins[0]).toMatchObject({ hasRequested: true, requestNumber: 9 });
     warn.mockRestore();
   });
 

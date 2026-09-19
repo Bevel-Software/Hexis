@@ -88,17 +88,19 @@ export interface PluginSummary {
    * as attention on its row. Absent from an older server.
    */
   warnings?: string[];
-  /** The caller has an OPEN join change request for this plugin. */
+  /**
+   * The caller has asked to join this plugin — true from the moment the
+   * server records the ask, which is before the change request that carries
+   * it exists. That is what keeps the "Requested" card on the page through a
+   * reload while the server is still doing the git work.
+   */
   hasRequested: boolean;
-  /** That CR's number when `hasRequested` (deep-links the review UI). */
+  /** The join CR's number once it exists (deep-links the review UI); null before that. */
   requestNumber: number | null;
   /**
-   * Why the caller's last request never reached the managers, in the words
-   * the platform received. Set only when a recorded request FAILED the git
-   * work that follows the click — the page says so and offers the button
-   * again, and the next click retries that same recorded request. Absent
-   * from an older server, which did the git work before answering and so
-   * could only fail the call itself.
+   * Why the recorded request could not be sent, in the server's words — set
+   * only when `hasRequested` is false because it failed. Absent from an older
+   * server, and absent whenever there is nothing to say.
    */
   requestFailure?: string | null;
 }
@@ -257,32 +259,21 @@ export class AlreadyReadableError extends Error {
   }
 }
 
-/** What the server says once it has RECORDED a request to join. */
-export interface JoinRequestAnswer {
-  ok: true;
-  /**
-   * `pending` while the branch, commit and change request are still being
-   * made in the background; `opened` once they exist. Either one means the
-   * request is recorded and the page shows the "Requested" card — the
-   * difference is only whether the managers can see it yet. Absent from an
-   * older server, which answered only after opening the change request.
-   */
-  state?: 'pending' | 'opened' | 'failed';
-  /** The change request, once there is one. Null while `state` is `pending`. */
-  number: number | null;
-}
-
 /**
- * Ask to join a locked plugin.
+ * Ask to join a plugin. The server RECORDS the ask and answers — the branch,
+ * the clone, the grant commit, the push and the change request happen after,
+ * so this resolves in a round-trip rather than in however long a first clone
+ * takes. `state` says which: `pending` while the git work is still to come,
+ * `opened` when the change request already exists (a second click, a retry
+ * the server had already finished), in which case `number` is that request's.
  *
- * Answers as soon as the request is RECORDED — the server does the branch,
- * the clone, the grant commit, the push and the change request afterwards, so
- * this returns in well under a second even on the caller's first-ever request
- * (which is the one that clones the repository). Idempotent server-side per
- * (caller, plugin): a second call returns the same recorded request, and one
- * that failed its background work is retried rather than duplicated.
+ * Idempotent server-side, and by the recorded request rather than by the
+ * branch: two tabs or two clicks record one request and open one change
+ * request, and a click after a failure continues the recorded one.
  */
-export async function requestPluginAccess(name: string): Promise<JoinRequestAnswer> {
+export async function requestPluginAccess(
+  name: string,
+): Promise<{ state: 'pending' | 'opened'; number: number | null }> {
   const res = await authFetch(`/api/plugins/${encodeURIComponent(name)}/join-request`, {
     method: 'POST',
   });
@@ -295,7 +286,7 @@ export async function requestPluginAccess(name: string): Promise<JoinRequestAnsw
       .catch(() => ({}))) as { kind?: string };
     if (body.kind === 'already-readable') throw new AlreadyReadableError();
   }
-  return handleApiResponse<JoinRequestAnswer>(res);
+  return handleApiResponse<{ ok: true; state: 'pending' | 'opened'; number: number | null }>(res);
 }
 
 /**

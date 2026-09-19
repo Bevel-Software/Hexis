@@ -38,7 +38,6 @@ const finance = (over: Partial<PluginSummary> = {}): PluginSummary => ({
   readers: { restricted: true, roles: [], users: [] },
   hasRequested: false,
   requestNumber: null,
-  requestFailure: null,
   ...over,
 });
 
@@ -63,13 +62,11 @@ function renderLocked(plugin: PluginSummary = finance()) {
 
 const askButton = () => screen.getByRole('button', { name: 'Subscribe to this plugin' });
 const pendingButton = () => screen.getByRole('button', { name: 'Requesting…' });
-const noButton = () =>
-  expect(screen.queryByRole('button', { name: /Subscribe to this plugin|Requesting…/ })).not.toBeInTheDocument();
 
 describe('LockedPluginView', () => {
   beforeEach(() => {
     apiMock.requestPluginAccess.mockReset();
-    apiMock.requestPluginAccess.mockResolvedValue({ ok: true, state: 'pending', number: null });
+    apiMock.requestPluginAccess.mockResolvedValue(undefined);
   });
 
   it('states the plugin, who runs it, and how much is in it. And nothing else', () => {
@@ -104,7 +101,7 @@ describe('LockedPluginView', () => {
     expect(screen.getByText('1 skill · 0 tools. Visible once you have access.')).toBeInTheDocument();
   });
 
-  it('says "Requesting…" on the click itself, refuses a second, and flips to the Requested box', async () => {
+  it('says "Requesting…" in the render after the click, refuses a second, and flips to the Requested box', async () => {
     let release = () => {};
     apiMock.requestPluginAccess.mockReturnValue(
       new Promise<void>((resolve) => {
@@ -114,12 +111,11 @@ describe('LockedPluginView', () => {
     const { onRequested } = renderLocked();
 
     fireEvent.click(askButton());
-    // Within one render: the label is the acknowledgement. A button that only
-    // greyed out is what made the old multi-second wait look like a freeze.
+    // The acknowledgement is the LABEL, not just the greying-out: the click
+    // used to leave a disabled button that still said "Subscribe", which is
+    // what read as a freeze for as long as the clone took.
     expect(pendingButton()).toBeDisabled();
-    expect(
-      screen.queryByRole('button', { name: 'Subscribe to this plugin' }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Subscribe to this plugin' })).toBeNull();
     fireEvent.click(pendingButton());
     expect(apiMock.requestPluginAccess).toHaveBeenCalledTimes(1);
     expect(apiMock.requestPluginAccess).toHaveBeenCalledWith('Finance');
@@ -128,19 +124,9 @@ describe('LockedPluginView', () => {
     expect(
       await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
     ).toBeInTheDocument();
-    noButton();
-    expect(onRequested).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows the Requested card on the answer, without waiting for a change request number', async () => {
-    // What the server now answers while the branch, commit and change request
-    // are still being made in the background.
-    apiMock.requestPluginAccess.mockResolvedValue({ ok: true, state: 'pending', number: null });
-    const { onRequested } = renderLocked();
-    fireEvent.click(askButton());
     expect(
-      await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
-    ).toBeInTheDocument();
+      screen.queryByRole('button', { name: 'Subscribe to this plugin' }),
+    ).not.toBeInTheDocument();
     expect(onRequested).toHaveBeenCalledTimes(1);
   });
 
@@ -158,6 +144,54 @@ describe('LockedPluginView', () => {
     expect(
       screen.queryByRole('button', { name: 'Subscribe to this plugin' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('hands the button back with the reason when the background work failed', () => {
+    renderLocked(
+      finance({ hasRequested: false, requestFailure: 'the remote refused the push' }),
+    );
+    expect(
+      screen.getByText(
+        'Your request to join Finance could not be sent: the remote refused the push. Try again.',
+      ),
+    ).toBeInTheDocument();
+    expect(askButton()).not.toBeDisabled();
+    expect(screen.queryByText(/^Requested/)).not.toBeInTheDocument();
+  });
+
+  it('names the plugin the way people read it in the failure sentence', () => {
+    renderLocked(
+      finance({ name: 'finance', displayName: 'Finance & Ops', requestFailure: 'the branch was refused' }),
+    );
+    expect(
+      screen.getByText(
+        'Your request to join Finance & Ops could not be sent: the branch was refused. Try again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('never shows a stale failure next to a standing request', () => {
+    // The two are mutually exclusive on the wire; the view does not rely on
+    // that, because a card saying "Requested" above a sentence saying it
+    // could not be sent is the one thing it must never render.
+    renderLocked(finance({ hasRequested: true, requestFailure: 'the remote refused the push' }));
+    expect(screen.getByText('Requested: Olga Ivanova decides who gets access.')).toBeInTheDocument();
+    expect(screen.queryByText(/could not be sent/)).toBeNull();
+  });
+
+  it('retrying after a failure asks again through the same endpoint', async () => {
+    const { onRequested } = renderLocked(
+      finance({ requestFailure: 'the remote refused the push' }),
+    );
+    fireEvent.click(askButton());
+    expect(apiMock.requestPluginAccess).toHaveBeenCalledWith('Finance');
+    // On the answer the card takes over — the failure sentence goes with the
+    // button it was explaining.
+    expect(
+      await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not be sent/)).toBeNull();
+    expect(onRequested).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the admins, in the plural, when nobody is named', async () => {
@@ -200,51 +234,6 @@ describe('LockedPluginView', () => {
     expect(await screen.findByText("Couldn't send that: try again.")).toBeInTheDocument();
     expect(askButton()).not.toBeDisabled();
     expect(onRequested).not.toHaveBeenCalled();
-  });
-
-  it('says what went wrong in the background, and offers the button again', () => {
-    renderLocked(
-      finance({ requestFailure: 'remote: permission denied', hasRequested: false }),
-    );
-    expect(
-      screen.getByText(
-        'Your request to join Finance could not be sent: remote: permission denied. Try again.',
-      ),
-    ).toBeInTheDocument();
-    // The button is back, and clicking it retries — the server reuses the same
-    // recorded request rather than opening a second one.
-    expect(askButton()).not.toBeDisabled();
-    expect(screen.queryByText(/^Requested:/)).not.toBeInTheDocument();
-  });
-
-  it('names the plugin the way people see it, and does not double the reason’s full stop', () => {
-    renderLocked(
-      finance({ name: 'finance', displayName: 'Finance & Ops', requestFailure: 'the git host said no.' }),
-    );
-    expect(
-      screen.getByText(
-        'Your request to join Finance & Ops could not be sent: the git host said no. Try again.',
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it('a request that is pending again outranks the last failure', () => {
-    renderLocked(finance({ hasRequested: true, requestFailure: 'stale' }));
-    expect(screen.getByText('Requested: Olga Ivanova decides who gets access.')).toBeInTheDocument();
-    expect(screen.queryByText(/could not be sent/)).not.toBeInTheDocument();
-  });
-
-  it('retrying clears the sentence at the click, not at the answer', async () => {
-    let release = () => {};
-    apiMock.requestPluginAccess.mockReturnValue(new Promise<void>((resolve) => { release = () => resolve(); }));
-    renderLocked(finance({ requestFailure: 'remote: permission denied' }));
-    fireEvent.click(askButton());
-    expect(pendingButton()).toBeDisabled();
-    release();
-    expect(
-      await screen.findByText('Requested: Olga Ivanova decides who gets access.'),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/could not be sent/)).not.toBeInTheDocument();
   });
 
   it('gives a locked-out admin the self-service way in', () => {

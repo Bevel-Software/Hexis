@@ -108,20 +108,22 @@ export interface PluginSummary {
   /** What discovery left out of this plugin and why — see `PluginCatalogEntry.warnings`. */
   warnings: string[];
   /**
-   * The caller has an OPEN join change request for this plugin (their
-   * deterministic join branch has an open CR). Always false for a member.
+   * The caller has asked to join this plugin: a recorded request that has not
+   * failed, or an open join change request on their deterministic join
+   * branch. The RECORD is what makes this true the moment the subscribe call
+   * is answered — the change request may still be seconds away. Always false
+   * for a member.
    */
   hasRequested: boolean;
-  /** The open join CR's number when `hasRequested` (deep-links the UI). */
+  /** The join CR's number once it exists (deep-links the UI); null before that. */
   requestNumber: number | null;
   /**
-   * Why the caller's last request never reached the managers, in the words
-   * the platform received — set only when a recorded request FAILED its
-   * background git work and no open change request exists. The page says so
-   * and offers the button again; the next click retries the same recorded
-   * request rather than opening a second one.
+   * Why the last recorded request could not be sent, in the words the git
+   * work used — set only when `hasRequested` is false because the record
+   * failed, which is when the page owes the person the button back and a
+   * reason. Null in every other case, including on a server without records.
    */
-  requestFailure: string | null;
+  requestFailure?: string | null;
 }
 
 /**
