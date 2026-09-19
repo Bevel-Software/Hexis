@@ -4,6 +4,7 @@ import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { NodeFs } from '../../kb-fs/node-fs.js';
 import { PathTraversalError } from '../../../shared/domain-errors.js';
+import { EntryExistsError } from '../workspace.service.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { ICreatorAccess } from '../../access-model/creator.js';
@@ -409,6 +410,27 @@ describe('the mutating verbs share one file identity', () => {
     expect(((await res.json()) as { error: string }).error).toContain('must differ');
     expect(h.moveEntryMock).not.toHaveBeenCalled();
     expect(h.lockedPaths).toEqual([]);
+  });
+
+  it('PATCH answers a taken destination with 409 and the sentence the sidebar shows', async () => {
+    // The refusal is the service's, and it reaches the client whole: the
+    // rename box renders `error` verbatim, and a client that switches on the
+    // shape has `kind` to switch on.
+    h = await makeHarness();
+    h.moveEntryMock.mockRejectedValueOnce(new EntryExistsError('file', `${KB}/Sales/Notes.md`));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/Sales/Report.docx`, newPath: `${KB}/Sales/Notes.md` }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: 'A file named Notes.md already exists in Sales.',
+      kind: 'entry-exists',
+      entryKind: 'file',
+    });
   });
 
   it('PATCH refuses a non-string path in the body', async () => {

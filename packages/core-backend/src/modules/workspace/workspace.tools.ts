@@ -46,6 +46,8 @@ import {
   isProtectedBranch,
   platformFileRefusal,
   platformFolderRefusal,
+  entryExistsMessage,
+  type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
@@ -788,21 +790,34 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * Whether `dest` names something other than `src` already on disk. Judged by
-   * file identity, not by spelling: a case-only rename finds its own source at
-   * `dest` on a case-insensitive disk (no collision), while on a case-sensitive
-   * disk `Deal.md` beside `deal.md` is a different file (a collision).
+   * What is already at `dest` — `file` or `folder` — or null when the name is
+   * free. The kind is what the refusal names, so the sentence says "A folder
+   * named …" of a folder.
+   *
+   * With `src`, judged by file identity rather than by spelling: a case-only
+   * rename finds its own source at `dest` on a case-insensitive disk (not a
+   * clash), while on a case-sensitive disk `Deal.md` beside `deal.md` is a
+   * different file (a clash). Without it — a copy, which creates a second
+   * entry rather than moving the first — anything at `dest` is a clash,
+   * the source's own alternate spelling included.
    */
-  const collides = async (root: string, src: string, dest: string): Promise<boolean> => {
+  const existingAt = async (
+    root: string,
+    dest: string,
+    src?: string,
+  ): Promise<ExistingEntryKind | null> => {
     let destStat: import('node:fs').Stats;
     try {
       destStat = await nodeFs.lstat(join(root, dest));
     } catch (err) {
-      if (isAbsence(err)) return false;
+      if (isAbsence(err)) return null;
       throw err;
     }
-    const srcStat = await nodeFs.lstat(join(root, src));
-    return srcStat.dev !== destStat.dev || srcStat.ino !== destStat.ino;
+    if (src !== undefined) {
+      const srcStat = await nodeFs.lstat(join(root, src));
+      if (srcStat.dev === destStat.dev && srcStat.ino === destStat.ino) return null;
+    }
+    return destStat.isDirectory() ? 'folder' : 'file';
   };
 
   const kindOf = async (fs: LocalFilesystem, path: string): Promise<'file' | 'folder' | null> => {
@@ -1850,7 +1865,8 @@ export function registerWorkspaceTools(
       const destOnDisk = await onDiskSpelling(root, dest);
       const destManaged = managedReason(destOnDisk, kind);
       const srcManaged = managedReason(await onDiskSpelling(root, src), kind);
-      const collision = srcManaged === undefined && (await collides(root, src, dest));
+      const occupiedBy = srcManaged === undefined ? await existingAt(root, dest, src) : null;
+      const collision = occupiedBy !== null;
       // Checked after the collision: onto an existing platform file, "already
       // exists" is the plainer answer.
       const createsManaged = srcManaged !== undefined || collision || destManaged === undefined
@@ -1868,8 +1884,8 @@ export function registerWorkspaceTools(
       // lock gate locks only the two folder paths, so this is the check.
       const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
       const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
-      const reason = collision
-        ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
+      const reason = occupiedBy !== null
+        ? entryExistsMessage(occupiedBy, dest)
         : managed
           ? managedWhy
           : blocked.length > 0
@@ -1907,13 +1923,15 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'copy_file',
-    description: 'Copy a workspace file to a new path. Committed + pushed as you.' + ONTOLOGY_BOUNDARY_NOTE,
+    description:
+      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.'
+      + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         src: wsPath(kbDirName, 'Source path', false),
-        dest: wsPath(kbDirName, 'Destination path'),
+        dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -1934,8 +1952,22 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
-      await (await ctx.getFilesystem(a.branch as string)).copyFile(a.src as string, a.dest as string);
-      return { src: a.src, dest: a.dest, copied: true };
+      const branch = a.branch as string;
+      const src = a.src as string;
+      const dest = a.dest as string;
+      // A copy lands bytes at a name of its own, so it is refused by the same
+      // rule a move is: nothing already at `dest` is replaced. To put new
+      // content into a file that exists, write it.
+      //
+      // The same plain-path rule a move applies to both its ends, applied
+      // here because the look at the destination comes before the filesystem's
+      // own containment check: a path with a `..` segment must not reach
+      // `lstat` outside the workspace, even to be told a name is taken.
+      assertPlainPath(dest);
+      const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
+      if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
+      await (await ctx.getFilesystem(branch)).copyFile(src, dest);
+      return { src, dest, copied: true };
     },
   });
 

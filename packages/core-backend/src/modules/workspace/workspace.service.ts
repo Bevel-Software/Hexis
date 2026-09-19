@@ -12,6 +12,8 @@ import {
   DEFAULT_BRANCH,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
+  entryExistsMessage,
+  type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
@@ -100,6 +102,29 @@ export class FolderTooLargeError extends Error {
 }
 
 /**
+ * A rename or move would land on a name something else already has. 409, like
+ * every other precondition the caller has to clear first: nothing was moved,
+ * and the entry already there is untouched.
+ *
+ * Lives here rather than in `shared/domain-errors.ts` because the sentence is
+ * built by `entryExistsMessage` and that file deliberately imports no VALUE
+ * from `@bevel-software/platform-shared`, only a type. It still extends
+ * `WorkflowDomainError`, so the routes' `sendError` maps it to 409 with
+ * `{ kind: 'entry-exists', … }` without knowing this class exists.
+ */
+export class EntryExistsError extends WorkflowDomainError {
+  readonly kind = 'entry-exists' as const;
+  constructor(readonly entryKind: ExistingEntryKind, readonly destination: string) {
+    super(entryExistsMessage(entryKind, destination), 409, {
+      kind: 'entry-exists',
+      entryKind,
+      destination,
+    });
+    this.name = 'EntryExistsError';
+  }
+}
+
+/**
  * A floor under the git deadline for a clone: a first clone of a large
  * knowledge base over a slow link legitimately takes minutes, and the port's
  * default is sized for a running deployment's operations. A configured
@@ -115,6 +140,16 @@ const CLONE_TIMEOUT_MS = 600_000;
  */
 const BOT_NAME = 'Bevel Workflow';
 const BOT_EMAIL = 'bevel-workflow@bevel.software';
+
+/** The entry at `absolutePath` without following a link, or null when nothing is there. */
+async function lstatOrNull(absolutePath: string): Promise<import('node:fs').Stats | null> {
+  try {
+    return await fs.lstat(absolutePath);
+  } catch (err) {
+    if (isAbsence(err)) return null;
+    throw err;
+  }
+}
 
 /** Redact any token that might leak into an error message. */
 function redactError(err: unknown): string {
@@ -1188,12 +1223,47 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
+    // Before `mkdir`, so a refused move leaves no empty folder behind, and
+    // long before `rename`, which would otherwise replace what is there.
+    await this.assertDestinationFree(oldAbsolute, newAbsolute, newRelativePath);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });
     await fs.rename(oldAbsolute, newAbsolute);
     if (this.diffService) {
       await this.diffService.markUserDeleted(workspaceId, oldRelativePath);
       await this.diffService.syncFromDisk(workspaceId, newRelativePath);
     }
+  }
+
+  /**
+   * Refuse a move onto a name that is taken. `fs.rename` REPLACES an existing
+   * file on every platform — that is how renaming a `.docx` onto an existing
+   * `.md` handed the markdown file the Word bytes — so the destination is
+   * looked at first, and a move never overwrites a file or merges into a
+   * folder.
+   *
+   * Judged by identity, not by spelling: on a case-insensitive filesystem
+   * `notes.md` → `Notes.md` finds the SOURCE at the destination (same device,
+   * same inode), which is the rename that was asked for, not a clash. On a
+   * case-sensitive one the two are different files and nothing is found.
+   *
+   * `lstat`, never `stat`: a link at the destination is an entry in its own
+   * right, and the moves that could reach one are refused above anyway.
+   *
+   * A source that is not there is left to `fs.rename`'s own ENOENT — "there is
+   * nothing to move" is the truer answer, and it is the one this path already
+   * gave.
+   */
+  private async assertDestinationFree(
+    oldAbsolute: string,
+    newAbsolute: string,
+    newRelativePath: string,
+  ): Promise<void> {
+    const destination = await lstatOrNull(newAbsolute);
+    if (destination === null) return;
+    const source = await lstatOrNull(oldAbsolute);
+    if (source === null) return;
+    if (source.dev === destination.dev && source.ino === destination.ino) return;
+    throw new EntryExistsError(destination.isDirectory() ? 'folder' : 'file', newRelativePath);
   }
 
   /**
