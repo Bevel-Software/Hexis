@@ -33,10 +33,11 @@ export function IntegrationsSetupReminder({
     <button
       type="button"
       onClick={onFinishSetup}
-      // The whole line, including the part the ellipsis is about to eat. A
-      // sidebar dragged down to 180px cannot hold this sentence, and the
-      // number is the half that gets cut — so the tooltip is the only place
-      // "how many" survives at that width.
+      // The whole line, including the tail the ellipsis is about to eat. A
+      // sidebar dragged down to 180px cannot hold this sentence, and
+      // `truncate` cuts from the END — the count leads the line and survives;
+      // "setup." is what goes. The tooltip is where the sentence is still
+      // readable whole at that width.
       title={`${said} Finish now`}
       className={cn(
         'flex items-center gap-1 rounded-sm py-1.5 text-left text-meta text-ink-faint transition-colors hover:text-ink',

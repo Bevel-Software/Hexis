@@ -65,6 +65,23 @@ function leftInset(el: Element): number {
   return total;
 }
 
+/**
+ * Every element from `el` up to the sidebar column that would clip a focus
+ * ring drawn on `el` — named rather than counted, so a failure says which one
+ * appeared. The column itself is the ceiling: what the frame does above it is
+ * the collapse animation's business and predates the footer rows.
+ */
+function clipsBetweenRowAndColumn(el: Element): string[] {
+  const found: string[] = [];
+  for (let node: Element | null = el; node; node = node.parentElement) {
+    if (node.hasAttribute('data-sidebar-column')) break;
+    for (const cls of node.classList) {
+      if (/^overflow(-[xy])?-(hidden|clip|auto|scroll)$/.test(cls)) found.push(cls);
+    }
+  }
+  return found;
+}
+
 /** The single spacing utility of a kind on an element, in pixels. */
 function spacingOf(el: Element, prefix: string): number | null {
   for (const cls of el.classList) {
@@ -151,6 +168,8 @@ const treeRow = () => screen.getByRole('button', { name: /^Everything/ });
 const reminder = () => screen.getByRole('button', { name: /setup/ });
 const dockHeader = () => screen.getByRole('button', { name: 'Change requests for you' });
 const request = () => screen.getByRole('button', { name: /Restate the enforcement/ });
+/** Where a request's title actually lands — the row's inset plus its indent. */
+const requestText = () => screen.getByText('Restate the enforcement wording so it reads as a rule');
 
 beforeEach(() => {
   api.listPullRequestsForMe.mockReset();
@@ -179,8 +198,11 @@ describe.each([
     expect(leftInset(reminder())).toBe(tree);
     expect(leftInset(dockHeader())).toBe(tree);
     // A request is a CHILD of that row, indented by the caret slot (12px)
-    // and its gap (7px) so it starts under the word "Change".
-    expect(leftInset(request())).toBe(tree + 19);
+    // and its gap (7px) so it starts under the word "Change". Measured from
+    // its TEXT rather than its row: the row sits on the shared inset like
+    // every other row, and the indent is inside it.
+    expect(leftInset(requestText())).toBe(tree + 19);
+    expect(leftInset(request())).toBe(tree);
   });
 
   it('separates the two rows by one gap, owned by the frame', async () => {
@@ -226,8 +248,15 @@ describe.each([
   /**
    * The hit areas the ticket asks to leave alone. Both footer rows are still
    * whole rows — the button IS the row, the way a tree row's is — and neither
-   * has grown a nested control or lost its focus ring to an `overflow-hidden`
-   * ancestor.
+   * has grown a nested control or a new clip between itself and the sidebar's
+   * column.
+   *
+   * "Between itself and the column" is the whole claim, and it stops there on
+   * purpose. The frame's `<aside>` is `overflow-hidden` and always was: that
+   * is what lets the column keep its width and slide out intact while the
+   * frame animates to zero, and it clips the tree rows exactly as much as
+   * these two. What this PR must not do is add a clip BELOW it, inside the
+   * column, where only the footer rows would lose their ring.
    */
   it('leaves both rows as one focusable control each', async () => {
     await renderSidebarAt(width);
@@ -235,7 +264,7 @@ describe.each([
     for (const row of [reminder(), dockHeader()]) {
       expect(row.tagName).toBe('BUTTON');
       expect(row.querySelector('button, a, [tabindex]')).toBeNull();
-      expect(row.className).not.toMatch(/overflow-hidden/);
+      expect(clipsBetweenRowAndColumn(row)).toEqual([]);
     }
     expect(request()).toHaveAttribute('tabindex', '0');
   });

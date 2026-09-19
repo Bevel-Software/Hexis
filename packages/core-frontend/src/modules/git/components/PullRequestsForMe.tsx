@@ -3,7 +3,7 @@ import { ChevronRight, Check, X, Clock } from 'lucide-react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { Badge } from '../../../shared/components';
-import { SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
+import { SIDEBAR_CHILD_INDENT, SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
 import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';
@@ -11,15 +11,6 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { PR_STALE_EVENT, PR_STALE_FALLBACK_MS } from '../../../core/events';
 
 const POLL_INTERVAL_MS = PR_STALE_FALLBACK_MS;
-
-/**
- * A request's own inset: the sidebar's 10px row inset, plus the 12px caret
- * slot and its 7px gap from the header above. A request starts under the word
- * "Change", the way a file in the tree starts under its folder's name — which
- * only reads as an indent if the header itself is on the grid, so the two
- * numbers below are the header's and must move with it.
- */
-const REQUEST_INSET = 'pl-[29px] pr-2.5';
 
 export function PullRequestsForMe() {
   const git = useGit();
@@ -208,7 +199,9 @@ export function PullRequestsForMe() {
       {expanded && (
         <div className="flex flex-col gap-px overflow-y-auto pb-1.5">
           {error && (
-            <div className={cn('py-2 text-meta text-danger', REQUEST_INSET)}>{error}</div>
+            <div className={cn('py-2', SIDEBAR_ROW_INSET)}>
+              <div className={cn('text-meta text-danger', SIDEBAR_CHILD_INDENT)}>{error}</div>
+            </div>
           )}
           {!error &&
             prs.map((pr) => <PrRow key={pr.number} pr={pr} onOpen={() => setOpenCr(pr)} />)}
@@ -256,24 +249,29 @@ function PrRow({ pr, onOpen }: { pr: PullRequestSummary; onOpen(): void }) {
       }}
       className={cn(
         'group block cursor-pointer rounded-sm py-1.5 transition-colors hover:bg-hover',
-        REQUEST_INSET,
+        SIDEBAR_ROW_INSET,
       )}
       title={pr.title}
     >
-      <div className="flex min-w-0 gap-1.5 text-ui text-ink-muted group-hover:text-ink">
-        <span className="flex-none tabular-nums text-ink-faint">#{pr.number}</span>
-        {/* The ellipsis has to live on the TEXT, not on the flex row — a flex
-            container clips its children without ever drawing one. */}
-        <span className="min-w-0 truncate">{pr.title}</span>
-      </div>
-      <div className="mt-px flex items-center gap-2 text-meta text-ink-faint">
-        <span className="truncate">{who}</span>
-        <ReviewBadge review={pr.review} />
-        {touched > 0 && (
-          <span className="flex-none">
-            {touched} file{touched === 1 ? '' : 's'}
-          </span>
-        )}
+      {/* The indent is on the CONTENT, not on the row: the row keeps the
+          sidebar's own inset, so it spans the full column the way a tree row
+          does and its hover fill starts where theirs does. */}
+      <div className={SIDEBAR_CHILD_INDENT}>
+        <div className="flex min-w-0 gap-1.5 text-ui text-ink-muted group-hover:text-ink">
+          <span className="flex-none tabular-nums text-ink-faint">#{pr.number}</span>
+          {/* The ellipsis has to live on the TEXT, not on the flex row — a flex
+              container clips its children without ever drawing one. */}
+          <span className="min-w-0 truncate">{pr.title}</span>
+        </div>
+        <div className="mt-px flex items-center gap-2 text-meta text-ink-faint">
+          <span className="truncate">{who}</span>
+          <ReviewBadge review={pr.review} />
+          {touched > 0 && (
+            <span className="flex-none">
+              {touched} file{touched === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -42,6 +42,21 @@ const FOCUSABLE_SELECTOR =
 export const SIDEBAR_ROW_INSET = 'px-2.5';
 
 /**
+ * How far a CHILD row's content sits inside its row: the 12px caret slot a
+ * parent row spends, plus the 7px gap after it. A change request starts under
+ * the word "Change", the way a file in the tree starts under its folder's
+ * name.
+ *
+ * An indent INSIDE the row, deliberately, rather than a larger inset written
+ * instead of it. The row still carries `SIDEBAR_ROW_INSET` and so still moves
+ * with the grid — whereas a single `pl-[29px]` holding both numbers at once
+ * would keep its own counsel the day the inset changes, and the child rows
+ * would drift off the header that moved without them. It also keeps the row
+ * spanning the full column, hover and focus ring included.
+ */
+export const SIDEBAR_CHILD_INDENT = 'pl-[19px]';
+
+/**
  * The footer group's geometry: one hairline off whatever the surface was
  * holding, then its rows on the sidebar's own vertical rhythm.
  *
