@@ -43,17 +43,26 @@ const FOCUSABLE_SELECTOR =
 export const SIDEBAR_ROW_INSET = 'px-2.5';
 
 /**
- * How far a CHILD row's content sits inside its row: the 12px caret slot a
- * parent row spends, plus the 7px gap after it. A change request starts under
- * the word "Change", the way a file in the tree starts under its folder's
- * name.
+ * How far a change request's content sits inside its row, so that it starts
+ * under the word "Change" in the CHANGE REQUESTS header above it: that row's
+ * own caret slot (`w-3`, 12px) plus its own gap (`gap-[7px]`), both in
+ * `git/components/PullRequestsForMe`. The two numbers are the header's, and
+ * this constant is only correct for children of THAT row — a parent with a
+ * different caret would need its own.
+ *
+ * It is emphatically NOT the tree's indent. `FileExplorer` spends a wider
+ * caret (`w-3.5`) and a narrower gap (`gap-1.5`), and steps its children by
+ * `10 + depth * 13` (proto:3561), which is a depth ladder rather than an
+ * alignment — a file there does not start under its folder's name and is not
+ * trying to. Only the horizontal INSET (`SIDEBAR_ROW_INSET`) is shared by
+ * both; what a row does inside that inset is its own.
  *
  * An indent INSIDE the row, deliberately, rather than a larger inset written
  * instead of it. The row still carries `SIDEBAR_ROW_INSET` and so still moves
- * with the grid — whereas a single `pl-[29px]` holding both numbers at once
- * would keep its own counsel the day the inset changes, and the child rows
- * would drift off the header that moved without them. It also keeps the row
- * spanning the full column, hover and focus ring included.
+ * with the grid — whereas one value holding the inset and the indent added
+ * together would keep its own counsel the day the inset changes, and the
+ * child rows would drift off the header that moved without them. It also
+ * keeps the row spanning the full column, hover and focus ring included.
  */
 export const SIDEBAR_CHILD_INDENT = 'pl-[19px]';
 
