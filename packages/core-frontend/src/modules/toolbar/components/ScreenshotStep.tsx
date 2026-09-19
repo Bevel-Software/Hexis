@@ -18,6 +18,12 @@ import { SHOT_HEIGHT, SHOT_WIDTH, type Shot } from './claude-setup-shots';
  * `border-danger` is the design system's only red. It reads as a callout
  * here rather than an error, which is the one thing a red rectangle over a
  * screenshot can mean.
+ *
+ * `width`/`height` come from the shot when it declares them: the nine window
+ * shots share one shape, the connector shots are a panel and a dialog and do
+ * not. They only reserve the right box before the bytes land — the image is
+ * `w-full h-auto` either way — but reserving the wrong one is what makes the
+ * page jump.
  */
 export function ScreenshotStep({ shot }: { shot: Shot }) {
   return (
@@ -33,8 +39,8 @@ export function ScreenshotStep({ shot }: { shot: Shot }) {
         alt={shot.alt}
         loading="lazy"
         decoding="async"
-        width={SHOT_WIDTH}
-        height={SHOT_HEIGHT}
+        width={shot.width ?? SHOT_WIDTH}
+        height={shot.height ?? SHOT_HEIGHT}
         className="block h-auto w-full"
       />
       {shot.boxes.map((b) => (

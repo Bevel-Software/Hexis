@@ -1,11 +1,14 @@
 # Cowork setup screenshots
 
-The nine shots behind the "Cowork and claude.ai" steps on the External agent
-access page. `../../components/claude-setup-shots.ts` pairs each with its alt
-text and the percentage rectangle drawn over the control to click.
+The eleven shots behind the "Cowork and claude.ai" steps — the personal
+carousel on the External agent access page, and the registration carousel in
+Deployment → Marketplace, which ends on the same connector slide.
+`../../components/claude-setup-shots.ts` pairs each with its alt text and the
+percentage rectangle drawn over the control to click.
 
-Captured on a real deployment (Claude's admin settings, Claude Code on the
-web, then Cowork), so the recipe below is what a re-shoot has to repeat.
+`01` through `09` were captured on a real deployment (Claude's admin
+settings, Claude Code on the web, then Cowork), so the recipe below is what a
+re-shoot has to repeat.
 
 ## Processing
 
@@ -29,9 +32,28 @@ outer device frame and shadow so the Claude viewport runs edge to edge like
 shots `01` through `08`. Crop the normalized source at `(67, 55, 1277, 989)`,
 scale that 1210x934 viewport to 1400x1080, and encode it as webp at q80.
 
+## The two connector shots
+
+`10-connector-not-added.webp` and `11-add-custom-connector.webp` are
+**placeholder renderings**, not captures: they were drawn to the layout of the
+screens they describe rather than photographed on a deployment. Replace them
+with real captures when the connector flow is next in front of a camera. Until
+then the alt text, not the pixels, is what the step relies on.
+
+They are 1400x700, not 1400x1080: a plugin panel and a dialog are not the
+shape of a full window, and padding them to the window shots' height would
+reserve a column of empty space before the bytes land. That is what the
+optional `width`/`height` on `Shot` is for — a shot that omits them is the
+default 1400x1080. A re-shoot may land on any size, as long as the file and
+the two numbers agree.
+
+Same processing otherwise: redact first, then scale to 1400px wide (Lanczos)
+and encode webp at q80.
+
 ## Highlights
 
-Measure against the final 1400x1080 image and convert each box to percentages,
-with 6px of padding on each side. Percentages keep the callout aligned when the
-shot renders in a narrower column. When a shot is replaced, re-measure and
-update `claude-setup-shots.ts`; nothing reads the numbers from the file.
+Measure against the final image at its own size and convert each box to
+percentages, with 6px of padding on each side. Percentages keep the callout
+aligned when the shot renders in a narrower column. When a shot is replaced,
+re-measure and update `claude-setup-shots.ts`; nothing reads the numbers from
+the file.
