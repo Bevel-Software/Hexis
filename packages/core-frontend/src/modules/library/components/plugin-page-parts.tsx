@@ -216,7 +216,6 @@ export function CardGrid({
             owned={item.owned}
             status={item.status}
             version={item.version}
-            lifecycle={item.lifecycle}
             // Null (inline, or no plugin in question) has to become `undefined`
             // — the prop is "there is a folder to name", and `null` is not it.
             linkedHome={(linkedIn ? linkedHomeOf(item, linkedIn, linkedRoots) : null) ?? undefined}
