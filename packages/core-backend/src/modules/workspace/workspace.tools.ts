@@ -964,10 +964,19 @@ export function registerWorkspaceTools(
   // ontology and then having `ask` write into another. In a core-only
   // deployment (no chat/ask) the default sink mints a bare id, which is all
   // the ontology gate needs.
+  //
+  // The description tells the caller that retrying is safe, and that is a
+  // property of the sink rather than a promise this route makes on its own:
+  // minting leaves nothing half-made. A call that failed created no session
+  // (the core sink is a random id and does no I/O at all; a chat thread the
+  // enterprise sink failed to create does not exist), and two calls that both
+  // succeed leave two unrelated ids, neither of which invalidates the other.
+  // Saying so matters because the alternative is a caller that reads a
+  // transport hiccup on its first call as an unrecoverable start.
   const startSessionDef = toolDef({
     name: 'start_session',
     description:
-      'Mint the KnowledgeBase session id this run needs to read or write the knowledge ontologies. Call this ONCE, before any other KnowledgeBase tool, and only once per run — every gated tool needs the `sessionId` it returns to enforce the one-ontology-per-conversation boundary, and minting a new id mid-run resets that boundary. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: reads and ask then share one ontology boundary. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). Returns `{ sessionId }`.',
+      'Mint the KnowledgeBase session id this run needs to read or write the knowledge ontologies. Call this ONCE, before any other KnowledgeBase tool, and only once per run — every gated tool needs the `sessionId` it returns to enforce the one-ontology-per-conversation boundary, and minting a new id mid-run resets that boundary. The id is also a chat session in the app, so you can hand the SAME id to the `ask` tool: reads and ask then share one ontology boundary. Pass the returned id explicitly as `sessionId` on every subsequent KnowledgeBase tool call (direct MCP calls and inside `call_tool_chain` alike). RETRYING IS SAFE: a call that fails created nothing, so retry it — there is no half-made session to clean up. If a retry lands after a success you simply hold two independent ids, which is harmless: keep passing the one id you have already used for the rest of the run and ignore the other. Returns `{ sessionId }`.',
     path: '/api/agent/tools/start_session',
     inputs: { type: 'object', properties: {}, additionalProperties: false },
     outputs: {
