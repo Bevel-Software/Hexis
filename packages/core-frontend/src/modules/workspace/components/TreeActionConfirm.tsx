@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { FileTreeEntry, FolderChangeRequest } from '@bevel-software/platform-shared';
 import { Button, Dialog, useLatestRef } from '../../../shared/components';
-import { deleteSentence, folderRequestLine, moveSentence } from '../utils/treeConfirm';
+import { deleteSentence, folderRequestLine, moveSentence, withdrawSentence } from '../utils/treeConfirm';
 
 /**
  * What the tree asks before it deletes or moves. Both verbs used to act on
@@ -9,6 +9,10 @@ import { deleteSentence, folderRequestLine, moveSentence } from '../utils/treeCo
  * and a drop moved a file into another folder without a word about what that
  * means — access is attached to folders, so every cross-folder move is an
  * access change.
+ *
+ * A third verb joined them: Withdraw, on a proposed row, which cancels the
+ * change request the row stands for — destructive in the same way, and asked
+ * in the same place rather than in a confirm() the tree has nowhere else.
  *
  * One request is open at a time, held by `TreeChrome`; the rows only describe
  * what they are about to do and hand over the operation to run on Confirm.
@@ -48,6 +52,25 @@ export type TreeConfirmRequest =
       /** How the destination reads in the sentence — the drop target's row name. */
       destinationLabel: string;
       /** Today's move, unchanged. */
+      run(): void | Promise<void>;
+      returnFocusTo(): HTMLElement | null;
+      focusAfterRun(): HTMLElement | null;
+    }
+  | {
+      /**
+       * The author takes their own suggestion back — the same cancel the file
+       * page's change box calls its Withdraw, reached from the proposed row
+       * in the sidebar instead. Only ever asked for a request the caller
+       * authored; an owner's "no" on someone else's is Decline, in the dialog.
+       */
+      kind: 'withdraw';
+      /** The request being cancelled — withdrawal is per request, not per file. */
+      crNumber: number;
+      /**
+       * Every file the request carries. One row was right-clicked, but the
+       * whole request goes, so the sentence counts them.
+       */
+      files: string[];
       run(): void | Promise<void>;
       returnFocusTo(): HTMLElement | null;
       focusAfterRun(): HTMLElement | null;
@@ -108,7 +131,8 @@ export function TreeActionConfirmDialog({
   }, [onConfirmRef]);
 
   const isDelete = request.kind === 'delete';
-  const name = isDelete ? request.entry.name : (request.sourcePath.split('/').pop() ?? '');
+  const isWithdraw = request.kind === 'withdraw';
+  const name = request.kind === 'move' ? (request.sourcePath.split('/').pop() ?? '') : '';
   const requests = isDelete && proposals.status === 'ready' ? proposals.requests : [];
   if (isDelete && requests.length > 0) {
     // The three-way question: this branch only, or its proposals too. The
@@ -177,7 +201,7 @@ export function TreeActionConfirmDialog({
       open
       size="sm"
       onClose={onCancel}
-      title={isDelete ? 'Delete' : 'Move'}
+      title={isDelete ? 'Delete' : isWithdraw ? 'Withdraw suggestion' : 'Move'}
       footer={
         <>
           <Button size="sm" onClick={onCancel}>
@@ -186,17 +210,23 @@ export function TreeActionConfirmDialog({
           <Button
             ref={confirmRef}
             size="sm"
-            variant={isDelete ? 'danger' : 'primary'}
+            // A withdraw takes the request away from the owners reviewing it:
+            // the same danger tone a delete gets, for the same reason.
+            variant={isDelete || isWithdraw ? 'danger' : 'primary'}
             disabled={checking}
             onClick={() => onConfirm('folder-only')}
           >
-            {isDelete ? 'Delete' : 'Move'}
+            {isDelete ? 'Delete' : isWithdraw ? 'Withdraw' : 'Move'}
           </Button>
         </>
       }
     >
       <p className="text-detail text-ink">
-        {isDelete ? deleteSentence(request.entry, request.isProposed) : moveSentence(name, request.destinationLabel)}
+        {request.kind === 'delete'
+          ? deleteSentence(request.entry, request.isProposed)
+          : request.kind === 'withdraw'
+            ? withdrawSentence(request.files)
+            : moveSentence(name, request.destinationLabel)}
       </p>
       {checking && <p className="mt-2 text-detail text-ink-muted">Checking open change requests…</p>}
       {isDelete && proposals.status === 'failed' && (
