@@ -1029,10 +1029,18 @@ describe('dispatchUpload: the drop is never silent', () => {
     let releaseSecondAcl: () => void = () => {};
     const result = await mountProtected();
 
-    const first = result.current.dispatchUpload(
-      { kind: 'files', files: [new File(['x'], 'one.md')] },
-      'knowledge-base/KnowledgeBase/Ops',
-    );
+    // `dispatchUpload` is async, but its prefix — the error reset, the
+    // progress notice, `isUploading` — runs synchronously on the call, so the
+    // start goes inside `act` like every other dispatch in this file. The
+    // `await first` below still works: the captured promise resolves in
+    // flight.
+    let first: Promise<void> | undefined;
+    act(() => {
+      first = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'one.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
     accessApiMock.fetchFileAccess.mockReturnValue(new Promise((resolve) => {
       releaseSecondAcl = () => resolve({
         canWrite: true,
