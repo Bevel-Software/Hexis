@@ -28,6 +28,25 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
 
   const abs = (rel: string) => path.join(workspaceDir, rel);
 
+  /** Whether `rel` is there, as spelled, without following a link. */
+  const entryVisible = async (rel: string) =>
+    await fs.lstat(abs(rel)).then(() => true, () => false);
+
+  /**
+   * Whether the disk under the workspace folds case — asked of the disk, not
+   * guessed from `process.platform`: a case-sensitive APFS volume and a
+   * case-insensitive mount on Linux are both ordinary things to run on.
+   */
+  const foldsCase = async () => {
+    const probe = abs(`${KB}/.case-probe`);
+    await fs.writeFile(probe, '');
+    try {
+      return await entryVisible(`${KB}/.CASE-PROBE`);
+    } finally {
+      await fs.rm(probe, { force: true });
+    }
+  };
+
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-move-'));
     workspaceId = workspaceIdForBranch(BRANCH);
@@ -121,17 +140,16 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     expect(await fs.readdir(abs(`${KB}/Sales/New`))).toEqual(['taken.md']);
   });
 
-  it('allows a case-only rename: the entry found at the destination is the source itself', async () => {
-    // A case-insensitive filesystem opens `Notes.md` and `notes.md` as ONE
-    // file, which is the case this is about. On a case-sensitive disk a hard
-    // link is the same thing to the check that matters — two names, one inode
-    // — so the link stands in for it there. On a case-INsensitive one the two
-    // names are already the same entry and the link is refused as existing:
-    // that IS the state under test, so the setup goes on.
+  it('allows a case-only rename, on a disk that folds the two spellings and on one that does not', async () => {
+    // The acceptance criterion is about a case-insensitive filesystem, where
+    // `Notes.md` already opens `notes.md`'s own file and the rename must not
+    // read that as a clash. On a case-sensitive one the destination is simply
+    // a free name. Both disks must let the rename through, and the disk is
+    // asked rather than guessed from `process.platform`.
     await svc.writeFile(workspaceId, `${KB}/Sales/notes.md`, '# Notes\n');
-    await fs.link(abs(`${KB}/Sales/notes.md`), abs(`${KB}/Sales/Notes.md`)).catch((err: NodeJS.ErrnoException) => {
-      if (err?.code !== 'EEXIST') throw err;
-    });
+    // The two pre-states, each asserted where it applies: on a folding disk
+    // the destination already resolves to the source; elsewhere it is free.
+    expect(await entryVisible(`${KB}/Sales/Notes.md`)).toBe(await foldsCase());
 
     await expect(
       svc.moveEntry(workspaceId, `${KB}/Sales/notes.md`, `${KB}/Sales/Notes.md`),
@@ -140,11 +158,11 @@ describe('WorkspaceService.moveEntry — a name that is taken is refused, never 
     expect(await fs.readFile(abs(`${KB}/Sales/Notes.md`), 'utf-8')).toBe('# Notes\n');
   });
 
-  it.skipIf(process.platform !== 'linux')('refuses a move onto a hard link of the source under another name', async () => {
+  it('refuses a move onto a hard link of the source under another name', async () => {
     // One inode is not enough to read the destination as "the source itself".
-    // `twin.md` is a name of its own in the tree, and a move onto it would
-    // take that name away — a clash, exactly like any other. Only a case-only
-    // rename, where the two spellings fold to one name, is exempt.
+    // `twin.md` is a name of its own in the tree — on every filesystem that
+    // has hard links, case-folding or not — and a move onto it would take that
+    // name away. A clash, exactly like any other.
     await svc.writeFile(workspaceId, `${KB}/Sales/notes.md`, '# Notes\n');
     await fs.link(abs(`${KB}/Sales/notes.md`), abs(`${KB}/Sales/twin.md`));
 

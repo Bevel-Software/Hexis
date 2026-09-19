@@ -13,8 +13,10 @@
  *   - A FILE moves as `link` + `unlink`. `link` is the atomic no-clobber
  *     primitive POSIX gives us: it fails with `EEXIST` if anything is at the
  *     new name, and the two names address one inode in between, so nothing is
- *     ever half-moved. On a filesystem that has no hard links at all we fall
- *     back to a plain `rename` (see `linkThenUnlink`) — no worse than before.
+ *     ever half-moved. A filesystem without hard links claims the name with
+ *     `open(…, 'wx')` instead and renames onto its own claim — never a plain
+ *     `rename`, which would put the overwrite back exactly where it is hardest
+ *     to notice.
  *   - A FOLDER claims its name with `mkdir` first, which fails with `EEXIST`
  *     the same way, and then renames onto the empty folder it just made
  *     (POSIX lets a directory rename replace an EMPTY directory, and only an
@@ -28,6 +30,8 @@
  * destination is re-examined so the same sentence comes out.
  */
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import type { FileHandle } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { entryExistsMessage, type ExistingEntryKind } from '@bevel-software/platform-shared';
 import { isAbsence } from './fs.contract.js';
@@ -72,13 +76,6 @@ export async function lstatOrNull(absolutePath: string): Promise<Stats | null> {
 /**
  * The one reading of "is this destination the source under another name?".
  *
- * Identity alone (same device, same inode) is too broad: two hard links are
- * one inode under two unrelated names, and a move onto one of them would
- * destroy that name — a clash like any other. A case-only rename is the
- * narrower thing, and it is recognisable in the paths: the two spellings fold
- * together, which is exactly why the filesystem handed us one entry for both.
- * So both must hold — one inode AND one name up to case.
- *
  * `lstat`, never `stat`: a link at the destination is an entry in its own
  * right.
  */
@@ -92,14 +89,54 @@ export async function inspectDestination(
   // A source that is not there is left to the move's own ENOENT — "there is
   // nothing to move" is the truer answer than "the name is taken".
   if (source === null) return { state: 'free' };
-  if (
-    source.dev === destination.dev &&
-    source.ino === destination.ino &&
-    foldsTogether(oldAbsolute, newAbsolute)
-  ) {
-    return { state: 'self' };
-  }
+  if (await isSelfRename(oldAbsolute, newAbsolute, source, destination)) return { state: 'self' };
   return { state: 'taken', kind: destination.isDirectory() ? 'folder' : 'file' };
+}
+
+/**
+ * Whether the destination is the SOURCE, seen under a second spelling of the
+ * one name — the thing a case-insensitive filesystem does and the only reason
+ * a move onto an existing entry is ever allowed.
+ *
+ * Identity alone (same device, same inode) does not show it: two hard links
+ * are one inode under two names a user sees separately in the tree, and a
+ * move onto one of them takes that name away. Neither does folded path
+ * equality on its own, for the same reason in the other direction — on a
+ * CASE-SENSITIVE disk `deal.md` and `Deal.md` fold together as strings while
+ * being two real entries, hard-linked or not.
+ *
+ * What actually distinguishes them is the directory: a filesystem that folds
+ * the two spellings has ONE entry to list, and a filesystem that does not has
+ * two. So the parent is read and the two spellings are counted. One entry
+ * means the filesystem handed us the source itself, whatever spelling was
+ * asked for; two means two names, and the move is a clash.
+ *
+ * Paths in different folders are two entries by definition. `oldAbsolute ===
+ * newAbsolute` is the degenerate self-move, which no directory read can
+ * decide (one spelling, one entry) and which is trivially the source itself.
+ */
+async function isSelfRename(
+  oldAbsolute: string,
+  newAbsolute: string,
+  source: Stats,
+  destination: Stats,
+): Promise<boolean> {
+  if (source.dev !== destination.dev || source.ino !== destination.ino) return false;
+  if (oldAbsolute === newAbsolute) return true;
+  const folder = path.dirname(oldAbsolute);
+  if (folder !== path.dirname(newAbsolute)) return false;
+  if (!foldsTogether(oldAbsolute, newAbsolute)) return false;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(folder);
+  } catch {
+    // The parent cannot be listed, so nothing here can be shown to be one
+    // entry. Refusing is the safe reading: at worst a case-only rename on an
+    // unreadable folder is turned away, and nothing is ever overwritten.
+    return false;
+  }
+  const listed = new Set(entries);
+  return !(listed.has(path.basename(oldAbsolute)) && listed.has(path.basename(newAbsolute)));
 }
 
 /** The two paths are one name on a case-insensitive filesystem. */
@@ -132,7 +169,7 @@ export async function renameNoReplace(
   }
   const source = await lstatOrNull(oldAbsolute);
   if (source?.isDirectory() === true) {
-    await moveFolder(oldAbsolute, newAbsolute, destinationLabel);
+    await landFolder(oldAbsolute, newAbsolute, destinationLabel);
     return;
   }
   await linkThenUnlink(oldAbsolute, newAbsolute, destinationLabel);
@@ -140,13 +177,14 @@ export async function renameNoReplace(
 
 /**
  * `link` + `unlink`: the destination is created atomically or not at all, and
- * the source only goes away once it exists under both names.
+ * the source only goes away once it exists under both names, so no reader ever
+ * sees a partial file at the new name.
  *
- * The fallback covers filesystems that cannot make a hard link at all (`EPERM`
- * on some network and FUSE mounts, `EXDEV` across a mount point inside the
- * workspace): there, a plain `rename` is what we did before this existed, and
- * the look above has already refused a taken name. Racing is possible on those
- * mounts alone rather than everywhere.
+ * Where hard links are unavailable — `EPERM` or `ENOSYS` on some network and
+ * FUSE mounts, FAT — the fallback is `claimThenRename`, NOT a plain rename: a
+ * rename replaces, and falling back to one would hand back exactly the
+ * overwrite this module exists to prevent, on the filesystems least likely to
+ * be tested.
  */
 async function linkThenUnlink(
   oldAbsolute: string,
@@ -158,10 +196,45 @@ async function linkThenUnlink(
   } catch (err) {
     if (codeOf(err) === 'EEXIST') throw await takenError(newAbsolute, destinationLabel);
     if (codeOf(err) === 'ENOENT') throw err; // No source: the caller's own ENOENT.
-    await renameOrTaken(oldAbsolute, newAbsolute, destinationLabel);
+    await claimThenRename(oldAbsolute, newAbsolute, destinationLabel);
     return;
   }
   await fs.unlink(oldAbsolute);
+}
+
+/**
+ * The no-clobber move for a file on a filesystem with no hard links: `wx`
+ * claims the name — `open` with `O_EXCL`, which every filesystem Node runs on
+ * implements atomically and which fails with `EEXIST` if anything is there —
+ * and the rename then replaces the empty file we own rather than someone
+ * else's. A rename that fails anyway gives the claim back.
+ *
+ * The cost against `link` + `unlink` is that the destination is briefly an
+ * empty file, which is why this is the fallback and not the first choice.
+ *
+ * Exported for the same reason as {@link landFolder}: the path only runs on
+ * filesystems without hard links, so a test has to call it directly to cover
+ * it at all.
+ */
+export async function claimThenRename(
+  oldAbsolute: string,
+  newAbsolute: string,
+  destinationLabel: string,
+): Promise<void> {
+  let claim: FileHandle;
+  try {
+    claim = await fs.open(newAbsolute, 'wx');
+  } catch (err) {
+    if (codeOf(err) === 'EEXIST') throw await takenError(newAbsolute, destinationLabel);
+    throw err;
+  }
+  await claim.close();
+  try {
+    await fs.rename(oldAbsolute, newAbsolute);
+  } catch (err) {
+    await fs.unlink(newAbsolute).catch(() => undefined);
+    throw err;
+  }
 }
 
 /**
@@ -174,8 +247,12 @@ async function linkThenUnlink(
  * Windows cannot rename onto an existing directory even when it is empty, so
  * the claim would make every folder move fail. It does not need one: its
  * `rename` refuses a taken destination for directories by itself.
+ *
+ * Exported without the look `renameNoReplace` does first, so the claim and its
+ * rollback — the half that only runs when a name is taken in the moment
+ * between the two — can be driven directly by a test instead of by a race.
  */
-async function moveFolder(
+export async function landFolder(
   oldAbsolute: string,
   newAbsolute: string,
   destinationLabel: string,

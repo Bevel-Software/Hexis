@@ -54,7 +54,7 @@ import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
-import { DestinationTakenError } from '../../shared/rename-no-replace.js';
+import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 
 const log = logger('workspace-tools');
 
@@ -795,31 +795,31 @@ export function registerWorkspaceTools(
    * free. The kind is what the refusal names, so the sentence says "A folder
    * named …" of a folder.
    *
-   * With `src`, a case-only rename is not a clash: on a case-insensitive disk
-   * `deal.md` → `Deal.md` finds its own source at `dest`, which is the rename
-   * that was asked for, while on a case-sensitive disk the two are different
-   * files (a clash). Identity alone would be too generous — two hard links are
-   * one inode under two unrelated names, and a move onto one of them destroys
-   * that name — so the spellings must fold together too, exactly as
-   * `shared/rename-no-replace.ts` reads it. Without `src` — a copy, which
-   * creates a second entry rather than moving the first — anything at `dest`
-   * is a clash, the source's own alternate spelling included.
+   * With `src`, the one case that is not a clash is the destination BEING the
+   * source — `deal.md` → `Deal.md` on a case-insensitive disk, where the two
+   * spellings are one entry. `inspectDestination` decides that, by the same
+   * reading the move itself uses, so the preflight and the move cannot answer
+   * differently: one inode is not enough (two hard links are one inode under
+   * two names a user sees separately), the parent has to list one entry for
+   * the two spellings. Without `src` — a copy, which creates a second entry
+   * rather than moving the first — anything at `dest` is a clash, the source's
+   * own alternate spelling included.
    */
   const existingAt = async (
     root: string,
     dest: string,
     src?: string,
   ): Promise<ExistingEntryKind | null> => {
+    if (src !== undefined) {
+      const verdict = await inspectDestination(join(root, src), join(root, dest));
+      return verdict.state === 'taken' ? verdict.kind : null;
+    }
     let destStat: import('node:fs').Stats;
     try {
       destStat = await nodeFs.lstat(join(root, dest));
     } catch (err) {
       if (isAbsence(err)) return null;
       throw err;
-    }
-    if (src !== undefined && src.toLowerCase() === dest.toLowerCase()) {
-      const srcStat = await nodeFs.lstat(join(root, src));
-      if (srcStat.dev === destStat.dev && srcStat.ino === destStat.ino) return null;
     }
     return destStat.isDirectory() ? 'folder' : 'file';
   };

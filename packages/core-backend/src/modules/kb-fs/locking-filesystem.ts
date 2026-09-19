@@ -51,7 +51,7 @@ import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platfor
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
+import { lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
@@ -247,8 +247,13 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       const taken = name === 'FileExistsError' || code === 'EEXIST' || code === 'EISDIR';
       const absolute = taken ? this.resolveAbsolutePath(dest) : undefined;
       // Only when something really is there: a code alone must not turn an
-      // unrelated failure into "already exists".
-      if (absolute !== undefined && (await this.exists(dest))) throw await takenError(absolute, dest);
+      // unrelated failure into "already exists". `lstat`, not an existence
+      // probe that follows links — a DANGLING link holds the name against an
+      // exclusive create while resolving to nothing, and it is an entry the
+      // user can see, so it gets the clash sentence like any other.
+      if (absolute !== undefined && (await lstatOrNull(absolute)) !== null) {
+        throw await takenError(absolute, dest);
+      }
       throw err;
     }
   }
