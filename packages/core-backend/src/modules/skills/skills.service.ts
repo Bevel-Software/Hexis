@@ -74,6 +74,13 @@ export class SkillService implements ISkillService {
     // and absent from the listing — an author who writes a skill and then
     // lists them not seeing their own work, and an agent discovering by
     // listing unable to find a skill it could load. One resolver, one answer.
+    //
+    // The price of the shared gate is that this path now reads through that
+    // memo rather than off disk, so a SKILL.md that rewrites its own `read:`
+    // rules would be authorized against the previous verdict until the memo
+    // expires. It is not: `registerCatalogCacheInvalidation` drops the gate on
+    // the same default-branch signal that drops this catalog, so the listing
+    // and the load are refreshed by one event or by neither.
     const allowed = await this.readable(userEmail, [found.summary.path]);
     if (allowed.get(`${found.summary.path}/SKILL.md`) !== true) {
       return { ok: false, error: 'forbidden' };

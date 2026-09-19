@@ -3,6 +3,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { FileChangeNotifier } from '../../modules/kb-fs/file-change-notifier.js';
 import { WorkflowEventBus } from '../../modules/workflow/event-bus.js';
 import { registerCatalogCacheInvalidation } from '../catalog-cache-invalidation.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -20,11 +21,13 @@ function setup() {
     { invalidate: vi.fn() },
     { invalidate: vi.fn() },
   ];
+  const accessControl = { invalidate: vi.fn() };
   const off = registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
     kbDirName: KB_DIR,
     catalogs,
+    accessControl,
   });
   /** How many times EVERY catalog was dropped — they are only ever dropped together. */
   const drops = () => {
@@ -32,7 +35,7 @@ function setup() {
     expect(new Set(counts).size).toBe(1);
     return counts[0];
   };
-  return { eventBus, fileChangeNotifier, drops, off };
+  return { eventBus, fileChangeNotifier, drops, off, accessControl };
 }
 
 describe('registerCatalogCacheInvalidation', () => {
@@ -178,6 +181,33 @@ describe('registerCatalogCacheInvalidation', () => {
       });
       expect(drops()).toBe(0);
     });
+  });
+
+  /**
+   * The read gate goes with them. Every catalog here is ACL-filtered, and a
+   * skill's or a manual's own `read:` frontmatter lives in the very file the
+   * commit rewrote — but the batch gate memoizes those own-entry rules per
+   * workspace for five minutes. A fresh catalog resolved through a stale gate
+   * is the pair disagreeing: a revoked skill still loadable by name, a
+   * just-granted one still missing from the listing, for the rest of the memo.
+   */
+  it('drops the access gate for the default workspace with them', () => {
+    const { fileChangeNotifier, eventBus, drops, accessControl } = setup();
+    fileChangeNotifier.emit({
+      workspaceId: 'ws',
+      branch: DEFAULT_BRANCH,
+      paths: [`${KB_DIR}/Skills/Ops/rfi/SKILL.md`],
+      byUser: USER,
+    });
+    expect(drops()).toBe(1);
+    expect(accessControl.invalidate).toHaveBeenCalledExactlyOnceWith(workspaceIdForBranch(DEFAULT_BRANCH));
+
+    eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+    expect(accessControl.invalidate).toHaveBeenCalledTimes(2);
+
+    // And not for a branch these catalogs never read.
+    eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws2', branch: 'agent/draft' });
+    expect(accessControl.invalidate).toHaveBeenCalledTimes(2);
   });
 
   it('detaches every subscription on unsubscribe', () => {

@@ -3,7 +3,6 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SkillSummary } from '../../modules/skills/skills.contract.js';
-import type { ToolManualSummary } from '../../modules/tool-manuals/tool-manuals.contract.js';
 import { catalogRevision, createCatalogRevisionRoutes } from '../catalog-revision.js';
 
 /**
@@ -17,14 +16,14 @@ import { catalogRevision, createCatalogRevisionRoutes } from '../catalog-revisio
  * this exists to close.
  */
 
-const manual = (over: Partial<ToolManualSummary> = {}): ToolManualSummary => ({
-  slug: 'serper',
-  name: 'serper',
-  path: 'Plugins/Everyone/software.bevel.hexis/tools/serper.tool',
-  type: 'http',
-  description: 'Web search.',
-  ...over,
-});
+/**
+ * A manual's line as `IToolManualService.catalogFingerprints` renders it:
+ * identity plus a digest of the file it was parsed from. Opaque here on
+ * purpose — what goes into one is the tool catalog's business, and
+ * `tool-manuals.service.test.ts` is where the fields that move it are pinned.
+ */
+const manualLine = (name: string, source = 'src-1'): string =>
+  [name, name, `Plugins/Everyone/${name}.tool`, 'http', 'remote', 'Web search.', source].join('\u0000');
 
 const skill = (over: Partial<SkillSummary> = {}): SkillSummary => ({
   name: 'rfi',
@@ -35,38 +34,38 @@ const skill = (over: Partial<SkillSummary> = {}): SkillSummary => ({
 
 describe('catalogRevision', () => {
   it('is stable for the same catalog', () => {
-    expect(catalogRevision([manual()], [skill()])).toBe(catalogRevision([manual()], [skill()]));
+    expect(catalogRevision([manualLine('serper')], [skill()])).toBe(
+      catalogRevision([manualLine('serper')], [skill()]),
+    );
   });
 
   it('does not change when the same set arrives in another order', () => {
-    const a = manual({ slug: 'a', name: 'a' });
-    const b = manual({ slug: 'b', name: 'b' });
     const x = skill({ name: 'x' });
     const y = skill({ name: 'y' });
-    expect(catalogRevision([a, b], [x, y])).toBe(catalogRevision([b, a], [y, x]));
+    expect(catalogRevision([manualLine('a'), manualLine('b')], [x, y])).toBe(
+      catalogRevision([manualLine('b'), manualLine('a')], [y, x]),
+    );
   });
 
   describe('a manual added, changed or removed', () => {
-    const base = catalogRevision([manual()], []);
+    const base = catalogRevision([manualLine('serper')], []);
 
     it('changes when one is added', () => {
-      expect(catalogRevision([manual(), manual({ slug: 'other', name: 'other' })], [])).not.toBe(base);
+      expect(catalogRevision([manualLine('serper'), manualLine('other')], [])).not.toBe(base);
     });
 
     it('changes when one is removed', () => {
       expect(catalogRevision([], [])).not.toBe(base);
     });
 
-    it.each([
-      ['its name', manual({ name: 'renamed' })],
-      ['its declaring file', manual({ path: 'Plugins/Finance/software.bevel.hexis/tools/serper.tool' })],
-      ['its type', manual({ type: 'mcp' })],
-      ['its description', manual({ description: 'Something else.' })],
-      // `remote: false` moves a tool from `list_tools` to `list_local_tools` —
-      // the same visible change as an add and a remove at once.
-      ['whether it is local-only', manual({ remote: false })],
-    ])('changes when %s changes', (_what, changed) => {
-      expect(catalogRevision([changed], [])).not.toBe(base);
+    /**
+     * The line moved without the set changing size: a manual whose file was
+     * edited in place — a new `url`, a new header, another inline tool — is a
+     * different callable thing under the same name, and a client holding the
+     * old one has to be told.
+     */
+    it('changes when a manual line moves but the set does not', () => {
+      expect(catalogRevision([manualLine('serper', 'src-2')], [])).not.toBe(base);
     });
   });
 
@@ -86,32 +85,20 @@ describe('catalogRevision', () => {
       ['its folder', skill({ path: 'Plugins/Ops/rfi' })],
       ['its description', skill({ description: 'Something else.' })],
       ['its version', skill({ version: '2.0.0' })],
-      ['its lifecycle', skill({ lifecycle: 'deprecated' })],
     ])('changes when %s changes', (_what, changed) => {
       expect(catalogRevision([], [changed])).not.toBe(base);
     });
   });
 
   /**
-   * `setup` and `variables` carry MCP OAuth auto-discovery results, which are
-   * re-probed on every cold scan and can differ between two scans of a file
-   * nobody touched. Hashing them would report a catalog change that no commit
-   * made — and every connected client would re-register for it.
+   * A manual and a skill are different things even when they read alike: one
+   * of each, rendering to the same text, must not hash to the same catalog —
+   * otherwise renaming a skill to a departing tool's name would look like no
+   * change at all.
    */
-  it('ignores the OAuth auto-discovery decoration, which no commit made', () => {
-    const plain = manual({ type: 'mcp' });
-    const probed = manual({
-      type: 'mcp',
-      setup: { kind: 'oauth-manual', reason: 'sign-in endpoint discovery failed: ECONNRESET' },
-      variables: [{ name: 'MCP_OAUTH', scope: 'user' }],
-    });
-    expect(catalogRevision([probed], [])).toBe(catalogRevision([plain], []));
-  });
-
-  /** A manual and a skill are different things even when they read alike. */
   it('keeps the two catalogs apart', () => {
-    const named = (n: string) => manual({ slug: n, name: n, path: n, type: 'http', description: '' });
-    expect(catalogRevision([named('a'), named('b')], [])).not.toBe(catalogRevision([named('a')], []));
+    const line = 'rfi\u0000Skills/Ops/rfi\u0000\u0000\u0000Answers RFIs.';
+    expect(catalogRevision([line], [])).not.toBe(catalogRevision([], [skill()]));
   });
 });
 
@@ -124,17 +111,21 @@ describe('GET /agent/catalog-revision', () => {
   });
 
   async function mount(deps: {
-    manuals: ToolManualSummary[];
+    manuals: string[];
     skills: SkillSummary[];
     userId?: string | undefined;
     resolveUserEmail?: (userId: string) => Promise<string | undefined>;
-  }): Promise<{ url: string; listAccessible: ReturnType<typeof vi.fn>; listSkills: ReturnType<typeof vi.fn> }> {
-    const listAccessible = vi.fn(async () => deps.manuals);
+  }): Promise<{
+    url: string;
+    catalogFingerprints: ReturnType<typeof vi.fn>;
+    listSkills: ReturnType<typeof vi.fn>;
+  }> {
+    const catalogFingerprints = vi.fn(async () => deps.manuals);
     const listSkills = vi.fn(async () => deps.skills);
     const app = express();
     app.use(
       createCatalogRevisionRoutes({
-        toolManuals: { listAccessible } as never,
+        toolManuals: { catalogFingerprints } as never,
         skills: { listSkills } as never,
         manualAuth: (req, _res, next) => {
           if (deps.userId !== undefined) req.toolAuth = { userId: deps.userId } as never;
@@ -145,35 +136,47 @@ describe('GET /agent/catalog-revision', () => {
     );
     http = app.listen(0);
     await new Promise<void>((resolve) => http!.once('listening', resolve));
-    return { url: `http://127.0.0.1:${(http.address() as AddressInfo).port}`, listAccessible, listSkills };
+    return {
+      url: `http://127.0.0.1:${(http.address() as AddressInfo).port}`,
+      catalogFingerprints,
+      listSkills,
+    };
   }
 
   it("answers the caller's own fingerprint, with the counts behind it", async () => {
-    const { url, listAccessible, listSkills } = await mount({
-      manuals: [manual()],
+    const { url, catalogFingerprints, listSkills } = await mount({
+      manuals: [manualLine('serper')],
       skills: [skill()],
       userId: 'u1',
     });
     const body = await (await fetch(`${url}/agent/catalog-revision`)).json();
 
-    expect(body).toEqual({ revision: catalogRevision([manual()], [skill()]), tools: 1, skills: 1 });
+    expect(body).toEqual({
+      revision: catalogRevision([manualLine('serper')], [skill()]),
+      tools: 1,
+      skills: 1,
+    });
     // Per-caller and ACL-filtered by the services themselves: the route adds
     // no second read model that could show a tool the listing hides.
-    expect(listAccessible).toHaveBeenCalledWith('someone@example.com');
+    expect(catalogFingerprints).toHaveBeenCalledWith('someone@example.com');
     expect(listSkills).toHaveBeenCalledWith('someone@example.com');
   });
 
   it('answers an unresolvable caller the empty catalog, as both listings do', async () => {
-    const { url, listAccessible } = await mount({ manuals: [manual()], skills: [skill()], userId: undefined });
+    const { url, catalogFingerprints } = await mount({
+      manuals: [manualLine('serper')],
+      skills: [skill()],
+      userId: undefined,
+    });
     const body = await (await fetch(`${url}/agent/catalog-revision`)).json();
 
     expect(body).toEqual({ revision: catalogRevision([], []), tools: 0, skills: 0 });
-    expect(listAccessible).not.toHaveBeenCalled();
+    expect(catalogFingerprints).not.toHaveBeenCalled();
   });
 
   it('does not fail the request when the email lookup throws', async () => {
     const { url } = await mount({
-      manuals: [manual()],
+      manuals: [manualLine('serper')],
       skills: [],
       userId: 'u1',
       resolveUserEmail: async () => {

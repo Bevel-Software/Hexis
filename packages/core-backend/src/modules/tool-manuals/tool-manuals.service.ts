@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { logger } from '../../shared/logging.js';
 
 const log = logger('tool-manuals');
@@ -179,6 +180,10 @@ export class ToolManualService implements IToolManualService {
 
   async listAllSummaries(): Promise<ToolManualSummary[]> {
     return (await this.scan()).map(toSummary);
+  }
+
+  async catalogFingerprints(userEmail: string): Promise<string[]> {
+    return (await this.accessibleManuals(userEmail)).map(manualFingerprint);
   }
 
   async getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null> {
@@ -702,7 +707,15 @@ export class ToolManualService implements IToolManualService {
     const discovered = await this.source.discover(kbRoot);
     for (const plugin of discovered.plugins) {
       if (plugin.mcpJsonText === null) continue; // no servers is the common case, not an error
-      parsed.push(...descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText));
+      // One stamp for every server the file declares: the two texts together
+      // are the whole source of these descriptors, so any edit to either
+      // (a URL, a header, an added or dropped server, a `local: true` flip)
+      // moves every server's digest — which is correct, if slightly generous.
+      const from = sourceDigest(plugin.mcpJsonText + '\u0000' + (plugin.manifestText ?? ''));
+      for (const d of descriptorsFromMcpJson(plugin.relFolder, plugin.mcpJsonText, plugin.manifestText)) {
+        d.sourceRevision = from;
+        parsed.push(d);
+      }
     }
 
     for (const f of files) {
@@ -722,6 +735,11 @@ export class ToolManualService implements IToolManualService {
       // The route slug IS the id (unique after dedup below, snake_case → URL-safe),
       // so the URL a user sees matches the tool's declared identity.
       descriptor.slug = descriptor.name;
+      // Stamped from the BYTES, here, before `decorateMcpOAuth` and
+      // `surfaceReferencedVariables` mutate the descriptor: those two derive
+      // from the network and from the file respectively, and a digest taken
+      // afterwards would move whenever an OAuth probe happened to fail.
+      descriptor.sourceRevision = sourceDigest(content);
       parsed.push(descriptor);
     }
     // The manual name (= its id) is the UTCP variable namespace secrets bind to, so
@@ -748,6 +766,41 @@ export class ToolManualService implements IToolManualService {
 }
 
 // --- helpers ------------------------------------------------------------------
+
+/**
+ * A short digest of the text a descriptor was parsed from. Truncated because
+ * this is only ever compared for equality, and 128 bits of it is far past what
+ * a per-workspace catalog could collide in.
+ */
+function sourceDigest(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 32);
+}
+
+/**
+ * One manual's line in the catalog fingerprint: what makes it the tool it is,
+ * plus the digest of the file it came from.
+ *
+ * The named fields rather than the whole descriptor, deliberately: `setup` and
+ * `variables` carry OAuth auto-discovery results, which are re-probed on every
+ * scan and can differ between two scans of an unchanged file — hashing them
+ * would report a catalog change that no commit made. `sourceRevision` is what
+ * covers everything else the file says, so nothing is lost by leaving the
+ * decorated fields out.
+ */
+function manualFingerprint(m: ToolManualDescriptor): string {
+  return [
+    m.slug,
+    m.name,
+    m.path,
+    m.type,
+    m.remote === false ? 'local' : 'remote',
+    m.description ?? '',
+    m.sourceRevision ?? '',
+    // NUL-joined, like the skill lines this sits beside: no field can contain
+    // one, so two different manuals can never render the same line by having
+    // a separator inside one of their own fields.
+  ].join('\u0000');
+}
 
 /**
  * The one descriptor → summary projection, shared by every list surface

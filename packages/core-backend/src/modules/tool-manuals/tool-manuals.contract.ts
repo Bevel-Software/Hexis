@@ -175,6 +175,21 @@ export interface ToolManualDescriptorBase {
   path: string;
   type: ToolManualType;
   /**
+   * A digest of the SOURCE this descriptor was parsed from — the `.tool`
+   * file's bytes, or the `mcp.json` (plus its `plugin.json`) the server entry
+   * came out of. Stamped by the scan, before any network decoration touches
+   * the descriptor, so it moves when and only when the author's file moved.
+   *
+   * It exists for {@link IToolManualService.catalogFingerprints}: a manual can
+   * change everything about what it CALLS — its `url`, its `headers`, an
+   * inline manual's embedded tool list — while its name, path, type and
+   * description stay exactly as they were, and a fingerprint built from those
+   * alone would report no change to a client whose registered copy is now
+   * wrong. INTERNAL: never on {@link ToolManualSummary}, which is serialized
+   * to the browser.
+   */
+  sourceRevision?: string;
+  /**
    * Optional one-line prose from the frontmatter, for humans browsing the
    * catalog. PURELY COSMETIC — a malformed value is ignored rather than
    * skipping the file (see `normalizeToolManual`), because a bad sentence must
@@ -297,6 +312,19 @@ export interface IToolManualService {
    */
   getDetail(userEmail: string, slug: string): Promise<ToolManualDetail | null>;
 
+  /**
+   * One line per manual the caller can read, each carrying the manual's
+   * identity AND a digest of the file it was parsed from — the input the
+   * catalog fingerprint (`GET /api/agent/catalog-revision`) is built out of.
+   *
+   * Its own accessor rather than a projection of {@link listAccessible},
+   * because the two answer different questions. A summary is what a person
+   * browsing the catalog sees; this is whether a registered copy of the
+   * catalog is still correct, which a change to a manual's `url` or an inline
+   * manual's embedded tools breaks without touching anything a summary shows.
+   * Opaque to callers: only equality is ever asked of these lines.
+   */
+  catalogFingerprints(userEmail: string): Promise<string[]>;
   /**
    * Every manual in the catalog, UNFILTERED by access — the mirror of
    * `skillService.listSkills(undefined)`. For caller-INDEPENDENT counting only

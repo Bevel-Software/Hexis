@@ -109,6 +109,11 @@ async function getJson(
     );
   }
   if (!res.ok) {
+    // Drained before it is thrown away, exactly as the 401 paths above do. The
+    // catalog poller asks again every three seconds, so a deployment that is
+    // 502-ing through a redeploy would otherwise leave one undrained body —
+    // and the connection it pins — behind on every poll for the duration.
+    await res.body?.cancel().catch(() => {});
     throw new DeploymentError(`${label} returned HTTP ${res.status} from ${url}.`, res.status);
   }
   // A 200 that is not JSON is a proxy or SPA fallback answering in the

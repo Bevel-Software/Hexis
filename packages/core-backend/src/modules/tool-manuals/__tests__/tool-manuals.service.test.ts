@@ -242,21 +242,96 @@ describe('ToolManualService', () => {
    * more often than it used to be. One file that could take the listing down
    * would take it down constantly.
    */
-  test('an unreadable `.tool` beside good ones costs only itself', async () => {
+  test('a `.tool` that cannot be read or parsed, beside good ones, costs only itself', async () => {
     const tools = join(root, wsId, KB_DIR, 'Plugins');
-    // Three ways a manual can be wrong: unparseable bytes, a valid document
-    // that is not a manual, and a manual with an invalid field.
+    // Four ways a manual can be wrong. Three are about its CONTENT: unparseable
+    // bytes, a valid document that is not a manual, and a manual with an
+    // invalid field.
     await writeFile(join(tools, 'truncated.tool'), '{ "name": "truncated", "type": "htt');
     await writeFile(join(tools, 'nottool.tool'), JSON.stringify({ hello: 'world' }));
     await writeFile(
       join(tools, 'badscope.tool'),
       JSON.stringify({ name: 'badscope', type: 'http', url: 'https://x/m', variables: [{ name: 'K', scope: 'root' }] }),
     );
+    // The fourth is the scan failing to READ the file at all — a separate
+    // branch from parsing, and the one a permissions mistake or a half-written
+    // checkout actually produces. A directory with a `.tool` name is the
+    // honest way to induce it: the walk lists it, and the read throws EISDIR
+    // with no mocking anywhere near the code under test.
+    await mkdir(join(tools, 'adirectory.tool'), { recursive: true });
 
     const list = await svc().listAccessible('user@x.eu');
     expect(list.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
     // And the valid ones are still usable, not merely counted.
     expect(list.find((m) => m.name === 'billing')!.type).toBe('http');
+  });
+
+  /**
+   * The catalog fingerprint — what `GET /api/agent/catalog-revision` hashes,
+   * and therefore what decides whether a long-lived MCP client re-registers.
+   *
+   * The hard half is the change that is invisible in a listing: a `.tool` that
+   * keeps its name, path, type and description while its `url`, its headers or
+   * an inline manual's embedded tools change is a DIFFERENT callable thing,
+   * and a client still holding the old definition has to be told. Hence the
+   * source digest on the line; these pin that it is there and that it is not
+   * so eager it fires on a scan of a file nobody touched.
+   */
+  describe('catalogFingerprints', () => {
+    const tools = () => join(root, wsId, KB_DIR, 'Plugins');
+    const line = async (access = allowAll) =>
+      (await svc(access).catalogFingerprints('user@x.eu')).find((l) => l.includes('billing'))!;
+
+    test('is stable across scans of a catalog nobody touched', async () => {
+      expect(await line()).toBe(await line());
+    });
+
+    test.each([
+      ['its url', { name: 'billing', type: 'http', url: 'https://api.example.com/moved' }],
+      [
+        'a header',
+        {
+          name: 'billing',
+          type: 'http',
+          url: 'https://api.example.com/utcp',
+          headers: { Authorization: 'Bearer ${BILLING_KEY}', 'X-Tenant': 'acme' },
+        },
+      ],
+    ])('moves when %s changes, though no listing field did', async (_what, rewritten) => {
+      const before = await line();
+      await writeFile(join(tools(), 'billing.tool'), JSON.stringify(rewritten));
+
+      const after = await line();
+      expect(after).not.toBe(before);
+      // The point of the case: nothing a person browsing the catalog sees has
+      // changed, so a fingerprint built from the summary alone would not move.
+      const [summary] = (await svc().listAccessible('user@x.eu')).filter((m) => m.name === 'billing');
+      expect([summary.slug, summary.name, summary.path, summary.type, summary.description]).toEqual([
+        'billing',
+        'billing',
+        'Plugins/billing.tool',
+        'http',
+        undefined,
+      ]);
+    });
+
+    test("moves when an inline manual's embedded tools change", async () => {
+      const inlineLine = async () =>
+        (await svc().catalogFingerprints('user@x.eu')).find((l) => l.includes('weather'))!;
+      const before = await inlineLine();
+
+      const withAnother = JSON.parse(INLINE_TOOL);
+      withAnother.tools.push({ ...withAnother.tools[0], name: 'historical' });
+      await writeFile(join(tools(), 'weather.tool'), JSON.stringify(withAnother));
+
+      expect(await inlineLine()).not.toBe(before);
+    });
+
+    test('drops a line for a manual the caller cannot read', async () => {
+      const lines = await svc(denyBilling).catalogFingerprints('user@x.eu');
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('weather');
+    });
   });
 
   test('skips a `.tool` with a malformed `variables` entry (never silently mis-scoped)', async () => {

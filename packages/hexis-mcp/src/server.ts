@@ -444,6 +444,18 @@ export async function createHexisMcpServer(
    */
   let closed = false;
   let remoteManualRegistered = false;
+  /**
+   * Whether the remote manual is believed to be registered on the live client
+   * RIGHT NOW — distinct from `remoteManualRegistered`, which records that
+   * discovery got as far as registering it once and never goes back to false.
+   *
+   * The catalog refresh retries a failed re-registration on the next poll, and
+   * that retry must not open by deregistering a manual that is not there: the
+   * client answers with a throw, which would put one "deregistering … failed"
+   * line in the operator's log every three seconds for as long as the
+   * deployment stays unwell — burying the one line that says what is wrong.
+   */
+  let remoteManualLive = false;
   let inflightCalls = 0;
   /** The one re-registration allowed at a time: a credential swap or a recovery. */
   let reregisterInProgress: Promise<void> | null = null;
@@ -508,13 +520,16 @@ export async function createHexisMcpServer(
       // fails like any call racing a dying session would.
       const deadline = Date.now() + 15_000;
       while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
-      try {
-        // Closes the manual's MCP sessions and drops its repository entries.
-        await live.deregisterManual(REMOTE_MANUAL_NAME);
-      } catch (err) {
-        console.error(
-          `[hexis-mcp] deregistering the remote manual for the credential swap failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      if (remoteManualLive) {
+        try {
+          // Closes the manual's MCP sessions and drops its repository entries.
+          await live.deregisterManual(REMOTE_MANUAL_NAME);
+        } catch (err) {
+          console.error(
+            `[hexis-mcp] deregistering the remote manual for the credential swap failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        remoteManualLive = false;
       }
       const result = await registerManual(live, remoteManualTemplate(mcpUrl, token));
       if (!result.ok) {
@@ -524,6 +539,7 @@ export async function createHexisMcpServer(
         );
         return;
       }
+      remoteManualLive = true;
       await removeRemoteMetaTools(live);
       // The manual now holds a session this swap created. A call that lost its
       // own session around the swap — the two often land together, a redeploy
@@ -554,8 +570,15 @@ export async function createHexisMcpServer(
    *
    * SCOPE: the REMOTE manual only. Local-only servers (`local: true`,
    * `type: stdio`) are materialized to disk and spawned as child processes at
-   * startup; adding one still needs a restart, and the log line says so rather
-   * than leaving the reader to discover it. Everything the deployment serves —
+   * startup, so one added, changed or removed on the workspace still needs a
+   * restart of this process, and the log line says so rather than leaving the
+   * reader to discover it. What this refresh leaves standing is what this
+   * process can still CALL: the child is running and its tools work, so
+   * listing them is the honest answer — rebuilding the local half here would
+   * mean killing and re-spawning children mid-session on a poll, and
+   * suppressing the notification would cost every REMOTE change its refresh
+   * because a local server happened to move in the same commit.
+   * Everything the deployment serves —
    * every `.tool`, every remote `mcp.json` entry, and the KB tools themselves —
    * arrives through the remote manual and is covered here.
    *
@@ -573,23 +596,28 @@ export async function createHexisMcpServer(
       if (!live) return false; // discovery failed and released it while we queued
       const deadline = Date.now() + 15_000;
       while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
-      try {
-        await live.deregisterManual(REMOTE_MANUAL_NAME);
-      } catch (err) {
-        console.error(
-          `[hexis-mcp] deregistering the remote manual to pick up a catalog change failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      if (remoteManualLive) {
+        try {
+          await live.deregisterManual(REMOTE_MANUAL_NAME);
+        } catch (err) {
+          console.error(
+            `[hexis-mcp] deregistering the remote manual to pick up a catalog change failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        remoteManualLive = false;
       }
       // The credential is read NOW, not captured: a renewal may have landed
       // between this poll and the gate, exactly as it may around a recovery.
       const result = await registerManual(live, remoteManualTemplate(mcpUrl, config.connectionKey));
-      if (!result.ok) {
-        console.error(
-          `[hexis-mcp] re-registering the remote manual after a catalog change failed: ${result.error}. ` +
-            'Remote tools may be unavailable until the next change or a restart.',
-        );
-        return false;
-      }
+      // THROWN, not logged and swallowed: the watcher treats a rejection as
+      // "this change is still owed" and tries again on its next poll. A
+      // registration fails for the reasons everything else here fails — a
+      // deployment mid-restart, a network that dropped — and swallowing it
+      // would leave the remote manual deregistered, with no tools at all,
+      // until some later commit happened to move the catalog again. The
+      // watcher owns the operator line, so this one only carries the reason.
+      if (!result.ok) throw new Error(`re-registering the remote manual failed: ${result.error}`);
+      remoteManualLive = true;
       await removeRemoteMetaTools(live);
       noteManualReregistered(live, REMOTE_MANUAL_NAME);
       // Re-flattened from the repository rather than re-running discovery:
@@ -600,7 +628,7 @@ export async function createHexisMcpServer(
       );
       console.error(
         `[hexis-mcp] the workspace's catalog changed — ${tools.length} tool(s) now served. ` +
-          'A newly added local-only server still needs a restart of this process.',
+          'A local-only server added, changed or removed still needs a restart of this process.',
       );
       return true;
     });
@@ -649,22 +677,30 @@ export async function createHexisMcpServer(
    * `shutdown`, which waits for this to come to rest before closing anything.
    */
   const discover = async (): Promise<void> => {
-    const [allManuals, localOnly, baselineRevision] = await Promise.all([
+    // Read BEFORE the manuals, and awaited on its own rather than raced
+    // alongside them. The baseline must never be NEWER than the toolset this
+    // discovery registers: a commit landing between the two reads would then
+    // be inside the baseline and outside the toolset, and the first poll —
+    // seeing the revision it already holds — would report no change, leaving
+    // that commit's tool invisible until a restart. Read first, the error is
+    // the harmless one: a commit in the gap makes the baseline stale, the
+    // first poll calls it a change, and one refresh settles it.
+    //
+    // Only when the deployment ADVERTISES the route: an older one would answer
+    // the unknown path through its JWT mounts with a 401, which reads as a
+    // dead credential. Never fatal either way — a deployment that cannot
+    // answer it is one whose tools still work, frozen at what discovery found,
+    // and an unknown baseline costs exactly one refresh (see `watchCatalog`).
+    const baselineRevision = catalogRevisionAdvertised
+      ? await fetchCatalogRevision(config).then(
+          (r) => r,
+          () => null,
+        )
+      : null;
+    if (closed) return;
+    const [allManuals, localOnly] = await Promise.all([
       fetchAllManuals(config),
       fetchLocalOnlyManuals(config),
-      // Read ALONGSIDE the manuals, so it is the revision of the catalog this
-      // discovery is about to register — not one read afterwards, which would
-      // swallow a commit that landed in between. Only when the deployment
-      // ADVERTISES the route: an older one would answer the unknown path
-      // through its JWT mounts with a 401, which reads as a dead credential.
-      // Never fatal either way — a deployment that cannot answer it is one
-      // whose tools still work, frozen at what this discovery found.
-      catalogRevisionAdvertised
-        ? fetchCatalogRevision(config).then(
-            (r) => r,
-            () => null,
-          )
-        : Promise.resolve(null),
     ]);
     if (closed) return;
     const local = await prepareLocalManuals(
@@ -722,6 +758,7 @@ export async function createHexisMcpServer(
 
     const discovered = withoutRemoteMetaTools(await discoverTools(built.client, remote, local));
     remoteManualRegistered = true;
+    remoteManualLive = true;
     // A renewal that landed while registration was in flight hit the no-op
     // guard above; without this reconciliation the manual would keep the
     // retired bearer until the next renewal.

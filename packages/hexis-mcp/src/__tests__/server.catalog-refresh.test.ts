@@ -233,10 +233,18 @@ describe('a manual added on the deployment reaches an already-connected client',
   it('polls with the connection key, and stops polling at shutdown', { timeout: 60_000 }, async () => {
     commit(['ping']);
     const s = await start(20);
-    await waitFor(() => revisionPolls.length > 0, 'a catalog poll');
-    expect(revisionPolls[0]).toBe('Bearer bevel_test');
-
-    await s.shutdown();
+    // The same try/finally as every other case here, and for a reason specific
+    // to this file: `shutdown()` is what stops the watch, and a server leaked
+    // by an assertion that threw would keep polling the shared stub every 20ms
+    // for the rest of the run — feeding stray entries into `revisionPolls`,
+    // which the cases below assert exact lengths on. One failure would become
+    // several.
+    try {
+      await waitFor(() => revisionPolls.length > 0, 'a catalog poll');
+      expect(revisionPolls[0]).toBe('Bearer bevel_test');
+    } finally {
+      await s.shutdown();
+    }
     const afterShutdown = revisionPolls.length;
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(revisionPolls.length).toBe(afterShutdown);
@@ -276,7 +284,7 @@ describe('a manual added on the deployment reaches an already-connected client',
   it('leaves the toolset frozen when the watch is turned off', { timeout: 60_000 }, async () => {
     commit(['ping']);
     const s = await start(0);
-    // Discovery still reads the revision once, alongside the manuals — that is
+    // Discovery still reads the revision once, before the manuals — that is
     // the baseline, not a poll. What the off switch stops is everything after.
     const atStartup = revisionPolls.length;
     try {
