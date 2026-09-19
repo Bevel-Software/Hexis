@@ -197,8 +197,19 @@ interface PrincipalRow {
    * dropped them into the collapsed inherited section looking removed.
    */
   manage: 'direct' | 'inherited' | 'external';
-  /** The distinct ancestor access.md path(s) this row inherits any verb from. */
+  /**
+   * The distinct ancestor access.md path(s) holding ANY entry for this row —
+   * where the rules naming this principal live, which is what "via Sales" and
+   * the parent-folder grouping report.
+   */
   ancestors: string[];
+  /**
+   * The subset of those that GRANT — the only ones "Remove from <folder>" can
+   * act on. An ancestor that merely denies is not where this person's access
+   * comes from, and revoking them there would LIFT a restriction in answer to a
+   * click that asked to remove access.
+   */
+  grantAncestors: string[];
   /** True when every verb is denied by an entry on this target — "Denied here". */
   deniedHere: boolean;
 }
@@ -234,7 +245,7 @@ function ancestorPaths(...maps: (GrantSources | DenialSources | undefined)[]): s
 function classifyManage(
   sources: GrantSources | undefined,
   denials: DenialSources | undefined,
-): { manage: 'direct' | 'inherited' | 'external'; ancestors: string[] } {
+): { manage: 'direct' | 'inherited' | 'external'; ancestors: string[]; grantAncestors: string[] } {
   // A row is 'direct' when ANY verb's WINNING grant source (the closest, `[0]`)
   // is direct — even if that verb is ALSO inherited (`[direct, ancestor]`); the
   // inherited tail still feeds `ancestors`, so Remove can chain to the parent
@@ -244,9 +255,13 @@ function classifyManage(
     sourceLists(sources).some((l) => l[0]?.kind === 'direct') ||
     sourceLists(denials).some((l) => l.some((s) => s.kind === 'direct'));
   const ancestors = ancestorPaths(sources, denials);
-  if (hasLocalEntry) return { manage: 'direct', ancestors };
-  if (ancestors.length > 0) return { manage: 'inherited', ancestors };
-  return { manage: 'external', ancestors: [] };
+  // Kept apart from `ancestors` on purpose: an ancestor DENIAL is a real entry
+  // (it classifies the row, and it is where the rule lives) but it is not a
+  // place access can be removed from.
+  const grantAncestors = ancestorPaths(sources);
+  if (hasLocalEntry) return { manage: 'direct', ancestors, grantAncestors };
+  if (ancestors.length > 0) return { manage: 'inherited', ancestors, grantAncestors };
+  return { manage: 'external', ancestors: [], grantAncestors: [] };
 }
 
 /**
@@ -656,6 +671,7 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
         verbs: { owner: false, write: false, read: false, download: false },
         manage: 'direct',
         ancestors: [],
+        grantAncestors: [],
         deniedHere: false,
       };
       rows.set(key, row);
@@ -680,6 +696,7 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
         verbs: { owner: false, write: false, read: false, download: false },
         manage: 'direct',
         ancestors: [],
+        grantAncestors: [],
         deniedHere: false,
       };
       rows.set(key, row);
@@ -732,9 +749,10 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
   for (const row of rows.values()) {
     row.sources = lookupSources(data.sources, row.key);
     row.denials = lookupDenials(data.denials, row.key);
-    const { manage, ancestors } = classifyManage(row.sources, row.denials);
+    const { manage, ancestors, grantAncestors } = classifyManage(row.sources, row.denials);
     row.manage = manage;
     row.ancestors = ancestors;
+    row.grantAncestors = grantAncestors;
     // "Denied here" is the whole-principal block: every verb denied by an entry
     // on this target. A partial restriction (edit denied, read still inherited)
     // is emphatically NOT this — it is a lowered set, and says so per verb.
@@ -1246,7 +1264,12 @@ export function ManageAccessDialog({
         setConfirmRemove({
           principal: row.principal,
           label: row.label,
-          ancestors: row.ancestors,
+          // GRANT ancestors only. The dialog's offer is "remove their access
+          // from <folder>"; an ancestor that denies holds no access to remove,
+          // and acting there would strip that folder's restriction instead. A
+          // row whose only ancestor entry is a denial falls to the no-ancestor
+          // branch, which offers restricting here and nothing else.
+          ancestors: row.grantAncestors,
         });
         return;
       }
@@ -1265,6 +1288,11 @@ export function ManageAccessDialog({
         // finish the job instead of leaving a row that reappears as inherited (a
         // silent half-removal). We read the just-revoked row's post-revoke sources
         // straight from the response, so it reflects the real current tree.
+        //
+        // GRANTS, deliberately — `res.denials` is not consulted. A parent that
+        // still DENIES this principal is not unfinished business: the removal
+        // already left them with nothing here, and chaining to that folder would
+        // offer to delete its restriction.
         const ancestors = ancestorPaths(lookupSources(res.sources, row.key));
         if (ancestors.length > 0) {
           setConfirmRemove({ principal: row.principal, label: row.label, ancestors });

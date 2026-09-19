@@ -262,12 +262,19 @@ export function createAccessRoutes(
    * Returns the resolved access view for the current user at a single path,
    * including a per-principal `sources` map (where each principal's access comes
    * from) so the dialog can show inherited-vs-direct, the matching `denials` map
-   * (where each verb they do NOT hold is denied, same direct/ancestor split) and
-   * `deniedHere` — the principals this target restricts, who hold nothing and so
-   * appear in no eligible list. Together those two let the dialog decide its
-   * sections by LOCAL ENTRY, grant or denial, rather than by local grant alone:
-   * without them a person restricted here reads as merely inherited and drops
-   * into the collapsed parent section, looking removed.
+   * (per verb, the entries that DENY it — same direct/ancestor split, closest
+   * first, stopping at a grant that beats them) and `deniedHere` — every
+   * principal a deny ON THIS TARGET names, however many verbs it took. Note what
+   * that is NOT: a partial restriction (edit denied, read still inherited) puts
+   * the principal in `deniedHere` while they stay in the eligible lists for the
+   * verbs they keep; only a principal denied every verb holds nothing and drops
+   * out of those lists. A deny naming a role nobody knows appears in neither
+   * field — the resolver ignores such a line, so it restricts nothing.
+   *
+   * Together those two let the dialog decide its sections by LOCAL ENTRY, grant
+   * or denial, rather than by local grant alone: without them a person
+   * restricted here reads as merely inherited and drops into the collapsed
+   * parent section, looking removed.
    *
    * `kind` defaults to `file` (the resolver treats a folder vs a file's own scope
    * differently only for the direct/ancestor split; the eligible/verdict fields

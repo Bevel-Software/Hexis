@@ -1632,12 +1632,18 @@ export class AccessControlService implements IAccessControl {
           }
           continue;
         }
+        // A token naming a role nobody knows is not a rule: `loadModel` drops
+        // such entries from every `access.md`, and `resolveScopes` filters them
+        // out of a file's own frontmatter (the one scope it does not pre-filter)
+        // — so the resolver denies nothing, `denialSources` reports nothing, and
+        // a row here would claim a restriction the server does not enforce. Skip
+        // it on the same rule, so this list and the denial sources agree.
+        if (!roleKnown(model.roles, entry.role)) continue;
         // Resolve the token's kind and display name through the SAME merged
         // index the eligible lists use, so a denied group keys as `g:` and a
         // denied role as `r:` — matching the row keys the view is built on. A
-        // token with no record (a vanished principal) degrades to 'role', the
-        // pre-groups display, rather than being dropped: the deny line is real
-        // and still removable.
+        // KNOWN token with no record is a built-in (`everyone`, `admin` before
+        // roles.yaml names it), which displays as the role it is.
         const record = model.roles.byCanonical.get(entry.role);
         const name = record ? record.displayName : (entry.displayRole || entry.role);
         const kindOf = record?.kind ?? 'role';

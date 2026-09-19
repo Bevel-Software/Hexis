@@ -364,14 +364,23 @@ describe('ManageAccessDialog: every row has the same controls', () => {
     await screen.findByText("Alice");
 
     const menu = await openRowMenu(user, /^can edit$/i);
-    // The four sets, then Deny — and each held verb saying where it comes from.
-    expect(within(menu).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
-      'Owner',
-      'Can editfrom Sales',
-      'Can readfrom Sales',
-      'Can download',
-      'Deny',
+    // The four sets, then Deny. Matched by ACCESSIBLE NAME and compared as
+    // elements, so the assertion is about the items and their order — not about
+    // how the trailing note happens to be glued onto `textContent` (it is
+    // aria-hidden there, and reaches assistive tech as `aria-description`).
+    expect(within(menu).getAllByRole('button')).toEqual([
+      setItem(menu, /^owner$/i),
+      setItem(menu, /^can edit$/i),
+      setItem(menu, /^can read$/i),
+      setItem(menu, /^can download$/i),
+      setItem(menu, /^deny$/i),
     ]);
+    // And the provenance rides along as a description, on exactly the verbs she
+    // holds: edit from the parent, and the read it implies.
+    expect(setItem(menu, /^can edit$/i)).toHaveAttribute('aria-description', 'from Sales');
+    expect(setItem(menu, /^can read$/i)).toHaveAttribute('aria-description', 'from Sales');
+    expect(setItem(menu, /^owner$/i)).not.toHaveAttribute('aria-description');
+    expect(setItem(menu, /^can download$/i)).not.toHaveAttribute('aria-description');
     // Nothing is disabled: picking a set BELOW what is held is the point.
     for (const item of within(menu).getAllByRole('button')) expect(item).not.toBeDisabled();
   });
@@ -421,6 +430,33 @@ describe('ManageAccessDialog: every row has the same controls', () => {
       }),
     );
     expect(screen.queryByRole('heading', { name: /remove from parent/i })).toBeNull();
+  });
+
+  it('the x on a row a PARENT restricts offers restrict-here, never "remove from" that parent', async () => {
+    const user = userEvent.setup();
+    // Alice reads through a role (no grant entry of her own anywhere), and the
+    // parent folder denies her edit. Her only ancestor ENTRY is that denial.
+    api.fetchFileAccess.mockResolvedValue({
+      ...BLANK,
+      eligible: { principals: [], roles: [], users: [ALICE] },
+      readers: { restricted: true, principals: [], roles: [], users: [ALICE] },
+      sources: {},
+      denials: { 'u:alice@x.com': { write: [{ kind: 'ancestor', path: PARENT }] } },
+    } as unknown as AccessResponse);
+    render(<ManageAccessDialog entry={FOLDER} onClose={() => {}} />);
+    // The denial still files her under the folder holding it — that is where
+    // the rule lives, and the row says so.
+    await expandParentSection(user);
+    await screen.findByText('Alice');
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+
+    // "Remove from Sales" would delete the parent's RESTRICTION — more access,
+    // from a click that asked for less. The only act offered is restricting here.
+    expect(await screen.findByRole('heading', { name: /restrict access here\?/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^remove from /i })).toBeNull();
+    expect(screen.getByRole('button', { name: /restrict just this folder/i })).toBeInTheDocument();
+    expect(api.revokeAccess).not.toHaveBeenCalled();
   });
 });
 

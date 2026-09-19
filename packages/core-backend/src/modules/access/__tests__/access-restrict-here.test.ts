@@ -412,4 +412,39 @@ describe('restricting below a parent keeps the principal reported', () => {
     expect(v.denials['u:alice@example.com']).toBeUndefined();
     expect(v.sources['u:alice@example.com'].read).toEqual([{ kind: 'direct' }]);
   });
+
+  // ── the two halves of the report must name the same principals ───────────
+
+  describe('a FILE whose own frontmatter denies a role', () => {
+    const NOTE = `${FOLDER}/Note.md`;
+
+    /** The file target's view — its own frontmatter is the scope in question. */
+    async function fileView() {
+      access.invalidate(WS);
+      return resolveAccessView(access, WS, NOTE, 'root@example.com', 'file');
+    }
+
+    it('reports a KNOWN role denial in both halves: the row, and the source under it', async () => {
+      await write(repo, NOTE, '---\nread:\n  - deny GTM Team\n---\n# Note\n');
+      const v = await fileView();
+
+      expect(v.deniedHere.principals).toEqual([{ name: 'GTM Team', kind: 'group' }]);
+      expect(v.denials['g:gtm team']?.read).toEqual([{ kind: 'direct' }]);
+      // And it is what the gate enforces: a member of the group cannot read.
+      expect(await access.canRead(WS, 'pat@example.com', NOTE)).toBe(false);
+    });
+
+    it('reports an UNKNOWN role denial in neither: the resolver ignores the line', async () => {
+      await write(repo, NOTE, '---\nread:\n  - deny Ghosts\n---\n# Note\n');
+      const v = await fileView();
+
+      // A role no roles.yaml names is dropped by the resolver, so nothing is
+      // denied and `denialSources` has nothing to report. A row here would say
+      // "Denied here" about a restriction the server does not enforce — and the
+      // menu on it would have no source to explain, per verb, why.
+      expect(v.deniedHere.principals).toEqual([]);
+      expect(v.denials['r:ghosts']).toBeUndefined();
+      expect(v.denials['g:ghosts']).toBeUndefined();
+    });
+  });
 });
