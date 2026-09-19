@@ -53,7 +53,13 @@ export async function readNativePlugin(
   // in, and the mismatch is said out loud so a grant written against the
   // manifest's spelling is not a mystery.
   const name = pluginIdentityOf(manifest, folderName);
-  const displayName = pluginDisplayNameOf(manifest, folderName);
+  // The display name comes from the MANIFEST alone — `displayName`, else
+  // `name` — never from the folder. `|| name` is not a folder fallback in
+  // disguise: it catches only the manifest that names nothing usable, the
+  // same shape `pluginIdentityOf` just stood the folder in for, so the
+  // display name follows the identity the reader resolved rather than
+  // arriving empty.
+  const displayName = pluginDisplayNameOf(manifest) || name;
   // Any PRESENT name that is not an identifier is worth a word — a number or
   // an object as much as a capitalised string. Only an absent name is silent.
   if (manifest && manifest.name !== undefined && !isPluginIdentifier(manifest.name)) {
