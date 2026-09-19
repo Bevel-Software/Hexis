@@ -686,6 +686,32 @@ describe('ConnectionProbeService: what the probe concludes', () => {
       // which resolved values were really secrets.
       expect(r?.detail).toContain('api version [redacted] is retired');
     });
+
+    /**
+     * Not every short `${VAR}` a manual resolves is even word-shaped. A
+     * separator or a path fragment arrives here as a "secret" like any other,
+     * and a pattern with no boundary on either side matches every occurrence
+     * of that punctuation in the provider's message — which is the whole quote.
+     */
+    it('leaves ordinary punctuation alone when a resolved value IS punctuation', async () => {
+      const svc = build(
+        {
+          type: 'http',
+          healthCheck: {
+            url: 'https://api${SEP}acme.test/me',
+            headers: { Authorization: 'Bearer ${API_KEY}' },
+          },
+        },
+        async (key) => (key.includes('SEP') ? '.' : SECRET),
+      );
+      const body = 'Bad credentials. See https://docs.acme.test/rest for help.';
+      vi.mocked(fetch).mockResolvedValue(new Response(body, { status: 401 }));
+
+      const r = await svc.probe('u1', 'a@b.c', 'acme');
+
+      // Every period survives: the sentence, the hostname, the trailing stop.
+      expect(r?.detail).toContain(body);
+    });
   });
 
   /**

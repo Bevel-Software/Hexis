@@ -210,21 +210,27 @@ class SecretRedactor {
   }
 }
 
-/** A letter or a digit — what a short value may not be glued to. */
-const WORD_CHAR = /[A-Za-z0-9]/;
-
 /**
  * `value`, wherever it appears as a run of its own.
  *
- * The guard goes on each END only when that end is itself a letter or a digit:
- * that is the only case where the value can hide inside a longer token (the
- * `1` of `401`). A value that begins or ends in punctuation has no such
- * ambiguity on that side, and demanding a boundary there would simply miss it.
+ * Both ends are guarded, unconditionally. An earlier version applied the guard
+ * only where the value's own edge was a letter or a digit, reasoning that a
+ * value ending in punctuation cannot hide inside a longer word — but a value
+ * made ENTIRELY of punctuation then compiled to a bare, unanchored pattern: a
+ * `${SEPARATOR}` of `.` turned every sentence period and every dot of every
+ * hostname in the provider's message into `[redacted]`, which destroys the
+ * quote this class exists to keep readable.
+ *
+ * The cost is a narrow one, and the right way round: a sub-six-character value
+ * whose edge is punctuation and which the provider echoes glued to a word
+ * character (`sk-ab` for a value of `-ab`) is not redacted. That intersection
+ * is far rarer than a punctuation-shaped `${VAR}`, and over-redaction cannot be
+ * recovered from by the reader while this miss still needs a credential short
+ * enough to carry almost no secret in the first place. Values of six
+ * characters or more never come here at all.
  */
 function standingAlone(value: string): RegExp {
-  const before = WORD_CHAR.test(value[0] ?? '') ? '(?<![A-Za-z0-9])' : '';
-  const after = WORD_CHAR.test(value[value.length - 1] ?? '') ? '(?![A-Za-z0-9])' : '';
-  return new RegExp(`${before}${escapeRegExp(value)}${after}`, 'g');
+  return new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(value)}(?![A-Za-z0-9])`, 'g');
 }
 
 function escapeRegExp(value: string): string {

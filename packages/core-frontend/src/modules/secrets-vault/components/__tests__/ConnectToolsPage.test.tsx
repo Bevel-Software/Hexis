@@ -397,7 +397,16 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
       // that holds the only copy of the probe's answer. Nothing persists a
       // verdict, so the answer was simply gone — and pressing Refresh is
       // exactly what someone does while waiting for one.
-      connectMock.getConnectPending.mockReset().mockResolvedValue(pending(false));
+      //
+      // Every load after the first reports the key as SET, which is what the
+      // server actually says once a save has landed. Feeding the pre-save list
+      // back instead would leave the badge reading `Needs a key` under a
+      // verdict reading `Connected` — a contradiction the real flow never
+      // produces, and not a state worth pinning a test to.
+      connectMock.getConnectPending
+        .mockReset()
+        .mockResolvedValueOnce(pending(false))
+        .mockResolvedValue(pending(true));
       renderPage();
       await include();
       await save('a');
@@ -407,7 +416,11 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
 
       await waitFor(() => expect(connectMock.getConnectPending).toHaveBeenCalledTimes(3));
       expect(screen.queryByText('Loading…')).toBeNull();
+      // The row is coherent: the badge agrees with the verdict beneath it.
+      expect(screen.getByText('Set')).toBeInTheDocument();
       expect(screen.getByTestId('saved-key-probe')).toHaveTextContent('Connected');
+      // Survived, not re-asked — a refresh is not a reason to call the provider.
+      expect(varsMock.checkToolConnection).toHaveBeenCalledTimes(1);
     });
   });
 });

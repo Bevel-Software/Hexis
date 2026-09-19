@@ -624,7 +624,14 @@ describe('ToolConnectionSection', () => {
       expect(checkToolConnection).not.toHaveBeenCalled();
       expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
 
-      releaseStore();
+      // Inside `act`, like the definition-edit race test above: resolving the
+      // held promise runs the save handler's continuation — `close`,
+      // `onChanged`, `onSaved` — and every one of those is a React state
+      // update. Outside an act window they warn and, worse for an ORDERING
+      // test, the assertions below could read a render that has not flushed.
+      await act(async () => {
+        releaseStore();
+      });
 
       // Only now, and the editor closes with the value gone from the DOM while
       // the probe is still hanging — the save is complete on its own terms.
