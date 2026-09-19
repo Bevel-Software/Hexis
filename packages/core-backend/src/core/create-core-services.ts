@@ -53,7 +53,7 @@ import { AuthService } from '../modules/auth/auth.service.js';
 import { AccountErasureService } from '../modules/auth/account-erasure.service.js';
 import { OidcAuthProvider, oidcSettingsFrom } from '../modules/auth/oidc-auth-provider.js';
 import { createAuthMiddleware } from '../modules/auth/auth.middleware.js';
-import { AccessControlService } from '../modules/access/access-control.service.js';
+import { AccessControlService, loadActiveGroups } from '../modules/access/access-control.service.js';
 import { CreatorAccessService } from '../modules/access/creator-access.js';
 import { GroupsAdminService } from '../modules/access/groups-admin.service.js';
 import { PendingSkillsService, SkillService } from '../modules/skills/index.js';
@@ -872,6 +872,7 @@ export async function createCoreServices(
     events: eventBus,
     kbDirName: kbDirName,
     creatorAccess,
+    loadActiveGroups,
   });
   const toolHandlerFactory = createToolHandlerFactory(resolveToolContext);
   const toolAuthMiddleware = createToolAuthMiddleware(externalApiKeyService, internalTokenService);
