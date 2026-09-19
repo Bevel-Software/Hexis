@@ -319,7 +319,7 @@ skills live under `{{skillsDir}}/`, organised by ownership; a skill that belongs
 exactly one plugin may live inside that plugin's `skills/` folder instead.
 Skill names are unique across the whole catalog, whichever home they have.
 The frontmatter names it, declares which tools it may use, and may carry a
-governance record:
+version:
 
 ```yaml
 ---
@@ -328,16 +328,14 @@ description: Drafts the Friday newsletter for review.
 allowed-tools: [slack_post_message]
 metadata:
   version: "1.4.0"
-  owner: "GTM"
-  lifecycle: active
 ---
 ```
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
 tool names from the `.tool` manuals and MCP servers of the plugins that hold
-the skill. `metadata.version` is semver; `metadata.lifecycle` is `active`,
-`deprecated` (still served, flagged in the library) or `retired` (kept for
-its owners, never distributed to agents).
+the skill. `metadata.version` is semver. Any other `metadata` keys are the
+author's own notes — the catalog carries the file as it is and acts on none
+of them.
 
 A `SKILL.md` committed on the default branch is listed and loadable within
 five seconds, on the connection you already have — see *A released tool or
