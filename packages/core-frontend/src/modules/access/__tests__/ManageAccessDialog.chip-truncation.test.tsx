@@ -117,11 +117,18 @@ describe('ManageAccessDialog: a picked chip is bounded by the field it sits in',
     expect(chip.getAttribute('style')).toBeNull();
     expect(remove.getAttribute('style')).toBeNull();
     for (const css of [chipCss, labelCss]) {
-      // `0px` is the absence of a floor, not a size; anything else in px would
-      // pin a width that zoom cannot scale.
-      const pinned = ['width', 'max-width', 'min-width']
-        .map((property) => css[property])
-        .filter((value) => value !== undefined && value !== '0px' && value.endsWith('px'));
+      // Any px width pins a size zoom cannot scale. `min-width: 0px` is the one
+      // exception — it is the absence of a floor, not a size. `width: 0px` and
+      // `max-width: 0px` are real pins (they would collapse the chip), so they
+      // are not exempt.
+      const pinned = (['width', 'max-width', 'min-width'] as const)
+        .map((property) => [property, css[property]] as const)
+        .filter(
+          ([property, value]) =>
+            value !== undefined &&
+            value.endsWith('px') &&
+            !(property === 'min-width' && value === '0px'),
+        );
       expect(pinned).toEqual([]);
     }
   }
