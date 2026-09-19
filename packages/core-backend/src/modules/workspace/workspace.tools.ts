@@ -348,6 +348,84 @@ async function assertNotBinaryOverwrite(
   return existing;
 }
 
+/** What a write is ALLOWED to do at a path. `create` is the default everywhere. */
+export type WriteMode = 'create' | 'overwrite' | 'update';
+
+/** What a write actually DID at a path, in the answer the caller reads. */
+export type WriteOutcome = 'created' | 'replaced' | 'updated';
+
+/**
+ * The `mode` input, on both write tools. Stated on the input itself and not
+ * only in the description, because the argument is where an agent decides:
+ * the default refuses to replace anything, so "write this here" can no longer
+ * destroy a page the agent never read.
+ */
+const WRITE_MODE_INPUT: JsonSchema = {
+  type: 'string',
+  enum: ['create', 'overwrite', 'update'],
+  description:
+    'What the write may do at the path, default `create`: `create` writes a NEW file and refuses (`exists`) a path that already ' +
+    'holds something; `overwrite` replaces what is there, and creates the file when there is nothing; `update` replaces an ' +
+    'EXISTING file and refuses (`missing`) a path that holds nothing.',
+};
+
+/** The same three modes, said once, for both tool descriptions. */
+const WRITE_MODE_NOTE =
+  ' `mode` decides what may happen at a path and DEFAULTS TO `create`: `create` writes a new file and refuses a path that ' +
+  'already exists (`exists`, with the path — pass `mode: overwrite` to replace it), `overwrite` replaces what is there ' +
+  '(creating it if there is nothing), `update` replaces an existing file and refuses a path that does not exist (`missing`). ' +
+  'A refused path is left exactly as it was.';
+
+/** The refusal `create` gives on a path that already holds something. */
+function pathExists(path: string): ToolError {
+  return new ToolError(
+    `"${displayPath(path)}" already exists — pass mode: overwrite to replace it, or write to a different path.`,
+    409,
+    { code: 'exists', path },
+  );
+}
+
+/** The refusal `update` gives on a path that holds nothing. */
+function pathMissing(path: string): ToolError {
+  return new ToolError(
+    `"${displayPath(path)}" does not exist — pass mode: create to create it.`,
+    404,
+    { code: 'missing', path },
+  );
+}
+
+/**
+ * The mode gate for ONE path: refuses the write the mode does not allow, or
+ * names what it is about to do. `create` on something that exists and `update`
+ * on something that does not are the two refusals; everything else writes, and
+ * the outcome distinguishes a file that was there from one that was not.
+ */
+function decideWrite(mode: WriteMode, path: string, exists: boolean): WriteOutcome {
+  if (mode === 'create' && exists) throw pathExists(path);
+  if (mode === 'update' && !exists) throw pathMissing(path);
+  if (mode === 'update') return 'updated';
+  return exists ? 'replaced' : 'created';
+}
+
+/** The three modes, as a set the handler can check a raw argument against. */
+const WRITE_MODES: readonly WriteMode[] = ['create', 'overwrite', 'update'];
+
+/**
+ * The call's mode — `create` when it says nothing, which is the whole point of
+ * the default. A mode that is not one of the three is REFUSED rather than
+ * treated as the nearest thing: a tool that quietly read `replace` as
+ * "overwrite" would put the silent overwrite back, by a different door.
+ */
+function modeOf(a: Record<string, unknown>): WriteMode {
+  if (a.mode === undefined || a.mode === null) return 'create';
+  if (typeof a.mode === 'string' && (WRITE_MODES as readonly string[]).includes(a.mode)) return a.mode as WriteMode;
+  throw new ToolError(
+    `"${String(a.mode)}" is not a write mode: use ${WRITE_MODES.map((m) => `\`${m}\``).join(', ')} (default \`create\`).`,
+    400,
+    { code: 'bad_mode' },
+  );
+}
+
 /**
  * What searching ONE file amounted to. The walk ignores this (a file with
  * nothing searchable is just a file with no matches), but a grep whose path
@@ -1419,7 +1497,9 @@ export function registerWorkspaceTools(
   mount({
     name: 'write_file',
     description:
-      'Write (create or overwrite) a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes }`.' +
+      'Write a workspace TEXT file. The change is committed + pushed as you. Returns `{ path, bytes, outcome }`, where `outcome` is ' +
+      '`created`, `replaced` or `updated`.' +
+      WRITE_MODE_NOTE +
       IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1428,6 +1508,7 @@ export function registerWorkspaceTools(
         branch: BRANCH_INPUT,
         path: wsPath(kbDirName, 'Path'),
         content: str('Full file content.'),
+        mode: WRITE_MODE_INPUT,
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'path', 'content'],
@@ -1435,8 +1516,16 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path written (echoes the input).'), bytes: int('Number of bytes written.') },
-      required: ['path', 'bytes'],
+      properties: {
+        path: str('The path written (echoes the input).'),
+        bytes: int('Number of bytes written.'),
+        outcome: {
+          type: 'string',
+          enum: ['created', 'replaced', 'updated'],
+          description: 'What the write did: `created` (nothing was there), `replaced` (`mode: overwrite` over an existing file), `updated` (`mode: update`).',
+        },
+      },
+      required: ['path', 'bytes', 'outcome'],
     },
     write: true,
     proposable: true,
@@ -1450,8 +1539,12 @@ export function registerWorkspaceTools(
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.path as string);
       const fs = await ctx.getFilesystem(a.branch as string);
       await assertNotBinaryOverwrite(readers,a.path as string, fs);
+      // The mode is judged AFTER the content gates, so a file the tools may
+      // not write as text is still answered with the capability refusal that
+      // names the tool to use instead — not with "it already exists".
+      const outcome = decideWrite(modeOf(a), a.path as string, (await kindOf(fs, a.path as string)) !== null);
       await fs.writeFile(a.path as string, a.content as string);
-      return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8') };
+      return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8'), outcome };
     },
   });
 
@@ -1459,10 +1552,14 @@ export function registerWorkspaceTools(
     name: 'write_files',
     description:
       'Batch-write many files in ONE commit — far faster than calling write_file once per file when ' +
-      'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`; all ' +
-      'are created/overwritten and committed + pushed together as you. Prefer this over many write_file ' +
-      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Text files only; one refused ' +
-      'file refuses the whole batch. Returns `{ count }`.' +
+      'creating many files at once (e.g. seeding a knowledge base). Each entry is `{ path, content }`, and the files it ' +
+      'writes are committed + pushed together as you. Prefer this over many write_file ' +
+      'calls. All files must be in the SAME ontology (the boundary below applies to the batch). Text files only. ' +
+      'Returns `{ count, files }`: one entry per REQUESTED path, in the order you gave them, each `{ path, outcome }` — ' +
+      '`created` / `replaced` / `updated` for a path it wrote, or `refused` with `error` (the code) and `message` (why) for a ' +
+      'path it could not. `count` is how many were written. A path it refuses — the mode said no, or the file is not text — ' +
+      'does not stop the others; read `files` to see what landed.' +
+      WRITE_MODE_NOTE +
       IMAGE_CONVENTION_NOTE +
       ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
@@ -1471,7 +1568,7 @@ export function registerWorkspaceTools(
         branch: BRANCH_INPUT,
         files: {
           type: 'array',
-          description: 'Files to write; each created or overwritten.',
+          description: 'Files to write; `mode` decides what each one may do at its path.',
           items: {
             type: 'object',
             properties: { path: wsPath(kbDirName, 'Path'), content: str('Full file content.') },
@@ -1479,6 +1576,7 @@ export function registerWorkspaceTools(
             additionalProperties: false,
           },
         },
+        mode: WRITE_MODE_INPUT,
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'files'],
@@ -1486,31 +1584,68 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { count: int('Number of files written.') },
-      required: ['count'],
+      properties: {
+        count: int('Number of files written — the entries in `files` whose `outcome` is not `refused`.'),
+        files: {
+          type: 'array',
+          description: 'One entry per REQUESTED path, in input order.',
+          items: {
+            type: 'object',
+            properties: {
+              path: str('The requested path (echoes the input).'),
+              outcome: {
+                type: 'string',
+                enum: ['created', 'replaced', 'updated', 'refused'],
+                description: 'What happened at this path. `refused` means nothing was written there and the file is untouched.',
+              },
+              error: str('Present when `outcome` is `refused`: the refusal code — `exists`, `missing` or `binary_not_writable`.'),
+              message: str('Present when `outcome` is `refused`: the full refusal, the same one write_file would have given.'),
+            },
+            required: ['path', 'outcome'],
+          },
+        },
+      },
+      required: ['count', 'files'],
     },
     write: true,
     proposable: true,
     handler: async (a, ctx: ToolContext) => {
       const files = (a.files as Array<{ path: string; content: string }>) ?? [];
-      if (files.length === 0) return { count: 0 };
-      // Gate every path first (records ontology touches; a cross-ontology batch
-      // is blocked exactly like the per-file write tools).
-      for (const f of files) assertNotDocumentEdit(readers, f.path);
+      if (files.length === 0) return { count: 0, files: [] };
+      const mode = modeOf(a);
+      // The POLICY gates still judge the whole batch: a restricted run or a
+      // cross-ontology batch is a call that should not have been made at all,
+      // not a per-path outcome, and the ontology gate must see every path
+      // before anything lands. What a single FILE is (not text) or what its
+      // path already holds (the mode) is decided per path, below.
       for (const f of files) writePolicy.assertPathWritable(ctx.sessionId, f.path);
       for (const f of files) await assertOntologyWriteAllowed(sessionOntologyGate, ctx, f.path);
+      const fs = await ctx.getFilesystem(a.branch as string);
       // `write: true` guarantees a LockingFilesystem here; `writeFiles` lands the
-      // whole batch as one commit. Structural cast avoids a workflow-internal import.
-      const fs = (await ctx.getFilesystem(a.branch as string)) as unknown as {
+      // batch as one commit. Structural cast avoids a workflow-internal import.
+      const batching = fs as unknown as {
         writeFiles(writes: { path: string; content: string }[], summary: string): Promise<void>;
-        readFile(p: string): Promise<string | Buffer>;
       };
-      for (const f of files) await assertNotBinaryOverwrite(readers,f.path, fs);
-      await fs.writeFiles(
-        files.map((f) => ({ path: f.path, content: f.content })),
-        `Write ${files.length} file(s)`,
-      );
-      return { count: files.length };
+      const writes: { path: string; content: string }[] = [];
+      const outcomes: Record<string, unknown>[] = [];
+      for (const f of files) {
+        try {
+          assertNotDocumentEdit(readers, f.path);
+          await assertNotBinaryOverwrite(readers, f.path, fs);
+          // An earlier entry in this same batch counts as existing: two `create`
+          // entries for one path are a mistake the commit would otherwise hide.
+          const exists = writes.some((w) => w.path === f.path) || (await kindOf(fs, f.path)) !== null;
+          const outcome = decideWrite(mode, f.path, exists);
+          writes.push({ path: f.path, content: f.content });
+          outcomes.push({ path: f.path, outcome });
+        } catch (err) {
+          if (!(err instanceof ToolError)) throw err;
+          const details = (err.details ?? {}) as { code?: string; kind?: string };
+          outcomes.push({ path: f.path, outcome: 'refused', error: details.code ?? details.kind ?? 'refused', message: err.message });
+        }
+      }
+      if (writes.length > 0) await batching.writeFiles(writes, `Write ${writes.length} file(s)`);
+      return { count: writes.length, files: outcomes };
     },
   });
 
