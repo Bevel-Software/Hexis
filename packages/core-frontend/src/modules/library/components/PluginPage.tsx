@@ -298,7 +298,15 @@ export function PluginPage() {
           each other is gone too: the band centres both, and it is the only
           thing deciding how tall this row is. */}
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
-        <div className="flex min-w-0 items-center gap-2">
+        {/* The trail and the title are the part of this row allowed to run out
+            of space; the actions beside them are not. `flex-1` + `min-w-0`
+            takes the row's shortfall from HERE, and `overflow-hidden` is what
+            makes that safe: the trail is a fixed width, so on a narrow
+            viewport a group that could only shrink would push its content
+            straight across the manifest and action buttons instead. Clipped,
+            the title truncates first, the trail goes last, and the controls
+            stay where they are and stay clickable. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           <PluginBreadcrumb />
           <h1 className="min-w-0 truncate text-display font-semibold" title={label}>
             {label}

@@ -1,7 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ChevronRight } from 'lucide-react';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { announceToolCredentialsChanged } from '../../../../core/events';
@@ -152,7 +152,7 @@ export function ToolPage({
             above still lead with it on its own row — they have no title bar
             to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
-          <div className="-ml-2 flex-none">{backLink}</div>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
           <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="flex-none" />
           <h1 className="min-w-0 truncate text-display font-semibold text-ink" title={tool.name}>
             {tool.name}

@@ -48,6 +48,26 @@ export const HEADER_BAND = 'flex h-header flex-none items-center';
  */
 export const HEADER_COLUMN_TOP = 'pt-3';
 
+/**
+ * The wrapper for a quiet `size="sm"` Button that LEADS a band — the `‹ Back`
+ * link on the skill and tool pages.
+ *
+ * The negative margin is not a nudge. `Button`'s quiet `sm` size carries
+ * `px-2` (`QUIET_SIZE.sm` in `shared/components/Button.tsx`), so a button
+ * placed at the band's leading edge starts its TEXT 8px inside that edge,
+ * while every other page's title starts on it — and a back link that hangs
+ * 8px right of the heading below it is the same kind of not-quite-aligned
+ * this whole band exists to remove. `-ml-2` cancels exactly that padding, so
+ * the label's left edge is the column's left edge; the button's hover
+ * background still covers its own padding, which is what the padding is for.
+ *
+ * It is a constant, and it says the number it is cancelling, because the
+ * coupling runs the wrong way: this file cannot see `QUIET_SIZE`, so a change
+ * to that padding silently moves the link. One place to fix beats two, and a
+ * named constant is a thing a reader can grep for from `Button.tsx`.
+ */
+export const HEADER_BAND_LEAD = '-ml-2 flex-none';
+
 /** The sidebar's header row, for the layout test that measures the seam. */
 export const SIDEBAR_HEADER_TESTID = 'sidebar-header-row';
 

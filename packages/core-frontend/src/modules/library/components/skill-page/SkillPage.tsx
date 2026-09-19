@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { cn } from '../../../../lib/utils';
-import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { ArrowLeft, History } from 'lucide-react';
 import {
   DEFAULT_BRANCH,
@@ -639,7 +639,7 @@ export function SkillPage({
             (The error and not-found returns above still lead with it on its
             own row — they have no title bar to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-3')}>
-          <div className="-ml-2 flex-none">{backLink}</div>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
           {/* `tabIndex={-1}` keeps the heading out of the tab order while
               letting `.focus()` land on it — where focus goes when closing
               the log finds no clock to hand back to. No focus ring: it is a
