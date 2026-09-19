@@ -14,6 +14,7 @@ import type {
   AccessDecision,
   AccessDecisionSource,
   AccessTargetKind,
+  DenialSources,
   GrantPrincipal,
   GrantSource,
   GrantSources,
@@ -803,14 +804,7 @@ function resolveGrantSourcesForVerb(
     //     a GROUP whose group has VANISHED reads "unshadowed" here, and the
     //     alias-tolerant pair would then attribute a same-named role's
     //     surviving `role/<name>` grant to the group.
-    const canonical = canonicalRoleName(principal.role);
-    const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
-    const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
-    const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
-    const tokens =
-      tokenMatch === 'exact' || shadowed
-        ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
-        : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+    const tokens = ownTokensOf(model, principal.role, tokenMatch);
     for (const scope of scopes) {
       const states = tokens.map((t) => scope.byRole.get(t));
       if (states.includes('grant')) {
@@ -832,6 +826,75 @@ function resolveGrantSourcesForVerb(
     if (direct === 'grant') out.push(scopeToGrantSource(scope, kind, relativePath));
     // A group/everyone grant or deny at this scope is NOT this user's own entry:
     // it neither adds a source nor hides a farther own-entry, so we keep walking.
+  }
+  return out;
+}
+
+/**
+ * WHICH token spellings in a file are THIS role-shaped principal's own entries
+ * — the shadowing rule, in one place because the grant walk, the denial walk
+ * and the revoke splice must all agree on it (a disagreement attributes a
+ * shadowed bare token to the wrong principal, which is how a "restrict" silently
+ * strips a same-named role's grant). See `resolveGrantSourcesForVerb` for the
+ * full reasoning behind each branch.
+ */
+function ownTokensOf(
+  model: AccessModel,
+  role: string,
+  tokenMatch?: 'exact' | 'name',
+): string[] {
+  const canonical = canonicalRoleName(role);
+  const explicit = canonical.startsWith(ROLE_TOKEN_PREFIX);
+  const bare = explicit ? canonical.slice(ROLE_TOKEN_PREFIX.length) : canonical;
+  const shadowed = model.roles.byCanonical.get(bare)?.kind === 'group';
+  return tokenMatch === 'exact' || shadowed
+    ? [explicit ? `${ROLE_TOKEN_PREFIX}${bare}` : bare]
+    : [bare, `${ROLE_TOKEN_PREFIX}${bare}`];
+}
+
+/**
+ * The polarity twin of {@link resolveGrantSourcesForVerb}: every file scope
+ * whose own entry for this principal DENIES `verb`, closest-first.
+ *
+ * Same walk, mirrored stopping rule. A grant in the principal's own entry at a
+ * scope ENDS the list — under closest-wins a farther deny is dead, and reporting
+ * it would have the dialog say "restricted" about a verb the principal holds.
+ * A grant or deny reaching the principal through a group/role/`everyone` is not
+ * their own entry: it is neither a denial to report nor a reason to stop, so the
+ * walk carries on past it, exactly as the grant twin does.
+ *
+ * Returns `[]` when the principal is not denied `verb` by any file entry.
+ */
+function resolveDenialSourcesForVerb(
+  model: AccessModel,
+  verb: Verb,
+  kind: AccessTargetKind,
+  relativePath: string,
+  principal: GrantPrincipal,
+  fileOwn?: OwnEntries | null,
+  tokenMatch?: 'exact' | 'name',
+): GrantSource[] {
+  const scopes = resolveScopes(model, verb, relativePath, fileOwn);
+  const out: GrantSource[] = [];
+
+  if (principal.kind === 'role') {
+    const tokens = ownTokensOf(model, principal.role, tokenMatch);
+    for (const scope of scopes) {
+      const states = tokens.map((t) => scope.byRole.get(t));
+      // A grant under EITHER spelling wins within the scope (`buildScope` lets a
+      // grant stick over a deny of the same principal), so it ends the walk
+      // whether or not the other spelling denies here.
+      if (states.includes('grant')) break;
+      if (states.includes('denied')) out.push(scopeToGrantSource(scope, kind, relativePath));
+    }
+    return out;
+  }
+
+  const email = canonicalEmail(principal.email);
+  for (const scope of scopes) {
+    const own = scope.byEmail.get(email);
+    if (own === 'grant') break;
+    if (own === 'denied') out.push(scopeToGrantSource(scope, kind, relativePath));
   }
   return out;
 }
@@ -1509,6 +1572,90 @@ export class AccessControlService implements IAccessControl {
       if (sources.length > 0) out[verb] = sources;
     }
     return out;
+  }
+
+  async denialSources(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+    principal: GrantPrincipal,
+    opts?: { tokenMatch?: 'exact' | 'name' },
+  ): Promise<DenialSources> {
+    const model = await this.loadModel(workspaceId);
+    // Same own-scope rule as `grantSources`: a file target consults its own
+    // frontmatter, a folder target's own access.md is already in the dir chain.
+    const own =
+      kind === 'file'
+        ? await this.readOwnEntries(await this.repoDir(workspaceId), relativePath)
+        : null;
+    const out: DenialSources = {};
+    for (const verb of KNOWN_VERBS) {
+      const sources = resolveDenialSourcesForVerb(
+        model,
+        verb,
+        kind,
+        relativePath,
+        principal,
+        own,
+        opts?.tokenMatch,
+      );
+      if (sources.length > 0) out[verb] = sources;
+    }
+    return out;
+  }
+
+  async locallyDeniedPrincipals(
+    workspaceId: string,
+    kind: AccessTargetKind,
+    relativePath: string,
+  ): Promise<{ principals: ResolvedPrincipal[]; users: { name: string; email: string }[] }> {
+    const model = await this.loadModel(workspaceId);
+    // The target's OWN entries, and only those — the one scope whose rules a
+    // restriction made here is written into. A folder's are its `access.md` in
+    // the dir model; a file node's are its own frontmatter.
+    const own: OwnEntries | null =
+      kind === 'folder'
+        ? (model.accessFilesByDir.get(relativePath)?.entries ?? null)
+        : await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
+    if (!own) return { principals: [], users: [] };
+
+    const byIdentity = new Map<string, ResolvedPrincipal>();
+    const byEmail = new Map<string, { name: string; email: string }>();
+    for (const verb of KNOWN_VERBS) {
+      for (const entry of own[verb] ?? []) {
+        // Grants are already reported by the eligible lists; only the denials
+        // are invisible there, and only they are this method's business.
+        if (!entry.deny) continue;
+        if (entry.kind === 'user') {
+          if (!byEmail.has(entry.email)) {
+            byEmail.set(entry.email, { name: entry.displayName, email: entry.email });
+          }
+          continue;
+        }
+        // A token naming a role nobody knows is not a rule: `loadModel` drops
+        // such entries from every `access.md`, and `resolveScopes` filters them
+        // out of a file's own frontmatter (the one scope it does not pre-filter)
+        // — so the resolver denies nothing, `denialSources` reports nothing, and
+        // a row here would claim a restriction the server does not enforce. Skip
+        // it on the same rule, so this list and the denial sources agree.
+        if (!roleKnown(model.roles, entry.role)) continue;
+        // Resolve the token's kind and display name through the SAME merged
+        // index the eligible lists use, so a denied group keys as `g:` and a
+        // denied role as `r:` — matching the row keys the view is built on. A
+        // KNOWN token with no record is a built-in (`everyone`, `admin` before
+        // roles.yaml names it), which displays as the role it is.
+        const record = model.roles.byCanonical.get(entry.role);
+        const name = record ? record.displayName : (entry.displayRole || entry.role);
+        const kindOf = record?.kind ?? 'role';
+        const key = `${kindOf}\0${name.toLowerCase()}`;
+        if (!byIdentity.has(key)) byIdentity.set(key, { name, kind: kindOf });
+      }
+    }
+    const principals = [...byIdentity.values()].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0,
+    );
+    const users = [...byEmail.values()].sort((a, b) => a.email.localeCompare(b.email));
+    return { principals, users };
   }
 
   async explainAccess(
