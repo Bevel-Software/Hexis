@@ -101,6 +101,14 @@ function tagsAround(source: string, marker: string): string[] {
     // decide whether the test can see the className.
     const start = source.lastIndexOf('<', hit.index);
     const end = source.indexOf('>', hit.index);
+    // Not every mention of the marker is inside a tag: the import that brings
+    // `HEADER_COLUMN_TOP` into the file names it too. Such a hit has no '<'
+    // before it, or has one that already closed — and slicing forward from it
+    // to the next '>' hands the assertions a window over whatever constants
+    // happen to sit between, which is how a `pt-` belonging to some unrelated
+    // class string gets read as a second offset on the column. A mention that
+    // is not in a tag is not a tag.
+    if (start === -1 || source.slice(start, hit.index).includes('>')) continue;
     // An unterminated tag is a parse the assertions cannot trust, so hand
     // them the rest of the file rather than a silently empty string.
     tags.push(source.slice(start === -1 ? hit.index : start, end === -1 ? undefined : end));
