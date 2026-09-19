@@ -42,6 +42,7 @@ import {
   PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_SKILLS_DIR,
+  pluginDisplayNameOf,
   pluginManifestName,
   renderPluginManifest,
   PERSONAL_PLUGIN_PREFIX,
@@ -276,13 +277,17 @@ export class PluginProvisionService {
 
   /**
    * Ensure the caller's personal folder exists — idempotent, keyed to the
-   * stable user id. Returns `created: false` when it is already there.
+   * stable user id. Returns `created: false` when it is already there, and
+   * with it the display name the existing manifest carries (see
+   * {@link persistedDisplayName}): the answer is what the file says, so the
+   * call that made the folder and every call after it agree.
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
-      if ((await this.existingFolder(folder)) !== null) {
-        return provisioned(folder, pluginManifestName(folder), folder, false);
+      const existing = await this.existingFolder(folder);
+      if (existing !== null) {
+        return provisioned(folder, pluginManifestName(folder), await this.persistedDisplayName(existing, folder), false);
       }
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
@@ -291,7 +296,7 @@ export class PluginProvisionService {
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
         if (err instanceof PluginProvisionError && err.status === 409) {
-          return provisioned(folder, pluginManifestName(folder), folder, false);
+          return provisioned(folder, pluginManifestName(folder), await this.persistedDisplayName(folder, folder), false);
         }
         throw err;
       }
@@ -440,6 +445,25 @@ export class PluginProvisionService {
     if (!children) return null;
     const lower = name.toLowerCase();
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
+  }
+
+  /**
+   * What the plugin at `folder` is ALREADY called, read from its manifest by
+   * the one shared rule — `fallback` only when there is no manifest to read
+   * (a folder mid-creation, a `plugin.json` that is not an object).
+   *
+   * An ensure that found the folder already there answers with the FILE's
+   * answer, never the folder's spelling: the folder is an input to no name,
+   * and an idempotent call whose second answer differed from its first would
+   * be this service telling the caller a plugin had been renamed.
+   */
+  private async persistedDisplayName(folder: string, fallback: string): Promise<string> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const manifest = await this.disk.readJsonObject(
+      path.join(wsDir, this.kbDirName, PLUGINS_DIR, ...folder.split('/'), PLUGIN_MANIFEST_FILE),
+    );
+    return pluginDisplayNameOf(manifest) || fallback;
   }
 
   /**

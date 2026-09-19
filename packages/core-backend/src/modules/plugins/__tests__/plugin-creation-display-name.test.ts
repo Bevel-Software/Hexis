@@ -209,6 +209,28 @@ describe('creation derives and stores the display name the same way through ever
     });
   });
 
+  it('an ensure that finds the folder answers with the manifest, not the folder spelling', async () => {
+    const h = await makeHarness();
+    await h.svc.ensurePersonalPlugin(ALICE);
+    // Somebody labelled their own space. The folder is keyed to a user id and
+    // never moves, but the manifest is the only thing that says what it is
+    // called — so the ensure has to read it.
+    const manifestPath = path.join(h.dir, KB, 'Plugins/personal-u-alice/plugin.json');
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify({ name: 'personal-u-alice', displayName: "Alice's space" }, null, 2),
+    );
+
+    const again = await h.svc.ensurePersonalPlugin(ALICE);
+    expect(again).toMatchObject({
+      created: false,
+      name: 'personal-u-alice',
+      displayName: "Alice's space",
+    });
+    // And the ensure wrote nothing: the label is still the one on disk.
+    expect(JSON.parse(await fs.readFile(manifestPath, 'utf-8')).displayName).toBe("Alice's space");
+  });
+
   it("the tool's declared output promises the display name it now returns", async () => {
     const h = await makeHarness();
     const outputs = CREATE_PLUGIN.outputs as { properties: Record<string, unknown> };

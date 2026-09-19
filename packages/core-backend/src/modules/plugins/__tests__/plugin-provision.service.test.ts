@@ -83,7 +83,7 @@ describe('PluginProvisionService.createPlugin', () => {
       path: 'Plugins/GTM',
       skillsDir: 'Plugins/GTM/skills',
       name: 'gtm',
-      // The name its creator typed, trimmed  persisted, and reported back
+      // The name its creator typed, trimmed — persisted, and reported back
       // exactly as persisted.
       displayName: 'GTM',
       created: true,

@@ -198,10 +198,12 @@ describe('PluginRenameService', () => {
     expect(await access.canRead(wsId, member.email, 'Skills/Eng/deploy/SKILL.md')).toBe(true);
 
     const result = await svc.rename(manager, 'gtm', { name: 'go-to-market' });
-    // The fixture's manifest carries no `displayName` — the shape the boot
-    // backfill leaves only for a plugin whose folder IS its identifier — so
-    // the plugin is called by its identifier, and the new identifier is what
-    // it is now called. Nothing here reads `Plugins/GTM`.
+    // The fixture's manifest carries no `displayName`: it predates the boot
+    // backfill, which would not have left it this way either — the folder
+    // `GTM` and the identifier `gtm` differ, so the step would have recorded
+    // the folder's spelling. With the field absent, the plugin is called by
+    // its identifier, and the new identifier is what it is now called.
+    // Nothing here reads `Plugins/GTM`.
     expect(result).toEqual({
       name: 'go-to-market',
       displayName: 'go-to-market',

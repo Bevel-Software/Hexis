@@ -55,8 +55,10 @@ describe('compileMarketplace', () => {
       'Plugins/GTM/plugin.json',
       JSON.stringify({
         name: 'gtm',
-        // Both names, as every manifest this platform writes carries them.
-        displayName: 'GTM',
+        // Both names, as every manifest this platform writes carries them —
+        // and spelled differently from the folder `Plugins/GTM`, so a compiler
+        // that fell back to the folder for either would fail here.
+        displayName: 'Go To Market',
         version: '2.1.0',
         description: 'Go to market',
         extensions: { 'software.bevel.hexis': { skills: ['Skills/Eng/deploy'] } },
@@ -372,15 +374,15 @@ describe('compileMarketplace', () => {
 
   it('a plugin with no presentation block of its own still tells Codex what it is called', async () => {
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
-    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ displayName: 'GTM' });
+    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ displayName: 'Go To Market' });
   });
 
   it('a partial presentation block keeps what it says and gains the name it does not', async () => {
     await write(
       'Plugins/GTM/plugin.json',
-      JSON.stringify({ name: 'gtm', displayName: 'GTM', version: '2.1.0', description: 'Go to market', interface: { category: 'Sales' } }),
+      JSON.stringify({ name: 'gtm', displayName: 'Go To Market', version: '2.1.0', description: 'Go to market', interface: { category: 'Sales' } }),
     );
     const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
-    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ category: 'Sales', displayName: 'GTM' });
+    expect(json(tree, 'plugins/gtm/.codex-plugin/plugin.json').interface).toEqual({ category: 'Sales', displayName: 'Go To Market' });
   });
 });

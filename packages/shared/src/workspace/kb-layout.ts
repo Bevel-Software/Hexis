@@ -422,22 +422,26 @@ export function pluginDisplayNameOf(manifest: Record<string, unknown> | null): s
  * A minimal, valid `plugin.json` for a plugin folder: the identifier the
  * folder name folds into, and the name a person sees it by — `displayName`,
  * ALWAYS written, so a client's picker shows "Sales Team" for `sales-team`
- * and every reader has the one field to read. `displayName` defaults to the
- * folder's spelling, which is what a folder someone made in the app is
- * called; creation passes the name its creator typed. The field is written
- * even when it equals the identifier: a manifest that omits it when the two
- * agree is a manifest whose readers need a second rule.
+ * and every reader has the one field to read.
+ *
+ * ONE argument, deliberately: `folderName` is the folder's own leaf, and on
+ * the creation path that leaf IS the name its creator typed, trimmed — the
+ * dialog's route and the `create_plugin` tool make the folder out of the
+ * typed name and hand the same string to both. A second `displayName`
+ * parameter would be a way for the two to disagree that no caller needs.
+ * The field is written even when it equals the identifier: a manifest that
+ * omits it when the two agree is a manifest whose readers need a second rule.
  *
  * Nothing else: `version`, `license` and the rest are metadata about a
  * DISTRIBUTED package, and inventing values for a folder someone just made
  * in the app would be asserting things nobody said.
  */
-export function renderPluginManifest(folderName: string, displayName: string = folderName): string {
+export function renderPluginManifest(folderName: string): string {
   const name = pluginManifestName(folderName);
-  // Always a non-blank, trimmed answer: what was asked for, else the folder,
-  // else the identifier — a `displayName` of spaces would be a field present
-  // and saying nothing, which is the shape every reader here exists to avoid.
-  const shown = displayName.trim() || folderName.trim() || name;
+  // Always a non-blank, trimmed answer: the spelling asked for, else the
+  // identifier — a `displayName` of spaces would be a field present and
+  // saying nothing, which is the shape every reader here exists to avoid.
+  const shown = folderName.trim() || name;
   return `${JSON.stringify({ $schema: PLUGIN_MANIFEST_SCHEMA, name, displayName: shown }, null, 2)}\n`;
 }
 

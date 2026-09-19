@@ -37,7 +37,7 @@ describe('the one display-name rule', () => {
   });
 
   describe('renderPluginManifest', () => {
-    it('always writes displayName — the folder spelling by default', () => {
+    it('always writes displayName — the spelling it is given, which creation takes from its creator', () => {
       expect(JSON.parse(renderPluginManifest('Sales Team'))).toMatchObject({
         name: 'sales-team',
         displayName: 'Sales Team',
@@ -50,13 +50,16 @@ describe('the one display-name rule', () => {
       expect(pluginDisplayNameOf(manifest)).toBe('design');
     });
 
-    it('takes the name its creator typed when given one', () => {
-      expect(JSON.parse(renderPluginManifest('Sales Team', 'Sales Team (EMEA)'))).toMatchObject({
+    it('trims the spelling it is given, and falls back to the identifier when it says nothing', () => {
+      // Creation hands over the name its creator typed — the folder's leaf and
+      // the display name are the one string, so the two can never disagree.
+      expect(JSON.parse(renderPluginManifest('  Sales Team  '))).toMatchObject({
         name: 'sales-team',
-        displayName: 'Sales Team (EMEA)',
+        displayName: 'Sales Team',
       });
-      // A blank one is not a name; the folder's spelling stands.
-      expect(JSON.parse(renderPluginManifest('Sales Team', '   ')).displayName).toBe('Sales Team');
+      // A blank one is not a name; the identifier stands rather than a field
+      // that is present and says nothing.
+      expect(JSON.parse(renderPluginManifest('   ')).displayName).toBe('plugin');
     });
 
     it('round-trips: what the renderer writes is what the reader says', () => {

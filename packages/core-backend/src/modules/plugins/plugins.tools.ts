@@ -36,7 +36,7 @@ const PROVISIONED_OUTPUT = {
     skillsDir: { type: 'string', description: 'Where its skills go: `<path>/skills`. Each skill is a subfolder holding a `SKILL.md`.' },
     folder: { type: 'string', description: 'The same folder as its path below the plugins root.' },
     name: { type: 'string', description: 'The plugin identity (its manifest name), as grants and the marketplace spell it.' },
-    displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: the name that was asked for, trimmed.' },
+    displayName: { type: 'string', description: 'What people see it called — the manifest `displayName`, exactly as persisted: for `create_plugin`, the name that was asked for, trimmed; for `my_plugin`, the personal folder\'s own label.' },
     created: { type: 'boolean', description: 'False when the folder already existed.' },
   },
 } as const;

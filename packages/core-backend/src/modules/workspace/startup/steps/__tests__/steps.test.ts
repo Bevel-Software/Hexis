@@ -66,7 +66,11 @@ afterEach(async () => {
 });
 
 /** A populated upstream carrying `files`: one commit, both protected refs. Returns the seed clone. */
-async function seedUpstream(files: Record<string, string>): Promise<string> {
+async function seedUpstream(
+  files: Record<string, string>,
+  /** Symlinks to seed beside them: path in the repo → the target it points at. */
+  symlinks: Record<string, string> = {},
+): Promise<string> {
   const seed = path.join(root, '.seed');
   await fs.mkdir(seed, { recursive: true });
   await git(seed, ['init', '-b', DEFAULT_BRANCH]);
@@ -74,6 +78,11 @@ async function seedUpstream(files: Record<string, string>): Promise<string> {
     const abs = path.join(seed, rel);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, content, 'utf8');
+  }
+  for (const [rel, target] of Object.entries(symlinks)) {
+    const abs = path.join(seed, rel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.symlink(target, abs);
   }
   await git(seed, ['add', '-A']);
   await git(seed, ['commit', '-m', 'init']);
@@ -967,6 +976,65 @@ describe('PluginDisplayNamesStep', () => {
     expect(log).toContain('Plugins/Sales Team: displayName "Sales Team"');
 
     // Idempotent: every manifest it would touch now carries the field.
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+    const again = await checkout(DEFAULT_BRANCH);
+    expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit
+  });
+
+  /**
+   * The three shapes the plain "lacks the field, folder differs" reading gets
+   * wrong: a field that is present and says nothing, a manifest naming the
+   * folder's own spelling without being an identifier, and a `plugin.json`
+   * that is not this platform's file to write.
+   */
+  it('repairs a blank field, leaves a manifest that already shows its folder, and never writes through a link', async () => {
+    const scaffold = await fullScaffold();
+    await seedUpstream(
+      {
+        ...scaffold,
+        // Present but BLANK. The new reader falls through it to `name` where
+        // the old one fell through to the folder, so leaving it be is leaving
+        // the rename this step exists to prevent: blank is absent, and repaired.
+        'Plugins/Growth Team/plugin.json': '{"name":"growth-team","displayName":"   "}',
+        // A `name` that is no identifier but IS the folder's spelling: the
+        // identity is the slug `my-plugin`, and what people see is already
+        // "My Plugin". The folder knows nothing the manifest does not.
+        'Plugins/My Plugin/plugin.json': '{"name":"My Plugin"}',
+        // An own `__proto__` key — `JSON.parse` makes it one. Copied as DATA:
+        // assignment would have set the object's prototype instead, dropping
+        // the field and letting a prototype `displayName` stand in for the
+        // one being written.
+        'Plugins/Odd One/plugin.json': '{"name":"odd-one","__proto__":{"displayName":"from the prototype"}}',
+        // A bundle makes this folder a plugin; the `plugin.json` beside it is
+        // a LINK, which discovery does not count as a native manifest.
+        'Plugins/Kit Pro/plugin.bundle.json': '{"name":"kit"}',
+        'vendor-manifest.json': '{"name":"kit"}',
+      },
+      { 'Plugins/Kit Pro/plugin.json': '../../vendor-manifest.json' },
+    );
+
+    await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
+
+    const dir = await checkout(DEFAULT_BRANCH);
+    expect(await readJson(dir, 'Plugins/Growth Team/plugin.json')).toEqual({
+      name: 'growth-team',
+      displayName: 'Growth Team',
+    });
+    // Untouched, byte for byte.
+    expect(await fs.readFile(path.join(dir, 'Plugins/My Plugin/plugin.json'), 'utf8')).toBe('{"name":"My Plugin"}');
+    expect(await fs.readFile(path.join(dir, 'Plugins/Odd One/plugin.json'), 'utf8')).toBe(
+      '{\n  "name": "odd-one",\n  "displayName": "Odd One",\n  "__proto__": {\n    "displayName": "from the prototype"\n  }\n}\n',
+    );
+    // Still a link, and the file it points at is still the vendor's own.
+    expect((await fs.lstat(path.join(dir, 'Plugins/Kit Pro/plugin.json'))).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(path.join(dir, 'vendor-manifest.json'), 'utf8')).toBe('{"name":"kit"}');
+
+    const log = (await git(dir, ['log', '-1', '--format=%B'])).trim();
+    expect(log).toContain('Record the display names of 2 plugins in their manifests');
+    expect(log).toContain('Plugins/Growth Team: displayName "Growth Team"');
+    expect(log).not.toContain('Kit Pro');
+
+    // Idempotent over all of it: the next boot finds nothing to write.
     await makeRunner([new PluginDisplayNamesStep(new NodeFs())]).runAll();
     const again = await checkout(DEFAULT_BRANCH);
     expect((await git(again, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2'); // init + one backfill commit

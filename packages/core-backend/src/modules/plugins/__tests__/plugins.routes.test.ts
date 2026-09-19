@@ -81,18 +81,23 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const kbRoot = path.join(workspaceDir, KB);
   // Both carry the manifest that makes a folder a plugin to discovery, and
   // the access.md that makes it exist to the index.
-  const fixtures: [string, string][] = [
-    ['GTM', 'gtm'],
-    ['Finance', 'finance'],
-    ...Object.entries(opts.extraPlugins ?? {}),
+  // Folder, identity, display name. GTM's three spellings are deliberately
+  // all different: nothing here may read the folder for either name, and a
+  // fixture whose displayName echoed its folder could not tell the two apart.
+  const fixtures: [string, string, string][] = [
+    ['GTM', 'gtm', 'Google Tag Manager'],
+    ['Finance', 'finance', 'Finance'],
+    ...Object.entries(opts.extraPlugins ?? {}).map(
+      ([folder, name]): [string, string, string] => [folder, name, folder],
+    ),
   ];
-  for (const [folder, name] of fixtures) {
+  for (const [folder, name, displayName] of fixtures) {
     await fs.mkdir(path.join(kbRoot, 'Plugins', folder), { recursive: true });
     // Both names in the file, as every manifest carries them: the identity
     // and the spelling people see. Nothing reads the folder for either.
     await fs.writeFile(
       path.join(kbRoot, 'Plugins', folder, 'plugin.json'),
-      `{"name":"${name}","displayName":"${folder}"}`,
+      `{"name":"${name}","displayName":"${displayName}"}`,
     );
     await fs.writeFile(
       path.join(kbRoot, 'Plugins', folder, 'access.md'),
@@ -301,7 +306,10 @@ describe('/api/plugins routes', () => {
     const { status, plugins } = await listPlugins(h.baseUrl);
     expect(status).toBe(200);
     // Named by identity and labelled by display name — both the manifest's.
-    expect(plugins.map((g) => [g.name, g.displayName])).toEqual([['finance', 'Finance'], ['gtm', 'GTM']]);
+    expect(plugins.map((g) => [g.name, g.displayName])).toEqual([
+      ['finance', 'Finance'],
+      ['gtm', 'Google Tag Manager'],
+    ]);
     // `linkedRoots` is part of the summary's contract — the plugin page reads
     // it to name where a linked card lives. Neither fixture links anything,
     // and an empty list is what says so; a dropped mapping would be `undefined`.

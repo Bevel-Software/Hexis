@@ -122,6 +122,13 @@ export async function readBundlePlugin(
   // answer so the shared reader (`pluginDisplayNameOf`, manifest-only) tells
   // anyone who asks the same thing this discovery reports.
   const displayName = typeof ui.displayName === 'string' && ui.displayName.trim() ? ui.displayName.trim() : leaf;
+  // The presentation block is carried as written (below) — except for the
+  // one field that is also a name: the block gets the SAME answer the
+  // manifest does. The compile step fills `interface.displayName` only when
+  // it is blank, so a padded or blank spelling left here would ship a Codex
+  // manifest whose `interface` calls the plugin something the catalog and
+  // the API do not — the split answer this whole rule removes.
+  const carriedUi = typeof ui.displayName === 'string' ? { ...ui, displayName } : ui;
   const manifest: Record<string, unknown> = { name: pluginManifestName(name) };
   if (typeof bundle.version === 'string') manifest.version = bundle.version;
   if (typeof bundle.description === 'string') manifest.description = bundle.description;
@@ -133,7 +140,7 @@ export async function readBundlePlugin(
   // `interface` the Codex presentation block); anything else is left where it is.
   if (isRecord(bundle.author) || typeof bundle.author === 'string') manifest.author = bundle.author;
   if (Array.isArray(bundle.keywords) && bundle.keywords.every((k) => typeof k === 'string')) manifest.keywords = bundle.keywords;
-  if (Object.keys(ui).length > 0) manifest.interface = ui;
+  if (Object.keys(carriedUi).length > 0) manifest.interface = carriedUi;
 
   return {
     name,

@@ -57,6 +57,12 @@ describe('KbPluginSource — bundles', () => {
     await write('plugins/departments/engineering/shared/unnamed/plugin.bundle.json', JSON.stringify({ sourceSkillRoots: ['../escape', 'skills/x'] }));
     // A bundle whose name is not its folder's, with no display name of its own.
     await write('plugins/departments/business/finance/ledger-folder/plugin.bundle.json', JSON.stringify({ name: 'ledger' }));
+    // A declared display name with padding around it — the one field of the
+    // presentation block that is also a name.
+    await write(
+      'plugins/functional/cluster-a/padded/plugin.bundle.json',
+      JSON.stringify({ name: 'padded', interface: { displayName: '  Padded Plugin  ', category: 'Ops' } }),
+    );
     await write('plugins/broken/plugin.bundle.json', '{ not json');
   });
   afterEach(async () => {
@@ -67,7 +73,7 @@ describe('KbPluginSource — bundles', () => {
   it('finds bundles at any depth and reads them as plugins that link skill roots', async () => {
     const { plugins, warnings } = await new KbPluginSource(new NodeFs()).discover(kb);
     const byName = new Map(plugins.map((p) => [p.name, p]));
-    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'unnamed']);
+    expect([...byName.keys()].sort()).toEqual(['close', 'example-plugin', 'ledger', 'padded', 'unnamed']);
     // The bundle dialect's own rule — a declared display name, else the
     // FOLDER — which this foreign, read-only format keeps. It is resolved
     // INTO the manifest the reader synthesizes, so the shared manifest-only
@@ -93,6 +99,19 @@ describe('KbPluginSource — bundles', () => {
       // The presentation block rides along whole, for the compiled Codex manifest.
       interface: { displayName: 'Example Plugin', category: 'Productivity' },
     });
+    // One answer, in both fields: the presentation block is carried whole,
+    // but the name inside it is the trimmed one the manifest and discovery
+    // report — the compile step fills that field only when it is blank, so a
+    // padded spelling left here would ship a Codex manifest calling the
+    // plugin something the catalog does not.
+    const padded = byName.get('padded')!;
+    expect(padded.displayName).toBe('Padded Plugin');
+    expect(padded.manifest).toMatchObject({
+      displayName: 'Padded Plugin',
+      interface: { displayName: 'Padded Plugin', category: 'Ops' },
+    });
+    expect(pluginDisplayNameOf(padded.manifest)).toBe('Padded Plugin');
+
     // An unnamed bundle takes its folder's name; a bad root is dropped with a warning.
     expect(byName.get('unnamed')!.linkedRoots).toEqual(['skills/x']);
     expect(warnings.some((w) => w.includes('../escape'))).toBe(true);
