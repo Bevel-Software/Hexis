@@ -96,11 +96,29 @@ describe('NameWithBadges', () => {
     expect(container.firstElementChild!.children).toHaveLength(1);
   });
 
-  it('counts a mark as company', () => {
-    // A logo takes the row's width exactly the way a badge does, so the name
-    // beside one is being squeezed and earns the same floor.
+  it('does not spend the floor on a mark, which cannot move', () => {
+    // The floor is a claim on space something else has to give back, and a
+    // badge is the only thing here that can — it takes a second line. A mark
+    // is fixed width on the name's own line, so a floor granted for one is a
+    // minimum width with no matching concession: the row just gets wider than
+    // its box. That is precisely how the tool page's title bar came to render
+    // outside its own band.
     render(<NameWithBadges name={LONG_NAME} leading={<span data-testid="mark" />} />);
-    expect(screen.getByTitle(LONG_NAME).className).toContain(NAME_MIN_WIDTH);
+    const name = screen.getByTitle(LONG_NAME);
+    expect(name.className).not.toContain(NAME_MIN_WIDTH);
+    expect(screen.getByTestId('mark')).toBeInTheDocument();
+  });
+
+  it('can be told its row is one line tall and may not wrap', () => {
+    // For a caller whose height is a contract it does not own — the tool
+    // page's title bar is exactly as tall as the sidebar header row beside
+    // it, so a second line does not grow the band, it hangs out of it.
+    const { container } = render(
+      <NameWithBadges name={LONG_NAME} wrap={false} badges={<Badge>Owner</Badge>} />,
+    );
+    const row = container.firstElementChild as HTMLElement;
+    expect(row.className).toContain('flex-nowrap');
+    expect(row.className).not.toContain('flex-wrap ');
   });
 
   it('opens no tooltip on a name that is missing', () => {
@@ -221,6 +239,26 @@ describe('PluginIndexRow: the same rule, one line tall', () => {
     expect(name.parentElement!.className).toContain('flex-wrap');
   });
 
+  it('is laid out in a track that can actually run short', () => {
+    // Measured in chromium before this was here: a row wearing a
+    // 60-character name laid itself out 605px wide inside a 200px column
+    // and hung out of it at every window size. `ItemMenuFrame` is a grid,
+    // and its implicit column was `auto` — a track whose minimum is the
+    // content's min-content, which for a `whitespace-nowrap` name is the
+    // whole name. `min-w-0` does not reach it: that bounds the grid box,
+    // not the track inside it.
+    //
+    // It is this row, not the name, that the wrap depends on. A row that is
+    // never short never has a shortfall, and badges that are never short of
+    // room never move. With the track floored at 0 the row is the width of
+    // its column (200px at a 236px window, measured), and the badges take
+    // their second line.
+    const { container } = render(
+      <PluginIndexRow label={LONG_NAME} badge={<Badge>Owner</Badge>} onOpen={vi.fn()} />,
+    );
+    const frame = container.firstElementChild as HTMLElement;
+    expect(frame.className).toContain('grid-cols-[minmax(0,1fr)]');
+  });
   it('says the whole name on a row that carries no chip at all', () => {
     // The row used to pass its label through as a bare string, so a plugin
     // whose name the row had to truncate had nowhere to finish saying it.

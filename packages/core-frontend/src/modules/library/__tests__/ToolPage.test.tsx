@@ -189,10 +189,9 @@ describe('ToolPage: frame', () => {
   });
 
   it('holds a long tool name to a readable width, and says the rest on hover', async () => {
-    // The card's rule, on the page header. The way back and the mark are both
-    // fixed widths, so without a floor the one thing the page is named after
-    // is the only thing on the band that gives way — a deep plugin label in
-    // the back link used to leave the title an ellipsis and a letter.
+    // The card's rule, on the page header — the half of it a one-row band
+    // can keep. The name truncates and says the rest on hover; it does not
+    // take a floor, because the band has no second line to hand anything.
     const long = 'disposable-weather-lookup-for-the-northern-hemisphere-v2beta';
     secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, name: long }]);
     toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, name: long });
@@ -202,7 +201,17 @@ describe('ToolPage: frame', () => {
     // so the reader who only has the ellipsis can finish it.
     const title = await screen.findByRole('heading', { name: long, level: 1 });
     expect(title).toHaveAttribute('title', long);
-    expect(title.className).toContain(NAME_MIN_WIDTH);
+    expect(title.className).toContain('truncate');
+
+    // And NOT the floor. The band is one row tall, the same row the sidebar's
+    // header holds, so there is no second line for a floor to push anything
+    // onto — a floor here only made the title wider than the band and sent it
+    // out of the bottom of it at every phone width. The row says so itself:
+    // it cannot wrap, and it clips.
+    expect(title.className).not.toContain(NAME_MIN_WIDTH);
+    const row = title.parentElement as HTMLElement;
+    expect(row.className).toContain('flex-nowrap');
+    expect(row.className).toContain('overflow-hidden');
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {

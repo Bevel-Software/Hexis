@@ -36,11 +36,29 @@ export interface NameWithBadgesProps {
    */
   badges?: ReactNode;
   /**
-   * A mark that belongs to the name — a tool's logo. Also counts as company:
-   * a name squeezed by a logo is squeezed the same way a name squeezed by a
-   * badge is.
+   * A mark that belongs to the name — a tool's logo.
+   *
+   * It does NOT earn the name a floor, and the distinction is the one this
+   * component got wrong first time round. A badge can be moved: when the
+   * floor and the badges stop fitting, the badges take a second line and give
+   * the whole row back to the name. A mark cannot — it is fixed width, it sits
+   * on the name's own line, and no floor can conjure the space it is holding.
+   * A floor granted for a mark is therefore a floor with nothing to take the
+   * space back FROM, which is an overflow with extra steps.
    */
   leading?: ReactNode;
+  /**
+   * Whether the badges may take a second line. True everywhere the row is
+   * allowed to grow, which is every list and every card.
+   *
+   * `false` is for a row whose height is a contract the row does not own —
+   * the tool page's title bar is `HEADER_BAND`, exactly as tall as the
+   * sidebar's header row beside it, and a second line there does not make the
+   * band taller, it hangs out of the bottom of it. Such a caller owes the row
+   * an `overflow-hidden`: with nowhere to wrap to, the only other way out is
+   * across whatever is beside it.
+   */
+  wrap?: boolean;
   /** Typography for the name itself — the caller's `text-lede`/`text-display`. */
   nameClassName?: string;
   /**
@@ -87,14 +105,21 @@ export interface NameWithBadgesProps {
  * badges to line two, name alone on line one with the whole width to
  * truncate into.
  *
- * Two consequences worth stating rather than discovering:
- *  - With no badges there is nothing to wrap, so the floor can only push the
- *    name out of its container. A caller that keeps a mark but no badges (the
- *    tool page header) therefore owes the row an `overflow-hidden`, so the
- *    name clips instead of painting over its neighbours.
- *  - A name with NOTHING beside it gets no floor: there is no competitor to
- *    take the space back from, and a floor would be an overflow with no
- *    upside.
+ * Which is why the floor is spent on BADGES and on nothing else. A floor is
+ * a claim on space that something else has to give back, and a badge is the
+ * only thing on this row that can: it takes a second line and the name gets
+ * the first one whole. A mark cannot move and a back link is not even in this
+ * component, so a floor granted for either is a minimum width with no matching
+ * concession — the row simply becomes wider than the box it is in. That is
+ * exactly what it did on the tool page's title bar, where the band is one row
+ * tall by contract: the `<h1>` wrapped under the logo, the row grew to 86px
+ * inside a 48px band, and the title rendered outside it at every phone width.
+ * A name with nothing beside it gets no floor for the same reason.
+ *
+ * `wrap={false}` is the other half of that lesson, for a row whose height is
+ * not its own to spend. It is belt to the braces above: with the floor tied
+ * to badges, a header that has none cannot break a line anyway — but the day
+ * somebody adds one, the band should clip rather than silently grow.
  */
 export function NameWithBadges({
   name,
@@ -102,10 +127,10 @@ export function NameWithBadges({
   leading,
   nameClassName,
   gap = 'gap-2',
+  wrap = true,
   className,
   as: NameTag = 'span',
 }: NameWithBadgesProps) {
-  const crowded = Boolean(badges) || Boolean(leading);
   // The row follows its name, because what may legally contain what runs both
   // ways. A card and a plugin row are `<button>`s, whose content model is
   // phrasing — a `<div>` inside one is not markup — so the row is a `<span>`.
@@ -113,14 +138,14 @@ export function NameWithBadges({
   // rule read the other way round, so that row is a `<div>`.
   const Row = NameTag === 'h1' ? 'div' : 'span';
   return (
-    <Row className={cn('flex min-w-0 flex-wrap items-center', gap, className)}>
+    <Row className={cn('flex min-w-0 items-center', wrap ? 'flex-wrap' : 'flex-nowrap', gap, className)}>
       {leading}
       <NameTag
         // Omitted rather than `title=""`: a tooltip that opens on nothing is
         // a tooltip that opens on nothing. A name can be missing — the row
         // still has to render whatever is beside it around the hole.
         title={name || undefined}
-        className={cn('flex-1 truncate', crowded && NAME_MIN_WIDTH, nameClassName)}
+        className={cn('flex-1 truncate', badges && NAME_MIN_WIDTH, nameClassName)}
       >
         {name}
       </NameTag>

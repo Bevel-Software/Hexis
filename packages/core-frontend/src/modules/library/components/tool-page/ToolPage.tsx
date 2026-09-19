@@ -154,25 +154,30 @@ export function ToolPage({
             to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
           <div className={HEADER_BAND_LEAD}>{backLink}</div>
-          {/* The mark and the title through `NameWithBadges`, so the page
-              header keeps the same floor under its name that a card and a
-              plugin row do — the way back is a fixed width, and without a
-              floor a long plugin label in it crushes the tool's name to an
-              ellipsis and a letter.
+          {/* The mark and the title through `NameWithBadges`, so this page
+              states its name the way a card and a plugin row do: truncated
+              with an ellipsis, whole in the DOM, whole in `title`.
 
-              This header carries no badges, so what it takes from the shared
-              component is the floor and the `title`, not the wrap — and the
-              wrap is the half that could not work here anyway: the band is
-              ONE row tall by contract (`HEADER_BAND`), so a second line of
-              anything would hang out of it. A badge on this header is a
-              decision about the band, not a prop to pass.
+              What it does NOT take is the floor, and the reason is the band.
+              A floor is only worth having where something can give the space
+              back, and the only thing that can is a badge taking a second
+              line. This header has no badges, and it could not wrap them if
+              it had: `HEADER_BAND` is one row tall, exactly as tall as the
+              sidebar's header row beside it, so a second line here hangs out
+              of the band rather than growing it. A floor granted against the
+              back link — which is not even inside this component — bought
+              nothing and cost the title its place on the band at every phone
+              width. `wrap={false}` says that out loud, so the day somebody
+              adds a badge the band clips instead of quietly growing.
 
-              Which is why `overflow-hidden`, exactly as on the plugin page:
-              with nowhere to wrap to, a group that could only grow would push
-              its title across the way back instead of truncating. Clipped,
-              the title gives way first and the way back stays clickable. */}
+              `overflow-hidden` is the other half of a row that cannot wrap,
+              exactly as on the plugin page: with nowhere to go, anything
+              past the width goes across the way back unless it is clipped.
+              Clipped, the title gives way first and the way back stays
+              clickable. */}
           <NameWithBadges
             as="h1"
+            wrap={false}
             className="min-w-0 flex-1 overflow-hidden"
             gap="gap-4"
             leading={<ToolLogo slug={tool.slug} name={tool.name} size="lg" />}

@@ -223,9 +223,11 @@ export function LibraryCard({
       {/* Only tools carry a mark. A skill has no brand to recognise — its
           name IS the thing — and a monogram beside every skill would add a
           column of coloured squares that distinguish nothing. It goes in as
-          the row's `leading` rather than as a sibling of it, because a mark
-          counts as company: a name with a logo beside it is being squeezed
-          the same way a name with a badge beside it is. */}
+          the row's `leading` so it stays on the name's line when the badges
+          leave for the one below — a logo stranded above its own name is
+          worse than no logo. A tool card is never without badges anyway: the
+          union makes `flavor` mandatory, so the floor is always in force
+          wherever a mark is. */}
       <NameWithBadges
         leading={kind === 'integration' && <ToolLogo slug={id} name={name} />}
         name={name}
