@@ -99,6 +99,21 @@ describe('LibraryCard', () => {
   });
 
   /**
+   * A skill's lifecycle is its authors' business, not the platform's. The card
+   * used to badge `deprecated`/`retired` off `metadata.lifecycle`; the prop is
+   * gone, so an old caller still handing one — or a `SKILL.md` still declaring
+   * the key — earns no badge and no row of governance vocabulary.
+   */
+  it('badges no lifecycle, whatever the frontmatter still says', () => {
+    for (const lifecycle of ['deprecated', 'retired', 'active']) {
+      card({ lifecycle } as Partial<LibraryCardProps>);
+      expect(screen.queryByText(/^Deprecated$/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^Retired$/i)).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  /**
    * A proposed skill — one that exists only on an open change request.
    *
    * Before this, a skill an agent proposed was in the product nowhere at all

@@ -199,8 +199,6 @@ export class PluginLinksService {
           root,
         });
       }
-      // The same retired-skill rule as `link`: a repair re-grants on the root.
-      await this.resolvedSkills(root);
       await this.grantTokens(wsId, user, folder, root);
       this.changed(wsId);
       return { root };
