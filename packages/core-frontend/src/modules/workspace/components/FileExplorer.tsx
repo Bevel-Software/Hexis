@@ -24,6 +24,7 @@ import {
   Pin,
   PinOff,
   Users,
+  Undo2,
 } from 'lucide-react';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import {
@@ -52,6 +53,7 @@ import {
   listChangeRequestsUnderFolder,
   removeFolderFromChangeRequests,
 } from '../../change-requests/services/change-requests.api';
+import { cancelPullRequest } from '../../pr/services/pr-cancel.api';
 import { snapshotEntries } from '../utils/readDroppedEntries';
 import { useSearchParams } from 'react-router-dom';
 import { CR_FILE_PARAM, CR_PARAM, useFileNav } from '../routing/kb-routes';
@@ -208,10 +210,35 @@ interface SuggestionsController {
   crFor(path: string): number | null;
   /** Open the shared change-request dialog on the request this path belongs to. */
   open(path: string, crNumber: number): void;
+  /**
+   * The caller AUTHORED this request, so they may take it back.
+   *
+   * Every suggestion row is the caller's own today — the map they are
+   * synthesized from is `/mine`. The menu asks anyway, because the answer is
+   * what the offer means: an owner looking at someone else's proposal must
+   * never be shown a Withdraw (their "no" is Decline, in the dialog), and
+   * this predicate is already right for the day those rows appear here.
+   */
+  mine(crNumber: number): boolean;
+  /**
+   * Every file the request carries — a multi-file drop is ONE request, and
+   * withdrawing it withdraws all of them, which the confirmation says out loud.
+   * Empty when the request has not arrived in the shared list yet.
+   */
+  filesOf(path: string, crNumber: number): string[];
+  /**
+   * Cancel the request down the author-cancel path — the same call the file
+   * page's change box makes — and tell the app its request list changed, so
+   * the rows go without a reload.
+   */
+  withdraw(crNumber: number): Promise<void>;
 }
 const SuggestionsContext = createContext<SuggestionsController>({
   crFor: () => null,
   open: () => {},
+  mine: () => false,
+  filesOf: () => [],
+  withdraw: async () => {},
 });
 const useSuggestions = () => useContext(SuggestionsContext);
 
@@ -364,6 +391,7 @@ function ContextMenu({
   onCreateFolder,
   onRename,
   onDownload,
+  onWithdraw,
   returnFocusTo,
   deletable = true,
   extraItems = [],
@@ -386,6 +414,13 @@ function ContextMenu({
   onCreateFolder?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
+  /**
+   * Take this suggestion back. Supplied ONLY by a proposed row whose change
+   * request the caller authored — its absence is what keeps Withdraw off an
+   * owner's view of someone else's proposal, the same way `onRename`'s
+   * absence keeps Rename off a row that cannot be renamed.
+   */
+  onWithdraw?: () => void;
   /** The surface's own items for this entry — see `TreeNav.menuItems`. */
   extraItems?: TreeMenuItem[];
   /** The row this menu was opened from — Escape hands focus back to it. */
@@ -621,6 +656,14 @@ function ContextMenu({
         // Danger tone comes from the primitive, not from a hand-written red.
         <MenuItem role="menuitem" tone="danger" onClick={handleDelete}>
           <span className="flex items-center gap-2"><Trash2 size={14} />Delete</span>
+        </MenuItem>
+      )}
+      {onWithdraw && (
+        // Last, in danger tone, exactly where Delete sits on a row that has
+        // one: it is the same shape of act — what the row points at stops
+        // existing — and a proposed row never has a Delete to collide with.
+        <MenuItem role="menuitem" tone="danger" onClick={() => { onWithdraw(); onClose(); }}>
+          <span className="flex items-center gap-2"><Undo2 size={14} />Withdraw suggestion</span>
         </MenuItem>
       )}
     </MenuPanel>
@@ -1291,6 +1334,44 @@ export function FileTreeNode({
   // the tell that this is proposed, not present.
   const suggestedCr = suggestions.crFor(entry.relativePath);
   if (suggestedCr !== null) {
+    // The one thing the author can DO to a proposal from here: take it back.
+    // The reporter of this had uploaded a file into a folder they cannot
+    // write, watched it turn into an accent-coloured row, and concluded there
+    // was no way to undo it — the Withdraw that already existed was on the
+    // file page and in the dialog, neither of which the row leads to.
+    //
+    // `undefined` for anyone else's request, which is what keeps the item off
+    // the menu entirely; an owner's "no" is Decline, and it stays in the dialog.
+    const withdraw = suggestions.mine(suggestedCr)
+      ? () => {
+          // The request may not be in the shared list yet (the broad fetch
+          // trails a just-made suggestion). Naming the row's own file is then
+          // both true and the least surprising thing to say.
+          const carried = suggestions.filesOf(entry.relativePath, suggestedCr);
+          confirm({
+            kind: 'withdraw',
+            crNumber: suggestedCr,
+            files: carried.length > 0 ? carried : [entry.relativePath],
+            returnFocusTo: () => rowRef.current,
+            // The row leaves the tree with the request it stood for, so focus
+            // goes to the folder that held it — as a delete's does.
+            focusAfterRun: () => rowForPath(entry.relativePath.split('/').slice(0, -1).join('/')),
+            run: async () => {
+              try {
+                await suggestions.withdraw(suggestedCr);
+              } catch (err) {
+                // Already applied, or declined meanwhile: the same surfacing
+                // every other refused tree operation gets. The rows refresh
+                // either way (see the controller), so what the user sees next
+                // is the truth from the server rather than a stale row.
+                console.error('Failed to withdraw suggestion:', err);
+                const msg = err instanceof Error ? err.message : String(err);
+                alert(`Couldn't withdraw ${entry.name}:\n${msg}`);
+              }
+            },
+          });
+        }
+      : undefined;
     return (
       <>
         <button
@@ -1322,6 +1403,7 @@ export function FileTreeNode({
             isRoot={false}
             proposed
             deletable={false}
+            onWithdraw={withdraw}
             onClose={() => setContextMenu(null)}
             returnFocusTo={rowRef}
           />
@@ -1498,8 +1580,22 @@ export function TreeChrome({
     () => ({
       crFor: (path) => suggestionOnlyPaths.get(path) ?? null,
       open: (path, crNumber) => setOpenSuggestion({ number: crNumber, path }),
+      mine: (crNumber) => openChangeRequests.mineNumbers.has(crNumber),
+      filesOf: (path, crNumber) =>
+        openChangeRequests.forPath(path).find((c) => c.number === crNumber)?.touchedNodePaths ?? [],
+      withdraw: async (crNumber) => {
+        try {
+          await cancelPullRequest(crNumber);
+        } finally {
+          // On BOTH paths. A cancel that succeeded has removed the request,
+          // and one that was refused (applied or declined meanwhile) means
+          // the row was already describing something that is no longer open —
+          // either way the next thing on screen should come from the server.
+          window.dispatchEvent(new Event(PR_STALE_EVENT));
+        }
+      },
     }),
-    [suggestionOnlyPaths, setOpenSuggestion],
+    [suggestionOnlyPaths, setOpenSuggestion, openChangeRequests],
   );
   // Right-click → Manage access opens this sheet for the chosen entry.
   const [accessTarget, setAccessTarget] = useState<FileTreeEntry | null>(null);

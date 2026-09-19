@@ -718,6 +718,13 @@ describe('dispatchUpload: suggestion routing', () => {
       expect(detail.touchedNodePaths).toContain('KnowledgeBase/Ops/note.md');
       expect(noticeIn(result.current)?.message).toMatch(/became a suggestion/);
       expect(noticeIn(result.current)?.kind).toBe('suggestion');
+      // …and where to undo it. The notice used to say a thing happened and
+      // nothing about reversing it, and the accent-coloured row it produces
+      // said nothing either — which is how an accidental upload into a folder
+      // you cannot write came to read as permanent.
+      expect(noticeIn(result.current)?.message).toMatch(
+        /To take it back, right-click the file and choose Withdraw suggestion\.$/,
+      );
       expect(errorIn(result.current)).toBeNull();
     } finally {
       window.removeEventListener(PR_STALE_EVENT, onStale);

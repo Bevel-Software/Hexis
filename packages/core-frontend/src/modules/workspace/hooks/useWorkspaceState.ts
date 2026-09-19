@@ -807,7 +807,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
     // Pin the workspace at dispatch time. A folder upload can take seconds;
     // if the user switches branches mid-flight, the trailing state
-    // mutations (setUploadError / setIsUploading / setFileTree via
+    // mutations (setUploadErrors / setIsUploading / setFileTree via
     // refreshFileTree / clearPendingMatching) would clobber the new
     // branch's UI with old-branch results. `isCurrent()` gates every
     // post-await mutation; the workspaceId reset effect above already
@@ -1092,7 +1092,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
               kind: 'suggestion',
               message:
                 "You can't write to that folder, so the upload became a suggestion: " +
-                'it is now a change request for the folder’s owners to review.',
+                'it is now a change request for the folder’s owners to review. ' +
+                // Where the undo is. Without this sentence the notice says a
+                // thing happened and nothing about reversing it, and the
+                // accent-coloured row it produces says nothing either — which
+                // is how an accidental upload came to read as permanent.
+                'To take it back, right-click the file and choose Withdraw suggestion.',
             }));
           }
         } catch (err) {
