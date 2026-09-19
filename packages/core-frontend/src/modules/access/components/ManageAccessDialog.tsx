@@ -39,6 +39,7 @@ import {
   asInheritedError,
   type AccessEligible,
   type AccessResponse,
+  type AccessUser,
   type GrantVerb,
   type GrantSource,
   type GrantSources,
@@ -105,6 +106,14 @@ interface PrincipalRow {
    */
   kind: 'user' | 'role' | 'group' | 'plugin';
   isYou: boolean;
+  /**
+   * For a person row: whether an account exists for the email yet. `false`
+   * earns the "hasn't signed in yet" note beside the name — the grant is
+   * real and unaffected either way. `undefined` means the server did not say
+   * (an older build), which is NOT the same as "no account" and shows
+   * nothing.
+   */
+  hasAccount?: boolean;
   /** The principal to send on grant / revoke. */
   principal: Principal;
   /** Per-verb origin of this row's access (from the resolver). */
@@ -198,6 +207,31 @@ const PRINCIPAL_KIND_HELP = {
   role: 'Roles: special app roles that give people extra abilities in the app. They are pre-defined; you can only add or remove people. Example: Admin, which opens the platform and user management screens.',
   plugin: 'Plugins: the readers, writers or owners of a plugin, whoever they are at the time.',
 } as const satisfies Record<Principal['kind'], string>;
+
+/**
+ * What a person with no account yet is called, beside their chip and beside
+ * their row. Granting ahead of a first sign-in is supported and stays
+ * supported — under single sign-on the account is created BY that sign-in —
+ * so this is a LABEL, never a warning and never a refusal: the grant saves
+ * exactly as any other. It is here so a mistyped address is visible, and it
+ * disappears on its own the first time that person signs in.
+ */
+const NO_ACCOUNT_NOTE = "hasn't signed in yet";
+const NO_ACCOUNT_HELP =
+  'No account for this email yet. The grant is saved and takes effect the moment they first sign in — if you did not expect this, check the spelling.';
+
+/** The note itself — muted and small, the same weight as a row's second line. */
+function NoAccountNote() {
+  return (
+    <span
+      className="shrink-0 whitespace-nowrap text-detail italic text-ink-faint"
+      title={NO_ACCOUNT_HELP}
+      aria-description={NO_ACCOUNT_HELP}
+    >
+      {NO_ACCOUNT_NOTE}
+    </span>
+  );
+}
 
 /**
  * A principal's row/chip identity. Kind is PART of it: a group and a role
@@ -596,6 +630,51 @@ export function ManageAccessDialog({
   // including the layering that lets the nested "Remove from parent?" modal
   // take Escape without also closing this one.
 
+  /**
+   * The emails suggest has TOLD us have an account, accumulated across every
+   * answer this dialog has received rather than read off the current one —
+   * so an answer landing after a chip was added still clears its note.
+   *
+   * Version skew: a server that says nothing (`hasAccount === undefined`)
+   * counts as HAVING an account, so an older build labels nobody it has named.
+   */
+  const [suggestedAccounts, setSuggestedAccounts] = useState<ReadonlySet<string>>(() => new Set());
+  const learnAccounts = useCallback((people: readonly AccessUser[]) => {
+    const known = people
+      .filter((p) => p.hasAccount !== false)
+      .map((p) => p.email.trim().toLowerCase());
+    if (known.length === 0) return;
+    setSuggestedAccounts((prev) => {
+      const fresh = known.filter((e) => !prev.has(e));
+      return fresh.length === 0 ? prev : new Set([...prev, ...fresh]);
+    });
+  }, []);
+
+  /**
+   * Every email we have been told has an account — the suggestions above plus
+   * the loaded view, which is the other place accounts are named (someone
+   * already granted here and already signed in must not pick up the note when
+   * their address is typed again).
+   *
+   * A chip is labelled by ABSENCE from this set, which is the only way to say
+   * anything about a free-typed address: nobody has ever named it, so nobody
+   * has signed in as it. Rows do NOT consult it — a row reads its own
+   * `hasAccount` straight from the view.
+   */
+  const knownAccounts = useMemo<ReadonlySet<string>>(() => {
+    if (!data) return suggestedAccounts;
+    const all = new Set(suggestedAccounts);
+    for (const u of [
+      ...data.eligible.users,
+      ...data.readers.users,
+      ...data.owners.users,
+      ...data.downloaders.users,
+    ]) {
+      if (u.hasAccount !== false) all.add(u.email.trim().toLowerCase());
+    }
+    return all;
+  }, [data, suggestedAccounts]);
+
   // Debounced autocomplete. People are withheld server-side until q ≥ 2 chars.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -608,13 +687,16 @@ export function ManageAccessDialog({
     }
     debounceRef.current = setTimeout(() => {
       suggestPrincipals(workspaceId, q)
-        .then(setSuggest)
+        .then((res) => {
+          setSuggest(res);
+          learnAccounts(res.people ?? []);
+        })
         .catch(() => setSuggest(null));
     }, 200);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query, workspaceId, repoRelative]);
+  }, [query, workspaceId, repoRelative, learnAccounts]);
 
   const myEmail = user?.email?.toLowerCase() ?? '';
 
@@ -667,7 +749,7 @@ export function ManageAccessDialog({
       }
       return row;
     };
-    const touchUser = (u: { name: string; email: string }): PrincipalRow => {
+    const touchUser = (u: AccessUser): PrincipalRow => {
       const key = `u:${u.email.toLowerCase()}`;
       let row = rows.get(key);
       if (!row) {
@@ -681,6 +763,10 @@ export function ManageAccessDialog({
           sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
           kind: 'user',
           isYou: u.email.toLowerCase() === myEmail,
+          // Whoever names this person first wins — the four eligible lists
+          // are four views of the same account, so the flag cannot differ
+          // between them.
+          hasAccount: u.hasAccount,
           principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
           verbs: { owner: false, write: false, read: false, download: false },
           manage: 'direct',
@@ -1220,6 +1306,10 @@ export function ManageAccessDialog({
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-ui font-medium text-ink">{p.label}</span>
             {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
+            {/* Granted, but nobody has signed in as this address yet. Beside
+                the name, where the chip put it before the grant was saved —
+                and gone by itself once they do sign in. */}
+            {p.kind === 'user' && p.hasAccount === false && <NoAccountNote />}
             {p.kind !== 'user' && (
               // The same chip vocabulary as the suggest menu's trailing tags:
               // a role is a capability, a group is an audience — badge which.
@@ -1386,6 +1476,11 @@ export function ManageAccessDialog({
                 <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
                   {pickedChips.map((c) => {
                     const label = principalLabel(c);
+                    // Nobody has signed in as this address — say so, and grant
+                    // it anyway. A person only reaches a chip by being typed
+                    // or picked, and both feed `knownAccounts`, so absence
+                    // from it is the server having named everyone but them.
+                    const noAccount = c.kind === 'user' && !knownAccounts.has(c.email.trim().toLowerCase());
                     return (
                       // `max-w-full` bounds the chip by the field it sits in, so a
                       // long email can never push its own border past the box;
@@ -1400,6 +1495,7 @@ export function ManageAccessDialog({
                         <span className="min-w-0 truncate" title={label}>
                           {label}
                         </span>
+                        {noAccount && <NoAccountNote />}
                         <button
                           type="button"
                           onClick={() => removeChip(c)}

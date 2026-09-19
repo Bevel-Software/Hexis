@@ -155,3 +155,76 @@ export function accessRoster(view: AccessView, kind: AccessTargetKind, repoRelTa
   }
   return roster;
 }
+
+/**
+ * A person named in an access list, plus whether an ACCOUNT exists for that
+ * email yet — `false` until they sign in for the first time.
+ *
+ * Under single sign-on the account is created BY that first sign-in, so a
+ * grant written ahead of time necessarily names an email with no account.
+ * That is a real use case and stays allowed: nothing anywhere gates on this
+ * flag. It exists so the share dialog can put a quiet "hasn't signed in yet"
+ * beside the chip and the row, which is what makes a mistyped address
+ * visible — and it turns true by itself the first time the person signs in,
+ * so the note goes away without anyone editing the grant.
+ */
+export interface AccessViewUser {
+  name: string;
+  email: string;
+  hasAccount: boolean;
+}
+
+type Labelled<L extends { users: { name: string; email: string }[] }> = Omit<L, 'users'> & {
+  users: AccessViewUser[];
+};
+
+/** {@link AccessView} with every person carrying {@link AccessViewUser.hasAccount}. */
+export type LabelledAccessView = Omit<
+  AccessView,
+  'eligible' | 'readers' | 'owners' | 'downloaders'
+> & {
+  eligible: Labelled<AccessView['eligible']>;
+  readers: Labelled<AccessView['readers']>;
+  owners: Labelled<AccessView['owners']>;
+  downloaders: Labelled<AccessView['downloaders']>;
+};
+
+/**
+ * Every distinct email the view names, canonical (trimmed + lowercased) — the
+ * exact set to look accounts up by, and no more: the lookup is scoped to the
+ * people this one view mentions rather than reading the whole users table.
+ */
+export function emailsInView(view: AccessView): string[] {
+  return [
+    ...new Set(
+      [...view.eligible.users, ...view.readers.users, ...view.owners.users, ...view.downloaders.users]
+        .map((u) => u.email.trim().toLowerCase())
+        .filter((e) => e.length > 0),
+    ),
+  ];
+}
+
+/**
+ * Mark each person in the view against `accountEmails` (canonical forms, as
+ * {@link emailsInView} produces). Pure: the caller does the one database
+ * lookup, this decides nothing but the label.
+ */
+export function labelAccountHolders(
+  view: AccessView,
+  accountEmails: ReadonlySet<string>,
+): LabelledAccessView {
+  const mark = <L extends { users: { name: string; email: string }[] }>(list: L): Labelled<L> => ({
+    ...list,
+    users: list.users.map((u) => ({
+      ...u,
+      hasAccount: accountEmails.has(u.email.trim().toLowerCase()),
+    })),
+  });
+  return {
+    ...view,
+    eligible: mark(view.eligible),
+    readers: mark(view.readers),
+    owners: mark(view.owners),
+    downloaders: mark(view.downloaders),
+  };
+}
