@@ -103,5 +103,5 @@ export function moveWarnings(opts: {
 export function withdrawSentence(files: string[]): string {
   if (files.length > 1) return `This withdraws the whole suggestion: ${files.length} files`;
   const name = files[0]?.split('/').pop();
-  return name ? `Withdraw this suggestion? ${name}` : 'Withdraw this suggestion?';
+  return name ? `Withdraw ${name}?` : 'Withdraw this suggestion?';
 }

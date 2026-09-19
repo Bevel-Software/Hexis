@@ -1485,7 +1485,7 @@ describe('FileExplorer: withdrawing my own suggestion from its row', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
-    expect(dialog).toHaveTextContent('Withdraw this suggestion? new-idea.md');
+    expect(dialog).toHaveTextContent('Withdraw new-idea.md?');
   });
 
   /**
