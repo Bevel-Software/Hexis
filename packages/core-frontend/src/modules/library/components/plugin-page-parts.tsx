@@ -21,17 +21,30 @@ import { LibraryCard } from './LibraryCard';
  * promise drift the first time either is touched.
  */
 
-/** `Everything › {name}` — the page's place in the Library, and the way back. */
-export function PluginBreadcrumb({ name }: { name: string }) {
+/**
+ * `Everything ›` — the page's place in the Library, and the way back.
+ *
+ * It belongs ON the page's title band, as the band's leading item, and not in
+ * a row above it. A row above the band pushes the title bar down off the line
+ * the sidebar's header row holds, which is the seam `shared/theme/header`
+ * exists to keep — and the seam is the first thing anyone sees below the
+ * toolbar.
+ *
+ * The trail stops SHORT of the current page for the same reason: the `<h1>`
+ * standing beside it IS the current page, and a crumb repeating the heading
+ * it sits next to says the name twice on one line. That also makes the trail
+ * a fixed width, so it never competes with the title for the row's space.
+ */
+export function PluginBreadcrumb() {
   return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
+    <nav
+      aria-label="Breadcrumb"
+      className="flex flex-none items-center gap-1.5 text-detail text-ink-faint"
+    >
       <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
         Everything
       </Link>
       <span aria-hidden="true">›</span>
-      <span aria-current="page" className="truncate text-ink-muted">
-        {name}
-      </span>
     </nav>
   );
 }
