@@ -1,11 +1,21 @@
 import { authFetch } from '../../../lib/api';
 
 /**
- * The aggregated "connect your tools" surface: everything the signed-in person
- * still needs to provide before the tools they can reach will work in their own
- * agent. It lists ONLY per-user items (never the admin/shared ones), split into
- * plain values (API keys) they enter and OAuth sign-ins they authorize.
+ * The aggregated "connect your tools" surface: everything standing between the
+ * signed-in person and the tools they can reach working in their own agent,
+ * split into plain values (API keys) and OAuth sign-ins.
+ *
+ * It is NOT only the caller's own items. The Library's plugin banner counts an
+ * integration that needs a WORKSPACE value nobody but its owner can set, and a
+ * page that omitted those disagreed with the banner that sent the reader to it.
+ * Such an item arrives flagged `ownerOnly` so the page can say whose job it is
+ * instead of pretending it is the reader's. Readability is unchanged: the server
+ * builds this from the tools the caller may read, so one they may not is absent
+ * rather than greyed.
  */
+
+/** Set once for the workspace by the tool's owner, or by each person for themselves. */
+export type ConnectVarScope = 'admin' | 'user';
 
 export interface ConnectVar {
   /** Bare variable name (e.g. `API_KEY`). */
@@ -13,8 +23,18 @@ export interface ConnectVar {
   label: string | null;
   /** The stored key — `<manual>_<VAR>`. */
   key: string;
-  /** The caller's own value exists. */
+  scope: ConnectVarScope;
+  /**
+   * A value the caller's agent would resolve exists — the workspace's for an
+   * `admin` var, the caller's own for a `user` one. An already-set `admin` var
+   * is dropped server-side, so this is false for every one that arrives.
+   */
   configured: boolean;
+  /**
+   * An `admin` var the caller may not write: it needs whoever owns the tool.
+   * Never true for a `user` var, and never true for an owner.
+   */
+  ownerOnly: boolean;
 }
 
 export interface ConnectTool {
@@ -22,6 +42,8 @@ export interface ConnectTool {
   name: string;
   path: string;
   type: 'inline' | 'http' | 'mcp';
+  /** The caller may set this tool's workspace (owner) values. */
+  canWrite: boolean;
   variables: ConnectVar[];
 }
 
@@ -45,6 +67,15 @@ export interface ConnectToolOAuth {
    * declares now (a scope was added since sign-in) — show Reconnect, not Connected.
    */
   needsReauth: boolean;
+  /**
+   * The owner-side half is done: the provider registration (client secret) exists,
+   * so Authorize can actually reach a consent screen. Until it does, nobody's
+   * sign-in can work — which is why the row is outstanding even for a person who
+   * has nothing to do about it.
+   */
+  ownerConfigured: boolean;
+  /** Waiting on the registration above, and the caller may not write it. */
+  ownerOnly: boolean;
 }
 
 export interface ConnectPending {

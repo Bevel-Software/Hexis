@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending } from '../../services/connect.api';
 import { ConnectToolsPage } from '../ConnectToolsPage';
@@ -23,7 +23,12 @@ const connectMock = vi.hoisted(() => ({
 }));
 vi.mock('../../services/connect.api', () => connectMock);
 
-const varsMock = vi.hoisted(() => ({ setUserVar: vi.fn(), deleteUserVar: vi.fn() }));
+const varsMock = vi.hoisted(() => ({
+  setUserVar: vi.fn(),
+  setAdminVar: vi.fn(),
+  deleteUserVar: vi.fn(),
+  setOAuthClientSecret: vi.fn(),
+}));
 vi.mock('../../services/tool-secrets.api', () => varsMock);
 vi.mock('../../services/secrets.api', () => ({ startOAuth: vi.fn() }));
 
@@ -36,8 +41,9 @@ function pending(configured: boolean): ConnectPending {
         name: 'heyreach',
         path: 'Plugins/GTM/heyreach.tool',
         type: 'inline',
+        canWrite: false,
         variables: [
-          { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', configured },
+          { name: 'API_KEY', label: null, key: 'heyreach_API_KEY', scope: 'user', configured, ownerOnly: false },
         ],
       },
     ],
@@ -53,7 +59,9 @@ function pendingPair(): ConnectPending {
     name: 'API_SECRET',
     label: null,
     key: 'heyreach_API_SECRET',
+    scope: 'user',
     configured: true,
+    ownerOnly: false,
   });
   return one;
 }
@@ -81,13 +89,11 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   });
   afterEach(() => window.removeEventListener(TOOL_CREDENTIALS_STALE_EVENT, heard));
 
-  /** An unconfigured tool starts skipped; ticking it reveals its key fields. */
-  const include = async () =>
-    fireEvent.click(await screen.findByRole('checkbox', { name: 'Include this tool' }));
+  // An unconfigured tool is INCLUDED to begin with — its key fields are there
+  // on arrival, because the page is reached from a banner saying it needs one.
 
   it('announces a saved key', async () => {
     renderPage();
-    await include();
 
     fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value: 'k' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -165,12 +171,58 @@ describe('ConnectToolsPage: telling the Library a credential landed', () => {
   it('announces nothing when the save fails', async () => {
     varsMock.setUserVar.mockRejectedValue(new Error('Nope.'));
     renderPage();
-    await include();
 
     fireEvent.change(await screen.findByLabelText('API_KEY value'), { target: { value: 'k' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText('Nope.')).toBeInTheDocument();
     expect(heard).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConnectToolsPage: an overtaken refetch never repaints the page', () => {
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/connect');
+    sessionStorage.clear();
+    connectMock.getConnectPending.mockReset();
+    connectMock.getMcpOAuthRequest.mockReset();
+    varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
+  });
+
+  /** A promise this test decides when to settle. */
+  function defer<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('keeps the newest listing when an earlier one answers last', async () => {
+    // Saving a key refreshes, and so do the mount, the Refresh button and every
+    // wipe — two are routinely open at once and the network does not promise to
+    // answer them in order. The older answer landing last must not repaint the
+    // page with the state from before the save.
+    const first = defer<ConnectPending>();
+    const second = defer<ConnectPending>();
+    connectMock.getConnectPending
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    renderPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(connectMock.getConnectPending).toHaveBeenCalledTimes(2);
+
+    // The NEWER request answers first: the key is saved.
+    await act(async () => second.resolve(pending(true)));
+    expect(await screen.findByPlaceholderText('Replace…')).toBeInTheDocument();
+
+    // …and now the older one arrives, still saying there is no key.
+    await act(async () => first.resolve(pending(false)));
+
+    expect(screen.getByPlaceholderText('Replace…')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Enter value')).not.toBeInTheDocument();
+    // Nor does the stale answer own the spinner it did not fill.
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument();
   });
 });
