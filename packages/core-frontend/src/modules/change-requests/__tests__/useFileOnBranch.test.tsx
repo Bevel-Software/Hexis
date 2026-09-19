@@ -76,12 +76,21 @@ describe('useFileOnBranch', () => {
  * "Loading…" for both — which is what left the change-request pane hanging on
  * a file the default branch does not have.
  */
+/** What a rejected read settles as: failed, with the reason it gave. */
+const FAILED_404 = {
+  content: null,
+  failed: true,
+  failure: { kind: 'error', reason: '404' },
+};
+
 describe('useFileOnBranchRead', () => {
   it('reports a settled failure as a failure, not as a wait', async () => {
     api.readFileOnBranch.mockRejectedValue(new Error('404'));
     const { result } = renderHook(() => useFileOnBranchRead('main', 'Ops/gone.yaml'));
     expect(result.current).toEqual({ content: null, failed: false });
-    await waitFor(() => expect(result.current).toEqual({ content: null, failed: true }));
+    // A settled failure carries WHY, so the caller can say whether the read
+    // was refused or merely broke. A bare Error is the second.
+    await waitFor(() => expect(result.current).toEqual(FAILED_404));
     // Settled means settled: the failure is cached, not retried on every render.
     expect(api.readFileOnBranch).toHaveBeenCalledTimes(1);
   });
@@ -113,6 +122,6 @@ describe('useFileOnBranchRead', () => {
     expect(result.current.failed).toBe(false);
 
     rerender({ path: 'Ops/gone.yaml' });
-    expect(result.current).toEqual({ content: null, failed: true });
+    expect(result.current).toEqual(FAILED_404);
   });
 });

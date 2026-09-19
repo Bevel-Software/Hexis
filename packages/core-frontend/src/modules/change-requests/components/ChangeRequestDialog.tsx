@@ -19,6 +19,8 @@ import { refreshChangeRequestFromTarget } from '../../pr/services/pr-merge.api';
 import { GitApiError } from '../../git/services/git.api';
 import { useApplyChangeRequest } from '../hooks/useApplyChangeRequest';
 import { readFileOnBranch } from '../services/change-requests.api';
+import { describeReadFailure } from '../services/denied-file.api';
+import { deniedSentence, readErrorLead, type ReadFailure } from '../utils/readFailure';
 import { changeAuthorName } from '../utils/author';
 import { conflictResolutionPrompt } from '../utils/conflict';
 import { ConflictHelp } from './ConflictHelp';
@@ -90,8 +92,13 @@ export function ChangeRequestDialog({
   const [detail, setDetail] = useState<PullRequestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [branchContents, setBranchContents] = useState<Record<string, string | null>>({});
-  /** Files whose branch copy could not be read — shown as such, never guessed at. */
-  const [unreadable, setUnreadable] = useState<Set<string>>(new Set());
+  /**
+   * Files whose branch copy could not be read, and WHY — shown as such, never
+   * guessed at. A flag alone made a refusal and an outage the same sentence,
+   * and a reviewer who was simply not allowed to see a file went looking for
+   * a problem with the platform.
+   */
+  const [branchFailure, setBranchFailure] = useState<Map<string, ReadFailure>>(new Map());
   const [blocked, setBlocked] = useState(false);
   /**
    * Bumped when the request's branch has moved under the dialog (an Update
@@ -101,6 +108,12 @@ export function ChangeRequestDialog({
    * "Loading…" forever.
    */
   const [branchRevision, setBranchRevision] = useState(0);
+  /**
+   * The same, for the OTHER side — the fork point, or the target's tip. Moved
+   * only by the Retry link beside a failed read, which has to re-fetch
+   * whichever of the two copies was the one that failed and cannot know which.
+   */
+  const [baseRevision, setBaseRevision] = useState(0);
 
   const isTop = useModalLayer(true);
   useEffect(() => {
@@ -261,11 +274,40 @@ export function ChangeRequestDialog({
         })
         // NOT `''`. An unreadable branch copy stored as empty would diff as
         // "every line deleted" — a change request that erases the file.
-        .catch(() => {
-          if (current()) setUnreadable((s) => new Set(s).add(selected));
-        });
+        //
+        // The failure is described before it is published: naming the folder
+        // to ask about is a second read, and the pane stays on "Loading…"
+        // until it settles rather than saying "couldn't be read" and then
+        // rewriting it as "you don't have access" a moment later.
+        .catch((err: unknown) =>
+          describeReadFailure(err, cr.branch, selected).then((failure) => {
+            if (current()) setBranchFailure((m) => new Map(m).set(selected, failure));
+          }),
+        );
     }
   }, [selected, selectedIsBinary, cr.branch, branchRevision]);
+
+  /**
+   * Read the selected file again, both sides — the Retry link the retryable
+   * form of the pane's failure sentence carries. The cached copy AND the
+   * `asked` token have to go: the effect above only re-reads a path it has no
+   * token for, and only when a revision moves it.
+   */
+  function retrySelectedRead() {
+    asked.current.delete(selected);
+    setBranchFailure((m) => {
+      const next = new Map(m);
+      next.delete(selected);
+      return next;
+    });
+    setBranchContents((c) => {
+      const next = { ...c };
+      delete next[selected];
+      return next;
+    });
+    setBranchRevision((r) => r + 1);
+    setBaseRevision((r) => r + 1);
+  }
 
   const isAdded = addedFiles.includes(selected);
 
@@ -333,8 +375,15 @@ export function ChangeRequestDialog({
     cr.number,
     readAtFork ? forkSha : null,
     readAtFork ? beforePath : null,
+    // The fork point belongs to the TARGET's tree, which is also the tree the
+    // route checks read authority against — so it is the tree to name a
+    // governing folder from when the read comes back refused.
+    { targetBranch: cr.base || DEFAULT_BRANCH, revision: baseRevision },
   );
-  const tipRead = useDefaultBranchFileRead(detail !== null && !readAtFork ? beforePath : null);
+  const tipRead = useDefaultBranchFileRead(
+    detail !== null && !readAtFork ? beforePath : null,
+    baseRevision,
+  );
   const mainRead = readAtFork ? forkRead : tipRead;
   const mainRaw = mainRead.content;
   const branchRaw = branchContents[selected] ?? null;
@@ -359,6 +408,14 @@ export function ChangeRequestDialog({
   const oldPathUnreadable = isRename && mainMissing;
   /** Any other file whose default-branch copy could not be read. */
   const baseUnreadable = !isRename && mainMissing;
+  /**
+   * Why that copy could not be read. The read always records a reason when it
+   * settles as a failure; the fallback covers the one path into
+   * `mainMissing` that never made a read at all (a rename with no old path),
+   * which `baseUnreadable` already excludes but the types cannot know.
+   */
+  const baseFailure: ReadFailure =
+    mainRead.failure ?? { kind: 'error', reason: 'the read did not complete' };
 
   /**
    * BOTH sides or nothing.
@@ -630,14 +687,21 @@ export function ChangeRequestDialog({
   /** The tree's per-file state, in the file list's order. */
   const treeFiles: CrTreeFileState[] = useMemo(() => {
     const statusByPath = new Map((detail?.files ?? []).map((f) => [f.path, f.status]));
-    return allFiles.map((path) => ({
-      path,
-      changed: changedFiles.has(path),
-      added: addedFiles.includes(path),
-      status: statusByPath.get(path),
-      approval: approvalByPath.get(path),
-    }));
-  }, [detail, allFiles, changedFiles, addedFiles, approvalByPath]);
+    return allFiles.map((path) => {
+      // Only files the reader has actually opened can carry the lock: the
+      // dialog reads one copy at a time, so a denial is a fact about a file
+      // that has been asked for, never a guess about the rest of the list.
+      const failure = branchFailure.get(path);
+      return {
+        path,
+        changed: changedFiles.has(path),
+        added: addedFiles.includes(path),
+        status: statusByPath.get(path),
+        approval: approvalByPath.get(path),
+        deniedNote: failure?.kind === 'denied' ? deniedSentence(failure.folder) : undefined,
+      };
+    });
+  }, [detail, allFiles, changedFiles, addedFiles, approvalByPath, branchFailure]);
 
   /** The footer's verdicts: apply plainly, apply by covering, or wait. */
   const allApproved =
@@ -705,7 +769,7 @@ export function ChangeRequestDialog({
       // goes on showing the pre-update text for a branch the server merged.
       asked.current.clear();
       setBranchContents({});
-      setUnreadable(new Set());
+      setBranchFailure(new Map());
       try {
         // Re-read in the same render the fresh detail (and so the fresh fork
         // point) lands in.
@@ -1030,7 +1094,7 @@ export function ChangeRequestDialog({
                     />
                   </div>
                 )
-              ) : mdPayload !== null && !unreadable.has(selected) ? (
+              ) : mdPayload !== null && !branchFailure.has(selected) ? (
                 // An untouched file arrives here too and simply renders as a
                 // clean document — identical sides diff to all-same blocks —
                 // so the reader gets prose everywhere, marked or not.
@@ -1057,16 +1121,16 @@ export function ChangeRequestDialog({
               <MarkedFile
                 diff={diff}
                 raw={rawFallback}
-                unreadable={
+                failure={
                   // A failure only gets the last word when there is nothing
                   // left to show: a file this request doesn't touch reads
-                  // fine from whichever copy arrived.
-                  unreadable.has(selected)
-                    ? 'branch'
-                    : baseUnreadable && !readsUnmarked
-                      ? 'base'
-                      : undefined
+                  // fine from whichever copy arrived. Which SIDE failed no
+                  // longer changes the sentence — the reader's question is
+                  // why they can't see it, and that answer is the same.
+                  branchFailure.get(selected) ??
+                  (baseUnreadable && !readsUnmarked ? baseFailure : null)
                 }
+                onRetry={retrySelectedRead}
               />
               )}
             </div>
@@ -1198,18 +1262,40 @@ function authorsReason(body: string | undefined): string | null {
 function MarkedFile({
   diff,
   raw,
-  unreadable,
+  failure,
+  onRetry,
 }: {
   diff: DiffLine[] | null;
   raw: string | null;
-  /** Which side failed to read — the change request's copy, or the default branch's. */
-  unreadable?: 'branch' | 'base';
+  /**
+   * Why the copy this pane needs could not be read — `null` when it could.
+   * Two forms, whichever side failed: a refusal, which a person has to lift,
+   * and everything else, which another attempt might.
+   */
+  failure?: ReadFailure | null;
+  /** Re-fetch this file. Offered only beside the retryable form. */
+  onRetry(): void;
 }) {
-  if (unreadable) {
+  if (failure) {
     return (
       <p className="py-6 text-center text-detail text-ink-faint">
-        This file's copy on {unreadable === 'branch' ? 'the change request' : 'the current text'}{' '}
-        couldn't be read, so there is no honest before and after to show.
+        {failure.kind === 'denied' ? (
+          deniedSentence(failure.folder)
+        ) : (
+          <>
+            {readErrorLead(failure.reason)}{' '}
+            {/* The retry IS the sentence's last words — a reader told to try
+                again should not then have to find where. */}
+            <button
+              type="button"
+              className="underline underline-offset-2 transition-colors hover:text-ink"
+              onClick={onRetry}
+            >
+              Try again
+            </button>
+            .
+          </>
+        )}
       </p>
     );
   }
