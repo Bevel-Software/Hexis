@@ -3,6 +3,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { isPersonalPluginFolder } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { DOCUMENT_COLUMN, documentGutters } from '../../../shared/theme/measure';
+import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
 import { useAdmin } from '../../admin/state/admin.context';
 import { attentionOf, useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { personalPluginName } from '../utils/personal-plugin';
@@ -206,11 +207,17 @@ export function LibraryLayout() {
           scroller so the scrollbar keeps sitting at its edge; the column
           inside it is the same 880px and the same side gutters Knowledge
           uses, so the two surfaces cannot report different widths at the same
-          window width. Top padding is the one measure they deliberately do
-          NOT share: Skills opens on a heading (34px), Knowledge on a tab
-          strip (12px). */}
+          window width.
+
+          Top padding is shared now too. It used to be the one measure the two
+          surfaces deliberately did not share — 34px here against Knowledge's
+          12px — and that difference was the reported bug: every Library page
+          opens on a title bar, and 34px put it 20px below the sidebar's
+          header row sitting right beside it. `HEADER_COLUMN_TOP` is the one
+          offset both columns open on; `HEADER_BAND` is the one height their
+          first rows are. */}
       <main className="min-w-0 flex-1 overflow-y-auto">
-        <div className={cn(DOCUMENT_COLUMN, documentGutters(collapsed), 'pt-[34px]')}>
+        <div className={cn(DOCUMENT_COLUMN, documentGutters(collapsed), HEADER_COLUMN_TOP)}>
           <Outlet />
         </div>
       </main>

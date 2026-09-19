@@ -5,6 +5,7 @@ import {
   SIDEBAR_DRAWER_WIDTH,
   SidebarFrame,
 } from '../components/SidebarFrame';
+import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 import {
   SIDEBAR_DEFAULT_WIDTH,
   setSidebarCollapsed,
@@ -72,10 +73,16 @@ describe('SidebarFrame: slots', () => {
     const dock = screen.getByText('dock');
     expect(aside).toContainElement(pill);
     expect(aside).toContainElement(dock);
-    // One column: the header and the contents are siblings in it, and so is
-    // the footer GROUP — the one slot with a wrapper, because it is the one
-    // slot that holds more than one row and has to space them.
-    expect(pill.parentElement).toBe(row.parentElement);
+    // One column, three siblings in it: the header band, the contents, the
+    // footer group. Each end slot has exactly one wrapper and for its own
+    // reason — the header's is the shared band, the row that has to be the
+    // same height as the page's title bar beside it; the footer's is the one
+    // slot holding more than one row, so something has to space them. The
+    // contents sit between them with no wrapper at all, and all three line up
+    // because they are siblings in the same column.
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).toContainElement(pill);
+    expect(band.parentElement).toBe(row.parentElement);
     const group = dock.parentElement as HTMLElement;
     expect(group).toHaveAttribute('data-sidebar-footer');
     expect(group.parentElement).toBe(row.parentElement);
