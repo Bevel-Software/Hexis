@@ -26,6 +26,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
+  BranchNotFoundError,
   RemoteBranchGoneError,
   WorkflowDomainError,
   isMissingRemoteBranchFailure,
@@ -288,6 +289,63 @@ export class WorkspaceService implements IWorkspaceService {
 
   setWorkspaceClonedListener(listener: (workspaceId: string) => void): void {
     this.onWorkspaceCloned = listener;
+  }
+
+  /**
+   * Every branch name a listing of origin's branches has shown this process.
+   * Together with the clones (in `branchDirs` or on disk) this is the whole
+   * of what the platform KNOWS about branch names — and the difference
+   * between "your link is to a branch that was deleted" (410) and "there is
+   * no branch by that name" (404).
+   *
+   * Names ACCUMULATE rather than being replaced by each listing, because the
+   * listing that proves a branch is gone is precisely the one that no longer
+   * names it: replacing would forget the deleted branch at the moment its
+   * deletion becomes the thing we need to report. Bounded by eviction of the
+   * oldest name, so a process that runs for months of created-and-deleted
+   * draft branches cannot grow this without limit.
+   *
+   * In memory only, by the spec's decision — no new persistence. A restart
+   * forgets a deleted branch whose clone was already retired, and that name
+   * then reads as unknown, which is exactly what the platform then knows.
+   */
+  private readonly listedBranches = new Set<string>();
+  private static readonly MAX_LISTED_BRANCHES = 5_000;
+
+  /**
+   * Record the branch names a listing returned. Called by the git layer after
+   * every `listBranches` (wired in the composition root), which is the one
+   * place the platform ever sees origin's set of branches.
+   */
+  noteBranchesListed(names: readonly string[]): void {
+    for (const name of names) {
+      // Re-insert so a name that keeps showing up in listings is also the
+      // last to be evicted.
+      this.listedBranches.delete(name);
+      this.listedBranches.add(name);
+      if (this.listedBranches.size > WorkspaceService.MAX_LISTED_BRANCHES) {
+        const oldest = this.listedBranches.values().next();
+        if (!oldest.done) this.listedBranches.delete(oldest.value);
+      }
+    }
+  }
+
+  /**
+   * Has the platform ever heard of this branch? A clone of it — registered in
+   * this process or sitting on disk from a previous one — or a listing that
+   * named it. Only asked on the failure path, where origin has just answered
+   * that it has no such ref: a yes means the branch was deleted (410), a no
+   * means it never existed as far as the platform is concerned (404).
+   */
+  private async hasHeardOfBranch(branch: string): Promise<boolean> {
+    if (this.branchDirs.has(branch)) return true;
+    if (this.listedBranches.has(branch)) return true;
+    try {
+      await fs.access(path.join(this.workspacesRoot, workspaceIdForBranch(branch), this.kbDirName, '.git'));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -818,13 +876,18 @@ export class WorkspaceService implements IWorkspaceService {
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       // A branch origin does not have is a fact about the branch, not a
-      // failure of ours: the host deleted it (and the sync retired the
-      // clone), or the link was to a branch that never existed. Typed, so the
-      // routes answer 410 with the branch named and the browser can say "this
-      // branch no longer exists" instead of "something went wrong".
+      // failure of ours — but WHICH fact depends on whether the platform ever
+      // knew the name. A branch it cloned or listed and origin no longer has
+      // was deleted (410, "this branch no longer exists"); a name it has
+      // never seen is simply not a branch (404), and saying "no longer exists
+      // on the remote" to a typo tells the reader it once did.
       if (isMissingRemoteBranchFailure(redacted)) {
-        log.info(`branch "${branch}" does not exist on origin — nothing to clone`);
-        throw new RemoteBranchGoneError(branch);
+        if (await this.hasHeardOfBranch(branch)) {
+          log.info(`branch "${branch}" is gone from origin — nothing to clone`);
+          throw new RemoteBranchGoneError(branch);
+        }
+        log.info(`branch "${branch}" has never existed here — nothing to clone`);
+        throw new BranchNotFoundError(branch);
       }
       log.error(`Failed to clone for branch "${branch}":`, { detail: redacted });
       throw new Error(`Failed to clone process map: ${redacted}`);
