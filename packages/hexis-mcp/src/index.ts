@@ -34,6 +34,8 @@ export {
   fetchAgentInstructions,
   type ResolvedDeployment,
   fetchAllManuals,
+  fetchCatalogRevision,
+  CatalogRevisionUnsupportedError,
   fetchLocalOnlyManuals,
   fetchLocalToolVariables,
   type LocalManualInfo,
@@ -72,6 +74,12 @@ export {
   DISCOVERY_NOTICE_TOOL,
   type HexisMcpHandle,
 } from './server.js';
+export {
+  watchCatalog,
+  CATALOG_POLL_INTERVAL_MS,
+  type CatalogWatch,
+  type CatalogWatchOptions,
+} from './catalog-watch.js';
 export {
   SUPPORTED_NODE,
   SUPPORTED_NODE_MAJORS,

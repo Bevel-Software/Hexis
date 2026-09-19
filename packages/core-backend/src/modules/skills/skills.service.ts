@@ -53,12 +53,7 @@ export class SkillService implements ISkillService {
     const skills = await this.scan();
     const summaries = skills.map((s) => s.summary);
     if (!userEmail) return summaries;
-    const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    const allowed = await this.accessControl.canReadBatch(
-      wsId,
-      userEmail,
-      summaries.map((s) => `${s.path}/SKILL.md`),
-    );
+    const allowed = await this.readable(userEmail, summaries.map((s) => s.path));
     // Fail closed: keep a skill only on an explicit `true` verdict — a missing
     // entry counts as denied, matching the KB's default-deny read model (and the
     // tool-manuals catalog). `!== false` would silently EXPOSE a skill any time
@@ -72,7 +67,22 @@ export class SkillService implements ISkillService {
     if (!found) return { ok: false, error: 'not_found' };
 
     const wsId = workspaceIdForBranch(DEFAULT_BRANCH);
-    if (!(await this.accessControl.canRead(wsId, userEmail, `${found.summary.path}/SKILL.md`))) {
+    // Through `readable`, not a bare `canRead`: the two gates must never
+    // disagree. `canRead` reads a file's own frontmatter rules off disk on
+    // every call while `canReadBatch` resolves them through a per-workspace
+    // memo, so the same skill at the same instant could be loadable by name
+    // and absent from the listing — an author who writes a skill and then
+    // lists them not seeing their own work, and an agent discovering by
+    // listing unable to find a skill it could load. One resolver, one answer.
+    //
+    // The price of the shared gate is that this path now reads through that
+    // memo rather than off disk, so a SKILL.md that rewrites its own `read:`
+    // rules would be authorized against the previous verdict until the memo
+    // expires. It is not: `registerCatalogCacheInvalidation` drops the gate on
+    // the same default-branch signal that drops this catalog, so the listing
+    // and the load are refreshed by one event or by neither.
+    const allowed = await this.readable(userEmail, [found.summary.path]);
+    if (allowed.get(`${found.summary.path}/SKILL.md`) !== true) {
       return { ok: false, error: 'forbidden' };
     }
 
@@ -100,6 +110,19 @@ export class SkillService implements ISkillService {
   }
 
   // --- internal ---------------------------------------------------------------
+
+  /**
+   * The ONE read gate both surfaces resolve through, keyed by each skill's
+   * `SKILL.md`. Shared so `listSkills` and `getSkill` can only ever give the
+   * same verdict about the same skill — see the note at the `getSkill` call.
+   */
+  private async readable(userEmail: string, skillFolders: string[]): Promise<Map<string, boolean>> {
+    return this.accessControl.canReadBatch(
+      workspaceIdForBranch(DEFAULT_BRANCH),
+      userEmail,
+      skillFolders.map((p) => `${p}/SKILL.md`),
+    );
+  }
 
   private async scan(): Promise<ParsedSkill[]> {
     const cached = this.cache.get();

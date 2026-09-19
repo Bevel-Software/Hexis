@@ -123,12 +123,15 @@ async function setup(deps?: {
     deps?.revokeOAuthAccess,
   );
   lastService = mcp;
+  lastRegistry = registry;
   const tokenId = deps?.tokenId === undefined ? 'tok-1' : deps.tokenId;
   return connectClient(mcp, tokenId);
 }
 
 /** The service `setup` built last — for a test that needs a SECOND request against the same service. */
 let lastService: McpService | undefined;
+/** Its tool registry, for a test that changes what the loopback catalog serves mid-run. */
+let lastRegistry: ToolRegistry | undefined;
 
 /**
  * One request's server, driven over an in-memory pair. The route builds one
@@ -560,6 +563,47 @@ describe('McpService — manual names that rewrite to one identifier', () => {
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toContain('ask');
     expect(warn.mock.calls.map((c) => String(c[0])).some((m) => m.includes('"KNOWLEDGE-BASE"') && m.includes('rewrites to'))).toBe(true);
+  });
+});
+
+describe('McpService — the stateless endpoint reads the live catalog', () => {
+  /**
+   * The freshness the STATELESS hosted endpoint gets for free, against the
+   * real service rather than a stand-in: because every request discovers the
+   * live catalog for itself, a tool released between two requests is in the
+   * second one's answer — no session to invalidate, no notification to honour,
+   * no reconnect. This is the half of the guarantee `/api/mcp` owes; the
+   * commit → catalog half is `catalog-cache-invalidation.ts`'s.
+   *
+   * Asserted through `McpService` itself, because a stub that re-reads a
+   * mutable array on every call proves only that the array was re-read: it
+   * would pass just as happily if the service cached its tool surface across
+   * requests, which is the only way this property can actually break.
+   */
+  it('a tool released between two requests is in the second request\'s answer', async () => {
+    const client = await setup();
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain('serper_search');
+
+    // The commit lands: a `.tool` is added and the catalog the loopback serves
+    // now holds it. Nothing reconnects, nothing is told.
+    lastRegistry!.registerExternalTool(
+      toolDef({
+        name: 'serper_search',
+        description: 'search the web',
+        path: '/api/agent/tools/serper_search',
+        inputs: { type: 'object', properties: {} },
+      }),
+    );
+
+    const second = await connectClient(lastService!, 'tok-1');
+    expect((await second.listTools()).tools.map((t) => t.name)).toContain('serper_search');
+    // The first request's own server, meanwhile, keeps the surface it
+    // discovered — one catalog per request, shared by that request's messages
+    // and nothing beyond. That is not a staleness bug but the shape of the
+    // endpoint: a client here makes a NEW request, and the new request sees
+    // the new tool. The long-lived-connection case is what the local bridge's
+    // catalog watch exists for.
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain('serper_search');
   });
 });
 
