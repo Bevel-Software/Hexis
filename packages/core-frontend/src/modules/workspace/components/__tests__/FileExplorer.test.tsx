@@ -9,6 +9,7 @@ import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
 import { OpenChangeRequestsContext } from '../../state/open-change-requests.context';
+import { PR_STALE_EVENT } from '../../../../core/events';
 
 // authFetch is the bearer-token wrapper around window.fetch. The Download
 // click test asserts the URL + ?download=1 flag, so we mock it at the
@@ -17,6 +18,16 @@ const mockAuthFetch = vi.fn();
 vi.mock('../../../../lib/api', () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
 }));
+
+// The author-cancel the sidebar's Withdraw reuses — the same function the
+// file page's change box calls. The tree's job is to call it with the right
+// request number and let the refetch take the rows away; the cancel itself
+// is the pr module's.
+const cancelMocks = vi.hoisted(() => ({
+  cancelPullRequest: vi.fn(),
+  deleteChangeRequest: vi.fn(),
+}));
+vi.mock('../../../pr/services/pr-cancel.api', () => cancelMocks);
 
 // The sheet itself is covered by the access module's own tests; here only
 // WHICH workspace and proposal the tree hands it matters.
@@ -103,6 +114,19 @@ interface RenderOptions {
   openChangeRequestPaths?: string[];
   /** The caller's own open requests: workspace-relative path → CR number. */
   minePaths?: Map<string, number>;
+  /**
+   * Which of those requests the caller AUTHORED. Defaults to all of them,
+   * which is the real shape today — suggestion rows are synthesized from
+   * `/mine`. A test wanting an owner's view of SOMEONE ELSE'S proposal passes
+   * a narrower set, which is the only way to decouple the two here.
+   */
+  mineNumbers?: number[];
+  /**
+   * The files the synthesized request carries. One drop can become one
+   * request over several files, and withdrawing takes all of them; defaults
+   * to just the path the row is for.
+   */
+  crFiles?: string[];
   /** The URL the tree mounts at — a reload lands on whatever the query says. */
   initialEntries?: string[];
 }
@@ -134,7 +158,7 @@ function renderExplorer(opts: RenderOptions = {}) {
     moveEntry,
     ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
   });
-  const ui = (ws: WorkspaceContextValue) => (
+  const ui = (ws: WorkspaceContextValue, mine: Map<string, number>) => (
       <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
         <AuthContext.Provider value={makeAuth()}>
           <WorkspaceContext.Provider value={ws}>
@@ -146,7 +170,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                     // synthesize a summary for every minePaths entry so the
                     // shared dialog has something to open.
                     forPath: (p) => {
-                      const n = opts.minePaths?.get(p);
+                      const n = mine.get(p);
                       return n === undefined
                         ? []
                         : ([
@@ -157,15 +181,15 @@ function renderExplorer(opts: RenderOptions = {}) {
                               base: 'main',
                               state: 'open',
                               createdAt: '2026-08-01T00:00:00.000Z',
-                              touchedNodePaths: [p],
+                              touchedNodePaths: opts.crFiles ?? [p],
                               author: { login: 'user-x' },
                               review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
                               url: '',
                             },
                           ] as never);
                     },
-                    minePaths: opts.minePaths ?? new Map(),
-                    mineNumbers: new Set(opts.minePaths?.values() ?? []),
+                    minePaths: mine,
+                    mineNumbers: new Set(opts.mineNumbers ?? [...mine.values()]),
                   }}
                 >
                   <FileExplorer />
@@ -176,7 +200,8 @@ function renderExplorer(opts: RenderOptions = {}) {
         </AuthContext.Provider>
       </MemoryRouter>
   );
-  const result = render(ui(workspace));
+  const minePaths = opts.minePaths ?? new Map<string, number>();
+  const result = render(ui(workspace, minePaths));
   return {
     moveEntry,
     dispatchUpload,
@@ -185,7 +210,17 @@ function renderExplorer(opts: RenderOptions = {}) {
     deleteEntry,
     ...result,
     /** Re-render the same explorer as though the user switched workspace. */
-    switchWorkspace: (workspaceId: string) => result.rerender(ui({ ...workspace, workspaceId })),
+    switchWorkspace: (workspaceId: string) =>
+      result.rerender(ui({ ...workspace, workspaceId }, minePaths)),
+    /**
+     * What the refetch behind a PR_STALE_EVENT does to a tree whose request
+     * is gone: `/mine` stops listing it, so its paths leave `minePaths`. The
+     * same mounted tree, re-rendered — never a reload.
+     */
+    requestWithdrawn: (crNumber: number) => {
+      const next = new Map([...minePaths].filter(([, n]) => n !== crNumber));
+      result.rerender(ui(workspace, next));
+    },
   };
 }
 
@@ -1382,6 +1417,161 @@ describe('FileExplorer rows: the prototype tree', () => {
     const dialog = screen.getByTestId('manage-access-dialog');
     expect(dialog.dataset.path).toBe('brief.md');
     expect(JSON.parse(dialog.dataset.proposal!)).toBeNull();
+  });
+});
+
+// ── Taking a suggestion back from the row that shows it ──
+//
+// Withdraw already existed — on the file page's change box, and in the
+// change-request dialog. Neither is where the accent-coloured row leads, and
+// the notice that announced the suggestion said nothing about undoing it, so
+// the reporter concluded an accidental upload was permanent. The row's
+// right-click menu is where the user looks; this is that menu.
+describe('FileExplorer: withdrawing my own suggestion from its row', () => {
+  const TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'docs',
+        relativePath: 'docs',
+        type: 'directory',
+        children: [{ name: 'a.md', relativePath: 'docs/a.md', type: 'file' }],
+      },
+      { name: 'brief.md', relativePath: 'brief.md', type: 'file' },
+    ],
+  };
+  const PROPOSED = 'docs/new-idea.md';
+  const proposedRow = () =>
+    screen.getByTitle('Proposed by you: opens the change request').closest('button')!;
+
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    cancelMocks.cancelPullRequest.mockReset();
+    cancelMocks.cancelPullRequest.mockResolvedValue({ ok: true });
+  });
+
+  it('offers Withdraw suggestion on a proposed row of my own request', () => {
+    renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    expect(screen.getByRole('menuitem', { name: /Withdraw suggestion/i })).toBeInTheDocument();
+  });
+
+  /**
+   * The rows are synthesized from `/mine` today, so this is the gate holding
+   * the line rather than a case the tree can reach — which is exactly why it
+   * is tested. An owner seeing another user's proposal must be offered no
+   * Withdraw: their "no" is Decline, and it stays in the dialog.
+   */
+  it('offers no Withdraw on a proposed row from someone else’s request', () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([[PROPOSED, 12]]),
+      // The row is there; the request is not the caller's.
+      mineNumbers: [],
+    });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /Withdraw/i })).toBeNull();
+    // And nothing else about the row changed.
+    expect(screen.getByRole('menuitem', { name: /Manage access/i })).toBeInTheDocument();
+  });
+
+  it('names the file in the confirmation when the request carries one', async () => {
+    renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+    expect(dialog).toHaveTextContent('Withdraw new-idea.md?');
+  });
+
+  /**
+   * Withdrawal is per REQUEST: a multi-file drop became one change request,
+   * and cancelling it cancels all of it. The user right-clicked one row, so
+   * the count is said before they confirm — not discovered afterwards.
+   */
+  it('says the whole suggestion goes when the request carries several files', async () => {
+    renderExplorer({
+      fileTree: TREE,
+      minePaths: new Map([[PROPOSED, 12]]),
+      crFiles: ['docs/new-idea.md', 'docs/budget.csv', 'docs/plan.md'],
+    });
+    fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+    expect(dialog).toHaveTextContent('This withdraws the whole suggestion: 3 files');
+    // The single-file sentence must not also be there — it would name one of
+    // the three and contradict the count.
+    expect(dialog).not.toHaveTextContent('new-idea.md');
+  });
+
+  it('cancels the request and the row goes, without a reload', async () => {
+    const view = renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    try {
+      fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+      fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+      const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+
+      // Nothing is sent until Confirm.
+      expect(cancelMocks.cancelPullRequest).not.toHaveBeenCalled();
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+      });
+
+      // The existing author-cancel path, called with the REQUEST number —
+      // not the path, and not a new endpoint of the tree's own.
+      expect(cancelMocks.cancelPullRequest).toHaveBeenCalledWith(12);
+      // The signal every consumer of the request list listens for. This is
+      // what takes the row away: `/mine` stops carrying the request.
+      expect(stale).toHaveBeenCalled();
+
+      view.requestWithdrawn(12);
+      expect(screen.queryByTitle('Proposed by you: opens the change request')).toBeNull();
+      expect(screen.queryByText('new-idea.md')).toBeNull();
+    } finally {
+      window.removeEventListener(PR_STALE_EVENT, stale);
+    }
+  });
+
+  /**
+   * Already applied, or declined meanwhile. The rows must still re-read from
+   * the server — a refused cancel means the row was describing something no
+   * longer open, and leaving it there is the one outcome worse than the error.
+   */
+  it('refreshes the rows even when the cancel is refused', async () => {
+    cancelMocks.cancelPullRequest.mockRejectedValue(new Error('Change request #12 is already merged'));
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const stale = vi.fn();
+    window.addEventListener(PR_STALE_EVENT, stale);
+    try {
+      renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+      fireEvent.contextMenu(proposedRow(), { clientX: 40, clientY: 40 });
+      fireEvent.click(screen.getByRole('menuitem', { name: /Withdraw suggestion/i }));
+      const dialog = await screen.findByRole('dialog', { name: 'Withdraw suggestion' });
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Withdraw' }));
+      });
+
+      await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+      expect(String(alertSpy.mock.calls[0][0])).toMatch(/already merged/);
+      expect(stale).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(PR_STALE_EVENT, stale);
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('leaves an ordinary row’s menu without a Withdraw', () => {
+    renderExplorer({ fileTree: TREE, minePaths: new Map([[PROPOSED, 12]]) });
+    fireEvent.contextMenu(screen.getByText('brief.md'), { clientX: 40, clientY: 40 });
+    expect(screen.queryByRole('menuitem', { name: /Withdraw/i })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: /Delete/i })).toBeInTheDocument();
   });
 });
 

@@ -974,7 +974,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           if (isCurrent()) {
             setUploadNotice(
               "You can't write to that folder, so the upload became a suggestion: " +
-                'it is now a change request for the folder’s owners to review.',
+                'it is now a change request for the folder’s owners to review. ' +
+                // Where the undo is. Without this sentence the notice says a
+                // thing happened and nothing about reversing it, and the
+                // accent-coloured row it produces says nothing either — which
+                // is how an accidental upload came to read as permanent.
+                'To take it back, right-click the file and choose Withdraw suggestion.',
             );
           }
         } catch (err) {
