@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
 import type { AccessResponse } from '../api';
+import { declarationsOf } from './tailwindDeclarations';
 
 // --- Mock the API module ----------------------------------------------------
 const api = vi.hoisted(() => ({
@@ -70,18 +71,23 @@ describe('ManageAccessDialog: a picked chip is bounded by the field it sits in',
   });
 
   /**
-   * happy-dom runs no layout engine and loads no Tailwind stylesheet, so a
-   * width here would only ever read 0. What these assert instead is the whole
-   * mechanism the fix is: the chip is clamped to its container, only the label
-   * gives way, and the remove control does not. That is what a browser needs to
-   * keep the chip inside the box, and it is checkable without a renderer.
+   * happy-dom runs no layout engine, so a width read here would only ever be 0
+   * — pixels are the visual check's job. What is checkable without a renderer
+   * is the CSS the browser is handed, and that is what these assert: the
+   * declarations come from compiling the app's own `index.css` with the app's
+   * own Tailwind (see `declarationsOf`), so a purged or renamed utility, a
+   * Tailwind upgrade that changes the generated CSS, or a broken CSS build
+   * fails the test instead of leaving it green while the chip overflows again.
+   * Reading declarations rather than class names also means restyling the chip
+   * is free: any class that yields the same CSS keeps these passing.
    */
   async function pickAndAssertChip(label: string) {
     const chip = chipFor(label);
     // 1. The chip can never be wider than the field it is laid out in, and it
     //    is allowed to shrink below its own content.
-    expect(chip).toHaveClass('max-w-full');
-    expect(chip).toHaveClass('min-w-0');
+    const chipCss = await declarationsOf(chip);
+    expect(chipCss['max-width']).toBe('100%');
+    expect(chipCss['min-width']).toBe('0px');
 
     // 2. The label is the part that truncates, and it carries the full name as
     //    its tooltip.
@@ -89,24 +95,34 @@ describe('ManageAccessDialog: a picked chip is bounded by the field it sits in',
     expect(labelEl).not.toBeNull();
     expect(labelEl).toHaveTextContent(label);
     expect(labelEl).toHaveAttribute('title', label);
-    expect(labelEl).toHaveClass('truncate');
-    expect(labelEl).toHaveClass('min-w-0');
+    const labelCss = await declarationsOf(labelEl as Element);
+    expect(labelCss).toMatchObject({
+      overflow: 'hidden',
+      'text-overflow': 'ellipsis',
+      'white-space': 'nowrap',
+      'min-width': '0px',
+    });
 
     // 3. The remove button keeps its full size at the end of the chip, and its
     //    accessible name is the whole untruncated label.
     const remove = screen.getByRole('button', { name: `Remove ${label}` });
-    expect(remove).toHaveClass('shrink-0');
+    expect((await declarationsOf(remove))['flex-shrink']).toBe('0');
     // Last child: visibly at the end, after the label, in reading order too.
     expect(chip.lastElementChild).toBe(remove);
 
-    // 4. Nothing in the chip is measured in pixels — the bound is a percentage
-    //    of the field and the padding/text are rem — so zooming to 200% scales
-    //    the chip and the field together instead of bursting one out of the
-    //    other.
+    // 4. The chip's bound is a percentage of the field (asserted above) and
+    //    nothing inside it is pinned to a pixel width, so zooming to 200%
+    //    scales the chip and the field together instead of bursting one out of
+    //    the other.
     expect(chip.getAttribute('style')).toBeNull();
     expect(remove.getAttribute('style')).toBeNull();
-    for (const el of [chip, labelEl as Element]) {
-      expect(el.className).not.toMatch(/\[\d+(?:\.\d+)?px\]/);
+    for (const css of [chipCss, labelCss]) {
+      // `0px` is the absence of a floor, not a size; anything else in px would
+      // pin a width that zoom cannot scale.
+      const pinned = ['width', 'max-width', 'min-width']
+        .map((property) => css[property])
+        .filter((value) => value !== undefined && value !== '0px' && value.endsWith('px'));
+      expect(pinned).toEqual([]);
     }
   }
 
@@ -172,7 +188,10 @@ describe('ManageAccessDialog: a picked chip is bounded by the field it sits in',
     // goes onto a new line inside the border instead of widening it.
     const field = chipFor(LONG_GROUP).parentElement as HTMLElement;
     expect(chipFor(LONG_EMAIL).parentElement).toBe(field);
-    expect(field).toHaveClass('flex-wrap');
-    expect(field).toHaveClass('w-full');
+    expect(await declarationsOf(field)).toMatchObject({
+      display: 'flex',
+      'flex-wrap': 'wrap',
+      width: '100%',
+    });
   });
 });
