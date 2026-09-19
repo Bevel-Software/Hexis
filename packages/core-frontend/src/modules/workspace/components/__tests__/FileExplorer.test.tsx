@@ -4,7 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
-import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '../../state/workspace.context';
+import {
+  KNOWLEDGE_UPLOAD_TARGET,
+  WorkspaceContext,
+  type UploadError,
+  type UploadNotice,
+  type UploadTarget,
+  type WorkspaceContextValue,
+} from '../../state/workspace.context';
 import { makeWorkspaceFixture } from '../../__tests__/testFixtures';
 import { GitContext, type GitContextValue } from '../../../git/state/git.context';
 import { AuthContext, type AuthContextValue } from '../../../auth/state/auth.context';
@@ -102,7 +109,11 @@ interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
   clearUploadError?: ReturnType<typeof vi.fn>;
   isUploading?: boolean;
+  /** Which tree the banner belongs to — the Knowledge explorer by default. */
+  uploadTarget?: UploadTarget;
   uploadError?: UploadError | null;
+  uploadNotice?: UploadNotice | null;
+  clearUploadNotice?: ReturnType<typeof vi.fn>;
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
   deleteEntry?: ReturnType<typeof vi.fn>;
@@ -145,9 +156,12 @@ function renderExplorer(opts: RenderOptions = {}) {
   const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
+  const bannerTarget = opts.uploadTarget ?? KNOWLEDGE_UPLOAD_TARGET;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
     fileTree,
-    uploadError: opts.uploadError ?? null,
+    uploadErrors: opts.uploadError ? new Map([[bannerTarget, opts.uploadError]]) : new Map(),
+    uploadNotices: opts.uploadNotice ? new Map([[bannerTarget, opts.uploadNotice]]) : new Map(),
+    clearUploadNotice: opts.clearUploadNotice ?? (() => {}),
     isUploading: opts.isUploading ?? false,
     openFilePath: opts.openFilePath ?? null,
     refreshFileTree: async () => fileTree,
@@ -354,6 +368,93 @@ describe('FileExplorer toolbar', () => {
   it('does not render the error region when uploadError is null', () => {
     renderExplorer({ uploadError: null });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  // The reported banner: "Couldn't add knowledge-base/K…" — one truncated
+  // line whose reason lived in a `title` tooltip. Everything the user needs
+  // is in the banner now, wrapping over as many lines as it takes.
+  it('shows the whole reason in the banner, wrapped, with no tooltip-only text', () => {
+    const reason =
+      'You don\u2019t have permission to write to Knowledge/Legal. '
+      + 'The folder is owned by the Legal group, and its access rules grant write '
+      + 'to that group only.';
+    renderExplorer({ uploadError: { filename: 'quarterly-report.pdf', reason } });
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't add quarterly-report.pdf");
+    // In full, not cut at the width of one line.
+    expect(alert.textContent).toContain(reason);
+    // Nothing is hidden behind a hover: no part of the message lives in a
+    // `title`, and nothing is clipped to a single line.
+    const titles = [...alert.querySelectorAll('[title]')].map((el) => el.getAttribute('title') ?? '');
+    expect(titles.some((t) => t.includes('permission'))).toBe(false);
+    expect(alert.querySelectorAll('.truncate')).toHaveLength(0);
+    expect(alert.querySelector('.whitespace-pre-wrap')).not.toBeNull();
+  });
+
+  // The next step comes from the STATUS, so the backend can reword its
+  // refusals — as it has — without the banner's advice going wrong. The
+  // reasons here are deliberately not the ones the old wording-matcher knew.
+  it('ends the error banner with what to do about it', () => {
+    renderExplorer({
+      uploadError: {
+        filename: 'brief.docx',
+        reason: 'Knowledge/Legal is owned by the Legal group; writing needs the Legal role',
+        status: 403,
+      },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('Try another folder or ask its owner.');
+    cleanup();
+
+    renderExplorer({
+      uploadError: { filename: 'huge.bin', reason: 'File exceeds 52428800 byte limit', status: 413 },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('try a smaller one');
+    cleanup();
+
+    renderExplorer({ uploadError: { filename: 'note.md', reason: 'Upstream is unreachable' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Try again, or pick another folder.');
+  });
+
+  // One shared piece of state, one banner per page: a drop into the Library's
+  // Skills tree must not paint its banner over the Knowledge explorer.
+  it('ignores banners stamped with another tree', () => {
+    renderExplorer({
+      uploadTarget: 'library:Skills',
+      uploadError: { filename: 'note.md', reason: 'nope' },
+      uploadNotice: { kind: 'suggestion', message: 'became a suggestion' },
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('upload-notice')).not.toBeInTheDocument();
+  });
+
+  it('renders exactly one notice for its own tree', () => {
+    renderExplorer({
+      uploadNotice: {
+        kind: 'suggestion',
+        message: "You can't write to that folder, so the upload became a suggestion.",
+      },
+    });
+    const notices = screen.getAllByTestId('upload-notice');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toHaveTextContent('became a suggestion');
+  });
+
+  // Nothing to dismiss about an upload that has not finished; the result
+  // notice that replaces it is the one the user closes.
+  it('offers no dismiss on the in-progress notice and one on the result', async () => {
+    const user = userEvent.setup();
+    renderExplorer({ uploadNotice: { kind: 'progress', message: 'Adding report.pdf to Ops…' } });
+    expect(screen.getByTestId('upload-notice')).toHaveTextContent('Adding report.pdf to Ops');
+    expect(screen.queryByRole('button', { name: /Dismiss upload notice/i })).not.toBeInTheDocument();
+    cleanup();
+
+    const clearUploadNotice = vi.fn();
+    renderExplorer({
+      uploadNotice: { kind: 'suggestion', message: 'became a suggestion' },
+      clearUploadNotice,
+    });
+    await user.click(screen.getByRole('button', { name: /Dismiss upload notice/i }));
+    expect(clearUploadNotice).toHaveBeenCalledTimes(1);
   });
 
   it('routes root-level drag-and-drop through dispatchUpload (parity with the button)', async () => {
