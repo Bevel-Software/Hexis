@@ -41,6 +41,22 @@ export function pluginPrincipalLabel(plugin: string, verb: PluginPrincipalVerb):
   return `${plugin} · ${who}`;
 }
 
+/**
+ * A person named in an access list. `hasAccount` is false when nobody has
+ * ever signed in as that email — under single sign-on the account is created
+ * BY the first sign-in, so a grant written ahead of time is a normal thing to
+ * see and is never refused for it. The dialog turns the flag into a quiet
+ * "hasn't signed in yet" beside the name, which is what makes a typo visible;
+ * the server re-reads it with every view, so the note goes away by itself
+ * once that person signs in. Optional for version skew: an older server omits
+ * it, and `undefined` must read as "nothing to say", never as "no account".
+ */
+export interface AccessUser {
+  name: string;
+  email: string;
+  hasAccount?: boolean;
+}
+
 export interface AccessEligible {
   /**
    * Kinded twin of `roles` — the same names, each saying whether it is a ROLE
@@ -50,7 +66,7 @@ export interface AccessEligible {
    */
   principals?: ResolvedPrincipal[];
   roles: string[];
-  users: { name: string; email: string }[];
+  users: AccessUser[];
 }
 
 export interface AccessReaders extends AccessEligible {
@@ -187,7 +203,13 @@ export interface SuggestResponse {
    * which was the retired alias of `roles`.
    */
   pluginPrincipals?: string[];
-  people?: { name: string; email: string }[];
+  /**
+   * Matching people, each carrying {@link AccessUser.hasAccount} — false for
+   * someone named in the knowledge base who has never signed in. Nobody is
+   * withheld for it; it is what a chip made from the suggestion labels itself
+   * with.
+   */
+  people?: AccessUser[];
   /** True when the query was too short to return people (roles/groups still shown). */
   peopleWithheld?: boolean;
 }
