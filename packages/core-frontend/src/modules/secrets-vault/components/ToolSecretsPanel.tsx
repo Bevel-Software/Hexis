@@ -11,6 +11,8 @@ import {
   deleteUserVar,
 } from '../services/tool-secrets.api';
 import { startToolOAuth } from '../services/connect.api';
+import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
+import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
 
 /**
@@ -24,10 +26,25 @@ import { announceToolCredentialsChanged } from '../../../core/events';
  * because a person arrives here FROM a card or a tool page that used those
  * words, and the fix-it surface must not describe the same state differently.
  * Values are write-only throughout: fields start empty, saving replaces.
+ *
+ * Every save here is followed by the manual's health check, and the answer
+ * lands on the row that was saved (`SavedKeyProbeResult`). The vault used to
+ * store a value and stop, which made it the quietest place in the app to
+ * install a key the provider would refuse.
  */
 export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onChanged: () => void }) {
   const adminVars = tool.variables.filter((v) => v.scope === 'admin');
   const userVars = tool.variables.filter((v) => v.scope === 'user');
+
+  /**
+   * ONE probe for the whole panel, shared by every row.
+   *
+   * That is what a probe is: a single call carrying the tool's whole
+   * credential set, not a test of one `${VAR}`. Giving each row its own would
+   * leave the admin key's row still saying `Connected` after the user key
+   * below it changed the very credentials that answer was about.
+   */
+  const probe = useSavedKeyProbe(tool.slug);
 
   /**
    * Every write in this panel funnels through here, which is why the Library
@@ -76,6 +93,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           onSave={(v, value) => setAdminVar(tool.slug, v.name, value)}
           onDelete={(v) => deleteAdminVar(tool.slug, v.name)}
           onChanged={changed}
+          probe={probe}
         />
       )}
       {userVars.length > 0 && (
@@ -94,6 +112,7 @@ export function ToolSecretsPanel({ tool, onChanged }: { tool: ToolSecrets; onCha
           onSave={(v, value) => setUserVar(tool.slug, v.name, value)}
           onDelete={(v) => deleteUserVar(tool.slug, v.name)}
           onChanged={changed}
+          probe={probe}
         />
       )}
     </div>
@@ -148,6 +167,7 @@ function VarPlugin({
   onSave,
   onDelete,
   onChanged,
+  probe,
 }: {
   title: string;
   hint: string;
@@ -160,6 +180,8 @@ function VarPlugin({
   onSave: (v: ToolVarStatus, value: string) => Promise<void>;
   onDelete: (v: ToolVarStatus) => Promise<void>;
   onChanged: () => void;
+  /** The panel's one probe — both groups of rows share it. */
+  probe: SavedKeyProbe;
 }) {
   return (
     <div>
@@ -168,7 +190,14 @@ function VarPlugin({
       <ul className="flex flex-col gap-1.5">
         {vars.map((v) =>
           v.oauth ? (
-            <OAuthVarRow key={v.name} v={v} slug={slug} ownerCanWrite={ownerCanWrite} onChanged={onChanged} />
+            <OAuthVarRow
+              key={v.name}
+              v={v}
+              slug={slug}
+              ownerCanWrite={ownerCanWrite}
+              onChanged={onChanged}
+              probe={probe}
+            />
           ) : (
             <VarRow
               key={v.name}
@@ -178,6 +207,7 @@ function VarPlugin({
               onSave={(value) => onSave(v, value)}
               onDelete={() => onDelete(v)}
               onChanged={onChanged}
+              probe={probe}
             />
           ),
         )}
@@ -193,6 +223,7 @@ function VarRow({
   onSave,
   onDelete,
   onChanged,
+  probe,
 }: {
   v: ToolVarStatus;
   editable: boolean;
@@ -200,23 +231,38 @@ function VarRow({
   onSave: (value: string) => Promise<void>;
   onDelete: () => Promise<void>;
   onChanged: () => void;
+  /** Shared with the panel's other rows; it answers for whichever saved last. */
+  probe: SavedKeyProbe;
 }) {
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (fn: () => Promise<void>) => {
+  /**
+   * @param saved a value was WRITTEN, so there is something to test. A delete
+   *   goes through here too and has nothing to prove — it only orphans
+   *   whatever the last probe was about to say, since that described a value
+   *   this row no longer holds.
+   */
+  const run = async (fn: () => Promise<void>, saved = false) => {
     setBusy(true);
     setError(null);
     try {
       await fn();
+      // Stored and cleared first; the probe cannot fail or delay any of this.
       setValue('');
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return;
     } finally {
       setBusy(false);
     }
+    // Outside the try: a probe's trouble is never reported as the save's, and
+    // the save is already done by the time either is decided. Naming the
+    // variable moves the panel's shared answer onto THIS row.
+    if (saved) probe.probeSaved(v.name);
+    else probe.forget();
   };
 
   return (
@@ -255,12 +301,16 @@ function VarRow({
             variant="primary"
             size="sm"
             disabled={busy || !value}
-            onClick={() => void run(() => onSave(value))}
+            onClick={() => void run(() => onSave(value), true)}
           >
             Save
           </Button>
         </div>
       )}
+      {/* What the provider made of the value just saved here. Only on the row
+          that asked: the answer is the tool's, and the newest save is the only
+          place it is still current. */}
+      {probe.subject === v.name && <SavedKeyProbeResult probe={probe} className="mt-1.5" />}
       {error && (
         <p role="alert" className="mt-1 text-detail text-danger">
           {error}
@@ -287,11 +337,14 @@ function OAuthVarRow({
   slug,
   ownerCanWrite,
   onChanged,
+  probe,
 }: {
   v: ToolVarStatus;
   slug: string;
   ownerCanWrite: boolean;
   onChanged: () => void;
+  /** Shared with the panel's other rows; it answers for whichever saved last. */
+  probe: SavedKeyProbe;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -319,9 +372,14 @@ function OAuthVarRow({
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return;
     } finally {
       setBusy(false);
     }
+    // Also a credential change: a replaced client secret can invalidate the
+    // tokens minted under the old one, so the tool's health is now unknown and
+    // worth testing — the same rule the tool page's rows follow.
+    probe.probeSaved(v.name);
   };
 
   return (
@@ -394,6 +452,8 @@ function OAuthVarRow({
           </div>
         </div>
       )}
+      {/* What the provider made of the client secret just saved here. */}
+      {probe.subject === v.name && <SavedKeyProbeResult probe={probe} className="mt-1.5" />}
       {error && (
         <p role="alert" className="mt-1 text-detail text-danger">
           {error}

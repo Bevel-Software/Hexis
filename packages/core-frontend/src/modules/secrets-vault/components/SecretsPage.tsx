@@ -55,8 +55,17 @@ export function SecretsPage() {
   // success path clears the API error — can't race the outcome away.
   const [oauthOutcome] = useState(readHashOutcome);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  /**
+   * @param quiet keep the panels on screen while they refetch.
+   *
+   * The loud refresh drops the page to "Loading…", which UNMOUNTS every panel
+   * — and a panel row holds the verdict of the probe its own save just
+   * started. Nothing persists a verdict, so a loud refetch after a save throws
+   * away the only copy of the answer the save was waiting for. Same fix
+   * `useToolPage` made for the tool page, for the same reason.
+   */
+  const refresh = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     try {
       const [t, s] = await Promise.all([listToolSecrets(), listSecrets()]);
       setTools(t);
@@ -163,7 +172,7 @@ export function SecretsPage() {
                   </Badge>
                 )}
               </div>
-                <ToolSecretsPanel tool={tool} onChanged={() => void refresh()} />
+                <ToolSecretsPanel tool={tool} onChanged={() => void refresh(true)} />
               </Surface>
             </li>
           ))}
