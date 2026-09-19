@@ -339,6 +339,11 @@ the skill. `metadata.version` is semver; `metadata.lifecycle` is `active`,
 `deprecated` (still served, flagged in the library) or `retired` (kept for
 its owners, never distributed to agents).
 
+A `SKILL.md` committed on the default branch is listed and loadable within
+five seconds, on the connection you already have — see *A released tool or
+skill is live within five seconds* under **Tool Manuals** for the one caveat
+(a client that caches the list it was given at connect time must re-list).
+
 **How skills reach agents.** Through the MCP server (`list_skills`,
 `get_skill`), or as native plugins: every user can clone a git remote from
 the app's external-agent page that holds a plugin marketplace compiled from
@@ -502,6 +507,10 @@ Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
 
 **Tools are served from the default branch only.** An `mcp.json` entry or `.tool` you write on a draft is committed to that draft and nowhere else: it is not listed, not callable and has no sign-in on the Connect page until the draft is merged. After declaring a tool on a draft, call `list_tool_setup` with `branch` set to that draft — `onBranchOnly` names what is still waiting there — and tell the user it goes live once the change request is merged. A tool that stays in `tools` is released, and a restart does not remove it or its sign-ins; if one disappears, check the caller's read access to the file that declares it.
+
+**A released tool or skill is live within five seconds — no reconnect.** A commit on the default branch that adds, changes or removes a `.tool`, an `mcp.json`, a `plugin.json` or a `SKILL.md` drops the catalogs at once, whichever way the commit arrived (the app, the file tools, or a git push). Within five seconds of it, `list_tools`, `list_tool_setup`, `list_local_tools` and `list_skills` answer with the new state on the connection you already have, and the new tool is callable on it. `list_skills` and `get_skill` resolve a skill the same way, so a skill you can load by name is a skill the listing shows.
+
+The platform also sends the MCP tool-list-changed and prompt-list-changed notifications when it can. **A client that CACHES the list it got at connect time — rather than honouring those notifications — will not see the change: it must re-list, or reconnect.** That is a property of the client, not of the workspace; if a tool you just wrote is missing, call `list_tools` again before assuming anything is wrong. One exception on the local `hexis-mcp` server: a newly added LOCAL-only server (`local: true`, or a `type: "stdio"` command) is fetched to disk and spawned at startup, so adding one needs that process restarted. Every tool the hosted workspace serves refreshes in place.
 
 The listing is scoped by the same access controls as everything else: a tool the caller can't READ doesn't appear at all, and `canWrite` means write access **on the file that declares it** — the `.tool` file itself (via its frontmatter `write:`/`owner:` verbs or the `access.md` chain), or the plugin's `mcp.json` for an MCP server (via the plugin's `access.md` chain — `mcp.json` carries no verb list of its own) — NOT any platform role. The people who manage that file are exactly the people who configure its shared secrets. To delegate a `.tool` to someone, add them to that file's `write:`/`owner:` list; to delegate an MCP server, grant them `write` on the plugin in its `access.md` (both are edits you can make via change request). That alone lets them configure it.
 

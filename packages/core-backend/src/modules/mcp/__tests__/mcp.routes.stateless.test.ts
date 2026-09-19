@@ -138,6 +138,46 @@ describe('POST /mcp (stateless)', () => {
     });
   });
 
+  /**
+   * The freshness property this endpoint gets for free, pinned so it cannot be
+   * optimised away: because every request builds its own server off the live
+   * registry, a manual committed between two requests is in the second one's
+   * answer. No session to invalidate, no notification to honour, no reconnect
+   * — the thing a stateful endpoint needs a whole refresh mechanism for.
+   *
+   * The `.tool` → registry half is `catalog-cache-invalidation.ts`'s (a commit
+   * drops the caches at once); this is the half that says the endpoint then
+   * SERVES what the registry holds, per request, forever.
+   */
+  it('serves a manual added between two requests, with no reconnect and no session', async () => {
+    // The registry as the proxy sees it: whatever it holds when the server for
+    // THIS request is built.
+    const registry = ['read_file'];
+    const mcpService = {
+      createRequestServer: vi.fn(async () => {
+        const snapshot = [...registry];
+        const server = new Server({ name: 'stub', version: '0' }, { capabilities: { tools: {} } });
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({
+          tools: snapshot.map((name) => ({ name, inputSchema: { type: 'object' as const } })),
+        }));
+        return server;
+      }),
+    };
+    const baseUrl = await mountMcpRoutes({ mcpService });
+
+    const before = await send(baseUrl, { body: TOOLS_LIST });
+    expect((await messagesOf(before))[0].result.tools.map((t: { name: string }) => t.name)).toEqual(['read_file']);
+
+    // A commit lands: a `.tool` is added, and another is removed.
+    registry.push('serper_search');
+    registry.splice(registry.indexOf('read_file'), 1);
+
+    const after = await send(baseUrl, { body: TOOLS_LIST });
+    expect((await messagesOf(after))[0].result.tools.map((t: { name: string }) => t.name)).toEqual(['serper_search']);
+    // Same client, no `initialize` in between, no session id either way.
+    expect(after.headers.get('mcp-session-id')).toBeNull();
+  });
+
   it('answers a failure building the server with a JSON-RPC 500', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const baseUrl = await mountMcpRoutes({

@@ -233,6 +233,32 @@ describe('ToolManualService', () => {
     ]);
   });
 
+  /**
+   * A bad manual costs its author their own tool and NOBODY ELSE anything.
+   *
+   * Asserted here rather than taken on trust because the refresh work makes
+   * the catalog re-scan far more often — on every default-branch commit rather
+   * than once a minute — so a broken file is now read, and skipped, many times
+   * more often than it used to be. One file that could take the listing down
+   * would take it down constantly.
+   */
+  test('an unreadable `.tool` beside good ones costs only itself', async () => {
+    const tools = join(root, wsId, KB_DIR, 'Plugins');
+    // Three ways a manual can be wrong: unparseable bytes, a valid document
+    // that is not a manual, and a manual with an invalid field.
+    await writeFile(join(tools, 'truncated.tool'), '{ "name": "truncated", "type": "htt');
+    await writeFile(join(tools, 'nottool.tool'), JSON.stringify({ hello: 'world' }));
+    await writeFile(
+      join(tools, 'badscope.tool'),
+      JSON.stringify({ name: 'badscope', type: 'http', url: 'https://x/m', variables: [{ name: 'K', scope: 'root' }] }),
+    );
+
+    const list = await svc().listAccessible('user@x.eu');
+    expect(list.map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+    // And the valid ones are still usable, not merely counted.
+    expect(list.find((m) => m.name === 'billing')!.type).toBe('http');
+  });
+
   test('skips a `.tool` with a malformed `variables` entry (never silently mis-scoped)', async () => {
     root = await mkdtemp(join(tmpdir(), 'toolsvbad-'));
     const tools = join(root, wsId, KB_DIR, 'Plugins');

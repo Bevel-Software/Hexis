@@ -14,6 +14,8 @@ npx @bevel-software/hexis-mcp --url https://your-workspace.example
 
 Once it is signed in, the server answers a client's `initialize` immediately and discovers your workspace's tools in the background, so a run that downloads the package and every plugin does not trip a client's handshake timeout. (The one exception is the very first keyless run: browser sign-in happens before the MCP transport exists, so nothing can be answered until you have signed in — the credential is cached afterwards and every later start is immediate.) `tools/list` waits for that discovery and then answers normally; if it fails, the failure arrives as a tool named `hexis_unavailable` whose description says why, and on stderr — the process stays up rather than disappearing.
 
+**The toolset tracks the workspace.** A tool manual or skill added, changed or removed on the workspace's default branch reaches this server within about five seconds, without a restart: it checks the workspace's catalog every three seconds and, when it has moved, re-registers the workspace's tools and sends the MCP tool-list-changed and prompt-list-changed notifications. A client that honours those re-lists on its own; one that caches the list it was given at connect time has to be asked to re-list, or reconnected. Two exceptions: adding a **local-only** server (`local: true`, or a `type: "stdio"` command) needs this process restarted, because those are fetched to your disk and run as child processes; and a workspace older than this package cannot report its catalog, which the server says once on stderr before keeping the toolset it started with.
+
 ## Signing in
 
 Two ways in, and whether you pass a key decides:
