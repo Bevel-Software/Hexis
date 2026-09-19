@@ -35,9 +35,21 @@ export interface Shot {
   /** Names the screen AND the highlighted control: the box is decoration. */
   alt: string;
   boxes: ShotHighlight[];
+  /**
+   * Intrinsic size, when this shot is not the default 1400x1080. Only the
+   * ASPECT matters — the image renders at the column's width either way —
+   * but the ratio has to be the file's own, or the reserved space collapses
+   * to the right height only after the bytes arrive. A dialog is a shorter
+   * screen than a full window, and cropping it to 1080 would be padding.
+   */
+  width?: number;
+  height?: number;
 }
 
-/** Intrinsic size of every shot, so the column reserves the space before load. */
+/**
+ * Intrinsic size of the nine window shots, so the column reserves the space
+ * before load. A shot that is not this shape carries its own `width`/`height`.
+ */
 export const SHOT_WIDTH = 1400;
 export const SHOT_HEIGHT = 1080;
 
@@ -102,4 +114,33 @@ export const installPluginsShot: Shot = {
   src: new URL('../assets/claude-setup/08-install-plugins.webp', import.meta.url).href,
   alt: 'The Discover list after a sync, with the whole Hexis all row highlighted as the bundle that installs everything at once.',
   boxes: [{ x: 27.0, y: 32.1, w: 69.4, h: 7.5 }],
+};
+
+/**
+ * The two connector shots. Installing the plugin is not the end of the
+ * setup: its MCP server is a connector Claude adds separately, and these are
+ * the screen that says so and the dialog that does it. Both are 1400x700 —
+ * a plugin panel and a dialog, not a full window — so they declare their own
+ * size rather than being padded to the window shots' 1080.
+ */
+export const connectorNotAddedShot: Shot = {
+  src: new URL('../assets/claude-setup/10-connector-not-added.webp', import.meta.url).href,
+  alt: "The Hexis all plugin's Tools and data sources list, with the hexis MCP server row reading Not added beside the Add for your team button.",
+  boxes: [
+    { x: 66.0, y: 30.9, w: 8.9, h: 6.0 },
+    { x: 76.3, y: 29.7, w: 17.7, h: 8.0 },
+  ],
+  width: 1400,
+  height: 700,
+};
+
+export const addCustomConnectorShot: Shot = {
+  src: new URL('../assets/claude-setup/11-add-custom-connector.webp', import.meta.url).href,
+  alt: "Claude's Add custom connector dialog, with the name and remote MCP server URL already filled in, and the Continue button that submits them.",
+  boxes: [
+    { x: 26.7, y: 28.6, w: 46.6, h: 25.7 },
+    { x: 63.1, y: 76.3, w: 10.6, h: 8.3 },
+  ],
+  width: 1400,
+  height: 700,
 };

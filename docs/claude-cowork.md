@@ -59,6 +59,14 @@ they can add the marketplace.
    choose **Add** on **Hexis all** for everything you may read in one plugin
    (every skill, and the knowledge base as an MCP server), or single plugins
    for a subset. **Update** in Claude pulls what changed.
+5. Add the connector. Installing the plugin does not connect its MCP server:
+   open the plugin's **tools and data sources** list and the `hexis` row reads
+   **Not added**. Choose **Add for your team**, which opens Claude's **Add
+   custom connector** dialog with the name and URL already filled in, then
+   **Continue**, and approve the sign-in on the platform. The step worked when
+   the row no longer reads **Not added**. Without organization-admin rights in
+   Claude you are offered the connector for yourself instead, which works the
+   same for you; ask an admin to add it for the team.
 
 Your connection appears under **Marketplaces → Your Claude connections**,
 where you can disconnect it. Disconnecting stops updates; connecting again
@@ -68,9 +76,22 @@ account: step 1 has not happened, or the connection it made was since
 disconnected here. Connect again from step 1; if that does not take, the
 server log says why (below).
 
-The same steps are a five-screen walkthrough on the **External agent access**
+A connector that will not attach is a different failure from a marketplace
+that will not sync, and the two are worth telling apart: the marketplace is
+fetched by Claude's servers over git, while the connector opens an MCP session
+against the platform's `/api/mcp` endpoint. If the row falls back to **Not
+added** after you approve, or the dialog says the server could not be reached,
+check the URL the dialog filled in — it has to be the platform's public HTTPS
+address, the same one the marketplace is served from, with `/api/mcp` on the
+end. A deployment reached on a second domain, or through a proxy that does not
+forward that path, is the usual cause. Remove the connector in Claude and add
+it again to re-run the sign-in. If approving never lands you back in Claude at
+all, that is the account connection in step 1, not the connector.
+
+The same steps are a six-screen walkthrough on the **External agent access**
 page in the app, identical for admins and everyone else once the deployment is
-marked registered. The registration half lives in **Deployment → Marketplace**.
+marked registered. The registration half is the same walkthrough in
+**Deployment → Marketplace**, and ends on the same connector step.
 
 ## When connecting does not take
 
