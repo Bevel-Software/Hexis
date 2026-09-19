@@ -1881,11 +1881,31 @@ export function registerWorkspaceTools(
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
       // item away nor makes one (a note renamed to `access.md` would start
-      // governing its folder).
-      const destOnDisk = await onDiskSpelling(root, dest);
-      const destManaged = managedReason(destOnDisk, kind);
+      // governing its folder). The source end is judged here; the destination
+      // end waits for the write verdict below, because reading it at all is
+      // what the caller has to have earned.
       const srcManaged = managedReason(await onDiskSpelling(root, src), kind);
-      const occupiedBy = srcManaged === undefined ? await existingAt(root, dest, src) : null;
+      // A folder move deletes every file under `src` and creates it again under
+      // `dest`, so every one of them is judged at both paths — a file its own
+      // rules deny you is not carried off because its folder is writable. The
+      // lock gate locks only the two folder paths, so this is the check.
+      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
+      // The write verdict comes FIRST, before anything that looks at the
+      // destination. "A file named Notes.md already exists in Sales." is a
+      // fact about a folder, and on a protected branch a caller who may not
+      // write there must not learn it from a refusal — answering existence
+      // first would make this tool an existence oracle for folders whose
+      // contents the caller cannot otherwise see. A source the platform owns
+      // is refused on the source alone and needs no destination at all.
+      const blocked = srcManaged !== undefined
+        ? []
+        : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
+      const mayReadDestination = blocked.length === 0;
+      const destOnDisk = mayReadDestination ? await onDiskSpelling(root, dest) : dest;
+      const destManaged = mayReadDestination ? managedReason(destOnDisk, kind) : undefined;
+      const occupiedBy = srcManaged === undefined && mayReadDestination
+        ? await existingAt(root, dest, src)
+        : null;
       const collision = occupiedBy !== null;
       // Checked after the collision: onto an existing platform file, "already
       // exists" is the plainer answer.
@@ -1898,18 +1918,14 @@ export function registerWorkspaceTools(
             : `"${destOnDisk}" is a platform folder; a move cannot create one.`;
       const managedWhy = srcManaged ?? createsManaged;
       const managed = managedWhy !== undefined;
-      // A folder move deletes every file under `src` and creates it again under
-      // `dest`, so every one of them is judged at both paths — a file its own
-      // rules deny you is not carried off because its folder is writable. The
-      // lock gate locks only the two folder paths, so this is the check.
-      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
-      const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
-      const reason = occupiedBy !== null
-        ? entryExistsMessage(occupiedBy, dest)
-        : managed
-          ? managedWhy
-          : blocked.length > 0
-            ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
+      // Same order as the checks above: the write refusal outranks every
+      // answer that had to look at the destination to be written.
+      const reason = managed
+        ? managedWhy
+        : blocked.length > 0
+          ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
+          : occupiedBy !== null
+            ? entryExistsMessage(occupiedBy, dest)
             : undefined;
       const impact = {
         src,
@@ -1923,8 +1939,8 @@ export function registerWorkspaceTools(
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
-      if (collision) throw new ToolError(reason!, 409);
       if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+      if (collision) throw new ToolError(reason!, 409);
       if (accessChanges && a.confirm !== true) {
         return {
           ...impact,
@@ -1988,6 +2004,13 @@ export function registerWorkspaceTools(
       // own containment check: a path with a `..` segment must not reach
       // `lstat` outside the workspace, even to be told a name is taken.
       assertPlainPath(dest);
+      // The write verdict comes FIRST, for the reason `move_file` gives at
+      // length: "already exists" is a fact about the destination folder, and a
+      // caller who may not write there must not be told it. The lock gate
+      // refuses this copy anyway — but only after the copy had already
+      // answered, which is exactly the oracle.
+      const blockedDest = await writeBlocked(branch, ctx, [dest]);
+      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0]);
       const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
       if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
       // The copy itself lands exclusively (`COPYFILE_EXCL`, under the

@@ -1895,6 +1895,55 @@ describe('preflight for moves and deletes', () => {
       expect(await exists(args.src)).toBe(false);
     });
 
+    /**
+     * "A file named rules.md already exists in Locked." is a fact about a
+     * folder. Answering it before the write verdict turned these tools into an
+     * existence oracle: a caller who may not write `Locked/` — and on a
+     * protected branch that is most callers — could ask for a name and read
+     * off whether it is taken. The two calls below differ ONLY in whether the
+     * destination exists, and must be indistinguishable.
+     */
+    it('a destination the caller may not write answers the same whether the name is taken or free', async () => {
+      const base = await seeded();
+      const taken = { src: KB('Sales/deal.md'), dest: KB('Locked/rules.md') };
+      const free = { src: KB('Sales/deal.md'), dest: KB('Locked/free.md') };
+
+      const ontoTaken = await call(base, 'move_file', taken);
+      const ontoFree = await call(base, 'move_file', free);
+      expect(ontoTaken.status).toBe(403);
+      expect(ontoTaken.status).toBe(ontoFree.status);
+      expect(ontoTaken.body.kind).toBe('write-denied');
+      expect(ontoTaken.body.error).not.toContain('already exists');
+      // Same shape, same words — only the path each names differs.
+      expect(ontoTaken.body.error.replace('rules.md', 'free.md')).toBe(ontoFree.body.error);
+
+      // The dry run is the easier oracle to reach, and says the same.
+      const dryTaken = await call(base, 'move_file', { ...taken, dryRun: true });
+      const dryFree = await call(base, 'move_file', { ...free, dryRun: true });
+      expect(dryTaken.body).toMatchObject({ allowed: false });
+      expect(dryTaken.body.reason).not.toContain('already exists');
+      expect(dryTaken.body.reason.replace('rules.md', 'free.md')).toBe(dryFree.body.reason);
+
+      // And nothing was moved onto the name that was taken.
+      expect(await fs.readFile(KB('Locked/rules.md'), { encoding: 'utf-8' })).toBe('rules');
+      expect(await exists(KB('Sales/deal.md'))).toBe(true);
+    });
+
+    it('copy_file keeps the same order: the write refusal, not what is in the folder', async () => {
+      const base = await seeded();
+
+      const ontoTaken = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Locked/rules.md') });
+      const ontoFree = await call(base, 'copy_file', { src: KB('Sales/deal.md'), dest: KB('Locked/free.md') });
+      expect(ontoTaken.status).toBe(403);
+      expect(ontoTaken.status).toBe(ontoFree.status);
+      expect(ontoTaken.body.kind).toBe('write-denied');
+      expect(ontoTaken.body.error).not.toContain('already exists');
+      expect(ontoTaken.body.error.replace('rules.md', 'free.md')).toBe(ontoFree.body.error);
+
+      expect(await fs.readFile(KB('Locked/rules.md'), { encoding: 'utf-8' })).toBe('rules');
+      expect(await exists(KB('Locked/free.md'))).toBe(false);
+    });
+
     it('a move the caller may not write: the dry run says so, the real call is a write-denied with proposal steps', async () => {
       const base = await seeded();
       const args = { src: KB('Sales/deal.md'), dest: KB('Locked/deal.md') };
