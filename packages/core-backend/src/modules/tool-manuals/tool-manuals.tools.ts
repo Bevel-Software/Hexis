@@ -193,12 +193,11 @@ export function registerToolManualsTools(
     toolHandler(async (args, ctx: ToolContext) => {
       // The in-app agent is focused on its own draft; an external caller names it.
       const branch = typeof args.branch === 'string' && args.branch ? args.branch : ctx.focusedBranch;
-      // `listInvalid` reads the SAME cached scan `listAccessible` does, so the
-      // refused files cost no second walk of the workspace — and the two
-      // halves cannot disagree about which files made it.
-      const [manuals, invalid, pending] = await Promise.all([
-        toolManualService.listAccessible(ctx.user.email),
-        toolManualService.listInvalid(ctx.user.email),
+      // The catalog comes back whole — what parsed AND what was refused — from
+      // ONE scan, so the refused files cost no second walk of the workspace and
+      // the two halves cannot disagree about which files made it.
+      const [{ tools: manuals, invalid }, pending] = await Promise.all([
+        toolManualService.listAccessibleCatalog(ctx.user.email),
         branch ? toolManualService.listDeclaredOnlyOnBranch(ctx.user.email, branch) : Promise.resolve([]),
       ]);
       const allKeys = manuals.flatMap((m) => (m.variables ?? []).map((v) => varKey(m.name, v.name)));

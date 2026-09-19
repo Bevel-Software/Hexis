@@ -203,10 +203,9 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
       // page can say which file and why instead of rendering a gap. Narrowed
       // by `?path=` exactly as the manuals are — the editor sidebar asking
       // about one file gets that file's verdict, valid or not.
-      const [allManuals, allInvalid] = await Promise.all([
-        toolManualService.listAccessible(email),
-        toolManualService.listInvalid(email),
-      ]);
+      // One scan, one access pass, one snapshot: `tools` and `invalid` cannot
+      // disagree about which files the workspace held.
+      const { tools: allManuals, invalid: allInvalid } = await toolManualService.listAccessibleCatalog(email);
       const manuals = pathFilter ? allManuals.filter((m) => m.path === pathFilter) : allManuals;
       const invalid = pathFilter ? allInvalid.filter((i) => i.path === pathFilter) : allInvalid;
 

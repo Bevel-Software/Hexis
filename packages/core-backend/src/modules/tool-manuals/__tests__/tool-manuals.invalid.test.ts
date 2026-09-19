@@ -94,6 +94,27 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
   const svc = (access: IAccessControl = allowAll) =>
     new ToolManualService(workspaceService, access, KB_DIR, disk, new KbPluginSource(disk), () => clock);
 
+  /**
+   * The refused half of the catalog. There is no way to ask for it alone: both
+   * halves come out of one scan and one access pass, so they always describe
+   * the same snapshot — see `listAccessibleCatalog`.
+   */
+  const invalidOf = async (service: ToolManualService, email: string) =>
+    (await service.listAccessibleCatalog(email)).invalid;
+
+  /**
+   * The real disk, counting the one call that walks the `.tool` tree.
+   * `Object.create` rather than a spread: `NodeFs`'s methods live on its
+   * prototype, and a spread would hand back an object with none of them.
+   */
+  const countingWalks = (onWalk: () => void): NodeFs =>
+    Object.assign(Object.create(disk) as NodeFs, {
+      walkFiles: (...args: Parameters<NodeFs['walkFiles']>) => {
+        onWalk();
+        return disk.walkFiles(...args);
+      },
+    });
+
   const pluginsDir = () => join(root, wsId, KB_DIR, 'Plugins');
   const write = (name: string, body: string) => writeFile(join(pluginsDir(), name), body);
   /** Past the scan's TTL: what "the next listing" means to a process nobody restarted. */
@@ -128,7 +149,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     test('the refused file is reported once, by path, with a usable reason', async () => {
       await write('broken.tool', content);
 
-      const invalid = await svc().listInvalid('user@x.eu');
+      const invalid = await invalidOf(svc(), 'user@x.eu');
       expect(invalid).toHaveLength(1);
       expect(invalid[0].path).toBe('Plugins/broken.tool');
       expect(invalid[0].reason).toBeTruthy();
@@ -144,7 +165,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
       const service = svc();
 
       expect((await service.listAccessible('user@x.eu')).map((m) => m.name)).not.toContain('fixed');
-      expect(await service.listInvalid('user@x.eu')).toHaveLength(1);
+      expect(await invalidOf(service, 'user@x.eu')).toHaveLength(1);
 
       // The same long-lived service object — nothing restarted, no cache
       // dropped by hand, just the next call after the scan's TTL.
@@ -156,18 +177,18 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
         'fixed',
         'weather',
       ]);
-      expect(await service.listInvalid('user@x.eu')).toEqual([]);
+      expect(await invalidOf(service, 'user@x.eu')).toEqual([]);
     });
 
     test('DISABLING the file — deleting it — clears the report just as well', async () => {
       await write('broken.tool', content);
       const service = svc();
-      expect(await service.listInvalid('user@x.eu')).toHaveLength(1);
+      expect(await invalidOf(service, 'user@x.eu')).toHaveLength(1);
 
       await unlink(join(pluginsDir(), 'broken.tool'));
       nextListing();
 
-      expect(await service.listInvalid('user@x.eu')).toEqual([]);
+      expect(await invalidOf(service, 'user@x.eu')).toEqual([]);
       expect((await service.listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['billing', 'weather']);
     });
   });
@@ -179,7 +200,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     const service = svc();
 
     expect((await service.listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['billing', 'weather']);
-    const invalid = await service.listInvalid('user@x.eu');
+    const invalid = await invalidOf(service, 'user@x.eu');
     expect(invalid.map((i) => i.path)).toEqual([
       'Plugins/bad-reserved.tool',
       'Plugins/bad-schema.tool',
@@ -198,7 +219,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
       `---\nid: broken\ntype: http\nurl: https://api.example.com/x\nheaders:\n  Authorization: "Bearer ${token}\n---\n`,
     );
 
-    const invalid = await svc().listInvalid('user@x.eu');
+    const invalid = await invalidOf(svc(), 'user@x.eu');
     expect(invalid).toHaveLength(1);
     expect(invalid[0].reason).not.toContain(token);
     expect(invalid[0].reason).not.toContain('sk-live');
@@ -229,10 +250,10 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
 
     // A path is a fact about the knowledge base: someone who may not read the
     // file may not learn from the listing that it is there and broken.
-    expect(await service.listInvalid('stranger@x.eu')).toEqual([]);
+    expect(await invalidOf(service, 'stranger@x.eu')).toEqual([]);
     expect((await service.listAccessible('stranger@x.eu')).map((m) => m.name).sort()).toEqual(['billing', 'weather']);
 
-    expect((await service.listInvalid('owner@x.eu')).map((i) => i.path)).toEqual(['Plugins/broken.tool']);
+    expect((await invalidOf(service, 'owner@x.eu')).map((i) => i.path)).toEqual(['Plugins/broken.tool']);
   });
 
   test('two manuals sharing one secret namespace: the dropped one says so', async () => {
@@ -247,7 +268,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
 
     const service = svc();
     const listed = (await service.listAccessible('user@x.eu')).map((m) => m.name);
-    const invalid = await service.listInvalid('user@x.eu');
+    const invalid = await invalidOf(service, 'user@x.eu');
     // One of the pair is served; the other is named, not silently gone.
     expect(listed.filter((n) => n === 'payments')).toHaveLength(1);
     expect(invalid).toHaveLength(1);
@@ -255,14 +276,17 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     expect(invalid[0].reason).toContain('namespace');
   });
 
-  test('a `.tool` the walk found but the read could not open is reported too', async () => {
+  // Root ignores the mode bits, so the file it is meant to fail on opens fine —
+  // the case is only meaningful where it doesn't. Declared as a SKIP rather
+  // than an early `return`, so a container that runs the suite as root (the
+  // normal case in CI) reports the coverage it did not get instead of a green
+  // test that asserted nothing.
+  test.skipIf(process.getuid?.() === 0)('a `.tool` the walk found but the read could not open is reported too', async () => {
     const unreadable = join(pluginsDir(), 'locked.tool');
     await write('locked.tool', BILLING.replace('billing', 'locked'));
     await chmod(unreadable, 0o000);
-    // Root ignores the mode bits; the case is only meaningful where it doesn't.
-    if (process.getuid?.() === 0) return;
 
-    const invalid = await svc().listInvalid('user@x.eu');
+    const invalid = await invalidOf(svc(), 'user@x.eu');
     expect(invalid.map((i) => i.path)).toEqual(['Plugins/locked.tool']);
     expect(invalid[0].reason).toContain('could not be read');
     expect(invalid[0].reason).toContain('EACCES');
@@ -305,9 +329,154 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     }
   });
 
+  test('a filename that tries to forge a log line cannot', async () => {
+    // A KB filename is author-written, and a newline is a legal character in
+    // one. Written raw into a warning it would start a second line — an
+    // operator log entry the process never wrote.
+    const lines: string[] = [];
+    const capture: ILogger = {
+      debug: () => {},
+      info: () => {},
+      warn: (m: string) => void lines.push(m),
+      error: () => {},
+      child: () => capture,
+    };
+    const restore = setLogger(capture);
+    try {
+      await write('oops\n[tool-manuals] catalog is empty.tool', MALFORMED.yaml);
+      await svc().listAccessible('user@x.eu');
+
+      const warned = lines.filter((l) => l.includes('oops'));
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).not.toContain('\n');
+      expect(warned[0]).toContain('\\n');
+    } finally {
+      setLogger(restore);
+    }
+  });
+
   test('a healthy workspace reports nothing invalid at all', async () => {
     const service = svc();
-    expect(await service.listInvalid('user@x.eu')).toEqual([]);
+    expect(await invalidOf(service, 'user@x.eu')).toEqual([]);
     expect((await service.listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+  });
+
+  describe('the reason never carries what the file wrote', () => {
+    // The redaction that matters is the one that cannot be applied afterwards.
+    // `redactSecret` knows this process's env tokens and the shape of a URL; it
+    // cannot know that `sk-live-…` pasted into `id:` is a credential. So the
+    // rule is upstream: a refusal names the FIELD and the RULE, never the
+    // value — and these are the fields an author can write anything into.
+    const token = 'sk-live-51H8ffGGnotarealkeybutlooksLikeOne';
+
+    test.each([
+      ['id', `---\nid: ${token}\ntype: http\nurl: https://api.example.com/x\n---\n`],
+      ['type', `---\nname: broken\ntype: ${token}\nurl: https://api.example.com/x\n---\n`],
+      [
+        'a variable name',
+        `---\nname: broken\ntype: http\nurl: https://api.example.com/x\nvariables:\n  - name: "${token}"\n---\n`,
+      ],
+      [
+        'a variable scope',
+        `---\nname: broken\ntype: http\nurl: https://api.example.com/x\nvariables:\n  - name: KEY\n    scope: ${token}\n---\n`,
+      ],
+    ])('a credential written as %s is refused without being quoted back', async (_field, content) => {
+      await write('broken.tool', content);
+
+      const invalid = await invalidOf(svc(), 'user@x.eu');
+      expect(invalid).toHaveLength(1);
+      expect(invalid[0].reason).not.toContain(token);
+      expect(invalid[0].reason).not.toContain('sk-live');
+      // Still actionable: the file is named by `path`, and the reason says
+      // which field broke which rule.
+      expect(invalid[0].path).toBe('Plugins/broken.tool');
+      expect(invalid[0].reason.length).toBeGreaterThan(0);
+      // …and the valid tools are untouched by any of it.
+      expect((await svc().listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+    });
+
+    test('a bad variable entry is located by index, since its name cannot be trusted yet', async () => {
+      await write(
+        'broken.tool',
+        `---\nname: broken\ntype: http\nurl: https://api.example.com/x\nvariables:\n  - name: FIRST\n  - name: "${token}"\n---\n`,
+      );
+
+      const invalid = await invalidOf(svc(), 'user@x.eu');
+      expect(invalid[0].reason).toContain('variables[1].name');
+      expect(invalid[0].reason).not.toContain(token);
+    });
+  });
+
+  test('one cold listing is ONE scan, however many readers arrive during it', async () => {
+    // The TTL cache only holds a value once the walk RETURNS, so everyone who
+    // asks while it runs used to start a walk of their own — and the surfaces
+    // that report refusals ask twice by construction. They share it now.
+    let walks = 0;
+    let aclBatches = 0;
+    const countingDisk = countingWalks(() => {
+      walks += 1;
+    });
+    const countingAccess: IAccessControl = {
+      canRead: async () => true,
+      canReadBatch: async (_w: string, _e: string, paths: string[]) => {
+        aclBatches += 1;
+        return new Map(paths.map((p) => [p, true]));
+      },
+    } as unknown as IAccessControl;
+
+    const service = new ToolManualService(
+      workspaceService,
+      countingAccess,
+      KB_DIR,
+      countingDisk,
+      new KbPluginSource(countingDisk),
+      () => clock,
+    );
+
+    const [a, b, c] = await Promise.all([
+      service.listAccessibleCatalog('user@x.eu'),
+      service.listAccessibleCatalog('user@x.eu'),
+      service.listAccessible('user@x.eu'),
+    ]);
+    expect(walks).toBe(1);
+    // One access pass per CALLER — the ACL answer is per-user, so it is not
+    // shared — but never two per response half.
+    expect(aclBatches).toBe(3);
+    // Every reader saw the same snapshot.
+    expect(a).toEqual(b);
+    expect(a.tools).toEqual(c);
+
+    // And the shared promise is released when it settles: the next listing past
+    // the TTL scans again rather than serving the first one forever.
+    nextListing();
+    await service.listAccessibleCatalog('user@x.eu');
+    expect(walks).toBe(2);
+  });
+
+  test('an invalidate() mid-scan is not served the tree it replaced', async () => {
+    let walks = 0;
+    const countingDisk = countingWalks(() => {
+      walks += 1;
+    });
+    const service = new ToolManualService(
+      workspaceService,
+      allowAll,
+      KB_DIR,
+      countingDisk,
+      new KbPluginSource(countingDisk),
+      () => clock,
+    );
+
+    // A merge lands while a scan is in flight. The caller that arrives AFTER it
+    // must not be handed the in-flight read of the tree the merge replaced —
+    // the same rule `TtlCache`'s generation token keeps for the cached value.
+    const first = service.listAccessibleCatalog('user@x.eu');
+    service.invalidate();
+    await write('added.tool', JSON.stringify({ name: 'added', type: 'http', url: 'https://c.example/u' }));
+    const second = await service.listAccessibleCatalog('user@x.eu');
+    await first;
+
+    expect(walks).toBe(2);
+    expect(second.tools.map((m) => m.name).sort()).toEqual(['added', 'billing', 'weather']);
   });
 });

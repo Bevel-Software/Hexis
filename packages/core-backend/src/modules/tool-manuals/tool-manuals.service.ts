@@ -26,6 +26,7 @@ import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { redactSecret } from '../../shared/redact-secret.js';
+import { printable } from '../../shared/printable.js';
 import { RESERVED_VARIABLE_NAMES, findReservedVariableRef } from '../../shared/variable-refs.js';
 import { extractFrontmatter, resolveDeclaredId, isValidId, dedupeById } from '../../shared/frontmatter-id.js';
 import type { ITreeWalker } from '../../shared/fs.contract.js';
@@ -44,6 +45,7 @@ import {
   type ToolManualSummary,
   type ToolManualDetail,
   type InvalidToolManual,
+  type AccessibleCatalog,
   type ToolCapability,
   type UtcpManualDict,
   type ToolManualPreview,
@@ -111,6 +113,15 @@ const MAX_REASON_LENGTH = 300;
 /**
  * Why one `.tool` was refused, in a form safe to hand an agent, a browser and a
  * log — the `reason` of an {@link InvalidToolManual}.
+ *
+ * This is the LAST of two defences, not the only one. The first is upstream and
+ * structural: the normalizer's own refusals name the FIELD and the RULE and
+ * never quote the rejected VALUE (`tool \`id\` must be lowercase snake_case`,
+ * not `tool id "<what was written>" must be…`). It has to be that way round —
+ * no scrub can recognise an arbitrary author-chosen string as a credential, so
+ * a message that interpolates one cannot be made safe after the fact. What
+ * remains for this function is the text the process does NOT author: the YAML
+ * parser's, which quotes the file at its fault.
  *
  * Two things happen here, and both are about NOT echoing the file back.
  *
@@ -224,6 +235,19 @@ export class ToolManualService implements IToolManualService {
    * is always reported.
    */
   private loggedInvalid: string | null = null;
+  /**
+   * The scan currently running, shared by everyone who asks while it runs.
+   *
+   * The TTL cache only holds a value once the scan RETURNS, so without this
+   * every caller arriving during the walk starts its own — and a listing that
+   * wants both halves of the catalog is exactly such a pair, as is a page that
+   * fires two requests. Sharing the promise makes one cold listing one disk
+   * walk, one MCP-discovery pass, and ONE snapshot for every reader of it.
+   * Cleared by `invalidate()` as well as on settle, so a caller arriving after
+   * a merge never inherits a scan that started on the tree it replaced — the
+   * same rule `TtlCache`'s generation token enforces for the cached value.
+   */
+  private inFlightScan: Promise<ScanResult> | null = null;
 
   constructor(
     private readonly workspaceService: WorkspaceService,
@@ -249,14 +273,16 @@ export class ToolManualService implements IToolManualService {
 
   invalidate(): void {
     this.cache.invalidate();
+    this.inFlightScan = null;
   }
 
   async listAccessible(userEmail: string): Promise<ToolManualSummary[]> {
     return (await this.accessibleManuals(userEmail)).map(toSummary);
   }
 
-  async listInvalid(userEmail: string): Promise<InvalidToolManual[]> {
-    return (await this.accessibleScan(userEmail)).invalid;
+  async listAccessibleCatalog(userEmail: string): Promise<AccessibleCatalog> {
+    const { manuals, invalid } = await this.accessibleScan(userEmail);
+    return { tools: manuals.map(toSummary), invalid };
   }
 
   async listAllSummaries(): Promise<ToolManualSummary[]> {
@@ -557,6 +583,21 @@ export class ToolManualService implements IToolManualService {
   private async scan(): Promise<ScanResult> {
     const cached = this.cache.get();
     if (cached) return cached;
+    // See `inFlightScan`: the cache is populated only when the walk finishes,
+    // so between the miss above and that moment, callers share this promise
+    // instead of each starting a walk of their own.
+    if (this.inFlightScan) return this.inFlightScan;
+    const started = this.runScan().finally(() => {
+      // Only if it is still OURS: an `invalidate()` during the scan already
+      // cleared the field (and may have installed a newer scan), and this
+      // settle must not undo that.
+      if (this.inFlightScan === started) this.inFlightScan = null;
+    });
+    this.inFlightScan = started;
+    return started;
+  }
+
+  private async runScan(): Promise<ScanResult> {
     // See `TtlCache.begin`: taken before the read so an `invalidate()` that
     // lands mid-scan discards this result instead of being overwritten by it.
     const token = this.cache.begin();
@@ -582,7 +623,12 @@ export class ToolManualService implements IToolManualService {
     if (signature === this.loggedInvalid) return;
     const first = this.loggedInvalid === null;
     this.loggedInvalid = signature;
-    for (const i of invalid) log.warn(`skipping "${i.path}": ${i.reason}`);
+    // Both halves are author-written — a KB filename and a parser's words about
+    // a KB file — so both go through `printable`: a newline in either would
+    // otherwise forge a second log line, and an escape sequence would paint the
+    // operator's terminal.
+    // (`printable` quotes what it escapes, so the path keeps its quotes here.)
+    for (const i of invalid) log.warn(`skipping ${printable(i.path)}: ${printable(i.reason)}`);
     if (invalid.length === 0 && !first) log.info('every `.tool` in the catalog parses again.');
   }
 
@@ -1004,7 +1050,12 @@ export function normalizeToolManual(
   let name: string;
   if (explicitId) {
     if (!isValidId(explicitId)) {
-      throw new Error(`tool id "${explicitId}" must be lowercase snake_case (letters, digits, underscores)`);
+      // The rejected id is NOT quoted back — see `describeManualFault`: this
+      // message becomes an `invalid[].reason` on an agent transcript, a browser
+      // and a log, and `id` is a field an author can paste anything into,
+      // including the token they meant for a header. The field name plus the
+      // rule is what the author needs; the value is in front of them.
+      throw new Error('tool `id` must be lowercase snake_case (letters, digits, underscores)');
     }
     name = explicitId;
   } else {
@@ -1246,14 +1297,18 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new Error('`variables` must be an array');
   const seen = new Set<string>();
-  return raw.map((entry) => {
+  return raw.map((entry, i) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new Error('each `variables` entry must be an object');
+      throw new Error(`\`variables[${i}]\` must be an object`);
     }
     const e = entry as Record<string, unknown>;
     const name = typeof e.name === 'string' ? e.name.trim() : '';
     if (!/^[A-Za-z0-9_]+$/.test(name)) {
-      throw new Error(`variable name "${name}" must match [A-Za-z0-9_]+`);
+      // Located by INDEX, not by quoting what was written: until it passes this
+      // test the `name` is arbitrary author text, and the messages below may
+      // quote it only because it has. (See the `id` refusal for why a reason
+      // never carries a rejected value.)
+      throw new Error(`\`variables[${i}].name\` must match [A-Za-z0-9_]+`);
     }
     if (RESERVED_VARIABLE_NAMES.includes(name)) {
       throw new Error(`variable name "${name}" is reserved for platform seeding and may not be declared by a \`.tool\``);
@@ -1262,7 +1317,7 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
     seen.add(name);
     const rawScope = typeof e.scope === 'string' ? e.scope.toLowerCase().trim() : '';
     if (rawScope && rawScope !== 'admin' && rawScope !== 'user') {
-      throw new Error(`variable "${name}" has invalid scope "${e.scope}" (expected admin|user)`);
+      throw new Error(`variable "${name}" has an invalid \`scope\` (expected admin|user)`);
     }
     const scope: ToolVariableScope = rawScope === 'user' ? 'user' : 'admin';
     const label = typeof e.label === 'string' && e.label.trim() ? e.label.trim() : undefined;
@@ -1376,5 +1431,8 @@ function normalizeType(raw: unknown): ToolManualType {
   if (t === 'http') return 'http';
   if (t === 'mcp') return 'mcp';
   if (t === 'inline' || t === 'text' || t === '') return 'inline';
-  throw new Error(`unknown \`.tool\` type: ${raw}`);
+  // The written value is not echoed (see the `id` refusal above): the accepted
+  // set says more than the rejected value does, and a `type:` line is one
+  // mis-paste away from holding a credential like any other.
+  throw new Error('unknown `.tool` `type` (expected `http`, `mcp`, `inline`, or absent)');
 }

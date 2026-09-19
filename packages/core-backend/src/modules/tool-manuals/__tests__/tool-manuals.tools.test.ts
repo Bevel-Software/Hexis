@@ -54,7 +54,12 @@ const toolManualService = {
   listAccessible: vi.fn(async (email: string) =>
     email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
   ),
-  listInvalid: vi.fn(async (email: string) => (email === ALICE.email ? REFUSED : [])),
+  // Both halves out of one call — the listing has no way to ask for them
+  // separately, and so no way to describe two different snapshots.
+  listAccessibleCatalog: vi.fn(async (email: string) => ({
+    tools: email === ALICE.email ? CATALOG : CATALOG.filter((m) => m.slug === 'weather'),
+    invalid: email === ALICE.email ? REFUSED : [],
+  })),
   listLocalOnly: async () => [],
   // Alice declared `crm` on her draft; nothing else is pending anywhere.
   listDeclaredOnlyOnBranch: vi.fn(async (email: string, branch: string) =>
@@ -167,7 +172,7 @@ describe('list_tool_setup — access controls resolved for the caller', () => {
     expect(alice.tools.map((t) => t.slug).sort()).toEqual(['billing', 'weather']);
     // ...and the one file that did not make it is named, with why and where.
     expect(alice.invalid).toEqual(REFUSED);
-    expect(toolManualService.listInvalid).toHaveBeenCalledWith(ALICE.email);
+    expect(toolManualService.listAccessibleCatalog).toHaveBeenCalledWith(ALICE.email);
 
     // Bob can't read that file, so he is not told it exists — the same
     // default-deny the catalog itself applies.

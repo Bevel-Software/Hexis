@@ -285,6 +285,17 @@ export interface InvalidToolManual {
   reason: string;
 }
 
+/**
+ * What one caller may see of the catalog: the manuals that parsed, and the
+ * files the scan refused. Produced together by
+ * {@link IToolManualService.listAccessibleCatalog} — see there for why the two
+ * halves are never fetched apart.
+ */
+export interface AccessibleCatalog {
+  tools: ToolManualSummary[];
+  invalid: InvalidToolManual[];
+}
+
 /** One thing an `inline` manual's embedded tool list says the assistant can do. */
 export interface ToolCapability {
   name: string;
@@ -312,17 +323,24 @@ export interface IToolManualService {
   /** The `.tool` manuals the user can read, as summaries. */
   listAccessible(userEmail: string): Promise<ToolManualSummary[]>;
   /**
-   * The manuals the scan REFUSED, filtered to the files this caller could read
-   * — the counterpart of `listAccessible`, from the same cached scan, so asking
-   * for both costs one disk read.
+   * BOTH halves of what this caller may see — the manuals that parsed and the
+   * files the scan refused — from ONE scan and ONE access pass.
    *
-   * Access-filtered for the same reason the listing is: a path is a fact about
-   * the knowledge base, and a caller who may not read the file may not learn it
-   * exists. The refused file's own frontmatter verbs are unparseable by
-   * definition, so the verdict comes from its folder's `access.md` chain —
-   * default-deny, as everywhere else.
+   * One method rather than a `listAccessible` + `listInvalid` pair, because the
+   * two halves are one answer and asking for them separately is a way to get it
+   * wrong twice: on a cold cache two calls are two disk walks and two MCP
+   * discovery passes, and if a `.tool` is written between them the response
+   * describes two different snapshots — a tool that is in neither half, or in
+   * both. Every surface that reports refusals wants both, so both is what there
+   * is to ask for.
+   *
+   * `invalid` is access-filtered for the same reason the listing is: a path is
+   * a fact about the knowledge base, and a caller who may not read the file may
+   * not learn it exists. The refused file's own frontmatter verbs are
+   * unparseable by definition, so the verdict comes from its folder's
+   * `access.md` chain — default-deny, as everywhere else.
    */
-  listInvalid(userEmail: string): Promise<InvalidToolManual[]>;
+  listAccessibleCatalog(userEmail: string): Promise<AccessibleCatalog>;
   /**
    * One readable `.tool` by slug, with its description + capabilities, for the
    * browser tool page. `null` when no such slug exists OR the caller can't read
