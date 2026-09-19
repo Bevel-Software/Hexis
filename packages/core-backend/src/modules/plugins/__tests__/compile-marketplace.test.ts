@@ -13,6 +13,9 @@ import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { PluginLinkIndex } from '../plugin-links.js';
 import { MarketplaceCompilerService } from '../compile/marketplace-compiler.service.js';
 import { NodeGitRunner } from '../../workflow/git/node-git-runner.js';
+import express from 'express';
+import { ToolRegistry } from '../../tool-registry/tool-registry.js';
+import { registerSkillsTools } from '../../skills/skills.tools.js';
 
 /**
  * Source in, distribution out — for one caller. The real resolver decides
@@ -27,6 +30,7 @@ describe('compileMarketplace', () => {
   let root: string;
   let repo: string;
   let compiler: MarketplaceCompilerService;
+  let catalog: SkillService;
 
   const write = async (rel: string, text: string) => {
     const abs = path.join(repo, rel);
@@ -89,6 +93,7 @@ describe('compileMarketplace', () => {
     const source = new KbPluginSource(disk);
     const access = new AccessControlService(workspaceService, KB_DIR, disk);
     const skills = new SkillService(workspaceService, access, KB_DIR, disk);
+    catalog = skills;
     const links = new PluginLinkIndex(workspaceService, skills, access, KB_DIR, source);
     compiler = new MarketplaceCompilerService(
       workspaceService,
@@ -172,6 +177,36 @@ describe('compileMarketplace', () => {
     expect(codex.plugins[0].source).toEqual({ source: 'local', path: './plugins/gtm' });
     expect(text(tree, 'README.md')).toContain('Compiled from Acme');
     expect(tree.warnings).toEqual([]);
+  });
+
+  it('ships a skill whose frontmatter carries a lifecycle, and lists it over MCP like any other', async () => {
+    // `metadata.lifecycle` is not a field this platform reads any more. A
+    // SKILL.md that still carries one is an ordinary readable skill: it
+    // compiles into every layout and the agent surfaces name it.
+    await write(
+      'Skills/Sales/legacy-pitch/SKILL.md',
+      '---\ndescription: The old pitch.\nmetadata:\n  lifecycle: retired\n  owner: "Sales"\n---\nBody\n',
+    );
+
+    const tree = await compiler.compileFor({ userEmail: 'sam@x.io' });
+    const paths = [...tree.files.keys()];
+    expect(paths).toContain('plugins/skills-and-knowledge/skills/legacy-pitch/SKILL.md');
+    expect(paths).toContain('plugins/hexis-all/skills/legacy-pitch/SKILL.md');
+    expect(paths).toContain('skills/legacy-pitch/SKILL.md');
+    expect(tree.warnings).toEqual([]);
+
+    // The MCP surface: `list_skills` answers with the catalog verbatim, and
+    // the tool's own description names what is available.
+    const listed = await catalog.listSkills('sam@x.io');
+    expect(listed.map((x) => x.name)).toContain('legacy-pitch');
+    expect(listed.find((x) => x.name === 'legacy-pitch')).not.toHaveProperty('lifecycle');
+
+    const registry = new ToolRegistry();
+    // The routes are registered but never called here: only the DEFINITION,
+    // which names the catalog, is under test.
+    registerSkillsTools(registry, express.Router(), () => undefined, () => () => undefined, catalog);
+    const listSkills = (await registry.listExternal({ userEmail: 'sam@x.io' })).find((t) => t.name === 'list_skills');
+    expect(listSkills?.description).toContain('`legacy-pitch`');
   });
 
   it('ships only mcp servers a client could run, and names each one it leaves out', async () => {
