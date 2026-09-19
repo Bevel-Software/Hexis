@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   DestinationTakenError,
+  type DestinationProbe,
   claimThenRename,
   inspectDestination,
   lstatOrNull,
@@ -311,5 +312,155 @@ describe('renameNoReplace', () => {
     // Nothing at the source: "there is nothing to move" is the truer answer,
     // so the destination is left to the move's own ENOENT.
     expect(await inspectDestination(at('absent.md'), at('note.md'))).toEqual({ state: 'free' });
+  });
+});
+
+/**
+ * The reading a CASE-INSENSITIVE volume produces, run on a disk that is not
+ * one.
+ *
+ * Everything the acceptance criterion "a case-only rename is not a clash with
+ * the entry itself" is about lives on the `self` side of `inspectDestination`,
+ * and `self` needs a volume where `notes.md` and `Notes.md` are one entry.
+ * Linux has none; the container cannot make one (`mount` is not permitted,
+ * `mkfs.vfat` is absent). The real-disk tests above therefore gate every one
+ * of those assertions behind a `foldsCase()` that is false here and in CI, so
+ * the branches went unexecuted while four review rounds reshaped them.
+ *
+ * `volume()` below stands in for the disk: a folder holds ONE entry per folded
+ * name (which is the whole of what case-insensitivity is), lookups fold, and
+ * listings report the spelling actually stored. The same helper with
+ * `folds: false` reproduces this machine's own answers — the pair is what
+ * makes it a stand-in rather than a fixture that only ever says `self`.
+ *
+ * Only the READING is faked. The move itself is driven against the real
+ * filesystem above, where its no-clobber calls are the thing being tested.
+ */
+describe('inspectDestination — the case-insensitive reading, on a disk that does not fold', () => {
+  interface Entry {
+    /** Which file this is. Two paths sharing an inode are one file. */
+    ino: number;
+    dir?: boolean;
+  }
+
+  /**
+   * A probe over a declared tree. `folds` picks the volume being modelled:
+   * folding (macOS's default APFS, Windows) or not (this disk). Paths are
+   * absolute and `/`-separated, as `inspectDestination` receives them.
+   */
+  function volume(
+    tree: Record<string, Entry>,
+    opts: { folds?: boolean; unreadable?: string[] } = {},
+  ): DestinationProbe {
+    const folds = opts.folds ?? true;
+    const key = (p: string) => (folds ? p.toLowerCase() : p);
+    // Folded keys collapse two spellings into one entry — a case-insensitive
+    // folder cannot hold both, and this map cannot represent both either.
+    const entries = new Map(
+      Object.entries(tree).map(([storedPath, entry]) => [key(storedPath), { storedPath, ...entry }]),
+    );
+    const absent = (call: string, p: string) =>
+      Object.assign(new Error(`ENOENT: ${call} '${p}'`), { code: 'ENOENT' });
+    return {
+      async lstat(p) {
+        const found = entries.get(key(p));
+        if (found === undefined) return null;
+        return { dev: 1, ino: found.ino, isDirectory: () => found.dir === true };
+      },
+      async readdir(folder) {
+        if (opts.unreadable?.some((u) => key(u) === key(folder))) {
+          throw Object.assign(new Error(`EACCES: readdir '${folder}'`), { code: 'EACCES' });
+        }
+        if (entries.get(key(folder))?.dir !== true) throw absent('readdir', folder);
+        const prefix = `${key(folder)}/`;
+        return [...entries.values()]
+          .filter((e) => key(e.storedPath).startsWith(prefix))
+          .filter((e) => !key(e.storedPath).slice(prefix.length).includes('/'))
+          .map((e) => e.storedPath.slice(e.storedPath.lastIndexOf('/') + 1));
+      },
+    };
+  }
+
+  /** One file in one folder — the shape every case below starts from. */
+  const SALES = { '/ws': { ino: 1, dir: true }, '/ws/Sales': { ino: 5, dir: true } };
+  const ONE_NOTE = { ...SALES, '/ws/Sales/notes.md': { ino: 10 } };
+
+  it('reads a re-cased FILE name as the source itself: one folded name, one listed entry', async () => {
+    const folding = volume(ONE_NOTE);
+
+    // The destination opens the source's own file, and the folder lists a
+    // single entry for the two spellings: the rename that was asked for.
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/Notes.md', folding))
+      .toEqual({ state: 'self' });
+
+    // The same tree on THIS disk: `Notes.md` is simply a free name.
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/Notes.md', volume(ONE_NOTE, { folds: false })))
+      .toEqual({ state: 'free' });
+  });
+
+  it('reads a re-cased PARENT with the same filename as one folder and one name', async () => {
+    // Nothing for the listing to count: asking it whether two identical
+    // basenames are both present answers yes, and would read the single entry
+    // as a clash with itself. The parents are one folder by identity.
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/sales/notes.md', volume(ONE_NOTE)))
+      .toEqual({ state: 'self' });
+  });
+
+  it('reads a re-cased parent AND a re-cased filename as the one rename it is', async () => {
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/sales/Notes.md', volume(ONE_NOTE)))
+      .toEqual({ state: 'self' });
+  });
+
+  it('reads a re-cased FOLDER as the folder itself', async () => {
+    expect(await inspectDestination('/ws/Sales', '/ws/sales', volume(ONE_NOTE)))
+      .toEqual({ state: 'self' });
+  });
+
+  it('still refuses a second NAME for one file, folding volume or not', async () => {
+    // Two hard links: one inode, two names a user sees separately, and the
+    // folder lists both. Moving onto one takes that name away, so it is a
+    // clash — identity alone must not be read as a case-only rename.
+    const twins = volume({ ...ONE_NOTE, '/ws/Sales/twin.md': { ino: 10 } });
+
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/twin.md', twins))
+      .toEqual({ state: 'taken', kind: 'file' });
+  });
+
+  it('still refuses one file reached through two DIFFERENT folders', async () => {
+    const linked = volume({
+      ...ONE_NOTE,
+      '/ws/Archive': { ino: 6, dir: true },
+      '/ws/Archive/notes.md': { ino: 10 },
+    });
+
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Archive/notes.md', linked))
+      .toEqual({ state: 'taken', kind: 'file' });
+  });
+
+  it('refuses when the folder cannot be listed: nothing unprovable is called a case-only rename', async () => {
+    const unlistable = volume(ONE_NOTE, { unreadable: ['/ws/Sales'] });
+
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/Notes.md', unlistable))
+      .toEqual({ state: 'taken', kind: 'file' });
+  });
+
+  it('names a FOLDER in the way as a folder, on a folding volume too', async () => {
+    const withArchive = volume({ ...ONE_NOTE, '/ws/Sales/Archive': { ino: 7, dir: true } });
+
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/archive', withArchive))
+      .toEqual({ state: 'taken', kind: 'folder' });
+  });
+
+  it('agrees with the real disk on every answer that does not need folding', async () => {
+    // The stand-in is only worth trusting if it reproduces what this machine
+    // says where the two can both be asked.
+    const plain = volume(ONE_NOTE, { folds: false });
+
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/free.md', plain))
+      .toEqual({ state: 'free' });
+    expect(await inspectDestination('/ws/Sales/absent.md', '/ws/Sales/notes.md', plain))
+      .toEqual({ state: 'free' });
+    expect(await inspectDestination('/ws/Sales/notes.md', '/ws/Sales/notes.md', plain))
+      .toEqual({ state: 'self' });
   });
 });

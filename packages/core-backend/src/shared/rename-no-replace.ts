@@ -73,6 +73,45 @@ export async function lstatOrNull(absolutePath: string): Promise<Stats | null> {
   }
 }
 
+/** What the reading needs of an entry: which one it is, and whether it is a folder. */
+export interface EntryIdentity {
+  dev: number;
+  ino: number;
+  isDirectory(): boolean;
+}
+
+/**
+ * The two filesystem facts a destination reading is made of: what is at a
+ * path, and what a folder lists.
+ *
+ * It is a seam for ONE reason, stated plainly because it is the only thing
+ * that justifies it: the reading's whole case-folding half — every answer of
+ * `self`, which is what "a case-only rename is not a clash" means — can be
+ * produced only by a case-insensitive volume, and there is none on the Linux
+ * that CI and the container run. No `mount` and no `mkfs.vfat` in the
+ * container either, so one cannot be made. Gated behind a `foldsCase()` probe,
+ * those branches were executed by nothing on any machine that runs the suite,
+ * while four review rounds reshaped them. A probe standing in for a folding
+ * volume runs them everywhere.
+ *
+ * Deliberately narrow: the facts the reading consults, and nothing else. The
+ * MOVE itself — `link`, `mkdir`, `rename`, `unlink` — has no seam and takes no
+ * probe. Those calls are the guarantee, and a guarantee that can be faked in a
+ * test is not one.
+ */
+export interface DestinationProbe {
+  /** What is at `absolutePath` itself, a link as a link; null when nothing is there. */
+  lstat(absolutePath: string): Promise<EntryIdentity | null>;
+  /** The names `folder` lists; rejects when it cannot be read. */
+  readdir(folder: string): Promise<string[]>;
+}
+
+/** The real disk — what every caller uses. */
+export const diskProbe: DestinationProbe = {
+  lstat: lstatOrNull,
+  readdir: (folder) => fs.readdir(folder),
+};
+
 /**
  * The one reading of "is this destination the source under another name?".
  *
@@ -82,14 +121,15 @@ export async function lstatOrNull(absolutePath: string): Promise<Stats | null> {
 export async function inspectDestination(
   oldAbsolute: string,
   newAbsolute: string,
+  probe: DestinationProbe = diskProbe,
 ): Promise<DestinationVerdict> {
-  const destination = await lstatOrNull(newAbsolute);
+  const destination = await probe.lstat(newAbsolute);
   if (destination === null) return { state: 'free' };
-  const source = await lstatOrNull(oldAbsolute);
+  const source = await probe.lstat(oldAbsolute);
   // A source that is not there is left to the move's own ENOENT — "there is
   // nothing to move" is the truer answer than "the name is taken".
   if (source === null) return { state: 'free' };
-  if (await isSelfRename(oldAbsolute, newAbsolute, source, destination)) return { state: 'self' };
+  if (await isSelfRename(oldAbsolute, newAbsolute, source, destination, probe)) return { state: 'self' };
   return { state: 'taken', kind: destination.isDirectory() ? 'folder' : 'file' };
 }
 
@@ -121,18 +161,25 @@ export async function inspectDestination(
  * spellings in them to count: `oldAbsolute === newAbsolute`, and the pair
  * whose basenames are identical and whose only difference is the parent's
  * spelling. Both are one entry by construction.
+ *
+ * Everything above happens only on a volume that folds case, so on the Linux
+ * this is built and tested on it is reached by nothing real. That is what
+ * {@link DestinationProbe} is for — read its note before changing any of this,
+ * because the tests that hold these rules up run against a stand-in volume,
+ * not against the disk under them.
  */
 async function isSelfRename(
   oldAbsolute: string,
   newAbsolute: string,
-  source: Stats,
-  destination: Stats,
+  source: EntryIdentity,
+  destination: EntryIdentity,
+  probe: DestinationProbe,
 ): Promise<boolean> {
   if (source.dev !== destination.dev || source.ino !== destination.ino) return false;
   if (oldAbsolute === newAbsolute) return true;
   if (!foldsTogether(oldAbsolute, newAbsolute)) return false;
   const folder = path.dirname(oldAbsolute);
-  if (!(await sameFolder(folder, path.dirname(newAbsolute)))) return false;
+  if (!(await sameFolder(folder, path.dirname(newAbsolute), probe))) return false;
   // One folder and one NAME: only the parent's spelling changed
   // (`Sales/notes.md` → `sales/notes.md`), so there is nothing for the listing
   // to count — asking it whether two identical basenames are both present
@@ -140,7 +187,7 @@ async function isSelfRename(
   if (path.basename(oldAbsolute) === path.basename(newAbsolute)) return true;
   let entries: string[];
   try {
-    entries = await fs.readdir(folder);
+    entries = await probe.readdir(folder);
   } catch {
     // The parent cannot be listed, so nothing here can be shown to be one
     // entry. Refusing is the safe reading: at worst a case-only rename on an
@@ -157,9 +204,9 @@ async function isSelfRename(
  * the filesystem decides, so a volume that folds `Sales` and `sales` is not
  * read as two folders.
  */
-async function sameFolder(a: string, b: string): Promise<boolean> {
+async function sameFolder(a: string, b: string, probe: DestinationProbe): Promise<boolean> {
   if (a === b) return true;
-  const [statA, statB] = await Promise.all([lstatOrNull(a), lstatOrNull(b)]);
+  const [statA, statB] = await Promise.all([probe.lstat(a), probe.lstat(b)]);
   if (statA === null || statB === null) return false;
   return statA.dev === statB.dev && statA.ino === statB.ino;
 }
