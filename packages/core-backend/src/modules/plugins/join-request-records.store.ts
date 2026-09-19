@@ -20,6 +20,8 @@ export interface JoinRequestRecord {
   failureReason: string | null;
   /** The change request the git work opened; null until it exists. */
   changeRequestNumber: number | null;
+  /** When a process took this row's git work; null when nobody holds it. */
+  claimedAt: Date | null;
 }
 
 export type JoinRequestStatus = 'pending' | 'opened' | 'failed';
@@ -46,6 +48,25 @@ export interface JoinRequestStore {
   forRequester(requesterEmail: string): Promise<JoinRequestRecord[]>;
   /** Every record still `pending` — what the boot sweep re-runs. */
   pending(): Promise<JoinRequestRecord[]>;
+  /**
+   * Take this row's git work, or report that somebody else holds it.
+   *
+   * The ONE guard against two processes doing git on the same branch: a
+   * redeploy overlaps two servers, both sweep, and neither's in-process
+   * single-flight map can see the other's. Returns the row when this caller
+   * may proceed and null when it may not — so a caller that gets null does
+   * nothing at all, rather than racing.
+   *
+   * Claims expire (see `claimed_at` on the table) so a process that dies
+   * holding one does not owe the request forever.
+   */
+  claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null>;
+  /**
+   * Give a claim back without deciding the request — the platform was not
+   * ready, so the row stays `pending` and becomes claimable again at once
+   * instead of after the stale window.
+   */
+  release(id: string): Promise<void>;
   /** The git work landed: the change request exists, under this number. */
   markOpened(id: string, changeRequestNumber: number): Promise<void>;
   /** The git work refused, in its own words. */
@@ -79,6 +100,10 @@ export class DbJoinRequestStore implements JoinRequestStore {
         requesterName: input.requesterName,
         status: sql`case when ${pluginJoinRequests.status} = 'failed' then 'pending' else ${pluginJoinRequests.status} end`,
         failureReason: sql`case when ${pluginJoinRequests.status} = 'failed' then null else ${pluginJoinRequests.failureReason} end`,
+        // A revived row is free for the retry to claim at once; a row that is
+        // already `pending` keeps whatever claim is running against it, so a
+        // second click still cannot start a second job.
+        claimedAt: sql`case when ${pluginJoinRequests.status} = 'failed' then null else ${pluginJoinRequests.claimedAt} end`,
         updatedAt: new Date(),
       })
       .where(
@@ -116,6 +141,34 @@ export class DbJoinRequestStore implements JoinRequestStore {
     return rows.map(toRecord);
   }
 
+  /**
+   * One conditional UPDATE, which is what makes this a claim rather than a
+   * check: the `pending` status and the free-or-stale claim are tested by the
+   * database in the same statement that takes the row, so two processes
+   * asking together cannot both be told yes.
+   */
+  async claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null> {
+    const [row] = await this.db
+      .update(pluginJoinRequests)
+      .set({ claimedAt: new Date() })
+      .where(
+        and(
+          eq(pluginJoinRequests.id, id),
+          eq(pluginJoinRequests.status, 'pending'),
+          sql`(${pluginJoinRequests.claimedAt} is null or ${pluginJoinRequests.claimedAt} < now() - make_interval(secs => ${staleAfterMs / 1000}))`,
+        ),
+      )
+      .returning();
+    return row ? toRecord(row) : null;
+  }
+
+  async release(id: string): Promise<void> {
+    await this.db
+      .update(pluginJoinRequests)
+      .set({ claimedAt: null })
+      .where(and(eq(pluginJoinRequests.id, id), eq(pluginJoinRequests.status, 'pending')));
+  }
+
   async markOpened(id: string, changeRequestNumber: number): Promise<void> {
     await this.db
       .update(pluginJoinRequests)
@@ -143,6 +196,7 @@ function toRecord(row: typeof pluginJoinRequests.$inferSelect): JoinRequestRecor
     status: isStatus(row.status) ? row.status : 'pending',
     failureReason: row.failureReason,
     changeRequestNumber: row.changeRequestNumber,
+    claimedAt: row.claimedAt,
   };
 }
 

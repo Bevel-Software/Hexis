@@ -614,6 +614,24 @@ export const pluginJoinRequests = pgTable('plugin_join_requests', {
   /** What the git work said when it refused — shown to the requester verbatim. */
   failureReason: text('failure_reason'),
   changeRequestNumber: integer('change_request_number'),
+  /**
+   * When a process took this row's git work, and the whole of the mutual
+   * exclusion over it.
+   *
+   * A redeploy runs two processes for as long as the changeover takes, and
+   * both sweep. Their single-flight maps are per-process, so without this
+   * they would clone, commit and push the same branch against the same shared
+   * workspace at the same time. Claiming is one conditional UPDATE — the row
+   * is taken only if nobody holds it — so the loser simply does not run.
+   *
+   * A CLAIM EXPIRES, because a process can die holding one and the request
+   * would otherwise be owed forever. The window has to exceed the longest
+   * honest attempt, which is a first-ever request's full clone; past it, the
+   * next sweep or click takes the row over. A row that was never claimed at
+   * all — recorded a moment before the process died — is claimable at once,
+   * which is the common restart case.
+   */
+  claimedAt: timestamp('claimed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (t) => ({

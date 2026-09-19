@@ -143,6 +143,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
       async (n: number) => (opts.authoredCrs ?? []).find((c) => c.number === n) ?? null,
     ),
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
+    listBranches: vi.fn(async () => []),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
   } as unknown as IWorkflowService;
@@ -605,6 +606,23 @@ describe('/api/plugins routes', () => {
     ]);
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
+    // BOTH bodies, not just the statuses: the contract the concurrent path
+    // advertises is that each tab is told the ask is recorded. Pinning only
+    // the status would let this answer regress to a different shape — a
+    // dropped `state`, a stale `number` — with the test still green.
+    //
+    // Either state is correct for a tab here, and which one is a race: the
+    // git work is instant against these stubs, so the second answer can be
+    // written after the first click's job has already opened the request. What
+    // must hold for both is that the ask is recorded and the shape is the
+    // shape — never a refusal, never a second request's number.
+    for (const answer of [await first.json(), await second.json()]) {
+      expect(answer).toEqual(
+        answer.state === 'opened'
+          ? { ok: true, state: 'opened', number: 42 }
+          : { ok: true, state: 'pending', number: null },
+      );
+    }
     await h.joinRequestJobs.drain();
 
     expect(h.joinRequestStore.all()).toHaveLength(1);
@@ -669,6 +687,7 @@ describe('/api/plugins routes', () => {
       status: 'pending',
       failureReason: null,
       changeRequestNumber: null,
+      claimedAt: null,
     });
 
     await h.joinRequestJobs.sweep();

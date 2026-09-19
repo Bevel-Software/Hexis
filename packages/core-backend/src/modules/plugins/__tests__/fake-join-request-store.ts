@@ -17,9 +17,20 @@ export class FakeJoinRequestStore implements JoinRequestStore {
   private readonly rows = new Map<string, JoinRequestRecord>();
   private nextId = 1;
 
-  /** Seed a row as if it had been written before this process started. */
+  /**
+   * Seed a row as if it had been written before this process started.
+   *
+   * The address is lowercased HERE, exactly as the real store lowercases it
+   * on insert. Storing it verbatim would let a seeded `Ali@x.io` be found by
+   * `byId` and returned by `pending`, yet never by `forRequester` — a split
+   * the table cannot produce, and one a test could accidentally rely on.
+   */
   seed(record: Omit<JoinRequestRecord, 'id'> & { id?: string }): JoinRequestRecord {
-    const row: JoinRequestRecord = { id: record.id ?? `jr-${this.nextId++}`, ...record };
+    const row: JoinRequestRecord = {
+      ...record,
+      id: record.id ?? `jr-${this.nextId++}`,
+      requesterEmail: record.requesterEmail.toLowerCase(),
+    };
     this.rows.set(keyOf(row.requesterEmail, row.pluginKey), row);
     return { ...row };
   }
@@ -40,6 +51,7 @@ export class FakeJoinRequestStore implements JoinRequestStore {
       if (existing.status === 'failed') {
         existing.status = 'pending';
         existing.failureReason = null;
+        existing.claimedAt = null;
       }
       return { ...existing };
     }
@@ -50,6 +62,7 @@ export class FakeJoinRequestStore implements JoinRequestStore {
       status: 'pending',
       failureReason: null,
       changeRequestNumber: null,
+      claimedAt: null,
     });
   }
 
@@ -68,6 +81,21 @@ export class FakeJoinRequestStore implements JoinRequestStore {
     return this.all()
       .filter((r) => r.status === 'pending')
       .map((r) => ({ ...r }));
+  }
+
+  async claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null> {
+    const row = this.rowById(id);
+    if (!row || row.status !== 'pending') return null;
+    const held = row.claimedAt;
+    if (held && Date.now() - held.getTime() < staleAfterMs) return null;
+    row.claimedAt = new Date();
+    return { ...row };
+  }
+
+  async release(id: string): Promise<void> {
+    const row = this.rowById(id);
+    if (!row || row.status !== 'pending') return;
+    row.claimedAt = null;
   }
 
   async markOpened(id: string, changeRequestNumber: number): Promise<void> {

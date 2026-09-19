@@ -65,6 +65,7 @@ import {
   PluginProvisionService,
   JoinRequestsService,
   PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
   DbJoinRequestStore,
   PluginLinkIndex,
   PluginLinksService,
@@ -593,10 +594,21 @@ export async function createCoreServices(
     // catalog is the only thing that can turn back into a path and a name
     // people read. Null once nothing answers to the key — a deleted plugin,
     // a moved folder — which the job records as a failure the requester sees.
+    //
+    // An EMPTY catalog is not that. Discovery degrades to empty whenever it
+    // cannot read the knowledge base — a boot that has not finished cloning,
+    // a remote that blipped — and answering "null" then would tell everyone
+    // with a request outstanding that their plugin is gone, permanently, for
+    // a fault that healed in seconds. A request is only refused when the
+    // catalog has something to say and this key is absent from it; when it
+    // has nothing to say at all, the failure is raised as a transient one, so
+    // the row stays `pending` for the next sweep to retry.
     target: async (pluginKey) => {
-      const entry = (await pluginIndexService.catalog()).find(
-        (g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey,
-      );
+      const catalog = await pluginIndexService.catalog();
+      if (catalog.length === 0) {
+        throw new JoinRequestNotReadyError('the plugin catalog is not available yet');
+      }
+      const entry = catalog.find((g) => pluginFolderBelowRoot(g.folders[0]) === pluginKey);
       return entry ? { folder: entry.folders[0], displayName: entry.displayName } : null;
     },
     requester: (email) => authService.getUserByEmail(email),

@@ -11,6 +11,7 @@ import {
   oauthAuthCodes,
   oauthTokens,
   pendingCommits,
+  pluginJoinRequests,
   prComments,
   prFileApprovals,
   prMergeLog,
@@ -136,6 +137,17 @@ export class AccountErasureService implements IAccountErasureService {
 
       // Personal-data rows the core owns.
       await tx.delete(fileLocks).where(eq(fileLocks.holderUserId, userId));
+      // Recorded plugin join requests. DELETED, not anonymised like the audit
+      // rows below: the row carries the person's address and name, it is not
+      // part of the review trail (the change request it opened is, and that
+      // is anonymised with the rest), and the table is unique on
+      // `(requester_email, plugin_key)` — so a row left behind would be
+      // INHERITED by a later account signing in with the same address, which
+      // would see a stranger's request as its own and be unable to make a new
+      // one. Sign-in is get-or-create by email, so that is not hypothetical.
+      await tx
+        .delete(pluginJoinRequests)
+        .where(eq(pluginJoinRequests.requesterEmail, target.email));
 
       // Audit rows: anonymize in place (no user FK on these; they key by email).
       await tx

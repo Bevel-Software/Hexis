@@ -246,6 +246,29 @@ describe('LockedPluginView', () => {
     renderLocked();
     expect(screen.queryByRole('button', { name: 'Manage access' })).not.toBeInTheDocument();
   });
+
+  it('announces the in-flight request to a screen reader, not just on the button', async () => {
+    let release = () => {};
+    apiMock.requestPluginAccess.mockReturnValue(
+      new Promise<void>((resolve) => {
+        release = () => resolve();
+      }),
+    );
+    renderLocked(finance({ name: 'finance', displayName: 'Finance & Ops' }));
+
+    const live = screen.getByRole('status', { name: 'Request progress' });
+    expect(live).toHaveTextContent('');
+
+    fireEvent.click(askButton());
+    // Pressing the button disables it, and a disabled button drops focus —
+    // so the label change alone is never read out. The live region is what
+    // carries the acknowledgement this whole ticket exists to give.
+    expect(live).toHaveAttribute('aria-live', 'polite');
+    expect(live).toHaveTextContent('Requesting access to Finance & Ops…');
+
+    release();
+    await screen.findByText('Requested: Olga Ivanova decides who gets access.');
+  });
 });
 
 describe('name helpers', () => {

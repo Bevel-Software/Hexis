@@ -117,6 +117,15 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
           for access; a name would tell you what is inside. */}
       <p className="mt-1 text-ui text-ink-muted">{countsLine(plugin)}</p>
 
+      {/* The in-flight word for assistive tech, matching `LinkSkillPanel`.
+          The button says "Requesting…" too, but pressing it disables it and a
+          disabled button drops focus, so that label change is never read out.
+          The acknowledgement is the whole point of this ticket, and it has to
+          reach somebody who cannot see the label. */}
+      <span role="status" aria-live="polite" aria-label="Request progress" className="sr-only">
+        {requesting ? `Requesting access to ${plugin.displayName || plugin.name}…` : ''}
+      </span>
+
       <div className="mt-5">
         {pending ? (
           <Surface tone="sunken" radius="lg" elevation="none" padded className="max-w-lg">

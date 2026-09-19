@@ -1,5 +1,5 @@
 {
-  "id": "e21e0893-9b76-4f51-b72c-121e5cafd1bb",
+  "id": "3ef39653-fc24-4596-a267-f4064b19bcca",
   "prevId": "8f0a1478-114d-40f6-a60c-fe6a752ebfc2",
   "version": "7",
   "dialect": "postgresql",
@@ -1201,6 +1201,12 @@
         "change_request_number": {
           "name": "change_request_number",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "claimed_at": {
+          "name": "claimed_at",
+          "type": "timestamp",
           "primaryKey": false,
           "notNull": false
         },

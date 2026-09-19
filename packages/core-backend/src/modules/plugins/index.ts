@@ -8,6 +8,7 @@ export {
 export { JoinRequestsService, type JoinRequest } from './join-requests.service.js';
 export {
   PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
   type JoinRequestJobsDeps,
   type JoinRequestTarget,
 } from './join-request-jobs.service.js';

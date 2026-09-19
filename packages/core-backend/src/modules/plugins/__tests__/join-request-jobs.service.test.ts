@@ -1,6 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
-import { PluginJoinRequestJobs, type JoinRequestJobsDeps } from '../join-request-jobs.service.js';
+import {
+  PluginJoinRequestJobs,
+  JoinRequestNotReadyError,
+  type JoinRequestJobsDeps,
+} from '../join-request-jobs.service.js';
 import { workspaceIdForBranch } from '../../../shared/workspace-id.js';
 import { FakeJoinRequestStore } from './fake-join-request-store.js';
 
@@ -22,6 +26,7 @@ function harness(over: Partial<JoinRequestJobsDeps> = {}) {
   const workflow = {
     listChangeRequestsAuthoredBy: vi.fn(async () => [] as never[]),
     createBranch: vi.fn(async () => ({ name: 'x', isDefault: false, isProtected: false })),
+    listBranches: vi.fn(async () => [] as { name: string }[]),
     commitChanges: vi.fn(async () => null),
     openChangeRequest: vi.fn(async () => ({ number: 42 })),
   };
@@ -50,10 +55,23 @@ function pendingRow(store: FakeJoinRequestStore) {
     status: 'pending',
     failureReason: null,
     changeRequestNumber: null,
+    claimedAt: null,
   });
 }
 
 describe('PluginJoinRequestJobs', () => {
+  // Silenced for the whole file and restored after EVERY test, including one
+  // that fails an assertion partway: a `mockRestore()` on the success path
+  // leaves console.error stubbed for every later test in the file the moment
+  // anything above it throws, which hides exactly the output you need to see.
+  let consoleError: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleError.mockRestore();
+  });
+
   it('runs the same steps the endpoint used to run inline, and records the number', async () => {
     const h = harness();
     await h.jobs.start(pendingRow(h.store));
@@ -106,7 +124,6 @@ describe('PluginJoinRequestJobs', () => {
   });
 
   it('records a failure in the words the git work used, with credentials stripped', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = harness();
     h.workflow.openChangeRequest.mockRejectedValue(
       new Error("fatal: unable to access 'https://x-access-token:ghp_secret@github.com/acme/kb'"),
@@ -117,28 +134,23 @@ describe('PluginJoinRequestJobs', () => {
     expect(row.status).toBe('failed');
     expect(row.failureReason).toContain('unable to access');
     expect(row.failureReason).not.toContain('ghp_secret');
-    error.mockRestore();
   });
 
   it('fails the record rather than throwing when the plugin is gone', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = harness({ target: async () => null });
     await expect(h.jobs.start(pendingRow(h.store))).resolves.toBeUndefined();
     expect(h.store.all()).toMatchObject([
       { status: 'failed', failureReason: 'the plugin is no longer available' },
     ]);
     expect(h.workflow.createBranch).not.toHaveBeenCalled();
-    error.mockRestore();
   });
 
   it('fails the record when no account answers to the address that asked', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const h = harness({ requester: async () => null });
     await h.jobs.start(pendingRow(h.store));
     expect(h.store.all()).toMatchObject([
       { status: 'failed', failureReason: 'the account that asked no longer exists' },
     ]);
-    error.mockRestore();
   });
 
   it('sweeps only the pending rows, and leaves the settled ones alone', async () => {
@@ -151,6 +163,7 @@ describe('PluginJoinRequestJobs', () => {
       status: 'opened',
       failureReason: null,
       changeRequestNumber: 7,
+      claimedAt: null,
     });
     h.store.seed({
       requesterEmail: 'mia@bevel.software',
@@ -159,6 +172,7 @@ describe('PluginJoinRequestJobs', () => {
       status: 'failed',
       failureReason: 'the remote refused the push',
       changeRequestNumber: null,
+      claimedAt: null,
     });
 
     await h.jobs.sweep();
@@ -187,4 +201,117 @@ describe('PluginJoinRequestJobs', () => {
     await h.jobs.drain();
     expect(h.store.all()).toMatchObject([{ status: 'opened' }]);
   });
+
+  it('does not run a record another process holds — the redeploy overlap', async () => {
+    const h = harness();
+    const record = pendingRow(h.store);
+    // What the OTHER server in a redeploy window leaves behind: the row is
+    // still pending, and its claim is live.
+    await h.store.claim(record.id, 15 * 60 * 1000);
+
+    await h.jobs.start({ ...record });
+
+    // Not "opened twice" — not started at all. Two servers cloning and
+    // pushing the same branch into one shared workspace is the thing the
+    // claim exists to prevent, and neither one's single-flight map can see
+    // the other.
+    expect(h.workflow.createBranch).not.toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.store.all()[0].status).toBe('pending');
+  });
+
+  it('takes over a claim left by a process that died holding it', async () => {
+    const h = harness();
+    const record = pendingRow(h.store);
+    await h.store.claim(record.id, 15 * 60 * 1000);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 16 * 60 * 1000);
+
+    await h.jobs.start({ ...record });
+
+    expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
+    vi.restoreAllMocks();
+  });
+
+  it('proceeds past a createBranch failure only when the branch is really there', async () => {
+    const h = harness();
+    const branch = joinBranchFor(ALI, 'Finance');
+    h.workflow.createBranch.mockRejectedValue(new Error('a branch named that already exists'));
+    h.workflow.listBranches.mockResolvedValue([{ name: branch }]);
+
+    await h.jobs.start(pendingRow(h.store));
+
+    expect(h.workflow.listBranches).toHaveBeenCalledWith(expect.any(String), {
+      freshFetch: true,
+      strictFetch: true,
+    });
+    expect(h.store.all()[0]).toMatchObject({ status: 'opened' });
+  });
+
+  it('fails the record when createBranch refuses and no branch exists to work against', async () => {
+    const h = harness();
+    h.workflow.createBranch.mockRejectedValue(new Error('remote: permission denied'));
+    h.workflow.listBranches.mockResolvedValue([]);
+
+    await h.jobs.start(pendingRow(h.store));
+
+    // The old bare `catch {}` swallowed this and let every later step run
+    // against a branch that was never created, so the requester read whatever
+    // confused error fell out downstream instead of the real one.
+    expect(h.store.all()[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'remote: permission denied',
+    });
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+  });
+
+  it('refuses to splice when access.md is unreadable for any reason but absence', async () => {
+    const h = harness();
+    const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    h.workspaceService.readFile.mockRejectedValue(denied);
+
+    await h.jobs.start(pendingRow(h.store));
+
+    // Treating it as empty would have committed a file holding nothing but
+    // this one request, wiping the plugin's real rules.
+    expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(h.store.all()[0]).toMatchObject({ status: 'failed' });
+  });
+
+  it('splices from nothing when access.md is merely absent', async () => {
+    const h = harness();
+    const missing = Object.assign(new Error('no such file'), { code: 'ENOENT' });
+    h.workspaceService.readFile.mockRejectedValue(missing);
+
+    await h.jobs.start(pendingRow(h.store));
+
+    expect(h.workspaceService.writeFile).toHaveBeenCalled();
+    expect(h.store.all()[0]).toMatchObject({ status: 'opened' });
+  });
+
+  it('keeps the request pending, and unclaimed, when the platform is not ready yet', async () => {
+    const h = harness({
+      target: async () => {
+        throw new JoinRequestNotReadyError('the plugin catalog is not available yet');
+      },
+    });
+    await h.jobs.start(pendingRow(h.store));
+
+    // A knowledge base that has not finished cloning must not tell everyone
+    // with a request outstanding that their plugin was deleted.
+    const [row] = h.store.all();
+    expect(row).toMatchObject({ status: 'pending', failureReason: null });
+    // And the claim went back, so the next sweep picks it up at once rather
+    // than waiting out a claim nothing is working behind.
+    expect(row.claimedAt).toBeNull();
+  });
+
+  it('asks for a FRESH change-request listing before it opens a second one', async () => {
+    const h = harness();
+    await h.jobs.start(pendingRow(h.store));
+    // A cached listing taken before an earlier attempt opened its change
+    // request shows nothing to adopt, which is how a retry becomes a
+    // duplicate.
+    expect(h.workflow.listChangeRequestsAuthoredBy).toHaveBeenCalledWith(ALI, { fresh: true });
+  });
+
 });
