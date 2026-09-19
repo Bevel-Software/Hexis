@@ -2503,21 +2503,51 @@ export class GitService implements IGitService {
    * Just the repo-relative paths changed by a change request (three-dot), no
    * patches — the cheap version used to build CR-list summaries and owner
    * routing. `changedFilesForPr` is the full version with statuses + diffs.
+   *
+   * `fetch: false` skips the per-request ref fetch, for a caller that has
+   * ALREADY refreshed the clone's remote-tracking refs — which is the whole
+   * clone in one round trip, against one per request here. A CR list is
+   * exactly that caller: at five open requests the per-request fetch was
+   * measured at ~0.55s each, and the list is re-read on every proposal and
+   * every 60s poll. Only pass it when a fetch of the clone really has just
+   * happened; the refs are otherwise as old as the last one, and the diff
+   * would describe a stale head.
+   *
+   * It is a skip, not a promise never to fetch: a branch this clone has
+   * never heard of is fetched anyway. That case is not a stale diff, it is
+   * NO diff — an empty touched-path set, which is a change request missing
+   * from its own author's tree. Two local `rev-parse`s are worth not being
+   * that.
    */
   async changedPathsForPr(
     workspaceId: string,
     baseBranch: string,
     headBranch: string,
+    opts: { fetch?: boolean } = {},
   ): Promise<string[]> {
     assertValidBranchName(baseBranch);
     assertValidBranchName(headBranch);
     // Fetch outside the mutex (network round-trip) so origin latency can't hold
     // the workspace lock; the lock guards only the local diff below.
     const cwd = await this.repoDir(workspaceId);
-    await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    // The skip decision and the diff are ONE reading of the refs, not two.
+    // Both are resolved here, to COMMITS, and the commits are what the diff
+    // below runs on — the same pinning `changedFilesForPr`'s `at` does. A
+    // concurrent `fetch --prune origin` (`ensureRemotesFetched` and
+    // `fetchPrRefs` both run outside this mutex, deliberately) can drop a
+    // remote-tracking ref between the two, and re-resolving inside the mutex
+    // would then throw `WorkflowValidationError` — which `touchedPathsFor`
+    // swallows into an empty touched-path set, i.e. exactly the change
+    // request missing from its own author's tree that the skip is guarded
+    // against. The commits stay readable whatever happens to the ref names.
+    const pinned =
+      opts.fetch === false ? await this.publishedPrCommits(cwd, baseBranch, headBranch) : null;
+    if (!pinned) {
+      await this.fetchPrRefs(cwd, baseBranch, headBranch);
+    }
     return this.mutex.run(workspaceId, async () => {
-      const baseRef = await this.resolvePublishedBranchRef(cwd, baseBranch);
-      const headRef = await this.resolvePublishedBranchRef(cwd, headBranch);
+      const baseRef = pinned ? pinned.base : await this.resolvePublishedBranchRef(cwd, baseBranch);
+      const headRef = pinned ? pinned.head : await this.resolvePublishedBranchRef(cwd, headBranch);
       const { stdout } = await this.git(cwd, [
         'diff', '-M', '-z', '--name-status', `${baseRef}...${headRef}`,
       ]);
@@ -2782,6 +2812,32 @@ export class GitService implements IGitService {
   }
 
   /**
+   * The COMMITS both of a change request's branches point at in this clone
+   * already, or null when either is unknown to it — the question behind
+   * `changedPathsForPr`'s `fetch: false`, answered with the resolution itself
+   * so the caller diffs precisely what it decided on. Only git's own "no such
+   * ref" answers null; every other failure is the caller's to see, and
+   * treating it as "not here" would spend a network fetch on a clone that is
+   * broken for some other reason.
+   */
+  private async publishedPrCommits(
+    cwd: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<{ base: string; head: string } | null> {
+    const shas: string[] = [];
+    for (const branch of [baseBranch, headBranch]) {
+      try {
+        shas.push((await this.resolvePublishedBranch(cwd, branch)).sha);
+      } catch (err) {
+        if (err instanceof WorkflowValidationError) return null;
+        throw err;
+      }
+    }
+    return { base: shas[0], head: shas[1] };
+  }
+
+  /**
    * `resolveBranchRef` with the preference reversed: the PUBLISHED ref
    * (`origin/<branch>`, just fetched by `fetchPrRefs`) before the local head.
    * A change request is a pair of published branches, and a clone's local
@@ -2791,10 +2847,22 @@ export class GitService implements IGitService {
    * and diffed it against a stale target. A local-only branch still resolves.
    */
   private async resolvePublishedBranchRef(cwd: string, branch: string): Promise<string> {
+    return (await this.resolvePublishedBranch(cwd, branch)).ref;
+  }
+
+  /**
+   * {@link resolvePublishedBranchRef} with the commit it resolved to — the
+   * `rev-parse` that verifies the ref already prints it, so pinning a diff to
+   * the commit costs nothing over naming the ref.
+   */
+  private async resolvePublishedBranch(
+    cwd: string,
+    branch: string,
+  ): Promise<{ ref: string; sha: string }> {
     for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
       try {
-        await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
-        return ref;
+        const { stdout } = await this.git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
+        return { ref, sha: stdout.trim() };
       } catch (err) {
         // Only git's own "no such ref" (exit 1 under --quiet) moves on to the
         // next candidate. A deadline or any other failure is not that answer:

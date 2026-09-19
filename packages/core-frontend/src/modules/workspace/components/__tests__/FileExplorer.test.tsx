@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { configureBranchModel, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { FileExplorer } from '../FileExplorer';
 import { WorkspaceContext, type UploadError, type WorkspaceContextValue } from '../../state/workspace.context';
@@ -111,6 +111,14 @@ interface RenderOptions {
    * Omitted means no `AdminProvider` at all, which is nobody's admin.
    */
   isAdmin?: boolean;
+  /** The URL the tree mounts at — a reload lands on whatever the query says. */
+  initialEntries?: string[];
+}
+
+/** The router's current query, so a test can read what a click put there. */
+function LocationProbe() {
+  const { search } = useLocation();
+  return <span data-testid="location-search">{search}</span>;
 }
 
 function renderExplorer(opts: RenderOptions = {}) {
@@ -135,7 +143,7 @@ function renderExplorer(opts: RenderOptions = {}) {
     ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
   });
   const ui = (ws: WorkspaceContextValue) => (
-      <MemoryRouter>
+      <MemoryRouter initialEntries={opts.initialEntries ?? ['/']}>
         <AuthContext.Provider value={makeAuth()}>
           <AdminContext.Provider value={{ isAdmin: opts.isAdmin === true } as AdminContextValue}>
           <WorkspaceContext.Provider value={ws}>
@@ -170,6 +178,7 @@ function renderExplorer(opts: RenderOptions = {}) {
                   }}
                 >
                   <FileExplorer />
+                  <LocationProbe />
                 </OpenChangeRequestsContext.Provider>
             </GitContext.Provider>
           </WorkspaceContext.Provider>
@@ -2463,5 +2472,336 @@ describe('FileExplorer: platform files stay put', () => {
     const rows = screen.getAllByText('AGENTS.md').map((n) => n.closest('button')!);
     const nested = rows.find((r) => r.getAttribute('data-tree-path') === `${KB}/Handbook/AGENTS.md`);
     expect(nested).toHaveAttribute('draggable', 'true');
+  });
+});
+
+/**
+ * A file created where its creator cannot read is invisible to them the
+ * moment it lands — the platform's creator read-grant rides in markdown
+ * frontmatter, and nothing else can carry it. The tree says so before it
+ * adds anything; see `utils/unreadableCreate.ts` for why the two conditions
+ * (non-markdown, lands directly in an existing folder) are exactly these.
+ */
+describe('FileExplorer: adding a file you would not be able to see', () => {
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+  });
+
+  const KB_TREE: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [
+      {
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory',
+        children: [
+          { name: 'Sales', relativePath: 'knowledge-base/Sales', type: 'directory', children: [] },
+        ],
+      },
+    ],
+  };
+
+  /** The `/access` answer, with only the verdict this gate reads varying. */
+  function withRead(canRead: boolean) {
+    mockAuthFetch.mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          canRead,
+          canWrite: true,
+          canDownload: true,
+          canOwner: false,
+          eligible: { roles: [], users: [] },
+          readers: { restricted: true, roles: [], users: [] },
+          owners: { roles: [], users: [] },
+          downloaders: { roles: [], users: [] },
+          sources: {},
+        }),
+        text: async () => '',
+        // Only the access endpoint is expected here; anything else is a bug
+        // in the test, and an unroutable URL makes that loud.
+        url,
+      }),
+    );
+  }
+
+  /** Type a new file name into the box the given folder row opens. */
+  async function newFileIn(folderName: string, name: string) {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: `New file in ${folderName}` }));
+    await user.type(screen.getByPlaceholderText('filename'), `${name}{Enter}`);
+  }
+
+  it('warns before a non-markdown file lands at a top level it cannot read', async () => {
+    withRead(false);
+    const { createFile } = renderExplorer({ fileTree: KB_TREE });
+    await newFileIn('knowledge-base', 'Sample file');
+
+    expect(await screen.findByTestId('unreadable-create-sentence')).toHaveTextContent(
+      "You won't be able to see Sample file after it is added: you don't have read access to the top level.",
+    );
+    // Nothing is created while the question is open.
+    expect(createFile).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(createFile).toHaveBeenCalledWith('knowledge-base/Sample file'));
+  });
+
+  it('names the folder it is about, not just the root', async () => {
+    withRead(false);
+    renderExplorer({ fileTree: KB_TREE });
+    await newFileIn('Sales', 'brief.pdf');
+    expect(await screen.findByTestId('unreadable-create-sentence')).toHaveTextContent(
+      "You won't be able to see brief.pdf after it is added: you don't have read access to Sales.",
+    );
+    // Asked of the folder the file lands in, as a folder.
+    expect(String(mockAuthFetch.mock.calls[0][0])).toContain('/access?path=Sales&kind=folder');
+  });
+
+  it('Cancel creates nothing at all', async () => {
+    withRead(false);
+    const { createFile } = renderExplorer({ fileTree: KB_TREE });
+    await newFileIn('knowledge-base', 'Sample file');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument(),
+    );
+    expect(createFile).not.toHaveBeenCalled();
+  });
+
+  it('never asks about markdown — its creator grant still works', async () => {
+    withRead(false);
+    const { createFile } = renderExplorer({ fileTree: KB_TREE });
+    await newFileIn('knowledge-base', 'Sample.md');
+
+    await waitFor(() => expect(createFile).toHaveBeenCalledWith('knowledge-base/Sample.md'));
+    expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument();
+    // Not even a read lookup: markdown can never be the thing this warns about.
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+  });
+
+  it('never asks where the caller can read', async () => {
+    withRead(true);
+    const { createFile } = renderExplorer({ fileTree: KB_TREE });
+    await newFileIn('knowledge-base', 'Sample file');
+
+    await waitFor(() => expect(createFile).toHaveBeenCalledWith('knowledge-base/Sample file'));
+    expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument();
+  });
+
+  it('never asks for a new folder — a new directory carries the grant itself', async () => {
+    withRead(false);
+    const user = userEvent.setup();
+    const createDirectory = vi.fn().mockResolvedValue(undefined);
+    const workspace = makeWorkspaceFixture({ fileTree: KB_TREE, createDirectory });
+    render(
+      <MemoryRouter>
+        <AuthContext.Provider value={makeAuth()}>
+          <WorkspaceContext.Provider value={workspace}>
+            <GitContext.Provider value={makeGit()}>
+              <FileExplorer />
+            </GitContext.Provider>
+          </WorkspaceContext.Provider>
+        </AuthContext.Provider>
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole('button', { name: 'New folder in knowledge-base' }));
+    await user.type(screen.getByPlaceholderText('folder name'), 'Reports{Enter}');
+    await waitFor(() => expect(createDirectory).toHaveBeenCalledWith('knowledge-base/Reports'));
+    expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument();
+  });
+
+  it('asks ONCE for a multi-file drop, listing every affected name', async () => {
+    withRead(false);
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: KB_TREE, dispatchUpload });
+
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: () => '',
+          items: undefined,
+          files: [
+            new File(['a'], 'one.pdf'),
+            new File(['b'], 'two.pdf'),
+            new File(['c'], 'three.pdf'),
+            // Unaffected: markdown keeps its grant and is not listed.
+            new File(['d'], 'notes.md'),
+          ],
+        },
+      });
+    });
+
+    const dialogs = await screen.findAllByTestId('unreadable-create-sentence');
+    expect(dialogs).toHaveLength(1);
+    expect(dialogs[0]).toHaveTextContent(
+      "You won't be able to see these 3 files after they are added: you don't have read access to Sales.",
+    );
+    for (const name of ['one.pdf', 'two.pdf', 'three.pdf']) {
+      expect(screen.getByText(name)).toBeInTheDocument();
+    }
+    expect(screen.queryByText('notes.md')).not.toBeInTheDocument();
+    // One question, one lookup — not one per file.
+    expect(mockAuthFetch).toHaveBeenCalledTimes(1);
+    expect(dispatchUpload).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(dispatchUpload).toHaveBeenCalledTimes(1));
+    expect(dispatchUpload.mock.calls[0][1]).toBe('knowledge-base/Sales');
+  });
+
+  it('Cancel on a drop uploads nothing', async () => {
+    withRead(false);
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: KB_TREE, dispatchUpload });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: { getData: () => '', items: undefined, files: [new File(['a'], 'one.pdf')] },
+      });
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument(),
+    );
+    expect(dispatchUpload).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The upload menu (Add files / Add folder) and the drops share one
+   * dispatcher, `uploadAfterGate`, so the gate covers all of them by
+   * construction. What the menu can reach is the difference: its buttons sit
+   * on the tree's own root row, which is the WORKSPACE root — outside the KB
+   * repo, where there is no access model and nothing can be hidden. So it
+   * dispatches straight through, and does not spend a lookup finding out.
+   */
+  it('takes the upload menu through the same gate — which has nothing to ask outside the KB', async () => {
+    withRead(false);
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: KB_TREE, dispatchUpload });
+    await act(async () => {
+      fireEvent.change(getFileInput(), { target: { files: [new File(['a'], 'brief.pdf')] } });
+    });
+    await waitFor(() => expect(dispatchUpload).toHaveBeenCalledTimes(1));
+    expect(dispatchUpload.mock.calls[0][1]).toBe('');
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The folder picker's shape (`kind: 'paths'`) at a KB folder: the loose
+   * file at the top level is the only one that can go missing — everything
+   * under the dropped folder is covered by the new directory's own grant.
+   */
+  it('asks only about what lands directly in the folder, not about a subfolder drop', async () => {
+    withRead(false);
+    const dispatchUpload = vi.fn().mockResolvedValue(undefined);
+    renderExplorer({ fileTree: KB_TREE, dispatchUpload });
+
+    // A drop's `items` are `DataTransferItem`s; the walker snapshots each
+    // one's FileSystem entry synchronously inside the handler.
+    const item = (name: string, isFile: boolean) => ({
+      kind: 'file',
+      webkitGetAsEntry: () => ({ name, isFile, isDirectory: !isFile }),
+    });
+    await act(async () => {
+      fireEvent.drop(screen.getByText('Sales'), {
+        dataTransfer: {
+          getData: () => '',
+          items: Object.assign([item('deck', false), item('loose.pdf', true)], { length: 2 }),
+          files: [],
+        },
+      });
+    });
+
+    expect(await screen.findByTestId('unreadable-create-sentence')).toHaveTextContent(
+      "You won't be able to see loose.pdf after it is added: you don't have read access to Sales.",
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(dispatchUpload).toHaveBeenCalledTimes(1));
+    expect(dispatchUpload.mock.calls[0][0].kind).toBe('items');
+  });
+
+  it('adds the file when the read lookup itself fails — the warning is a courtesy', async () => {
+    mockAuthFetch.mockRejectedValue(new Error('offline'));
+    const { createFile } = renderExplorer({ fileTree: KB_TREE });
+    await newFileIn('knowledge-base', 'Sample file');
+    await waitFor(() => expect(createFile).toHaveBeenCalledWith('knowledge-base/Sample file'));
+    expect(screen.queryByTestId('unreadable-create-sentence')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * A proposed row is a link to the request's view of ONE file. Clicking it has
+ * to arrive there, and the URL has to carry enough for a reload to arrive
+ * there too — a request bundling twenty proposals otherwise opens on whatever
+ * file happens to be first.
+ */
+describe('FileExplorer: a proposed row opens its request at that file', () => {
+  beforeEach(() => {
+    cleanup();
+    mockAuthFetch.mockReset();
+    // The dialog's detail read goes through authFetch; an unresolved promise
+    // keeps it on its loading state, which is all these assertions need.
+    mockAuthFetch.mockImplementation(() => new Promise(() => {}));
+  });
+
+  const TREE_WITH_DOCS: FileTreeEntry = {
+    name: '.',
+    relativePath: '.',
+    type: 'directory',
+    children: [{ name: 'docs', relativePath: 'docs', type: 'directory', children: [] }],
+  };
+
+  const search = () => screen.getByTestId('location-search').textContent;
+
+  it('puts the request and the clicked file in the URL', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+    });
+    fireEvent.click(screen.getByTitle('Proposed by you: opens the change request').closest('button')!);
+
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
+    expect(search()).toBe('?cr=12&file=docs%2Fnew-idea.md');
+  });
+
+  it('opens straight from the URL, so a reload lands on the same file', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      initialEntries: ['/workspace/main?cr=12&file=docs%2Fnew-idea.md'],
+    });
+    // No click: the query alone opened it.
+    expect(
+      await screen.findByRole('dialog', { name: /Change request: Suggested change/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('drops both parameters when the dialog closes', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      initialEntries: ['/workspace/main?cr=12&file=docs%2Fnew-idea.md'],
+    });
+    const dialog = await screen.findByRole('dialog', { name: /Change request: Suggested change/ });
+    fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(search()).toBe(''));
+  });
+
+  it('opens nothing for a request the caller does not have', async () => {
+    renderExplorer({
+      fileTree: TREE_WITH_DOCS,
+      minePaths: new Map([['docs/new-idea.md', 12]]),
+      initialEntries: ['/workspace/main?cr=999&file=docs%2Fnew-idea.md'],
+    });
+    await waitFor(() => expect(screen.getByTestId('location-search')).toBeInTheDocument());
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

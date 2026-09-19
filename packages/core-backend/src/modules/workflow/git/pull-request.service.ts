@@ -187,10 +187,11 @@ export class PullRequestService implements IPullRequestService {
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
+    opts: { fetch?: boolean } = {},
   ): Promise<string[]> {
     if (!workspaceId) return [];
     return this.gitService
-      .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch)
+      .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
       .catch((err) => {
         // Best-effort, but log it: an empty result silently hides a CR from the
         // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
@@ -209,8 +210,12 @@ export class PullRequestService implements IPullRequestService {
    * count a list shows. The unfiltered paths are kept for routing, where a
    * folder-only request must still reach the folder's owners.
    */
-  private async summaryOf(row: ChangeRequestRow, workspaceId: string | null): Promise<PullRequestSummary> {
-    const touched = await this.touchedPathsFor(row, workspaceId);
+  private async summaryOf(
+    row: ChangeRequestRow,
+    workspaceId: string | null,
+    opts: { fetch?: boolean } = {},
+  ): Promise<PullRequestSummary> {
+    const touched = await this.touchedPathsFor(row, workspaceId, opts);
     const summary = this.rowToSummary(row, touched.filter((p) => !isFolderPlaceholder(p)));
     this.routingPaths.set(summary, touched);
     return summary;
@@ -232,8 +237,36 @@ export class PullRequestService implements IPullRequestService {
       .from(changeRequests)
       .where(eq(changeRequests.state, 'open'))
       .orderBy(desc(changeRequests.createdAt));
+    // ONE fetch of the clone for the whole list, not one per request.
+    //
+    // Every summary needs the request's touched paths, and
+    // `changedPathsForPr` fetches the two refs it is about before diffing
+    // them. That is a network round trip PER OPEN REQUEST, on a list that is
+    // re-read after every proposal and polled every 60s while the tab is
+    // visible — measured at ~0.55s per additional open request, which is the
+    // "very slow loading" this list was reported for. `ensureRemotesFetched`
+    // refreshes every `origin/*` ref of the clone in one round trip and
+    // shares an in-flight fetch between callers — so the two list endpoints
+    // the tree calls together cost one fetch BETWEEN them instead of two per
+    // request.
+    //
+    // `force` on a fresh read, for the same reason the read is fresh at all:
+    // it exists because the caller knows the remote just moved, and a fetch
+    // skipped by its 30s TTL would answer about a request whose branch this
+    // clone has not seen — which is the request missing from its own
+    // author's tree. A non-fresh poll keeps the TTL; `changedPathsForPr`
+    // fetches for itself if a branch is missing even then, so the worst a
+    // stale window can do is report a known branch one poll behind.
+    //
+    // Best-effort, exactly as the per-request fetch was: a request whose diff
+    // cannot be computed degrades to no touched paths as before.
+    if (workspaceId && rows.length > 0) {
+      await this.workspaceService
+        .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
+        .catch(() => undefined);
+    }
     const summaries = await Promise.all(
-      rows.map((row) => this.summaryOf(row, workspaceId)),
+      rows.map((row) => this.summaryOf(row, workspaceId, { fetch: false })),
     );
     if (generation === this.cacheGeneration) {
       this.cachedList.set(cacheKey, { at: now, value: summaries });

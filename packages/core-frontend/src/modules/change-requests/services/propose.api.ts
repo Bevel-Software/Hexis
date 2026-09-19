@@ -4,9 +4,10 @@ import {
   suggestionsBranchPrefixFor,
   type PullRequestSummary,
 } from '@bevel-software/platform-shared';
-import { createBranch, deleteBranch } from '../../git/services/git.api';
+import { createBranch, deleteBranch, GitApiError } from '../../git/services/git.api';
 import { getOrCreateWorkspace, writeFile } from '../../workspace/services/workspace.api';
 import { openChangeRequest } from '../../pr/services/pr-open.api';
+import { fetchPrDetail } from '../../pr/services/pr-detail.api';
 import { listMyChangeRequests } from './change-requests.api';
 
 /** The default branch's workspace id (id = encodeURIComponent(branch)), read lazily. */
@@ -93,11 +94,33 @@ export interface KnowledgeSuggestionTarget {
   existingCr: PullRequestSummary | null;
 }
 
-export async function ensureKnowledgeSuggestionWorkspace(
+/**
+ * The workspace ensure in flight for a branch — same in-flight-only contract
+ * as {@link openingByBranch}. Two proposals started together would otherwise
+ * each pay the fresh list read (the slow call), each try to create the same
+ * branch, and each reach the same conclusion; one answer serves both.
+ */
+const ensuringByBranch = new Map<string, Promise<KnowledgeSuggestionTarget>>();
+
+export function ensureKnowledgeSuggestionWorkspace(
   user: ProposalAuthor,
 ): Promise<KnowledgeSuggestionTarget> {
   const branch = knowledgeSuggestionBranchFor(user);
+  const inFlight = ensuringByBranch.get(branch);
+  // Joining saves a duplicate of work that would have reached the same
+  // answer — it does not make the first flow's FAILURE this caller's answer.
+  // The map entry is already gone by the time this rejects (the `finally`
+  // below is attached first), so the fallback is a fresh attempt, not a
+  // re-join of the same dead promise.
+  if (inFlight) return inFlight.catch(() => ensureKnowledgeSuggestionWorkspace(user));
+  const ensuring = ensureFresh(branch).finally(() => {
+    if (ensuringByBranch.get(branch) === ensuring) ensuringByBranch.delete(branch);
+  });
+  ensuringByBranch.set(branch, ensuring);
+  return ensuring;
+}
 
+async function ensureFresh(branch: string): Promise<KnowledgeSuggestionTarget> {
   // FRESH, not the 30s cache: a second proposal inside the cache window must
   // see the request the first one just opened, or it opens a duplicate
   // against the same branch.
@@ -139,21 +162,87 @@ export async function ensureKnowledgeSuggestionWorkspace(
 }
 
 /**
+ * The number of the open request the server says already covers this
+ * (source, target) pair, or null when the failure was anything else. The
+ * refusal carries the number precisely so a client can reach the request
+ * instead of treating the state as broken (`DuplicateChangeRequestError`).
+ */
+function duplicateRequestNumber(err: unknown): number | null {
+  if (!(err instanceof GitApiError) || err.status !== 409) return null;
+  const body = err.body as { kind?: unknown; existingNumber?: unknown } | null | undefined;
+  if (!body || typeof body !== 'object' || body.kind !== 'duplicate-change-request') return null;
+  return typeof body.existingNumber === 'number' ? body.existingNumber : null;
+}
+
+/**
+ * The open request being made for a branch right now, so a second proposal
+ * joins it instead of racing it. In-flight ONLY, never a cache: whether the
+ * caller still has an open request is the server's answer to give, and a
+ * withdrawn or merged one must not be remembered here.
+ */
+const openingByBranch = new Map<string, Promise<PullRequestSummary | null>>();
+
+/**
  * Open the caller's one Knowledge change request, unless it already exists.
  * Returns the request either way (the server's created row, or the existing
  * one) so callers can announce it — the optimistic suggestion rows need its
  * number and branch the moment the write lands.
+ *
+ * Two proposals started before either had opened the request both read
+ * `existingCr: null` from `ensureKnowledgeSuggestionWorkspace`, and the
+ * second one used to fail the whole proposal on the server's
+ * one-open-request-per-pair refusal — a 409 the user saw as "Couldn't add
+ * change request". The window is exactly how long the fresh list read takes,
+ * which grows with the number of open requests, so "propose again while the
+ * first is still loading" hit it reliably. Both halves are closed here:
+ *
+ *  - concurrently, the second call JOINS the first's open rather than issuing
+ *    its own, so there is only ever one request in flight per branch; and
+ *  - sequentially — or from another tab, or another device, where no
+ *    client-side coordination can help — the duplicate refusal is read for
+ *    what it is. It names the request that already exists, which is the state
+ *    this function is trying to reach, so it adopts it instead of failing.
  */
-export async function ensureKnowledgeChangeRequest(
+export function ensureKnowledgeChangeRequest(
   target: KnowledgeSuggestionTarget,
   userName: string,
 ): Promise<PullRequestSummary | null> {
-  if (target.existingCr) return target.existingCr;
-  const created = await openChangeRequest({
-    sourceBranch: target.branch,
-    targetBranch: DEFAULT_BRANCH,
-    title: `Changes from ${userName}. Knowledge`,
+  if (target.existingCr) return Promise.resolve(target.existingCr);
+  const inFlight = openingByBranch.get(target.branch);
+  // A joined open that fails is not this caller's verdict. The first flow's
+  // error says nothing about what this one's own attempt would meet — and in
+  // the case that matters (the connection dropped AFTER the server created
+  // the row) its own attempt meets the duplicate refusal and adopts the
+  // request, where joining would report "Couldn't add change request" about a
+  // request that exists. So a rejection falls back to one attempt of its own.
+  if (inFlight) return inFlight.catch(() => ensureKnowledgeChangeRequest(target, userName));
+  const opening = openKnowledgeChangeRequest(target, userName).finally(() => {
+    if (openingByBranch.get(target.branch) === opening) openingByBranch.delete(target.branch);
   });
+  openingByBranch.set(target.branch, opening);
+  return opening;
+}
+
+async function openKnowledgeChangeRequest(
+  target: KnowledgeSuggestionTarget,
+  userName: string,
+): Promise<PullRequestSummary | null> {
+  let created: unknown;
+  try {
+    created = await openChangeRequest({
+      sourceBranch: target.branch,
+      targetBranch: DEFAULT_BRANCH,
+      title: `Changes from ${userName}. Knowledge`,
+    });
+  } catch (err) {
+    const existing = duplicateRequestNumber(err);
+    // Anything else is a real failure and stays one — the caller reports it.
+    if (existing === null) throw err;
+    // The request exists; read it so the caller can still announce its rows.
+    // A failed read is only a missing announcement, never a failed proposal:
+    // the bytes are committed and the request is open either way.
+    return await fetchPrDetail(existing, { fresh: true }).catch(() => null);
+  }
   // The endpoint returns the created request; treat an unexpected shape as
   // "no summary to announce" rather than a failure — the request exists.
   return created && typeof (created as PullRequestSummary).number === 'number'

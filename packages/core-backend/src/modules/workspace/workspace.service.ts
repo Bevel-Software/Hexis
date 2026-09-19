@@ -1054,15 +1054,25 @@ export class WorkspaceService implements IWorkspaceService {
    * Run `git fetch --prune origin` for this branch's clone. Results are
    * cached for `FETCH_CACHE_TTL_MS`; concurrent callers share the same
    * in-flight fetch to avoid fetch storms when e.g. the CR list poll fans out.
+   *
+   * `force` skips the TTL — for a caller that KNOWS the remote just moved
+   * (an event-driven `?fresh=1` read, which bypasses its own cache for the
+   * same reason) and would otherwise answer from refs older than the change
+   * it is being asked about. It keeps the in-flight join, which is the half
+   * that actually prevents storms: ten forced callers in the same tick still
+   * share one fetch.
    */
-  async ensureRemotesFetched(workspaceId: string, opts: { strict?: boolean } = {}): Promise<void> {
+  async ensureRemotesFetched(
+    workspaceId: string,
+    opts: { strict?: boolean; force?: boolean } = {},
+  ): Promise<void> {
     const workspaceDir = await this.resolveWorkspaceDir(workspaceId);
     const repoDir = path.join(workspaceDir, this.kbDirName);
     const now = Date.now();
     // The TTL is stamped only by a SUCCESSFUL fetch, so a fresh window is
     // itself the proof a strict caller wants.
     const last = this.lastFetchAt.get(repoDir) ?? 0;
-    if (now - last < FETCH_CACHE_TTL_MS) return;
+    if (!opts.force && now - last < FETCH_CACHE_TTL_MS) return;
 
     const inFlight = this.inFlightFetches.get(repoDir);
     if (inFlight) {
