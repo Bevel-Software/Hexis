@@ -3,7 +3,6 @@ import { logger } from '../shared/logging.js';
 
 const startupLog = logger('kb-startup');
 const crLog = logger('cr');
-const pluginsLog = logger('plugins');
 import cors from 'cors';
 import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
@@ -344,19 +343,24 @@ export async function createCoreServer(
     })
     .catch((err) => crLog.warn('deleted-branch sweep failed:', { err }));
 
-  // Join requests recorded before this boot, resumed. SEQUENCED AFTER the
-  // startup phase for the same reason as the sweep above: the work needs the
-  // default-branch clone the runner maintains and the plugin catalog read
-  // from it, and a sweep that ran first would refuse every row for a
-  // knowledge base that simply was not ready — telling people their request
-  // could not be sent when nothing had gone wrong with it. Not awaited: a
-  // first request from a person is a full clone, and nothing else at boot
-  // depends on it. `sweep` returns once the work is under way and each row
-  // records its own outcome, so there is nothing here to report but the
-  // failure to read the table at all.
-  void core.pluginJoinRequestJobs
-    .sweep()
-    .catch((err) => pluginsLog.warn('could not resume recorded join requests:', { err }));
+  // Recorded join requests that are still owed, resumed — now, and then on a
+  // timer. SEQUENCED AFTER the startup phase for the same reason as the sweep
+  // above: the work needs the default-branch clone the runner maintains and
+  // the plugin catalog read from it, and a sweep that ran first would refuse
+  // every row for a knowledge base that simply was not ready — telling people
+  // their request could not be sent when nothing had gone wrong with it.
+  //
+  // ON A TIMER rather than at boot alone, because boot cannot cover the
+  // redeploy: this process sweeps while the outgoing one still holds a
+  // record, skips it (correctly — two servers must not do git on one branch),
+  // and the outgoing process then exits mid-work. Nothing else would look at
+  // that row again. The requester cannot prompt it either: a pending record
+  // shows them the "Requested" card, not a button.
+  //
+  // Not awaited, and nothing to report here but the failure to read the table
+  // at all: a first request from a person is a full clone, nothing else at
+  // boot depends on it, and each row records its own outcome.
+  core.pluginJoinRequestJobs.startSweeping();
 
   // Auth routes (unprotected — login endpoint must be accessible)
   app.use(

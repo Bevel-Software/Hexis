@@ -92,6 +92,12 @@ export class FakeJoinRequestStore implements JoinRequestStore {
     return { ...row };
   }
 
+  async heartbeat(id: string): Promise<void> {
+    const row = this.rowById(id);
+    if (!row || row.status !== 'pending' || !row.claimedAt) return;
+    row.claimedAt = new Date();
+  }
+
   async release(id: string): Promise<void> {
     const row = this.rowById(id);
     if (!row || row.status !== 'pending') return;

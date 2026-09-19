@@ -15,17 +15,44 @@ import type { JoinRequestRecord, JoinRequestStore } from './join-request-records
 const log = logger('plugins');
 
 /**
- * How long a claim on a record holds before another process may take it over.
+ * How often a process that is working a record says so, by pushing its
+ * claim's timestamp forward.
  *
- * Has to exceed the longest honest attempt, and that is a first-ever request:
- * a full clone of the plugins repository, which is minutes on a real one. Too
- * short and a redeploy's two processes both work the same branch, which is
- * the thing the claim exists to prevent; too long and a request whose process
- * died mid-clone waits that much longer to be finished. Fifteen minutes is
- * comfortably past the clone and well inside a person's patience for a
- * request they have already been told was received.
+ * The claim is a LIVENESS signal, not a deadline, and the heartbeat is what
+ * makes it one. Without it `claimed_at` only says when the work started, and
+ * a timestamp cannot tell "another process is still doing this" from "a
+ * process died holding it" — which is exactly the distinction both the
+ * redeploy overlap and the crash-restart need, in opposite directions.
  */
-const CLAIM_STALE_AFTER_MS = 15 * 60 * 1000;
+const CLAIM_HEARTBEAT_MS = 30 * 1000;
+
+/**
+ * How long a claim outlives its last heartbeat before another process may
+ * take the record over.
+ *
+ * Three missed beats. It does NOT have to cover the longest honest attempt —
+ * that was the mistake this replaced. Sizing the window to a first-ever
+ * request's full clone made a crash-restart wait out the whole clone window
+ * before anything would retry, and a boot is far quicker than that, so the
+ * boot sweep was refused every row it had come to rescue and gave up. A
+ * heartbeat decouples the two: a live process holds its claim for as long as
+ * the work genuinely takes, however long that is, and a dead one lets go
+ * within a minute and a half.
+ */
+export const CLAIM_STALE_AFTER_MS = 90 * 1000;
+
+/**
+ * How often every `pending` record is looked at again.
+ *
+ * Boot alone is not enough. A redeploy's incoming process sweeps while the
+ * outgoing one still holds a record — correctly skipping it — and if that
+ * process then exits mid-work, nothing would look at the row again until the
+ * NEXT boot, which on a healthy deployment may be days. The tick is one
+ * indexed read of the rows that are still owed, and it is what makes "a
+ * recorded request is always eventually finished or failed" true between
+ * boots rather than only across them.
+ */
+const SWEEP_INTERVAL_MS = 60 * 1000;
 
 /**
  * A failure that says nothing about the REQUEST — the platform simply could
@@ -110,14 +137,33 @@ export interface JoinRequestJobsDeps {
  * needs the default-branch clone that phase maintains and the plugin catalog
  * read from it, and a sweep that ran first would mark every row failed for a
  * knowledge base that was merely not ready yet. So exclusion is taken where
- * the row lives: `attempt` claims it with one conditional UPDATE, and a
- * process that does not get the claim does nothing. Two servers cloning,
- * committing and pushing the same branch into the same shared workspace is
- * what that prevents; the adoption check below, now on a FRESH listing, is
- * the second line for the change request itself.
+ * the row lives: `run` claims it with one conditional UPDATE, and a process
+ * that does not get the claim does nothing. Two servers cloning, committing
+ * and pushing the same branch into the same shared workspace is what that
+ * prevents; the adoption check below, on a FRESH listing, is the second line
+ * for the change request itself.
+ *
+ * THE CLAIM IS A HEARTBEAT, and that is the part worth being careful about. A
+ * bare `claimed_at` cannot distinguish a process still working from one that
+ * died holding the row, so whatever window you pick is wrong in one
+ * direction: long enough to cover a first-ever request's clone, and a crash
+ * leaves the request owed for that whole window — which is how the boot
+ * sweep, the very thing meant to rescue it, came to be refused every row it
+ * asked for and to give up silently. So a running job pushes its claim
+ * forward every {@link CLAIM_HEARTBEAT_MS}, and the window is three missed
+ * beats. A live process holds a row for as long as the work honestly takes; a
+ * dead one lets go in ninety seconds.
+ *
+ * AND SOMETHING ALWAYS LOOKS AGAIN. {@link startSweeping} re-reads the owed
+ * rows on a timer, not only at boot, because the one case boot cannot cover
+ * is the redeploy: the incoming process skips a row the outgoing one holds,
+ * and the outgoing process then exits mid-work. A requester cannot rescue
+ * that themselves — a pending record shows them the "Requested" card, not a
+ * button — so nothing but this tick would ever pick the row up.
  */
 export class PluginJoinRequestJobs {
   private readonly inFlight = new Map<string, Promise<void>>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly store: JoinRequestStore,
@@ -160,18 +206,54 @@ export class PluginJoinRequestJobs {
   }
 
   /**
-   * Re-run every record still `pending` — the boot sweep, and the whole of
-   * what makes a recorded request survive a restart: a row written before the
-   * process died is either completed or marked failed after it, never lost.
+   * Re-run every record still `pending` — what makes a recorded request
+   * survive: a row written before a process died is completed or marked
+   * failed afterwards, never left owed.
+   *
+   * A record another LIVE process is working is skipped by the claim, not by
+   * this: the sweep asks for everything pending and lets each attempt decide.
    */
   async sweep(): Promise<void> {
     const pending = await this.store.pending();
     if (pending.length === 0) return;
-    log.info(`resuming ${pending.length} join request(s) recorded before this boot`);
-    // Started, not awaited: this runs as a boot task ahead of the commit
-    // worker, and a queue of first-time requests is a queue of full clones —
-    // minutes of git that nothing else at boot should be made to wait behind.
+    log.info(`looking at ${pending.length} join request(s) still owed`);
+    // Started, not awaited: a queue of first-time requests is a queue of full
+    // clones — minutes of git that nothing else should be made to wait behind.
     for (const record of pending) void this.start(record);
+  }
+
+  /**
+   * Sweep now, and keep sweeping.
+   *
+   * Boot alone left a hole with no second door: a redeploy's incoming process
+   * sweeps while the outgoing one still holds a record, skips it correctly,
+   * and then the outgoing process exits mid-work — after which nothing looked
+   * at that row again until the next boot. Nothing else retries, because the
+   * only other way a record is picked up is its requester clicking again, and
+   * a pending record shows them the "Requested" card rather than a button.
+   *
+   * Idempotent, and safe to call when a sweep is already scheduled.
+   */
+  startSweeping(intervalMs: number = SWEEP_INTERVAL_MS): void {
+    void this.sweep().catch((err: unknown) => {
+      log.warn(`could not look at the join requests still owed: ${sanitizeError(err)}`);
+    });
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => {
+      void this.sweep().catch((err: unknown) => {
+        log.warn(`could not look at the join requests still owed: ${sanitizeError(err)}`);
+      });
+    }, intervalMs);
+    // Never a reason for the process to stay alive: every row is durable, and
+    // whatever this tick would have done the next boot's sweep does.
+    this.sweepTimer.unref?.();
+  }
+
+  /** Stop the periodic sweep. Part of shutting down cleanly. */
+  stopSweeping(): void {
+    if (!this.sweepTimer) return;
+    clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
   }
 
   /**
@@ -183,6 +265,31 @@ export class PluginJoinRequestJobs {
   }
 
   private async run(record: JoinRequestRecord): Promise<void> {
+    // CLAIM FIRST, and say nothing further if somebody else holds it.
+    //
+    // Claiming here rather than inside `attempt` is what lets the heartbeat
+    // wrap the whole attempt: the claim has to be refreshed for as long as
+    // the work runs, and the work is the part that can take minutes.
+    const live = await this.store.claim(record.id, CLAIM_STALE_AFTER_MS).catch((err: unknown) => {
+      log.warn(`could not claim a join request: ${sanitizeError(err)}`);
+      return null;
+    });
+    if (!live) {
+      // Not silence, as this once was: a row that is skipped every pass is
+      // the shape of the bug this logging exists to make visible.
+      log.debug(`join request for ${printable(record.pluginKey)} is held elsewhere — leaving it`);
+      return;
+    }
+
+    const heartbeat = setInterval(() => {
+      void this.store.heartbeat(live.id).catch((err: unknown) => {
+        // A missed beat is survivable — the window is three of them — and the
+        // work is still running, so there is nothing to do but note it.
+        log.warn(`could not refresh a join-request claim: ${sanitizeError(err)}`);
+      });
+    }, CLAIM_HEARTBEAT_MS);
+    heartbeat.unref?.();
+
     try {
       await this.attempt(record);
     } catch (err) {
@@ -210,24 +317,14 @@ export class PluginJoinRequestJobs {
         .catch((writeErr: unknown) => {
           log.error(`could not record that failure: ${sanitizeError(writeErr)}`);
         });
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 
+  /** The work itself. The caller has already claimed `record`. */
   private async attempt(record: JoinRequestRecord): Promise<void> {
     const { workflow, workspaceService, kbDirName } = this.deps;
-    // CLAIM THE ROW, and stop dead if somebody else holds it.
-    //
-    // This does the work the old `byId` re-read did — a second click carries a
-    // snapshot taken before the first click's job finished, and single-flight
-    // cannot catch that one, because the first flight is already gone from the
-    // map — and the work that read could not do. A re-read only tells this
-    // process what the row said a moment ago; on a redeploy the outgoing and
-    // incoming servers both sweep, both re-read `pending`, and both proceed to
-    // clone, commit and push the same branch in the same shared workspace. The
-    // claim is a single conditional UPDATE, so exactly one of them is told yes.
-    const live = await this.store.claim(record.id, CLAIM_STALE_AFTER_MS);
-    if (!live) return;
-
     const target = await this.deps.target(record.pluginKey);
     if (!target) throw new Error('the plugin is no longer available');
     const user = await this.deps.requester(record.requesterEmail);

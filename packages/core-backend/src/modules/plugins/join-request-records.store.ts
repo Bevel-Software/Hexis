@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { pluginJoinRequests } from '../database/schema.js';
 
@@ -61,6 +61,13 @@ export interface JoinRequestStore {
    * holding one does not owe the request forever.
    */
   claim(id: string, staleAfterMs: number): Promise<JoinRequestRecord | null>;
+  /**
+   * Say the claim on this row is still being worked — push its timestamp
+   * forward. What turns `claimed_at` from a deadline into a liveness signal:
+   * a process that is still going keeps its row however long the work takes,
+   * and one that died stops beating and lets go within the stale window.
+   */
+  heartbeat(id: string): Promise<void>;
   /**
    * Give a claim back without deciding the request — the platform was not
    * ready, so the row stays `pending` and becomes claimable again at once
@@ -160,6 +167,22 @@ export class DbJoinRequestStore implements JoinRequestStore {
       )
       .returning();
     return row ? toRecord(row) : null;
+  }
+
+  async heartbeat(id: string): Promise<void> {
+    // Conditional on the row still being claimed AND pending: a beat that
+    // landed after the work finished must not resurrect a claim on a row
+    // somebody else may by then be entitled to.
+    await this.db
+      .update(pluginJoinRequests)
+      .set({ claimedAt: new Date() })
+      .where(
+        and(
+          eq(pluginJoinRequests.id, id),
+          eq(pluginJoinRequests.status, 'pending'),
+          isNotNull(pluginJoinRequests.claimedAt),
+        ),
+      );
   }
 
   async release(id: string): Promise<void> {
