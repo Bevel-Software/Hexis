@@ -203,7 +203,14 @@ Access to any path — reading it as much as writing it — is governed by
   case- and whitespace-insensitive (`Admin` = `admin` = `ADMIN`; `Product Team`
   = `product team`). The reserved name `deny` cannot be used, and neither can
   names starting with `role/` or `plugin/` — those spellings are tokens in
-  access entries (below).
+  access entries (below). One exception to the file's authority: the
+  **deployment admin** — the address the server configuration sets as
+  `ADMIN_EMAIL` — is **always an Admin**, whether or not `roles.yaml` lists
+  it, and taking it out of the file does not change that. It is the rescue
+  path for a `roles.yaml` that has lost its last Admin. The App roles page
+  shows that account under Admin as a fixed member that cannot be added or
+  removed there; every other Admin membership is exactly what the file says,
+  and removing one takes effect on that person's next request.
 - **Plugins are grantable principals.** `plugin/<name>/read`,
   `plugin/<name>/write` and `plugin/<name>/owner` in any access file mean
   everyone who currently holds that verb on the plugin whose manifest `name`
