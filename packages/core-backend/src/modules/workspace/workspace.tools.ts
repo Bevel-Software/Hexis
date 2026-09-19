@@ -489,6 +489,26 @@ async function grepWalk(
   }
 }
 
+/** One `allowed-tools` entry a saved SKILL.md names that no visible tool matches. */
+export interface SkillSaveWarning {
+  entry: string;
+  message: string;
+  suggestion?: string;
+}
+
+/** The save-time skill check the write tools consult — satisfied by the skills module's `AllowedToolsChecker`. */
+export interface SkillSaveCheck {
+  checkSave(userEmail: string, path: string, content: string): Promise<SkillSaveWarning[]>;
+}
+
+const SAVE_WARNINGS_OUTPUT: JsonSchema = {
+  type: 'array',
+  description:
+    'Present only when the file is a SKILL.md whose `allowed-tools` names platform tools you cannot use: ' +
+    'each `{ entry, message, suggestion? }`. The write still happened.',
+  items: { type: 'object' },
+};
+
 /**
  * Workspace domain tools: the file primitives (replacing Mastra's auto-injected
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
@@ -510,6 +530,12 @@ export function registerWorkspaceTools(
   sessionOntologyGate: SessionOntologyGate,
   writePolicy: IRoutineWritePolicy,
   sessionSink: ISessionSink,
+  /**
+   * Save-time skill check (see `AllowedToolsChecker`): a write to a SKILL.md
+   * returns `warnings` for `allowed-tools` entries naming no visible tool.
+   * Advisory only — it never refuses the write.
+   */
+  skillSaveCheck?: SkillSaveCheck,
 ): void {
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -518,6 +544,17 @@ export function registerWorkspaceTools(
    * around the shared extraction cache.
    */
   const readers = createFileReaderRegistry(docExtract);
+
+  /** `{ warnings }` when a saved skill names tools nobody can resolve, else `{}` — spread into a write's result. */
+  const saveWarnings = async (
+    ctx: ToolContext,
+    path: string,
+    content: string,
+  ): Promise<{ warnings?: SkillSaveWarning[] }> => {
+    if (!skillSaveCheck) return {};
+    const warnings = await skillSaveCheck.checkSave(ctx.user.email, path, content);
+    return warnings.length > 0 ? { warnings } : {};
+  };
 
   /** Build the per-call read gate from the tool's branch input + caller identity. */
   const readGateFor = (branch: string, ctx: ToolContext): ReadGate => ({
@@ -1435,7 +1472,7 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path written (echoes the input).'), bytes: int('Number of bytes written.') },
+      properties: { path: str('The path written (echoes the input).'), bytes: int('Number of bytes written.'), warnings: SAVE_WARNINGS_OUTPUT },
       required: ['path', 'bytes'],
     },
     write: true,
@@ -1451,7 +1488,11 @@ export function registerWorkspaceTools(
       const fs = await ctx.getFilesystem(a.branch as string);
       await assertNotBinaryOverwrite(readers,a.path as string, fs);
       await fs.writeFile(a.path as string, a.content as string);
-      return { path: a.path, bytes: Buffer.byteLength(a.content as string, 'utf8') };
+      return {
+        path: a.path,
+        bytes: Buffer.byteLength(a.content as string, 'utf8'),
+        ...(await saveWarnings(ctx, a.path as string, a.content as string)),
+      };
     },
   });
 
@@ -1486,7 +1527,7 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { count: int('Number of files written.') },
+      properties: { count: int('Number of files written.'), warnings: SAVE_WARNINGS_OUTPUT },
       required: ['count'],
     },
     write: true,
@@ -1510,7 +1551,12 @@ export function registerWorkspaceTools(
         files.map((f) => ({ path: f.path, content: f.content })),
         `Write ${files.length} file(s)`,
       );
-      return { count: files.length };
+      const warnings: (SkillSaveWarning & { path: string })[] = [];
+      for (const f of files) {
+        const found = await saveWarnings(ctx, f.path, f.content);
+        if (found.warnings) warnings.push(...found.warnings.map((w) => ({ path: f.path, ...w })));
+      }
+      return { count: files.length, ...(warnings.length > 0 ? { warnings } : {}) };
     },
   });
 
@@ -1534,7 +1580,7 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path edited (echoes the input).'), replaced: int('Number of occurrences replaced.') },
+      properties: { path: str('The path edited (echoes the input).'), replaced: int('Number of occurrences replaced.'), warnings: SAVE_WARNINGS_OUTPUT },
       required: ['path', 'replaced'],
     },
     write: true,
@@ -1558,7 +1604,7 @@ export function registerWorkspaceTools(
       }
       const updated = a.replace_all === true ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
       await fs.writeFile(path, updated);
-      return { path, replaced: a.replace_all === true ? count : 1 };
+      return { path, replaced: a.replace_all === true ? count : 1, ...(await saveWarnings(ctx, path, updated)) };
     },
   });
 

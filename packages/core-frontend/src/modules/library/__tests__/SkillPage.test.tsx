@@ -659,6 +659,39 @@ describe('SkillPage', () => {
     expect(apiMock.proposeChange).not.toHaveBeenCalled();
   });
 
+  it('a save whose allowed-tools name unknown platform tools lands, and says so in the status area', async () => {
+    accessMock.result = {
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    };
+    apiMock.getOrCreateWorkspace.mockResolvedValue({
+      workspace: { id: 'target-company-state', kbDirName: 'knowledge-base' },
+    });
+    apiMock.writeFile.mockResolvedValue({
+      warnings: [
+        {
+          entry: 'hubspot.serch',
+          message: '"hubspot.serch" in allowed-tools is not a tool you can use here. Did you mean "hubspot.search"?',
+          suggestion: 'hubspot.search',
+        },
+      ],
+    });
+    renderPage(true);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const box = await screen.findByRole('textbox', { name: 'Edit SKILL.md' });
+    fireEvent.change(box, { target: { value: '---\nallowed-tools: Bash hubspot.serch\n---\n' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    // Never a block: the save still closes the editor and confirms.
+    expect(await screen.findByText(/Saved: the skill now reads with your change/)).toBeInTheDocument();
+    const status = (await screen.findByText('Some tools this skill lists are not available')).closest('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(within(status as HTMLElement).getByText(/Did you mean "hubspot.search"/)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Edit SKILL.md' })).toBeNull();
+  });
+
   it('arriving with startEditing in router state opens the editor without a click', async () => {
     // The creation hand-off: NewSkillPanel navigates here with the flag, so
     // the person who just made an empty skill lands with the cursor in it.
