@@ -8,6 +8,20 @@ import { isExternalHref, isOpenableExternalHref } from '../../../shared/markdown
 export const KB_ROUTE_PREFIX = '/workspace';
 
 /**
+ * The open change request, in the URL. A proposed row opens the shared
+ * change-request dialog AT the file that was clicked, and both halves of
+ * that — which request, which file — live in the query so a reload (or a
+ * pasted link) lands on the same file of the same request.
+ *
+ * `CR_FILE_PARAM` is WORKSPACE-relative — the same path space as the route's
+ * own segments and as every path the tree holds, so the row that was clicked
+ * and the query that records it are the one string. The dialog speaks
+ * repo-relative and the conversion happens where it is handed over, once.
+ */
+export const CR_PARAM = 'cr';
+export const CR_FILE_PARAM = 'file';
+
+/**
  * Matches an id-link destination: a bare frontmatter id (`bdl-cpb-service-terms`,
  * or a snake_case tool/skill id like `my_tool`), optionally followed by a heading
  * anchor (`#id`, `#offer`). The id grammar (lowercase alphanumeric + hyphens +
