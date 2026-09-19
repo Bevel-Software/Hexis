@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { printable } from '../../shared/printable.js';
 
 /**
  * The reproduction probe behind "the first `start_session` on a fresh
@@ -178,10 +179,16 @@ const line = (label: string, t: ProbeTimings): string =>
  * the error as the platform worded it. A run with no failures says so in as
  * many words — "no failure reproduced" is this ticket's most likely finding
  * and it has to be as legible as a failure would be.
+ *
+ * Every value that did not come from this file goes through `printable`: the
+ * error text is whatever a remote endpoint chose to send, and the target and
+ * tool name are whatever the operator typed. A newline or an ANSI escape in
+ * any of them would otherwise forge or restyle the lines around it, in the one
+ * output a reader trusts to say what the platform actually did.
  */
 export function formatProbeReport(report: FirstCallProbeReport): string {
   const lines = [
-    `${report.connections} fresh connections, one first \`${report.toolName}\` call each — ${report.target} (${report.mode} mode)`,
+    `${report.connections} fresh connections, one first ${printable(report.toolName)} call each — ${printable(report.target)} (${report.mode} mode)`,
     `  ${report.ok}/${report.connections} succeeded, ${report.failed} failed, ` +
       `${report.distinctSessionIds} distinct session ids, ${ms(report.wallClockMs)} wall clock`,
     line('connect', report.connect),
@@ -192,7 +199,7 @@ export function formatProbeReport(report: FirstCallProbeReport): string {
     lines.push('  no failure reproduced');
   } else {
     for (const f of report.failures) {
-      lines.push(`  FAILED #${f.index} at ${f.stage} after ${ms(f.totalMs)}: ${f.error}`);
+      lines.push(`  FAILED #${f.index} at ${f.stage} after ${ms(f.totalMs)}: ${printable(f.error ?? '')}`);
     }
   }
   return lines.join('\n');
@@ -224,6 +231,7 @@ export function readSessionId(result: unknown): string | undefined {
 }
 
 interface AttemptContext {
+  /** Already normalized AND already parsed — see `normalizeBaseUrl`. */
   baseUrl: string;
   bearer: string;
   toolName: string;
@@ -308,6 +316,50 @@ async function toolAttempt(index: number, ctx: AttemptContext): Promise<FirstCal
 }
 
 /**
+ * A count the probe can actually run with, or a refusal naming the option.
+ *
+ * `runPooled` clamps its limit with `Math.max(1, …)`, so a `concurrency` of 0
+ * or -5 would quietly become a one-at-a-time run — the opposite of the burst
+ * the caller asked for, reported as though it were the burst. A number that
+ * cannot be honoured is answered, not reinterpreted.
+ */
+function positiveInt(name: string, value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer, got ${value}`);
+  }
+  return value;
+}
+
+/**
+ * The base URL, trailing slashes removed, checked once.
+ *
+ * `new URL(...)` throws synchronously, and `mcpAttempt` builds one before its
+ * own `try` — inside a pool worker. Left there, an empty or malformed
+ * `--base-url` would reject `Promise.all` and take all fifty results down
+ * with it, which is exactly what this probe promises never to do. It is also
+ * not an attempt failure: nothing was attempted. So it is raised here, before
+ * the burst, in the same class as a bad `connections` — and both modes answer
+ * a bad URL the same way, rather than `'tool'` recording fifty copies of a
+ * parse error while `'mcp'` threw.
+ */
+function normalizeBaseUrl(baseUrl: string): string {
+  // A trailing slash would make the joined path `//api/mcp`, which some
+  // proxies answer differently from `/api/mcp`.
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`baseUrl must be an absolute URL, got ${printable(baseUrl)}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`baseUrl must be http or https, got ${printable(baseUrl)}`);
+  }
+  return trimmed;
+}
+
+/**
  * Run `count` tasks with at most `limit` in flight. At the default
  * `limit === count` every task starts in the same tick, which is the burst the
  * probe is for; a smaller limit is there for an endpoint one would rather not
@@ -330,26 +382,30 @@ async function runPooled<T>(count: number, limit: number, task: (index: number) 
 /**
  * Open `connections` fresh connections, make exactly one first call on each,
  * and report. Never throws for a failed attempt — a thrown probe would lose
- * the other forty-nine results, and those are the evidence.
+ * the other forty-nine results, and those are the evidence. It DOES throw for
+ * arguments it cannot probe with at all (a count that is not a positive
+ * integer, a base URL that is not an absolute http(s) URL), and it throws
+ * before the burst starts, so
+ * there is never a half-run whose numbers mean nothing.
  */
 export async function probeFirstCall(options: FirstCallProbeOptions): Promise<FirstCallProbeReport> {
-  const connections = options.connections ?? DEFAULT_CONNECTIONS;
-  if (!Number.isInteger(connections) || connections < 1) {
-    throw new Error(`connections must be a positive integer, got ${options.connections}`);
-  }
+  const connections = positiveInt('connections', options.connections, DEFAULT_CONNECTIONS);
+  // Clamped to `connections` further down, so asking for more in flight than
+  // there are attempts is merely the default; asking for zero or less is not a
+  // smaller burst, it is a request the probe cannot honour.
+  const concurrency = positiveInt('concurrency', options.concurrency, connections);
+  const timeoutMs = positiveInt('timeoutMs', options.timeoutMs, DEFAULT_TIMEOUT_MS);
   const mode = options.mode ?? 'mcp';
   const now = options.now ?? (() => performance.now());
   const ctx: AttemptContext = {
-    // A trailing slash would make the joined path `//api/mcp`, which some
-    // proxies answer differently from `/api/mcp`.
-    baseUrl: options.baseUrl.replace(/\/+$/, ''),
+    baseUrl: normalizeBaseUrl(options.baseUrl),
     bearer: options.bearer,
     toolName: options.toolName ?? 'start_session',
-    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    timeoutMs,
     now,
   };
   const attempt = mode === 'mcp' ? mcpAttempt : toolAttempt;
   const startedAt = now();
-  const attempts = await runPooled(connections, options.concurrency ?? connections, (index) => attempt(index, ctx));
+  const attempts = await runPooled(connections, concurrency, (index) => attempt(index, ctx));
   return summarizeProbe(attempts, { target: ctx.baseUrl, mode, toolName: ctx.toolName, wallClockMs: now() - startedAt });
 }

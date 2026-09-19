@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
+import net from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -91,9 +92,35 @@ async function startToolApp(handler: express.RequestHandler): Promise<string> {
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 }
 
+/**
+ * A target that ACCEPTS the connection and then never answers.
+ *
+ * Not the same thing as a closed port: `http://127.0.0.1:1` refuses the TCP
+ * connect immediately, so the probe's timeout never runs. This one completes
+ * the handshake at the socket level and holds the request open forever, which
+ * is the "never answers" a hung deployment produces and the only way the
+ * timeout branch in `mcpAttempt`'s connect is exercised at all.
+ */
+const silentServers: net.Server[] = [];
+const heldSockets: net.Socket[] = [];
+async function startSilentServer(): Promise<string> {
+  const server = net.createServer((socket) => {
+    heldSockets.push(socket);
+    socket.on('error', () => {});
+    // Read the request and write nothing back.
+    socket.resume();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  silentServers.push(server);
+  return `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+}
+
 afterEach(async () => {
   await closeMountedRoutes();
   await Promise.all(toolApps.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
+  // Sockets first: a server with a held-open connection never finishes closing.
+  heldSockets.splice(0).forEach((socket) => socket.destroy());
+  await Promise.all(silentServers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
 });
 
 describe('probeFirstCall — fresh connections, one first call each', () => {
@@ -166,9 +193,11 @@ describe('probeFirstCall — fresh connections, one first call each', () => {
     expect(report.failures.map((f) => f.stage)).toEqual(['parse', 'parse']);
   });
 
-  it('records a connection that never answers as a failure, not a hang', async () => {
-    // Nothing listens on this port: the handshake itself fails, which is the
-    // one stage a `call`-only probe would never attribute correctly.
+  it('records a REFUSED connection as a failure at the connect stage', async () => {
+    // Nothing listens on this port, so the TCP connect is refused outright:
+    // the handshake fails, which is the one stage a `call`-only probe would
+    // never attribute correctly. This is the fast failure, not the hang — see
+    // the next test for that.
     const report = await probeFirstCall({ baseUrl: 'http://127.0.0.1:1', bearer: BEARER, connections: 2, timeoutMs: 2_000 });
 
     expect(report.ok).toBe(0);
@@ -176,10 +205,48 @@ describe('probeFirstCall — fresh connections, one first call each', () => {
     expect(report.failures[0]!.error).toBeTruthy();
   });
 
-  it('refuses a connection count that is not a positive integer', async () => {
-    await expect(probeFirstCall({ baseUrl: 'http://127.0.0.1:1', bearer: BEARER, connections: 0 })).rejects.toThrow(
-      /positive integer/,
+  it('gives up on a connection that is accepted and then never answered', async () => {
+    // The hang the ticket is actually about: the endpoint is up, the socket is
+    // open, and nothing ever comes back. Without the per-request ceiling the
+    // probe would sit here forever and report nothing at all, so what is pinned
+    // is that the ceiling fires, the attempt is RECORDED as a connect-stage
+    // failure with the platform's own wording, and the burst still settles.
+    const baseUrl = await startSilentServer();
+    const startedAt = Date.now();
+
+    const report = await probeFirstCall({ baseUrl, bearer: BEARER, connections: 2, timeoutMs: 1_000 });
+
+    expect(report.ok).toBe(0);
+    expect(report.failed).toBe(2);
+    expect(report.failures.map((f) => f.stage)).toEqual(['connect', 'connect']);
+    expect(report.failures[0]!.error).toMatch(/timed out|timeout/i);
+    // It waited for the ceiling rather than failing fast, and it did not wait
+    // appreciably longer: a ceiling that never fires is the bug being excluded.
+    expect(report.failures[0]!.connectMs).toBeGreaterThanOrEqual(900);
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
+  }, 20_000);
+
+  it('refuses a count that is not a positive integer, before opening anything', async () => {
+    const url = 'http://127.0.0.1:1';
+    await expect(probeFirstCall({ baseUrl: url, bearer: BEARER, connections: 0 })).rejects.toThrow(/positive integer/);
+    // `runPooled` clamps its limit with `Math.max(1, …)`, so an unchecked zero
+    // would silently run one attempt at a time and report it as the burst.
+    await expect(probeFirstCall({ baseUrl: url, bearer: BEARER, concurrency: 0 })).rejects.toThrow(
+      /concurrency must be a positive integer/,
     );
+    await expect(probeFirstCall({ baseUrl: url, bearer: BEARER, concurrency: -5 })).rejects.toThrow(/positive integer/);
+    await expect(probeFirstCall({ baseUrl: url, bearer: BEARER, timeoutMs: 0 })).rejects.toThrow(
+      /timeoutMs must be a positive integer/,
+    );
+  });
+
+  it('refuses a base URL it cannot probe, instead of losing the whole burst to one throw', async () => {
+    // `new URL()` throws synchronously inside the pool worker. Unchecked, that
+    // rejects the `Promise.all` and takes all fifty results with it — the one
+    // thing this probe promises never to do — so it is caught before the burst.
+    for (const bad of ['', 'not-a-url', '/api/mcp', 'ftp://example.com']) {
+      await expect(probeFirstCall({ baseUrl: bad, bearer: BEARER, connections: 50 })).rejects.toThrow(/baseUrl must be/);
+    }
   });
 });
 
@@ -299,6 +366,29 @@ describe('the report', () => {
     expect(dirty).toContain('FAILED #3 at connect');
     expect(dirty).toContain('socket hang up');
     expect(dirty).not.toContain('no failure reproduced');
+  });
+
+  it('escapes the error text, the target and the tool name, so a report cannot forge its own lines', () => {
+    // All three are attacker- or typo-supplied: the error is whatever a remote
+    // endpoint chose to send back, the target and tool name are whatever was
+    // typed on the command line. A newline in any of them would otherwise add
+    // a line to an operator's log that the platform never said, and an ANSI
+    // escape would restyle the lines around it.
+    const forged = formatProbeReport(
+      summarizeProbe(
+        [attempt({ index: 0, ok: false, sessionId: undefined, stage: 'call', error: 'boom\n  50/50 succeeded, 0 failed\u001b[31m' })],
+        { target: 'http://x\nFAKE', mode: 'mcp', toolName: 'start_session\u0007', wallClockMs: 1 },
+      ),
+    );
+
+    // One line per report line: nothing injected a line of its own.
+    expect(forged.split('\n')).toHaveLength(6);
+    expect(forged).not.toContain('\u001b');
+    expect(forged).not.toContain('\u0007');
+    // Escaped, not dropped — the operator still sees exactly what was sent.
+    expect(forged).toContain('boom\\n');
+    expect(forged).toContain('\\u001b[31m');
+    expect(forged).toContain('http://x\\nFAKE');
   });
 });
 

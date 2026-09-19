@@ -44,14 +44,28 @@ function parseArgs(argv: readonly string[]): Record<string, string> {
   return args;
 }
 
-/** A numeric flag, or the default when absent. A garbage value is an error, not a silent default. */
-function num(args: Record<string, string>, key: string, fallback: number | undefined): number | undefined {
+/**
+ * A count flag, or `undefined` when absent so the probe's own default stands.
+ *
+ * Every numeric flag this CLI takes is a count: connections, attempts in
+ * flight, milliseconds. None of them has a meaning at zero or below —
+ * `--concurrency 0` in particular would reach `runPooled`'s `Math.max(1, …)`
+ * and run one worker at a time, so the operator would get a report of a
+ * one-at-a-time run labelled as the burst they asked for. Garbage and
+ * out-of-range are both refused here, before anything is opened.
+ */
+function count(args: Record<string, string>, key: string): number | undefined {
   const raw = args[key];
-  if (raw === undefined) return fallback;
+  if (raw === undefined) return undefined;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) throw new Error(`--${key} must be a number, got ${raw}`);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new ConfigError(`--${key} must be a positive integer, got ${raw}`);
+  }
   return parsed;
 }
+
+/** An argument the operator has to fix: printed plainly, exit 2, no stack. */
+class ConfigError extends Error {}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -62,27 +76,45 @@ async function main(): Promise<void> {
   const baseUrl = args['base-url'];
   const bearer = args.bearer ?? process.env.PROBE_BEARER ?? '';
   if (!baseUrl || !bearer) {
-    console.error(`${!baseUrl ? '--base-url is required' : '--bearer (or $PROBE_BEARER) is required'}\n\n${USAGE}`);
-    process.exitCode = 2;
-    return;
+    throw new ConfigError(!baseUrl ? '--base-url is required' : '--bearer (or $PROBE_BEARER) is required');
   }
   const mode = (args.mode ?? 'mcp') as ProbeMode;
   if (mode !== 'mcp' && mode !== 'tool') {
-    console.error(`--mode must be mcp or tool, got ${args.mode}`);
-    process.exitCode = 2;
-    return;
+    throw new ConfigError(`--mode must be mcp or tool, got ${args.mode}`);
   }
-  const report = await probeFirstCall({
+  const options = {
     baseUrl,
     bearer,
     mode,
-    connections: num(args, 'connections', undefined),
-    concurrency: num(args, 'concurrency', undefined),
-    timeoutMs: num(args, 'timeout', undefined),
+    connections: count(args, 'connections'),
+    concurrency: count(args, 'concurrency'),
+    timeoutMs: count(args, 'timeout'),
     toolName: args.tool,
+  };
+  // `probeFirstCall` checks the arguments it cannot probe with — a malformed
+  // `--base-url` above all — and does it before opening anything. Those are
+  // the operator's typos too, so they leave by the same door.
+  const report = await probeFirstCall(options).catch((err: unknown) => {
+    throw new ConfigError(err instanceof Error ? err.message : String(err));
   });
   console.log(args.json ? JSON.stringify(report, null, 2) : formatProbeReport(report));
   if (report.failed > 0) process.exitCode = 1;
 }
 
-await main();
+try {
+  await main();
+} catch (err) {
+  // Every way of mis-invoking this ends the same way: the sentence that says
+  // what to fix, the usage block, exit 2. A bad flag used to escape the
+  // top-level `await` as an unhandled rejection — a stack trace and exit 1,
+  // which reads like the probe crashed rather than like the command was typed
+  // wrong. A real crash still looks like one: stack, exit 1, no usage block
+  // pretending the operator mistyped something.
+  if (err instanceof ConfigError) {
+    console.error(`${err.message}\n\n${USAGE}`);
+    process.exitCode = 2;
+  } else {
+    console.error(err);
+    process.exitCode = 1;
+  }
+}

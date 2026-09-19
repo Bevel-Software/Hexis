@@ -631,7 +631,13 @@ describe('the first call on a fresh connection, fifty at once', () => {
   it('serves every one of fifty fresh connections its own session id', async () => {
     const { baseUrl } = await startPlatform({ extraTools: ['start_session'] });
 
-    const report = await probeFirstCall({ baseUrl, bearer: KEY_A, connections: 50 });
+    // `timeoutMs` well under the vitest budget on purpose. The probe charges it
+    // per phase, so the default 30s would let one hung attempt burn ~60s and
+    // vitest would abort the test before `probeFirstCall` resolved — in exactly
+    // the flaky-first-call scenario this test exists to catch, the failure list
+    // and the report below would never be printed, and the run would show a
+    // bare timeout instead of which attempt died where.
+    const report = await probeFirstCall({ baseUrl, bearer: KEY_A, connections: 50, timeoutMs: 20_000 });
 
     // Printed as well as asserted: this block is what the ticket's log records,
     // and a run whose numbers were never shown proves nothing to a reader.
@@ -641,5 +647,5 @@ describe('the first call on a fresh connection, fifty at once', () => {
     expect(report.failures).toEqual([]);
     expect(report.ok).toBe(50);
     expect(report.distinctSessionIds).toBe(50);
-  }, 60_000);
+  }, 120_000);
 });

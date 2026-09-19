@@ -31,10 +31,15 @@ export default defineConfig([
     // bare `console.*` in a module bypasses that decision; the sink itself is
     // the one file allowed to call it, and suites may still spy on it.
     //
-    // A `*.cli.ts` entry is the exception with a reason: it is not part of any
-    // deployment, it is a command someone runs by hand, and its stdout IS its
-    // output. Routing that through the logging port would hand a one-off
-    // diagnostic to whatever sink a shell happened to install.
+    // A `*.cli.ts` entry is the exception with a reason: no deployment ever
+    // EXECUTES it. It is a command someone runs by hand (`tsx src/…/x.cli.ts`),
+    // and its stdout IS its output; routing that through the logging port would
+    // hand a one-off diagnostic to whatever sink a shell happened to install.
+    // It is still compiled into `dist` and still copied into the image, because
+    // the package's tsconfig includes all of `src` — so what holds is "never on
+    // a path the server runs", not "never shipped". That is the invariant the
+    // rule is about: the logging port exists so a DEPLOYMENT decides where its
+    // lines go, and a file the deployment never calls makes no such decision.
     files: ['packages/core-backend/src/**/*.ts'],
     ignores: [
       'packages/core-backend/src/**/__tests__/**',

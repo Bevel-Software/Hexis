@@ -1510,10 +1510,16 @@ describe('start_session', () => {
 
       // The route logs the sink's failure — correct behaviour, and expected
       // here, so it is kept out of the suite's output rather than left to look
-      // like a real fault.
+      // like a real fault. Restored in a `finally`: if the request itself
+      // rejected, an un-restored spy would go on swallowing console.error for
+      // every later test in this file, and they would pass while saying nothing.
       const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const failed = await post(`${base}/api/agent/tools/start_session`);
-      errorLog.mockRestore();
+      let failed: Awaited<ReturnType<typeof post>>;
+      try {
+        failed = await post(`${base}/api/agent/tools/start_session`);
+      } finally {
+        errorLog.mockRestore();
+      }
       expect(failed.status).toBeGreaterThanOrEqual(500);
 
       const retried = (await (await post(`${base}/api/agent/tools/start_session`)).json()) as { sessionId: string };
