@@ -1,5 +1,9 @@
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('database');
 import type { Database } from './connection.js';
+import { AdvisoryLock, withAdvisoryLock } from './advisory-lock.js';
 
 /*
  * ── Per-tier migration folders ──────────────────────────────────────────────
@@ -22,13 +26,25 @@ import type { Database } from './connection.js';
  * Note: drizzle-orm's node-postgres `migrate()` accepts `migrationsTable` (and
  * `migrationsSchema`) in the installed version (0.45.x) — see
  * `drizzle-orm/migrator.d.ts` (`MigrationConfig`).
+ *
+ * BOTH RUNNERS TAKE AN ADVISORY LOCK. Drizzle's migrator takes none of its own:
+ * it reads the newest applied migration, then opens a transaction and applies
+ * everything newer — so two processes booting at once read the same watermark
+ * and both apply. The idempotence described above covers a RE-run, which is a
+ * different thing from a CONCURRENT one, and it only covers the init migration
+ * anyway; 0002 onward are plain DDL, where the second process fails on an
+ * already-applied `ALTER TABLE` and crash-loops. Two processes booting at once
+ * is not hypothetical here — it is every redeploy, for as long as the outgoing
+ * container takes to exit. See `advisory-lock.ts` for the mechanism.
  */
 
 /** Apply the CORE migration history from `folder`, tracked in `__drizzle_migrations_core`. */
 export async function runCoreMigrations(db: Database, folder: string): Promise<void> {
-  console.log('Running core database migrations...');
-  await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core' });
-  console.log('Core migrations complete.');
+  await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
+    log.info('Running core database migrations...');
+    await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_core' });
+    log.info('Core migrations complete.');
+  });
 }
 
 /**
@@ -37,7 +53,12 @@ export async function runCoreMigrations(db: Database, folder: string): Promise<v
  * enterprise tables FK into core tables.
  */
 export async function runEnterpriseMigrations(db: Database, folder: string): Promise<void> {
-  console.log('Running enterprise database migrations...');
-  await migrate(db, { migrationsFolder: folder, migrationsTable: '__drizzle_migrations_enterprise' });
-  console.log('Enterprise migrations complete.');
+  await withAdvisoryLock(db, AdvisoryLock.Migrations, async () => {
+    log.info('Running enterprise database migrations...');
+    await migrate(db, {
+      migrationsFolder: folder,
+      migrationsTable: '__drizzle_migrations_enterprise',
+    });
+    log.info('Enterprise migrations complete.');
+  });
 }

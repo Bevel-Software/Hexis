@@ -5,9 +5,9 @@ import { canDeepLink, chatgptInstallUrl } from './connect-snippets';
 /**
  * The ChatGPT counterpart of {@link ClaudeInstallLink} — with one honest
  * difference. Claude's link PREFILLS the connector; ChatGPT publishes no
- * such link, so this one only opens the settings pane where a custom MCP
- * server is created. The person still turns on Developer mode, presses
- * Create, types the name and pastes the URL. It is a shortcut through a menu
+ * such link, so this one only opens ChatGPT's settings. The person still
+ * opens Plugins, turns on Developer Mode, presses Create, types the name and
+ * pastes the URL. It is a shortcut through a menu
  * nobody finds on the first try, not a grant of anything — which is why it
  * carries no warning, and why every surface that shows it also shows the
  * name and the URL to paste.

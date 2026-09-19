@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import { createAccountRoutes } from '../account.routes.js';
-import type { AuthService } from '../auth.service.js';
+import { AuthService } from '../auth.service.js';
+import { hashPassword } from '../password-hash.js';
+import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
 
 const authService = {
@@ -79,6 +81,48 @@ describe('account routes — admin gate', () => {
     });
     expect(create.status).toBe(201);
     expect(authService.createAccount).toHaveBeenCalledWith('b@example.com', 'B', 'long-enough-pw');
+  });
+
+  it('list reports hasPassword + isEnvAdmin and never carries a hash or password', async () => {
+    const passwordHash = await hashPassword('stored-password-1');
+    const rows = [
+      { id: 'u1', email: 'root@example.com', name: 'Root', passwordHash: null, createdAt: new Date() },
+      { id: 'u2', email: 'b@example.com', name: 'B', passwordHash, createdAt: new Date() },
+    ];
+    // A real AuthService over a stub db — the route's body is what the
+    // service produces from full `users` rows, hash column included.
+    const db = {
+      select: () => ({ from: () => ({ orderBy: async () => rows }) }),
+    } as unknown as Database;
+    const realAuth = new AuthService(db, {
+      jwtSecret: 'test-jwt-secret',
+      adminEmail: 'root@example.com',
+      adminPassword: 'env-admin-secret',
+      allowedEmailDomains: [],
+    });
+    const app = express();
+    app.use((req, _res, next) => {
+      req.userId = 'caller';
+      req.userEmail = 'caller@example.com';
+      next();
+    });
+    app.use('/api', createAccountRoutes(realAuth, { isAdmin: async () => true }, accountErasure));
+    const base = await listen(app);
+
+    const res = await fetch(`${base}/api/admin/accounts`);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const body = JSON.parse(text) as {
+      accounts: Array<{ email: string; hasPassword: boolean; isEnvAdmin: boolean }>;
+    };
+    expect(body.accounts.map((a) => [a.email, a.hasPassword, a.isEnvAdmin])).toEqual([
+      ['root@example.com', false, true],
+      ['b@example.com', true, false],
+    ]);
+    expect(text).not.toContain('scrypt:');
+    expect(text).not.toContain('passwordHash');
+    expect(text).not.toContain('env-admin-secret');
+    expect(text).not.toContain('stored-password-1');
   });
 
   it('erasure: refuses non-admins, refuses self, 404s unknown, 204s success', async () => {

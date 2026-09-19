@@ -1,4 +1,7 @@
 import { eq, inArray } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('settings');
 import type { Database } from '../database/connection.js';
 import { deploymentSettings } from '../database/core-schema.js';
 import {
@@ -7,7 +10,9 @@ import {
   validateKbLayout,
   validateKbRootName,
 } from '@bevel-software/platform-shared';
+import { createHmac } from 'node:crypto';
 import { TokenCrypto } from '../../shared/token-crypto.js';
+import { normalizeIssuerUrl } from './oidc-check.js';
 
 /**
  * A setting an admin may set from the setup screen instead of the environment.
@@ -46,7 +51,14 @@ export const validateHttpsRemote = (value: string): string | null => {
   } catch {
     return 'Enter a full URL, e.g. https://github.com/acme/knowledge-base.git';
   }
-  return parsed.protocol === 'https:' ? null : 'The URL must start with https://';
+  if (parsed.protocol !== 'https:') return 'The URL must start with https://';
+  // Userinfo would ride into git's argv on every call, visible in process
+  // listings — the KB startup refuses such a URL, so saving one only defers the
+  // failure to the next boot.
+  if (parsed.username || parsed.password) {
+    return 'Remove the username and token from the URL — enter the token in its own field.';
+  }
+  return null;
 };
 
 /**
@@ -166,8 +178,9 @@ export const CORE_SETTINGS: SettingDef[] = [
   },
 
   /**
-   * Single sign-on. Restart-to-apply because the provider is built once at boot
-   * and pushed into the auth plugin array the server mounts from.
+   * Single sign-on. Applies without a restart: the OIDC provider is mounted
+   * once at boot but reads these on every probe and sign-in, advertising
+   * itself only while issuer, client id and secret are all set.
    */
   {
     key: 'oidcIssuerUrl',
@@ -180,32 +193,27 @@ export const CORE_SETTINGS: SettingDef[] = [
         return 'Enter the issuer URL, e.g. https://login.microsoftonline.com/<tenant>/v2.0';
       }
     },
-    restartToApply: true,
   },
   {
     key: 'oidcClientId',
     envVar: 'OIDC_CLIENT_ID',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcClientSecret',
     envVar: 'OIDC_CLIENT_SECRET',
     section: 'sign-in',
     secret: true,
-    restartToApply: true,
   },
   {
     key: 'oidcScopes',
     envVar: 'OIDC_SCOPES',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     key: 'oidcProviderLabel',
     envVar: 'OIDC_PROVIDER_LABEL',
     section: 'sign-in',
-    restartToApply: true,
   },
   {
     // Belongs with SSO because SSO is what makes it load-bearing: sign-in
@@ -217,6 +225,39 @@ export const CORE_SETTINGS: SettingDef[] = [
     restartToApply: true,
   },
 ];
+
+/**
+ * Whether the single sign-on configuration in effect is known to work:
+ * `verified` (the provider accepted its credentials, or someone signed in with
+ * it), `unverified` (configured, never proven — sign in once to confirm), or
+ * `not-configured` (no issuer, application id and secret to prove), or
+ * `unrecordable` (configured, but SECRETS_ENC_KEY is unset — see
+ * {@link DeploymentSettingsService.oidcVerification}).
+ */
+export type OidcVerificationState = 'verified' | 'unverified' | 'not-configured' | 'unrecordable';
+
+/** What a record can say about one set of values. */
+export type OidcRecordState = 'verified' | 'unverified';
+
+/** The three values a verification is about. Scopes, label and domains are not among them. */
+export interface OidcCredentials {
+  issuerUrl: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+/**
+ * The rows holding verification records: ONE PER SET OF VALUES, keyed
+ * `oidcVerification:<fingerprint>`. Not settings — nobody types them — so they
+ * have no catalogue entry, are never described or loaded, and `prune` leaves
+ * them be.
+ *
+ * A row per fingerprint rather than one shared row is what makes concurrent
+ * writers safe without a lock: a sign-in finishing through a provider built
+ * from OLD values records those old values under their own key, and can never
+ * overwrite what a save (or another replica) recorded about the new ones.
+ */
+const OIDC_VERIFICATION_PREFIX = 'oidcVerification:';
 
 /** Where a resolved value came from, which is what the UI renders as its status. */
 export type SettingSource = 'env' | 'stored' | 'unset';
@@ -256,6 +297,10 @@ export interface ResolvedSetting {
  * deployment that has nothing to serve until it is. Nobody is mid-session on a
  * second replica at that moment.
  *
+ * The single sign-on settings are the first to bend that: they apply live, so
+ * on a multi-replica deployment an OIDC change reaches only the replica that
+ * served the save until the others restart.
+ *
  * It stops being acceptable the moment a setting is something an operator
  * changes on a live multi-replica deployment. Adding one means adding
  * invalidation with it — the event bus already carries user-scoped and
@@ -269,7 +314,7 @@ export class DeploymentSettingsService {
 
   constructor(
     private readonly db: Database,
-    secretsEncKey: string,
+    private readonly secretsEncKey: string,
     defs: SettingDef[] = CORE_SETTINGS,
   ) {
     for (const def of defs) this.defs.set(def.key, def);
@@ -290,9 +335,7 @@ export class DeploymentSettingsService {
       if (!this.defs.has(row.key)) continue; // a setting this build no longer has
       if (row.encrypted) {
         if (!this.crypto) {
-          console.warn(
-            `[settings] "${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`,
-          );
+          log.warn(`"${row.key}" is stored encrypted but SECRETS_ENC_KEY is unset — ignoring it.`);
           continue;
         }
         try {
@@ -301,7 +344,7 @@ export class DeploymentSettingsService {
           // A rotated or mistyped key. Loud, and skipped rather than fatal:
           // one unreadable setting must not stop the server from booting into
           // the screen where it can be fixed.
-          console.error(`[settings] could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
+          log.error(`could not decrypt "${row.key}" — is SECRETS_ENC_KEY correct?`);
         }
         continue;
       }
@@ -371,11 +414,61 @@ export class DeploymentSettingsService {
    * A setting whose environment variable is set is REFUSED rather than silently
    * stored, because storing it would write a row that can never take effect and
    * leave the screen implying otherwise.
+   *
+   * `restartRequired` is this service's view: some restart-to-apply setting
+   * changed. It cannot know what the caller then applies to the running
+   * process, so `restartKeys` names the settings behind it — the setup route
+   * leaves out the folder names and the branch model when the save that
+   * completes setup has just applied them, and reports only what remains.
    */
   async save(
     entries: Record<string, string>,
     updatedBy: string | null,
-  ): Promise<{ restartRequired: boolean }> {
+  ): Promise<{ restartRequired: boolean; restartKeys: string[] }> {
+    const toWrite = this.plan(entries);
+
+    /** The settings this save changed that a running server cannot pick up. */
+    const restartKeys: string[] = [];
+    for (const { key, value, def } of toWrite) {
+      // Compared against the EFFECTIVE value: a layout root that was unset
+      // was already running on its default, so saving that default changes
+      // nothing a restart would pick up.
+      const effective =
+        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
+      if (def.restartToApply && effective !== value) restartKeys.push(key);
+      const encrypted = def.secret === true;
+      const stored = encrypted ? this.crypto!.encrypt(value) : value;
+      await this.db
+        .insert(deploymentSettings)
+        .values({ key, value: stored, encrypted, updatedBy })
+        .onConflictDoUpdate({
+          target: deploymentSettings.key,
+          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
+        });
+      this.stored.set(key, value);
+    }
+
+    // The git token is consumed through the environment (the credential helper
+    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
+    // it there is what makes a token saved here work without a restart.
+    this.syncGitTokenEnv();
+    return { restartRequired: restartKeys.length > 0, restartKeys };
+  }
+
+  /**
+   * What {@link resolve} would answer for each key AFTER saving `entries` —
+   * validated by exactly the rules `save` applies, and throwing the same
+   * {@link SettingsValidationError}, but writing nothing. It is how a caller
+   * checks the values a save would put in effect (the repository connection)
+   * before letting the save happen.
+   */
+  resolveAfter(entries: Record<string, string>): (key: string) => string {
+    const toWrite = this.plan(entries);
+    return (key) => toWrite.find((w) => w.key === key)?.value ?? this.resolve(key);
+  }
+
+  /** Validate a batch and return the writes it amounts to; throws on any problem. */
+  private plan(entries: Record<string, string>): { key: string; value: string; def: SettingDef }[] {
     const problems: Record<string, string> = {};
     const toWrite: { key: string; value: string; def: SettingDef }[] = [];
 
@@ -445,32 +538,7 @@ export class DeploymentSettingsService {
     }
 
     if (Object.keys(problems).length > 0) throw new SettingsValidationError(problems);
-
-    let restartRequired = false;
-    for (const { key, value, def } of toWrite) {
-      // Compared against the EFFECTIVE value: a layout root that was unset
-      // was already running on its default, so saving that default changes
-      // nothing a restart would pick up.
-      const effective =
-        this.resolve(key) || (DEFAULT_KB_LAYOUT as Record<string, string | undefined>)[key] || '';
-      if (def.restartToApply && effective !== value) restartRequired = true;
-      const encrypted = def.secret === true;
-      const stored = encrypted ? this.crypto!.encrypt(value) : value;
-      await this.db
-        .insert(deploymentSettings)
-        .values({ key, value: stored, encrypted, updatedBy })
-        .onConflictDoUpdate({
-          target: deploymentSettings.key,
-          set: { value: stored, encrypted, updatedBy, updatedAt: new Date() },
-        });
-      this.stored.set(key, value);
-    }
-
-    // The git token is consumed through the environment (the credential helper
-    // reads `$GITHUB_TOKEN` at call time, so it never appears in argv). Putting
-    // it there is what makes a token saved here work without a restart.
-    this.syncGitTokenEnv();
-    return { restartRequired };
+    return toWrite;
   }
 
   /** Drop stored rows for settings this build no longer defines. */
@@ -478,7 +546,9 @@ export class DeploymentSettingsService {
     const known = [...this.defs.keys()];
     if (known.length === 0) return;
     const rows = await this.db.select({ key: deploymentSettings.key }).from(deploymentSettings);
-    const orphans = rows.map((r) => r.key).filter((k) => !known.includes(k));
+    const orphans = rows
+      .map((r) => r.key)
+      .filter((k) => !known.includes(k) && !k.startsWith(OIDC_VERIFICATION_PREFIX));
     if (orphans.length > 0) {
       await this.db.delete(deploymentSettings).where(inArray(deploymentSettings.key, orphans));
     }
@@ -494,6 +564,98 @@ export class DeploymentSettingsService {
     if (this.sourceOf('gitToken') !== 'stored') return;
     const token = this.resolve('gitToken');
     if (token) process.env.GITHUB_TOKEN = token;
+  }
+
+  /** The single sign-on values in effect, issuer normalized the way the provider uses it. */
+  resolveOidcCredentials(): OidcCredentials {
+    return {
+      issuerUrl: normalizeIssuerUrl(this.resolve('oidcIssuerUrl')),
+      clientId: this.resolve('oidcClientId'),
+      clientSecret: this.resolve('oidcClientSecret'),
+    };
+  }
+
+  /**
+   * Whether the single sign-on configuration IN EFFECT is verified.
+   *
+   * The record names the values it was made about by a keyed digest, so it
+   * speaks only for those: a changed issuer, application id or secret —
+   * through a save or through the environment — reads as unverified until it
+   * is proven again, with nothing to remember to reset. The secret itself is
+   * never stored here, and a digest keyed with the secrets key cannot be
+   * checked against a guess without that key.
+   *
+   * WHICH IS WHY THERE IS NO RECORD WITHOUT THAT KEY: keyed with a public
+   * constant, the digest of a public issuer and application id would let
+   * anyone who can read `deployment_settings` (a backup, a replica, a dump)
+   * confirm guesses of the secret offline. A salt stored beside it would be
+   * read along with it. So with SECRETS_ENC_KEY unset nothing is recorded and
+   * a configured deployment reads `unrecordable`.
+   *
+   * Read from the database, not the in-memory cache: unlike the settings, this
+   * changes on a live deployment (every first sign-in), and a sign-in on one
+   * replica must show as Verified on the others.
+   */
+  async oidcVerification(): Promise<OidcVerificationState> {
+    const current = this.resolveOidcCredentials();
+    if (!current.issuerUrl || !current.clientId || !current.clientSecret) return 'not-configured';
+    if (!this.secretsEncKey) return 'unrecordable';
+    return this.oidcVerificationOf(current);
+  }
+
+  /** What is recorded about one set of single sign-on values — `unverified` when nothing is. */
+  async oidcVerificationOf(credentials: OidcCredentials): Promise<OidcRecordState> {
+    if (!this.secretsEncKey) return 'unverified';
+    const key = this.oidcVerificationKey(credentials);
+    const rows = await this.db
+      .select({ key: deploymentSettings.key, value: deploymentSettings.value })
+      .from(deploymentSettings)
+      .where(eq(deploymentSettings.key, key));
+    return rows.some((row) => row.key === key && row.value === 'verified') ? 'verified' : 'unverified';
+  }
+
+  /**
+   * Record what is known about one set of single sign-on values.
+   *
+   * ONLY EVER UPGRADES, atomically: `verified` overwrites, `unverified` only
+   * fills an empty slot. The same values cannot stop being proven by an
+   * inconclusive answer — an overlapping check that could not reach the token
+   * endpoint says nothing against the sign-in that worked.
+   *
+   * Records about values no longer in effect are left in place rather than
+   * swept: they are inert (nothing reads a key the current values do not hash
+   * to), and a sweep racing a save on another replica could delete the record
+   * of the values that end up in effect.
+   */
+  async recordOidcVerification(state: OidcRecordState, credentials: OidcCredentials): Promise<void> {
+    // No secrets key, no record: see oidcVerification().
+    if (!this.secretsEncKey) return;
+    const key = this.oidcVerificationKey(credentials);
+    const insert = this.db
+      .insert(deploymentSettings)
+      .values({ key, value: state, encrypted: false, updatedBy: null });
+    if (state === 'unverified') {
+      await insert.onConflictDoNothing({ target: deploymentSettings.key });
+      return;
+    }
+    await insert.onConflictDoUpdate({
+      target: deploymentSettings.key,
+      set: { value: state, encrypted: false, updatedBy: null, updatedAt: new Date() },
+    });
+  }
+
+  private oidcVerificationKey(credentials: OidcCredentials): string {
+    // JSON-encoded, so no issuer, id or secret containing the separator can
+    // make two different tuples hash alike.
+    const tuple = JSON.stringify([
+      normalizeIssuerUrl(credentials.issuerUrl),
+      credentials.clientId,
+      credentials.clientSecret,
+    ]);
+    const fingerprint = createHmac('sha256', `hexis-oidc-verification:${this.secretsEncKey}`)
+      .update(tuple)
+      .digest('hex');
+    return `${OIDC_VERIFICATION_PREFIX}${fingerprint}`;
   }
 
   /** Remove one stored row (used by tests and by `prune`). */

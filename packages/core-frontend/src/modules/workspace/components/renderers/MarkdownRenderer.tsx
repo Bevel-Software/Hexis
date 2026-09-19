@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useContext, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { KbMarkdownView } from './KbMarkdownView';
 import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
@@ -7,7 +7,9 @@ import {
   useNodeIdNav,
   useCanonicalFileUrl,
 } from '../../routing/kb-routes';
-import { useWorkspace } from '../../state/workspace.context';
+import { useRendererWorkspaceId } from './rendererWorkspace';
+import { WorkspaceContext } from '../../state/workspace.context';
+import { markdownLinkForPaste } from '../../utils/pasteLink';
 import { useWorkspaceImageResolver } from '../../hooks/useWorkspaceImageResolver';
 import type { FileRendererProps, RendererSaveState } from './types';
 
@@ -162,7 +164,7 @@ export function MarkdownRenderer({
   // bevel_token cookie), and the URL carries the workspace's image revision,
   // which changes when a teammate replaces a file, so an open tab shows the
   // new picture.
-  const { workspaceId } = useWorkspace();
+  const workspaceId = useRendererWorkspaceId();
   const resolveImage = useWorkspaceImageResolver(workspaceId, filePath);
 
   const save = useCallback(async (): Promise<boolean> => {
@@ -189,6 +191,31 @@ export function MarkdownRenderer({
     setValue(next);
     onValueChange?.(next);
   }, [onValueChange]);
+
+  // Pasting a bare workspace path (what Copy path gives) or a URL makes a
+  // link, so nobody has to know `[]()` to link a page. Anything else pastes
+  // as it always did. Read optionally, so paste adds no workspace-provider
+  // requirement of its own; without a `kbDirName` a path pastes as text.
+  const kbDirName = useContext(WorkspaceContext)?.kbDirName ?? null;
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    const { selectionStart: start, selectionEnd: end } = el;
+    const link = markdownLinkForPaste(
+      e.clipboardData.getData('text/plain'),
+      kbDirName,
+      el.value.slice(start, end),
+    );
+    if (link === null) return;
+    e.preventDefault();
+    // `insertText` keeps the paste on the browser's undo stack and fires the
+    // usual change; where it is unavailable, splice the buffer directly.
+    if (typeof document.execCommand === 'function' && document.execCommand('insertText', false, link)) return;
+    const next = el.value.slice(0, start) + link + el.value.slice(end);
+    setValue(next);
+    onValueChange?.(next);
+    const caret = start + link.length;
+    requestAnimationFrame(() => textareaRef.current?.setSelectionRange(caret, caret));
+  }, [kbDirName, onValueChange]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -254,6 +281,7 @@ export function MarkdownRenderer({
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           spellCheck={false}
           autoFocus
         />

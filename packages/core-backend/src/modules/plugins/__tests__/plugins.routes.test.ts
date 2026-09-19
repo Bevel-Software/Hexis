@@ -5,6 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
+import { KbPluginSource } from '../discovery/kb-plugin-source.js';
 
 import { DEFAULT_BRANCH, joinBranchFor } from '@bevel-software/platform-shared';
 import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
@@ -79,14 +81,24 @@ async function makeHarness(opts: HarnessOpts = {}) {
   const kbRoot = path.join(workspaceDir, KB);
   // Both carry the manifest that makes a folder a plugin to discovery, and
   // the access.md that makes it exist to the index.
-  const fixtures: [string, string][] = [
-    ['GTM', 'gtm'],
-    ['Finance', 'finance'],
-    ...Object.entries(opts.extraPlugins ?? {}),
+  // Folder, identity, display name. GTM's three spellings are deliberately
+  // all different: nothing here may read the folder for either name, and a
+  // fixture whose displayName echoed its folder could not tell the two apart.
+  const fixtures: [string, string, string][] = [
+    ['GTM', 'gtm', 'Google Tag Manager'],
+    ['Finance', 'finance', 'Finance'],
+    ...Object.entries(opts.extraPlugins ?? {}).map(
+      ([folder, name]): [string, string, string] => [folder, name, folder],
+    ),
   ];
-  for (const [folder, name] of fixtures) {
+  for (const [folder, name, displayName] of fixtures) {
     await fs.mkdir(path.join(kbRoot, 'Plugins', folder), { recursive: true });
-    await fs.writeFile(path.join(kbRoot, 'Plugins', folder, 'plugin.json'), `{"name":"${name}"}`);
+    // Both names in the file, as every manifest carries them: the identity
+    // and the spelling people see. Nothing reads the folder for either.
+    await fs.writeFile(
+      path.join(kbRoot, 'Plugins', folder, 'plugin.json'),
+      `{"name":"${name}","displayName":"${displayName}"}`,
+    );
     await fs.writeFile(
       path.join(kbRoot, 'Plugins', folder, 'access.md'),
       '---\nread:\n  - everyone\n---\nread: []\n',
@@ -139,7 +151,7 @@ async function makeHarness(opts: HarnessOpts = {}) {
 
   const index =
     opts.index ??
-    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB);
+    new PluginIndexService(workspaceService, accessControl, skillService, toolService, KB, new KbPluginSource(new NodeFs()));
 
   const email = opts.email === undefined ? ALI : opts.email;
   const app = express();
@@ -293,10 +305,16 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const { status, plugins } = await listPlugins(h.baseUrl);
     expect(status).toBe(200);
-    // Named by identity (the manifest), labelled by folder.
-    expect(plugins.map((g) => [g.name, g.displayName])).toEqual([['finance', 'Finance'], ['gtm', 'GTM']]);
-    expect(plugins[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1 });
-    expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0 });
+    // Named by identity and labelled by display name — both the manifest's.
+    expect(plugins.map((g) => [g.name, g.displayName])).toEqual([
+      ['finance', 'Finance'],
+      ['gtm', 'Google Tag Manager'],
+    ]);
+    // `linkedRoots` is part of the summary's contract — the plugin page reads
+    // it to name where a linked card lives. Neither fixture links anything,
+    // and an empty list is what says so; a dropped mapping would be `undefined`.
+    expect(plugins[0]).toMatchObject({ canRead: true, skillCount: 0, toolCount: 1, linkedRoots: [] });
+    expect(plugins[1]).toMatchObject({ canRead: true, skillCount: 1, toolCount: 0, linkedRoots: [] });
   });
 
   it("carries the index's broken-link count into the summary — the server's, not the caller's slice", async () => {
@@ -304,6 +322,7 @@ describe('/api/plugins routes', () => {
       name: 'gtm',
       displayName: 'GTM',
       folders: ['Plugins/GTM'],
+      linkedRoots: ['Skills/Testing'],
       linksAreManaged: true,
       skillCount: 2,
       toolCount: 0,
@@ -312,6 +331,7 @@ describe('/api/plugins routes', () => {
       writers: { roles: [], users: [] },
       readers: { restricted: true, roles: [], users: [] },
       isPrivate: false,
+      warnings: ['mcpProfile "global" named but no registry could be read'],
     };
     const h = await makeHarness({
       readable: MEMBER_OF_BOTH,
@@ -320,7 +340,15 @@ describe('/api/plugins routes', () => {
     server = h.server;
     const { plugins } = await listPlugins(h.baseUrl);
     expect(plugins).toHaveLength(1);
-    expect(plugins[0]).toMatchObject({ name: 'gtm', brokenLinks: 2 });
+    expect(plugins[0]).toMatchObject({
+      name: 'gtm',
+      brokenLinks: 2,
+      // The roots the index scanned reach the page, which needs them to say
+      // where a linked card lives.
+      linkedRoots: ['Skills/Testing'],
+      // What discovery left out reaches the summary as the index said it.
+      warnings: ['mcpProfile "global" named but no registry could be read'],
+    });
   });
 
   it('a DISCOVERABLE plugin (access.md readable, folder not) lists locked with hasRequested from the join CR', async () => {

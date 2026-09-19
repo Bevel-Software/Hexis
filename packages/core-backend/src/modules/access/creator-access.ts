@@ -32,12 +32,16 @@
  * itself, so every decision path degrades to "no grant" with a warning.
  */
 
-import fs from 'node:fs/promises';
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
 
+const log = logger('creator-access');
+
+import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import type { IAccessControl } from './access-control.interface.js';
 import { spliceGrant, type Principal } from '../access-model/access-splice.js';
+import { isTextBytes } from '../workspace/file-readers/text-reader.js';
 import { isAccessMdPath } from '../access-model/access-grammar.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';
 import {
@@ -52,7 +56,13 @@ export class CreatorAccessService implements ICreatorAccess {
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
+    private readonly disk: IFsProbe,
   ) {}
+
+  /** Whether something is at `abs`, links followed: a link to a real file is "there", a dangling one is not. */
+  private async exists(abs: string): Promise<boolean> {
+    return (await this.disk.statOrNull(abs)) !== null;
+  }
 
   /**
    * Decide whether creating `wsRelPath` (workspace-relative) needs a creator
@@ -77,7 +87,7 @@ export class CreatorAccessService implements ICreatorAccess {
     try {
       const wsDir = await this.workspaceService.getWorkspacePath(workspaceId);
       repoDir = path.join(wsDir, this.kbDirName);
-      if (await exists(path.join(repoDir, rel))) return null; // not a create
+      if (await this.exists(path.join(repoDir, rel))) return null; // not a create
       if (await this.accessControl.canRead(workspaceId, creator.email, rel)) return null;
     } catch (err) {
       // Unusable access config (e.g. missing roles.yaml) or workspace lookup
@@ -97,7 +107,7 @@ export class CreatorAccessService implements ICreatorAccess {
     let acc = '';
     for (const seg of segments) {
       acc = acc ? `${acc}/${seg}` : seg;
-      if (!(await exists(path.join(repoDir, acc)))) {
+      if (!(await this.exists(path.join(repoDir, acc)))) {
         try {
           // Validate the principal now (a bad one throws), so a doomed plan
           // is dropped here instead of surfacing at every write site.
@@ -136,8 +146,8 @@ export class CreatorAccessService implements ICreatorAccess {
     // No new directory — a file created directly inside an existing folder.
     // Only markdown can carry a per-file frontmatter grant.
     if (!rel.endsWith('.md')) {
-      console.warn(
-        `[creator-access] cannot grant creator read on "${rel}" — a non-markdown file in a folder without a read grant carries no frontmatter`,
+      log.warn(
+        `cannot grant creator read on "${rel}" — a non-markdown file in a folder without a read grant carries no frontmatter`,
       );
       return null;
     }
@@ -171,7 +181,13 @@ export class CreatorAccessService implements ICreatorAccess {
     if (rel === null || !rel.endsWith('.md')) return null;
     try {
       if (await this.accessControl.canRead(workspaceId, creator.email, rel)) return null;
-      const content = await this.workspaceService.readFile(workspaceId, wsRelPath);
+      // The name says note; the bytes decide. A binary archived under a `.md`
+      // name, read as UTF-8 and written back with a grant spliced in, would
+      // come out corrupted — the damage the share routes now refuse to do.
+      // Such a file carries no rule of its own, so it gets none here either.
+      const bytes = await this.workspaceService.readFileBinary(workspaceId, wsRelPath);
+      if (!isTextBytes(bytes)) return null;
+      const content = bytes.toString('utf-8');
       const result = spliceGrant(content, 'read', this.principalFor(creator), {
         allowScalar: true,
       });
@@ -210,18 +226,6 @@ export class CreatorAccessService implements ICreatorAccess {
   }
 }
 
-async function exists(absolutePath: string): Promise<boolean> {
-  try {
-    await fs.stat(absolutePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function warnSkipped(rel: string, err: unknown): void {
-  console.warn(
-    `[creator-access] skipped creator read grant for "${rel}":`,
-    err instanceof Error ? err.message : err,
-  );
+  log.warn(`skipped creator read grant for "${rel}":`, { err });
 }

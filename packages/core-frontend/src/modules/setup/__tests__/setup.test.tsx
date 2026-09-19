@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const api = vi.hoisted(() => ({
@@ -17,9 +17,19 @@ vi.mock('../services/setup.api', async () => {
   return { ...actual, ...api };
 });
 
+// The Marketplace section renders on first run too. Registration state is
+// read on mount; the credentials only once its drawer opens.
+const facade = vi.hoisted(() => ({
+  fetchGitHubFacade: vi.fn(),
+  rotateGitHubFacade: vi.fn(),
+  fetchMarketplaceRegistration: vi.fn(async () => false),
+  setMarketplaceRegistration: vi.fn(),
+}));
+vi.mock('../../settings/services/github-facade.api', () => facade);
+
 import { SetupGate } from '../components/SetupGate';
 import { SetupScreen } from '../components/SetupScreen';
-import { SettingsProblems, type SettingStatus } from '../services/setup.api';
+import { KbInitFailed, SettingsProblems, type SettingStatus } from '../services/setup.api';
 
 const KB = 'knowledge-base' as const;
 const SETTINGS: SettingStatus[] = [
@@ -27,9 +37,12 @@ const SETTINGS: SettingStatus[] = [
   { key: 'gitToken', envVar: 'GIT_TOKEN', section: KB, source: 'unset', configured: false, secret: true, restartToApply: false },
   { key: 'gitUsername', envVar: 'GIT_USERNAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: false },
   { key: 'kbDirName', envVar: 'KB_DIR_NAME', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'knowledgeBaseDir', envVar: 'KB_KNOWLEDGE_BASE_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'skillsDir', envVar: 'KB_SKILLS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
+  { key: 'pluginsDir', envVar: 'KB_PLUGINS_DIR', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'defaultBranch', envVar: 'DEFAULT_BRANCH', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
   { key: 'protectedBranches', envVar: 'PROTECTED_BRANCHES', section: KB, source: 'unset', value: '', configured: false, secret: false, restartToApply: true },
-  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: true },
+  { key: 'oidcClientSecret', envVar: 'OIDC_CLIENT_SECRET', section: 'sign-in', source: 'unset', configured: false, secret: true, restartToApply: false },
 ];
 
 /**
@@ -126,6 +139,34 @@ describe('SetupScreen', () => {
       ),
     );
     await waitFor(() => expect(reload).toHaveBeenCalled());
+  });
+
+  /**
+   * The first-run host of the Marketplace section: marked optional and never
+   * in the way — setup finishes without anyone touching it, and nothing in it
+   * is fetched or saved on the way. There is no skip control to press: an
+   * admin ignores the section the way they ignore single sign-on, by leaving
+   * it alone. Because "Save and continue" now sits BELOW this section and is
+   * tied to the form by `form=`, this also proves that out-of-form submit
+   * still saves.
+   */
+  it('offers the Marketplace section as optional, and finishes setup having ignored it', async () => {
+    facade.fetchGitHubFacade.mockClear();
+    facade.setMarketplaceRegistration.mockClear();
+    await renderScreen();
+    const section = await screen.findByTestId('marketplace-deployment-section');
+    expect(section).toHaveTextContent('Optional');
+    expect(screen.getByRole('heading', { name: 'Marketplace' })).toBeInTheDocument();
+    expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Skip for now' })).toBeNull();
+
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://example.com/kb.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_secret');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+    expect(facade.fetchGitHubFacade).not.toHaveBeenCalled();
+    expect(facade.setMarketplaceRegistration).not.toHaveBeenCalled();
   });
 
   /**
@@ -344,6 +385,34 @@ describe('SetupScreen', () => {
 
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
     expect(api.testConnection).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The third outcome: the host lets the token read, but not push. That is not
+   * "connected" — every save anyone makes would fail — and not "rejected"
+   * either: the fix is a permission, and the screen has to say which.
+   */
+  it('shows a token that can read but not write as its own outcome, and will not save it', async () => {
+    await renderScreen();
+    api.testConnection.mockResolvedValue({
+      ok: false,
+      outcome: 'read-only',
+      field: 'gitToken',
+      error:
+        'This token can read the repository but cannot write to it. Grant it write access: on GitHub, “Contents: Read and write” for this repository.',
+      branches: ['main'],
+      defaultBranch: 'main',
+      empty: false,
+    });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://github.com/acme/kb.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_readonly');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    expect(await screen.findByText(/Contents: Read and write/)).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+    expect(screen.getByText(/can read the repository but cannot write to it\. Grant write access/)).toBeInTheDocument();
+    expect(api.saveSettings).not.toHaveBeenCalled();
   });
 
   /** An empty repository is a supported starting point, not a failure. */
@@ -731,7 +800,9 @@ describe('SetupScreen', () => {
   /** Single sign-on is skippable, and the screen has to say so. */
   it('marks the optional section optional', async () => {
     await renderScreen();
-    expect(screen.getByText('Optional')).toBeInTheDocument();
+    // Scoped: the Marketplace section below the form is optional too.
+    const signIn = screen.getByRole('heading', { name: 'Single sign-on' }).closest('section')!;
+    expect(within(signIn).getByText('Optional')).toBeInTheDocument();
   });
 
   it('says so when a saved setting needs a restart', async () => {
@@ -741,6 +812,147 @@ describe('SetupScreen', () => {
     await userEvent.type(screen.getByLabelText('Folder name'), 'company-brain');
     await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
     expect(await screen.findByText(/restart it when convenient/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * A repository whose skills lived in `skills/` connected, got an empty
+ * `Skills/` scaffolded beside it and imported nothing, with no word anywhere.
+ * The folder fields are now in plain sight and checked against what the
+ * repository actually has.
+ */
+describe('SetupScreen — the three root folders', () => {
+  const FOLDER_LABELS = ['Knowledge folder', 'Skills folder', 'Plugins folder'];
+  const LISTED = {
+    ok: true,
+    empty: false,
+    branches: ['main'],
+    defaultBranch: 'main',
+    rootFolders: ['KnowledgeBase', 'skills', 'Data'],
+  };
+  const stateOf = (key: string) => document.getElementById(`${key}-repo-state`);
+
+  function expectInMainSection() {
+    const card = screen.getByRole('heading', { name: 'Knowledge, skills & tools' }).closest('section')!;
+    const advanced = card.querySelector('details')!;
+    for (const label of FOLDER_LABELS) {
+      const field = screen.getByLabelText(label);
+      expect(card).toContainElement(field);
+      expect(advanced).not.toContainElement(field);
+    }
+  }
+
+  it('shows the fields in the main section on first run', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByRole('heading', { name: /Set up this deployment/ });
+    expectInMainSection();
+    expect(screen.getByText(/The three folder names must differ\. Case matters/)).toBeInTheDocument();
+  });
+
+  it('shows the fields in the main section on the Deployment page', () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" />);
+    expectInMainSection();
+  });
+
+  it('says found, will be created, or names the folder that differs only by case', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue(LISTED);
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 1 branch/);
+
+    expect(stateOf('knowledgeBaseDir')).toHaveTextContent('KnowledgeBase found in the repository.');
+    expect(stateOf('pluginsDir')).toHaveTextContent(
+      'Plugins is not in the repository yet — it will be created.',
+    );
+    expect(stateOf('skillsDir')).toHaveTextContent(
+      'Not found — the repository has skills (differs only by case): set this field to skills or rename the folder.',
+    );
+
+    // Taking the advice says found at once.
+    await userEvent.type(screen.getByLabelText('Skills folder'), 'skills');
+    expect(stateOf('skillsDir')).toHaveTextContent('skills found in the repository.');
+  });
+
+  it('names a folder that differs by case and a trailing s', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['skill'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() =>
+      expect(stateOf('skillsDir')).toHaveTextContent(
+        'Not found — the repository has skill (differs by case and a trailing s)',
+      ),
+    );
+  });
+
+  it('names a folder that differs only by a trailing s', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['Skill'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() =>
+      expect(stateOf('skillsDir')).toHaveTextContent(
+        'Not found — the repository has Skill (differs only by a trailing s): set this field to Skill or rename the folder.',
+      ),
+    );
+  });
+
+  it('offers the listed folders as suggestions on the three fields, less the ones no root may take', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Skills folder')).not.toHaveAttribute('list');
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: ['.github', ...LISTED.rootFolders, 'Agents'] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 1 branch/);
+    for (const label of FOLDER_LABELS) {
+      const list = screen.getByLabelText(label).getAttribute('list');
+      expect(list).toBeTruthy();
+      const options = [...document.querySelectorAll(`#${list} option`)].map((o) => o.getAttribute('value'));
+      // `.github`, `Data` and `Agents` would each fail the save's validation.
+      expect(options).toEqual(['KnowledgeBase', 'skills']);
+    }
+  });
+
+  it('shows only the empty-repository message for an empty repository', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ok: true, empty: true, branches: [], defaultBranch: null, rootFolders: [] });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(await screen.findByText(/repository is empty; it will be set up for you/)).toBeInTheDocument();
+    expect(screen.queryByText(/will be created/)).toBeNull();
+    for (const key of ['knowledgeBaseDir', 'skillsDir', 'pluginsDir']) expect(stateOf(key)).toBeNull();
+  });
+
+  it('says nothing about the folders when they could not be listed', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue({ ...LISTED, rootFolders: null });
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByText(/Found 1 branch/);
+    expect(stateOf('skillsDir')).toBeNull();
+  });
+
+  it('never blocks the save over a folder warning', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue(LISTED);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await waitFor(() => expect(stateOf('skillsDir')).toHaveTextContent(/differs only by case/));
+
+    const save = screen.getByRole('button', { name: 'Save and continue' });
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+  });
+
+  it('checks the folders on a save that proves the connection', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} />);
+    api.testConnection.mockResolvedValue(LISTED);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: false, settings: SETTINGS });
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled());
+    expect(stateOf('skillsDir')).toHaveTextContent(/the repository has skills/);
+    expect(stateOf('pluginsDir')).toHaveTextContent(/will be created/);
   });
 });
 
@@ -835,6 +1047,211 @@ describe('SetupScreen — remote sync panel', () => {
     await waitFor(() =>
       expect(screen.getByText(/main is not in sync yet: a\.md changed both/)).toBeTruthy(),
     );
+  });
+});
+
+/**
+ * The completing save stored everything, but the knowledge base behind the
+ * gate could not be initialized. The admin is told what to fix — the server's
+ * classified sentence, never git's raw words — and can retry without typing
+ * anything again.
+ */
+describe('SetupScreen — a failed knowledge-base initialization', () => {
+  const WRITE_REFUSED = {
+    kind: 'write-refused' as const,
+    cause: 'The token can read the repository but not write to it — grant it write (push) access to the repository, then retry.',
+  };
+  const POLICY = {
+    kind: 'push-refused-by-policy' as const,
+    cause: "A branch protection rule or hook on the repository refused the initialization push — allow the deployment's account to push to the protected branches, then retry.",
+  };
+  const HEADLINE = 'Saved, but the knowledge base could not be initialized';
+
+  it('shows a standing failure when the screen is opened, without a new save', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: WRITE_REFUSED });
+    render(<SetupGate>{APP}</SetupGate>);
+    const banner = await screen.findByTestId('kb-init-failure');
+    expect(banner).toHaveTextContent(HEADLINE);
+    expect(banner).toHaveTextContent(WRITE_REFUSED.cause);
+    expect(within(banner).getByRole('button', { name: 'Retry initialization' })).toBeEnabled();
+    expect(api.saveSettings).not.toHaveBeenCalled();
+    // Nothing tells the admin that restarting is the remedy.
+    expect(banner).not.toHaveTextContent(/restart/i);
+  });
+
+  it('shows the classified banner right after the failing save, not a generic error', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS });
+    api.testConnection.mockResolvedValue({ ok: true, branches: ['main'], defaultBranch: 'main' });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByRole('heading', { name: /Set up this deployment/ });
+    api.saveSettings.mockRejectedValue(new KbInitFailed(POLICY));
+    // The refetch after the save carries the same standing failure.
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: POLICY });
+
+    await userEvent.type(screen.getByLabelText('Repository address'), 'https://x/y.git');
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_x');
+    await userEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    const banner = await screen.findByTestId('kb-init-failure');
+    expect(banner).toHaveTextContent(HEADLINE);
+    expect(banner).toHaveTextContent(POLICY.cause);
+    // One banner, not the failure AND a generic "could not save".
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('retry: re-runs with nothing re-entered, shows it running, then opens the app', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: WRITE_REFUSED });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByTestId('kb-init-failure');
+    let finish!: (v: unknown) => void;
+    api.saveSettings.mockReturnValue(new Promise((r) => (finish = r)));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    expect(api.saveSettings).toHaveBeenCalledWith({});
+    const running = screen.getByRole('button', { name: 'Initializing…' });
+    expect(running).toBeDisabled();
+    // The form's own save cannot race the run.
+    expect(screen.getByRole('button', { name: 'Save and continue' })).toBeDisabled();
+
+    finish({ restartRequired: false, complete: true, settings: SETTINGS });
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+  });
+
+  it('retry: a fresh failure replaces the banner, and the button can be pressed again', async () => {
+    api.fetchSetupStatus.mockResolvedValue({ complete: false, isAdmin: true, settings: SETTINGS, kbInit: WRITE_REFUSED });
+    render(<SetupGate>{APP}</SetupGate>);
+    await screen.findByTestId('kb-init-failure');
+    api.saveSettings.mockRejectedValue(new KbInitFailed(POLICY));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    const banner = await screen.findByTestId('kb-init-failure');
+    await waitFor(() => expect(banner).toHaveTextContent(POLICY.cause));
+    expect(banner).not.toHaveTextContent(WRITE_REFUSED.cause);
+    expect(within(banner).getByRole('button', { name: 'Retry initialization' })).toBeEnabled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('settings mode: a retry that succeeds clears the banner and refreshes', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={WRITE_REFUSED} />);
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+    expect(onSaved).toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('settings mode: a retry that lands awaiting a restart still refreshes the host', async () => {
+    const onSaved = vi.fn();
+    render(<SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={WRITE_REFUSED} />);
+    api.saveSettings.mockResolvedValue({ restartRequired: true, complete: false, awaitingRestart: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+
+    expect(await screen.findByText(/needs a restart/)).toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalled();
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
+  });
+
+  it('retry waits while the form has unsaved changes — Save is the retry that carries them', async () => {
+    render(<SetupScreen settings={SETTINGS} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+    expect(retry).toBeEnabled();
+
+    await userEvent.type(screen.getByLabelText('Access token'), 'ghp_corrected');
+
+    expect(retry).toBeDisabled();
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(/unsaved changes/i);
+    await userEvent.click(retry);
+    expect(api.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('retry comes back once an edit is put back — an unchanged value is not an unsaved change', async () => {
+    const REPO = 'https://github.com/acme/kb.git';
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl'
+        ? { ...s, source: 'stored' as const, value: REPO, configured: true }
+        : s.key === 'gitUsername'
+          ? { ...s, source: 'stored' as const, value: 'x-access-token', configured: true }
+          : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const address = screen.getByLabelText('Repository address');
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+
+    await userEvent.type(address, '-old');
+    expect(retry).toBeDisabled();
+    await userEvent.type(address, '{Backspace}{Backspace}{Backspace}{Backspace}');
+
+    expect(retry).toBeEnabled();
+    expect(screen.getByTestId('kb-init-failure')).not.toHaveTextContent(/unsaved changes/i);
+  });
+
+  it('a username filled in from the address is not an unsaved change of its own', async () => {
+    // Stored username blank: the address fills in x-access-token, which differs from it.
+    const stored = SETTINGS.map((s) =>
+      s.key === 'kbRepoUrl' ? { ...s, source: 'stored' as const, value: 'https://github.com/acme/kb.git', configured: true } : s,
+    );
+    render(<SetupScreen settings={stored} onSaved={vi.fn()} variant="settings" kbInit={WRITE_REFUSED} />);
+    const address = screen.getByLabelText('Repository address');
+    const retry = screen.getByRole('button', { name: 'Retry initialization' });
+
+    // Inside the closed Advanced block, but in the form all the same.
+    const username = screen.getByLabelText('Token username');
+    expect(username).toHaveValue('');
+
+    await userEvent.type(address, '-x');
+    // The address DID fill the username in — that is what this test is about.
+    expect(username).toHaveValue('x-access-token');
+    expect(retry).toBeDisabled();
+    await userEvent.type(address, '{Backspace}{Backspace}');
+    expect(retry).toBeEnabled();
+
+    // Cleared, the address means "leave it alone". The username it filled in
+    // stays filled in, and is still not an edit.
+    await userEvent.clear(address);
+    expect(username).toHaveValue('x-access-token');
+    expect(retry).toBeEnabled();
+  });
+
+  it('a late status answer cannot bring back a failure this screen just saw cleared', async () => {
+    const onSaved = vi.fn();
+    const screenWith = (kbInit?: typeof WRITE_REFUSED | typeof POLICY) => (
+      <SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={kbInit} />
+    );
+    const { rerender } = render(screenWith(WRITE_REFUSED));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    // The read sent before the retry answers now: a new object, the same failure.
+    rerender(screenWith({ ...WRITE_REFUSED }));
+    expect(screen.queryByTestId('kb-init-failure')).toBeNull();
+    // A DIFFERENT failure is news, and shows.
+    rerender(screenWith(POLICY));
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(POLICY.cause);
+  });
+
+  it('after a read agrees the failure cleared, the same failure reported again is shown', async () => {
+    const onSaved = vi.fn();
+    const screenWith = (kbInit?: typeof WRITE_REFUSED) => (
+      <SetupScreen settings={SETTINGS} onSaved={onSaved} variant="settings" kbInit={kbInit} />
+    );
+    const { rerender } = render(screenWith(WRITE_REFUSED));
+    api.saveSettings.mockResolvedValue({ restartRequired: false, complete: true, settings: SETTINGS });
+    await userEvent.click(screen.getByRole('button', { name: 'Retry initialization' }));
+    await waitFor(() => expect(screen.queryByTestId('kb-init-failure')).toBeNull());
+
+    rerender(screenWith(undefined));
+    rerender(screenWith({ ...WRITE_REFUSED }));
+
+    expect(screen.getByTestId('kb-init-failure')).toHaveTextContent(WRITE_REFUSED.cause);
   });
 });
 

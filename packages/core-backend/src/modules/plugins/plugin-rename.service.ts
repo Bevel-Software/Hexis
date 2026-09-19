@@ -9,7 +9,7 @@ import {
 } from '@bevel-software/platform-shared';
 import type { AuthUser } from '@bevel-software/platform-shared';
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
-import { walkKb, type KbWalkListener } from '../../shared/kb-walk.js';
+import type { ITreeWalker, WalkListener } from '../../shared/fs.contract.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import {
   PLUGIN_TOKEN_PREFIX,
@@ -69,6 +69,7 @@ export class PluginRenameService {
     private readonly commits: RenameCommitDriver,
     private readonly accessControl: IAccessControl,
     private readonly source: PluginSource,
+    private readonly disk: ITreeWalker,
     private readonly kbDirName: string,
     private readonly events?: {
       emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void;
@@ -103,14 +104,14 @@ export class PluginRenameService {
     // happens here — no file is read, nothing is decided — so it can run
     // before authorization without telling anyone anything.
     const grantFiles: string[] = [];
-    const grantListener: KbWalkListener = {
+    const grantListener: WalkListener = {
       onFile(dir, name) {
         if (hasAccessFrontmatterExtension(name)) grantFiles.push(dir ? `${dir}/${name}` : name);
       },
     };
     const { discovery, holes } = this.source.walkWith
       ? await this.source.walkWith(kbRoot, [grantListener])
-      : { discovery: await this.source.discover(kbRoot), holes: (await walkKb(kbRoot, [grantListener])).holes };
+      : { discovery: await this.source.discover(kbRoot), holes: (await this.disk.walkKb(kbRoot, [grantListener])).holes };
     const { plugins } = discovery;
     const unreadable = [...new Set([...discovery.unreadable, ...holes])];
     // Three phases: READ everything, DECIDE, then WRITE. Nothing about the
@@ -165,14 +166,23 @@ export class PluginRenameService {
     if (identifierChanges && plugins.some((p) => p !== plugin && pluginManifestName(p.name) === nextName)) {
       throw new PluginRenameError(`A plugin named "${nextName}" already exists.`, 409, { kind: 'name-taken' });
     }
-    const folderName = path.posix.basename(plugin.folder);
+    // What the MANIFEST says today, not what discovery resolved: a manifest
+    // carrying no `displayName` shows its identifier, and carrying THAT over
+    // an identifier change would persist the name the plugin just stopped
+    // being called. The stored field is the only thing an untouched display
+    // name can mean.
+    const storedDisplay =
+      typeof plugin.manifest?.displayName === 'string' ? plugin.manifest.displayName.trim() : '';
     const nextDisplay =
-      patch.displayName === undefined ? plugin.displayName : String(patch.displayName).trim();
+      patch.displayName === undefined ? storedDisplay : String(patch.displayName).trim();
 
-    // The manifest, with everything else in it kept.
+    // The manifest, with everything else in it kept. `displayName` is ALWAYS
+    // written — equal to the identifier, equal to the folder, whatever the
+    // person typed — because the manifest is the only source every reader
+    // has. The field is never deleted: an edit that blanks it falls back to
+    // the identifier, which is what the plugin is then called.
     const manifest: Record<string, unknown> = { ...(plugin.manifest ?? {}), name: nextName };
-    if (nextDisplay && nextDisplay !== folderName) manifest.displayName = nextDisplay;
-    else delete manifest.displayName;
+    manifest.displayName = nextDisplay || nextName;
     const manifestRel = `${this.kbDirName}/${plugin.folder}/${PLUGIN_MANIFEST_FILE}`;
     const writes: { rel: string; text: string; before: string | null }[] = [
       { rel: manifestRel, text: `${JSON.stringify(manifest, null, 2)}\n`, before: plugin.manifestText },
@@ -247,9 +257,11 @@ export class PluginRenameService {
       throw err;
     }
     this.noteChanged(wsId);
+    // Exactly what was persisted, read back through the shared rule — the
+    // response and the file can never say two different things.
     return {
       name: nextName,
-      displayName: pluginDisplayNameOf(manifest, folderName),
+      displayName: pluginDisplayNameOf(manifest),
       rewritten: writes.slice(1).map((w) => w.rel.slice(this.kbDirName.length + 1)),
     };
   }

@@ -42,6 +42,9 @@ import {
   type WorkflowEvent,
   type WorkflowEventPayload,
 } from '@bevel-software/platform-shared';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('event-bus');
 
 /**
  * Capacity of the global event ring buffer. A new event evicts the oldest
@@ -133,10 +136,7 @@ export class WorkflowEventBus {
       try {
         listener(event);
       } catch (err) {
-        console.warn(
-          '[event-bus] onEmit listener threw:',
-          err instanceof Error ? err.message : err,
-        );
+        log.warn('onEmit listener threw:', { err });
       }
     }
     // Single-line emit log with all the fields most useful for tracing a
@@ -154,8 +154,8 @@ export class WorkflowEventBus {
     if ('branch' in event && event.branch) extra.push(`branch=${event.branch}`);
     if ('newSha' in event && event.newSha !== undefined) extra.push(`sha=${event.newSha ?? 'null'}`);
     if ('holderName' in event && event.holderName) extra.push(`holder=${event.holderName}`);
-    console.log(
-      `[event-bus] EMIT id=${event.id} kind=${event.kind} ${scope}${extra.length ? ' ' + extra.join(' ') : ''} subs=${this.subscribers.size}`,
+    log.info(
+      `EMIT id=${event.id} kind=${event.kind} ${scope}${extra.length ? ' ' + extra.join(' ') : ''} subs=${this.subscribers.size}`,
     );
     let matched = 0;
     let skipped = 0;
@@ -176,15 +176,10 @@ export class WorkflowEventBus {
         sub.push(event);
         matched++;
       } catch (err) {
-        console.warn(
-          `[event-bus] dispatch to session ${sub.sessionId} threw:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`dispatch to session ${sub.sessionId} threw:`, { err });
       }
     }
-    console.log(
-      `[event-bus] EMIT id=${event.id} kind=${event.kind} → delivered=${matched} skipped=${skipped}`,
-    );
+    log.info(`EMIT id=${event.id} kind=${event.kind} → delivered=${matched} skipped=${skipped}`);
     return event;
   }
 
@@ -195,18 +190,14 @@ export class WorkflowEventBus {
    */
   subscribe(sub: Subscriber): () => void {
     this.subscribers.set(sub.sessionId, sub);
-    console.log(
-      `[event-bus] SUBSCRIBE session=${sub.sessionId} user=${sub.userId} → total=${this.subscribers.size}`,
-    );
+    log.info(`SUBSCRIBE session=${sub.sessionId} user=${sub.userId} → total=${this.subscribers.size}`);
     return () => {
       // Only delete if the same Subscriber is still registered — protects
       // against a stale unsubscribe (e.g. a reconnect replaced the entry
       // before the old `close` handler fired).
       if (this.subscribers.get(sub.sessionId) === sub) {
         this.subscribers.delete(sub.sessionId);
-        console.log(
-          `[event-bus] UNSUBSCRIBE session=${sub.sessionId} user=${sub.userId} → total=${this.subscribers.size}`,
-        );
+        log.info(`UNSUBSCRIBE session=${sub.sessionId} user=${sub.userId} → total=${this.subscribers.size}`);
       }
     };
   }

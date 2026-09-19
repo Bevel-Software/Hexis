@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { Badge, Button, Surface } from '../../../shared/components';
-import { pathForPluginsIndex } from '../routes/library-paths';
-import { ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
+import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
 import { AlreadyReadableError, requestPluginAccess, type PluginSummary } from '../services/plugins.api';
 import { firstNames, joinNames } from '../utils/names';
 import { useLibraryToast } from '../state/toast.context';
 import { LockGlyph } from './LockGlyph';
+import { PluginBreadcrumb } from './plugin-page-parts';
 
 /**
  * A plugin you cannot read, as a place you can still stand in.
@@ -79,18 +80,20 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
 
   return (
     <div className="pb-14">
-      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
-        <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-          Everything
-        </Link>
-        <span aria-hidden="true">›</span>
-        <span aria-current="page" className="truncate text-ink-muted">
+      {/* The same band every other page title bar is on, so a plugin you
+          cannot open still lines its heading up with the nav beside it — and
+          the page's FIRST row, with the breadcrumb on the band rather than
+          above it, for the same reason. `PluginBreadcrumb` is the one an
+          openable plugin page uses; a locked page is still a plugin page, and
+          two copies of one trail drift the first time either is touched. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-2.5')}>
+        <PluginBreadcrumb />
+        <h1
+          className="min-w-0 truncate text-display font-semibold"
+          title={plugin.displayName || plugin.name}
+        >
           {plugin.displayName || plugin.name}
-        </span>
-      </nav>
-
-      <div className="mt-1.5 flex items-center gap-2.5">
-        <h1 className="text-display font-semibold">{plugin.displayName || plugin.name}</h1>
+        </h1>
         <Badge tone="outline" size="sm">
           <LockGlyph className="size-3 shrink-0" />
           Locked
@@ -112,7 +115,7 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
           </Surface>
         ) : (
           <Button variant="primary" disabled={requesting} onClick={() => void request()}>
-            Subscribe to its skills and tools
+            Subscribe to this plugin
           </Button>
         )}
       </div>
@@ -138,22 +141,5 @@ function countsLine(plugin: Pick<PluginSummary, 'skillCount' | 'toolCount'>): st
   const skills = `${plugin.skillCount} ${plugin.skillCount === 1 ? 'skill' : 'skills'}`;
   const tools = `${plugin.toolCount} ${plugin.toolCount === 1 ? 'tool' : 'tools'}`;
   return `${skills} · ${tools}. Visible once you have access.`;
-}
-
-/**
- * The people `ownersTextOf` names, as a list.
- *
- * Mirrors that helper's chain exactly — owners, else writers, else nobody — so
- * the sentence and the count of subjects in it can never disagree. It is a
- * separate function only because the toast needs the NAMES (to take first
- * names) and the verb needs the COUNT, and prose gives back neither.
- */
-function adminNamesOf(plugin: Pick<PluginSummary, 'owners' | 'writers'>): string[] {
-  const owners = [...plugin.owners.users.map((u) => u.name), ...plugin.owners.roles];
-  const named = owners.filter((s) => s.length > 0);
-  if (named.length > 0) return named;
-  return [...plugin.writers.users.map((u) => u.name), ...plugin.writers.roles].filter(
-    (s) => s.length > 0,
-  );
 }
 

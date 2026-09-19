@@ -1,8 +1,9 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
+import { ConnectionKeyRejectedError } from '../deployment.js';
 import {
   expandPlaceholders,
   extractArchive,
@@ -27,6 +28,38 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
+});
+
+describe('materializePlugin: a rejected connection key', () => {
+  const previousHome = process.env.HEXIS_HOME;
+  beforeEach(() => {
+    process.env.HEXIS_HOME = root;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (previousHome === undefined) delete process.env.HEXIS_HOME;
+    else process.env.HEXIS_HOME = previousHome;
+  });
+
+  it('ends in the same plain sentence as every other key-authenticated request', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    const config: HexisMcpConfig = { baseUrl: 'https://x.example', connectionKey: 'bevel_k' };
+    await expect(materializePlugin(config, 'GTM')).rejects.toBeInstanceOf(ConnectionKeyRejectedError);
+  });
+
+  it('keeps a sign-in\'s 401 generic — only a key is the key\'s fault', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    const config: HexisMcpConfig = {
+      baseUrl: 'https://x.example',
+      connectionKey: 'internal',
+      renewConnectionKey: async () => {
+        throw new Error('materializePlugin does not renew');
+      },
+    };
+    const err = await materializePlugin(config, 'GTM').catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(ConnectionKeyRejectedError);
+    expect(String(err)).toMatch(/HTTP 401/);
+  });
 });
 
 describe('materializePlugin: plugin folder names', () => {

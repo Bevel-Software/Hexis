@@ -34,8 +34,12 @@
  *                                                    (status='needs_attention')
  */
 
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, min, or, sql } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('pending-commits');
 import type { Database } from '../database/connection.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 import { pendingCommits } from '../database/schema.js';
 
 /**
@@ -172,7 +176,7 @@ export class PendingCommitsService {
    * in-flight or terminal work the caller shouldn't disturb.
    */
   async enqueue(input: EnqueueInput): Promise<void> {
-    const email = input.authorEmail.trim().toLowerCase();
+    const email = canonicalEmail(input.authorEmail);
     // Store the canonical (encoded) workspace id so the worker's per-workspace
     // claim — which keys on `knownWorkspaces()`'s encoded ids — can find this row
     // even when the enqueuing route delivered a URL-decoded id.
@@ -249,7 +253,7 @@ export class PendingCommitsService {
       workspaceId,
       branch: input.branch,
       path: input.path,
-      authorEmail: input.authorEmail.trim().toLowerCase(),
+      authorEmail: canonicalEmail(input.authorEmail),
       authorName: input.authorName,
     });
     return true;
@@ -381,6 +385,24 @@ export class PendingCommitsService {
   }
 
   /**
+   * When the oldest commit still waiting to land was queued, or null when
+   * nothing waits — the readiness answer's one number. `pending` and
+   * `running` both count: a row the worker holds is still not in git, and a
+   * row it holds for too long is exactly the stall this measures.
+   * `needs_attention` does not: that row has already been escalated through
+   * the notice sink and sits on the admin surface, and counting it here would
+   * keep the deployment "degraded" until triage rather than saying whether
+   * draining keeps up.
+   */
+  async oldestQueuedAt(): Promise<Date | null> {
+    const [row] = await this.db
+      .select({ oldest: min(pendingCommits.queuedAt) })
+      .from(pendingCommits)
+      .where(inArray(pendingCommits.status, ['pending', 'running']));
+    return row?.oldest ?? null;
+  }
+
+  /**
    * Admin / dashboard surface. Returns everything stuck in
    * `needs_attention` for triage.
    */
@@ -503,10 +525,7 @@ export class PendingCommitsService {
       try {
         dirty = await scanner.scan(workspace);
       } catch (err) {
-        console.warn(
-          `[pending-commits] startup scan failed for workspace=${workspace.id}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`startup scan failed for workspace=${workspace.id}:`, { err });
         continue;
       }
       for (const entry of dirty) {

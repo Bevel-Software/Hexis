@@ -1,5 +1,5 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { IFsProbe } from '../../../../shared/fs.contract.js';
 import { renderRolesYaml } from '../../../access-model/render-roles-yaml.js';
 import type { OnServerStart, ServerStartContext, StepResult } from '../on-server-start.js';
 
@@ -21,7 +21,10 @@ import type { OnServerStart, ServerStartContext, StepResult } from '../on-server
 export class RolesYamlStep implements OnServerStart {
   readonly name = 'roles-yaml';
 
-  constructor(private readonly seedAdminEmails: readonly string[]) {}
+  constructor(
+    private readonly disk: IFsProbe,
+    private readonly seedAdminEmails: readonly string[],
+  ) {}
 
   async run(ctx: ServerStartContext): Promise<StepResult> {
     const adminless: string[] = [];
@@ -31,7 +34,7 @@ export class RolesYamlStep implements OnServerStart {
       // read as "present" and be skipped over — reporting success over a
       // knowledge base whose access roster cannot be read. Fail closed, same
       // as template-files' squatter checks: this is a state a human must fix.
-      const found = await lstatOrNull(path.join(repoDir, 'roles.yaml'));
+      const found = await this.disk.lstatOrNull(path.join(repoDir, 'roles.yaml'));
       if (found) {
         if (found.isFile()) continue; // the operator's file — leave it alone
         throw new Error(
@@ -58,14 +61,5 @@ export class RolesYamlStep implements OnServerStart {
       };
     }
     return { outcome: 'ok' };
-  }
-}
-
-/** `lstat` without the throw — null when nothing is at `p`. */
-async function lstatOrNull(p: string): Promise<import('node:fs').Stats | null> {
-  try {
-    return await fs.lstat(p);
-  } catch {
-    return null;
   }
 }

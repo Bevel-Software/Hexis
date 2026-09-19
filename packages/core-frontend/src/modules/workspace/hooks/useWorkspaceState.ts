@@ -10,6 +10,7 @@ import {
 } from '../../change-requests/services/propose.api';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../core/events';
 import type {
+  HydrateResult,
   OpenTab,
   PendingEntry,
   UploadError,
@@ -33,6 +34,7 @@ import {
 import { contentChanged } from '../utils/diff';
 import { isUploadNoise, walkEntries, type DroppedItem } from '../utils/readDroppedEntries';
 import { tabsKey, type PersistedTabState } from '../utils/tab-persistence';
+import { traceFiles } from '../utils/file-trace';
 
 const PERSIST_DEBOUNCE_MS = 200;
 // Bounded concurrency cap for upload requests. The server serializes git
@@ -48,6 +50,22 @@ const UNSAVED_TABS_BULK_WARNING = (filenames: string[]) =>
 function basename(path: string): string {
   const i = path.lastIndexOf('/');
   return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/**
+ * Which branch a workspace IS, read off the workspace itself rather than off
+ * whatever we happened to ask for. `WorkspaceInfo.id` is
+ * `encodeURIComponent(branch)` and documents the decode as the supported way
+ * to recover the branch without a round-trip — so the answer travels with the
+ * id, and the pair can never come apart mid-switch. `requested` is only the
+ * fallback for a malformed id.
+ */
+function workspaceBranchOf(workspaceId: string, requested: string | undefined): string {
+  try {
+    return decodeURIComponent(workspaceId);
+  } catch {
+    return requested ?? DEFAULT_BRANCH;
+  }
 }
 
 /**
@@ -99,7 +117,22 @@ interface UseWorkspaceStateReturn extends WorkspaceContextValue {
 
 export function useWorkspaceState(): UseWorkspaceStateReturn {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
-  const [bootstrapError, setBootstrapError] = useState<{ branch: string; status: number } | null>(null);
+  /**
+   * The branch the CURRENT `workspaceId` actually is (see
+   * {@link workspaceBranchOf}). Not the same thing as `persistenceBranch`,
+   * which is the branch we've asked for and may still be bootstrapping. Every
+   * key that has to say "these tabs came from that branch" is built from this
+   * one, paired with the `workspaceId` of the same render, so a switch can
+   * never write one branch's tabs under another branch's name.
+   */
+  const [workspaceBranch, setWorkspaceBranch] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<
+    { branch: string; status: number; message: string } | null
+  >(null);
+  // Bumped by `retryBootstrap`. A dependency of the bootstrap effect, so a
+  // retry re-runs it for the SAME persistenceBranch (which a plain state set
+  // would not, the value being unchanged).
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [kbDirName, setKbDirName] = useState<string | null>(null);
   const [fileTree, setFileTree] = useState<FileTreeEntry | null>(null);
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
@@ -120,6 +153,15 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // Monotonic token so a slow `addTab` whose response arrives after a newer add
   // doesn't clobber the newer state.
   const addRequestIdRef = useRef(0);
+  // A SECOND token, for hydrations only. "Which file should be active" and
+  // "which restore owns the tab strip" are different questions, and sharing one
+  // counter conflated them: an ordinary `addTab` starting mid-hydration made
+  // the hydration look superseded, so it dropped the branch's whole restored
+  // tab list on the floor AND left `hydratedKeyRef` unset, which silently
+  // disables persistence for that branch until the next switch. Only a NEWER
+  // hydration (or the workspace moving) may retire a hydration's claim on the
+  // strip; a newer open only outranks it for activation.
+  const hydrateRequestIdRef = useRef(0);
   // Tracks the (workspaceId, persistenceBranch) key we've successfully hydrated
   // for. Auto-persist effect won't write until hydrate has run for the current
   // key — avoids overwriting localStorage with `[]` before the restore lands.
@@ -142,10 +184,45 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // persistenceBranch as a ref too, so hydrateTabs reads the latest value
   // even when setPersistenceBranch was called in the same render.
   const persistenceBranchRef = useRef<string | null>(persistenceBranch);
+  /**
+   * The live `workspaceId`, for the reads that resolve AFTER the workspace
+   * moved on. A read started against branch A's workspace must not write its
+   * bytes into branch B's tab strip: every tab mutation below compares the
+   * workspaceId it was started with against this before touching state.
+   */
+  const workspaceIdRef = useRef<string | null>(workspaceId);
   useEffect(() => { openTabsRef.current = openTabs; }, [openTabs]);
   useEffect(() => { activeTabPathRef.current = activeTabPath; }, [activeTabPath]);
   useEffect(() => { fileTreeRef.current = fileTree; }, [fileTree]);
   useEffect(() => { persistenceBranchRef.current = persistenceBranch; }, [persistenceBranch]);
+
+  /**
+   * The one place `workspaceId` moves. The ref is advanced in the same tick as
+   * the state, not in an effect: child effects (FileRoute's hydrate) run before
+   * this component's own effects, so an effect-synced ref would still read the
+   * PREVIOUS workspace on the very render that introduced the new one.
+   */
+  const adoptWorkspace = useCallback((id: string, branch: string) => {
+    // A different workspace IS a different branch, and every open tab holds
+    // bytes read from the one being left. The strip starts empty for the new
+    // branch rather than waiting for its restore to replace it: a restore
+    // overtaken by a click MERGES into the strip instead of replacing it, and
+    // merged with a strip that still held the old branch's tabs it carried
+    // them over — shown on the new branch with the old branch's text, and
+    // persisted under the new branch's key. Refs move with the state for the
+    // same reason `workspaceIdRef` does: the reads resolving next consult
+    // them. Nothing typed is lost — a switch is refused while any tab is dirty
+    // (`FileRoute`), and `deleteWorkspace` closes every tab before it re-adopts.
+    if (workspaceIdRef.current !== null && workspaceIdRef.current !== id) {
+      openTabsRef.current = [];
+      activeTabPathRef.current = null;
+      setOpenTabs([]);
+      setActiveTabPath(null);
+    }
+    workspaceIdRef.current = id;
+    setWorkspaceId(id);
+    setWorkspaceBranch(branch);
+  }, []);
 
   const setPersistenceBranch = useCallback((branch: string | null) => {
     persistenceBranchRef.current = branch;
@@ -168,30 +245,52 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const branch = persistenceBranch ?? undefined;
     let cancelled = false;
     (async () => {
+      traceFiles('bootstrap:start', { branch: branch ?? null, attempt: bootstrapAttempt });
       try {
         const { workspace, fileTree: tree } = await getOrCreateWorkspace(branch);
+        traceFiles('bootstrap:ok', { branch: branch ?? null, workspaceId: workspace.id, cancelled });
         if (cancelled) return;
-        setWorkspaceId(workspace.id);
+        adoptWorkspace(workspace.id, workspaceBranchOf(workspace.id, branch));
         setKbDirName(workspace.kbDirName);
         setFileTree(tree);
         setBootstrapError(null);
       } catch (err) {
+        traceFiles('bootstrap:failed', {
+          branch: branch ?? null,
+          status: err instanceof WorkspaceApiError ? err.status : null,
+          message: err instanceof Error ? err.message : String(err),
+          cancelled,
+        });
         if (cancelled) return;
         console.error('Failed to bootstrap workspace:', err);
         // Surfaced, not just logged: a bootstrap that fails leaves
         // `workspaceId` where it was, and the route waiting on it needs to
-        // know why — a branch the host deleted (410) has its own screen.
+        // know why — a branch the host deleted (410) has its own screen, and
+        // every other status gets a named failure with a Retry. The message
+        // rides along so the screen can say what actually failed instead of
+        // only which branch it was.
         // No persistence branch means the server bootstrapped the DEFAULT
         // branch, so that is the branch this failure is about — an empty
         // name would never match the URL a route is on.
         setBootstrapError({
           branch: branch ?? DEFAULT_BRANCH,
           status: err instanceof WorkspaceApiError ? err.status : 0,
+          message: err instanceof Error ? err.message : String(err),
         });
       }
     })();
     return () => { cancelled = true; };
-  }, [persistenceBranch]);
+  }, [persistenceBranch, bootstrapAttempt, adoptWorkspace]);
+
+  /**
+   * Re-run the bootstrap for the branch we're already asking for. The one
+   * recovery from a failed `GET /api/workspace` that doesn't need a page
+   * reload — the Retry on the file page's bootstrap-failure screen calls it.
+   */
+  const retryBootstrap = useCallback(() => {
+    setBootstrapError(null);
+    setBootstrapAttempt((n) => n + 1);
+  }, []);
 
   const refreshFileTree = useCallback(async () => {
     if (!workspaceId) return null;
@@ -234,11 +333,19 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // null-content guard renders an empty/loading state until content arrives.
     if (tab.content === null && workspaceId) {
       const path = tab.path;
-      readFile(workspaceId, path).then((content) => {
+      // The same guard the eager refetch and `addTab` carry: a switch while
+      // this read is in flight clears the strip, and a tab of the SAME path
+      // may already be open on the new branch. Its answer — bytes, a 404 or a
+      // 403 — is about the branch that was left, so it must neither overwrite
+      // that tab nor close it.
+      const readFrom = workspaceId;
+      readFile(readFrom, path).then((content) => {
+        if (workspaceIdRef.current !== readFrom) return;
         setOpenTabs((prev) => prev.map((t) => (
           t.path === path ? { ...t, content, savedContent: content } : t
         )));
       }).catch((err) => {
+        if (workspaceIdRef.current !== readFrom) return;
         if (
           err instanceof WorkspaceApiError &&
           (err.status === 404 || err.status === 403)
@@ -258,12 +365,25 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // on dirty state — opening more tabs never discards work.
     const existing = openTabsRef.current.find((t) => t.path === relativePath);
     if (existing) {
+      // Claim the "latest open" token even though there is nothing to fetch.
+      // Without it, an OLDER addTab still in flight counted as the latest when
+      // it landed and activated ITS file — so a burst of tree clicks ending on
+      // an already-open tab left the screen on some other file while the URL
+      // named this one, for good. Opening a tab is the newest intent whether or
+      // not it costs a read.
+      ++addRequestIdRef.current;
       activateTab(existing);
       return true;
     }
     const requestId = ++addRequestIdRef.current;
     try {
       const content = await readFile(workspaceId, relativePath);
+      // A read that outlived its workspace belongs to another branch's tab
+      // strip; drop it rather than splicing those bytes into this one.
+      if (workspaceIdRef.current !== workspaceId) {
+        traceFiles('add-tab:stale-workspace', { path: relativePath, readFrom: workspaceId, now: workspaceIdRef.current });
+        return false;
+      }
       const isLatest = requestId === addRequestIdRef.current;
       // Re-check dedup in case of races during the await.
       const stillExisting = openTabsRef.current.find((t) => t.path === relativePath);
@@ -289,7 +409,9 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       return true;
     } catch (err) {
       // Drop stale errors silently — the user already navigated to a newer
-      // tab, surfacing the older error would be confusing.
+      // tab, or the workspace moved to another branch; surfacing the older
+      // error would be confusing.
+      if (workspaceIdRef.current !== workspaceId) return false;
       if (requestId !== addRequestIdRef.current) return false;
       // A 403 (read-restricted deep-link / id-link) throws like any other
       // failure: NO tab is created for a file the user can't read — the route
@@ -344,18 +466,35 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const hydrateTabs = useCallback(async (
     paths: string[],
     activePath: string | null,
-  ): Promise<{ surviving: string[]; dropped: string[]; denied: string[] }> => {
-    if (!workspaceId) return { surviving: [], dropped: paths.slice(), denied: [] };
+  ): Promise<HydrateResult> => {
+    // No workspace, nothing read, nothing owned: `superseded` so the caller
+    // doesn't record a restore that never happened.
+    if (!workspaceId) {
+      return { surviving: [], dropped: paths.slice(), denied: [], superseded: true };
+    }
+    // The key these tabs belong to, pinned from THIS render's (workspaceId,
+    // workspaceBranch) pair — the two always move together, so the key can
+    // never cross one branch's workspace with another branch's name. It used
+    // to be built from `persistenceBranchRef` at settle time, which is the
+    // branch being switched TO, and that is exactly how a key like
+    // `bevel.tabs.main.someone/draft` got written mid-switch.
+    const hydratedKey = workspaceBranch ? `${workspaceId}.${workspaceBranch}` : null;
     // Deduplicate while preserving order.
     const uniqPaths = paths.filter((p, i) => paths.indexOf(p) === i);
+
+    // Two claims, two tokens. `addRequestIdRef` says "this is the newest thing
+    // the user asked to have ACTIVE" — a hydration and an open compete for
+    // that, and whichever started last wins when they settle out of order.
+    // `hydrateRequestIdRef` says "this restore owns the tab strip", which only
+    // another restore can take away.
+    const requestId = ++addRequestIdRef.current;
+    const hydrateId = ++hydrateRequestIdRef.current;
 
     if (uniqPaths.length === 0) {
       setOpenTabs([]);
       setActiveTabPath(null);
-      hydratedKeyRef.current = persistenceBranchRef.current
-        ? `${workspaceId}.${persistenceBranchRef.current}`
-        : null;
-      return { surviving: [], dropped: [], denied: [] };
+      hydratedKeyRef.current = hydratedKey;
+      return { surviving: [], dropped: [], denied: [], superseded: false };
     }
 
     // Fetch every path in parallel. 404s are silently dropped (file no longer
@@ -365,6 +504,16 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // access message instead of "file not found". Other errors throw so the
     // caller can show "file-load-failed".
     const results = await Promise.allSettled(uniqPaths.map((p) => readFile(workspaceId, p)));
+    // The strip is no longer this hydration's to write: the workspace moved to
+    // another branch, or a newer restore started while these reads were in
+    // flight. Report what we read so the caller can still classify its
+    // deeplink, but touch nothing — and tell the caller, so it doesn't record
+    // a hydration that never landed.
+    const superseded =
+      workspaceIdRef.current !== workspaceId || hydrateId !== hydrateRequestIdRef.current;
+    // A newer `addTab` started meanwhile. It owns the ACTIVE tab, not the
+    // strip: its file still has to sit alongside the restored ones.
+    const outranked = requestId !== addRequestIdRef.current;
     const survivors: OpenTab[] = [];
     const surviving: string[] = [];
     const dropped: string[] = [];
@@ -395,17 +544,36 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       }
     }
 
+    if (superseded) {
+      traceFiles('hydrate:superseded', { readFrom: workspaceId, now: workspaceIdRef.current, surviving });
+      return { surviving, dropped, denied, superseded: true };
+    }
+
+    if (outranked) {
+      // Merge instead of replace: the newer open's tab stays (it may not even
+      // be in `prev` yet — `addTab` appends with its own race-safe setter, so
+      // it lands on top of this list), and the restored tabs join it in their
+      // persisted order. Activation is left alone; the newer open is the
+      // user's latest intent and has already claimed it.
+      traceFiles('hydrate:outranked-by-open', { readFrom: workspaceId, surviving });
+      const restored = new Set(surviving);
+      setOpenTabs((prev) => [...survivors, ...prev.filter((t) => !restored.has(t.path))]);
+      // Still a completed restore for this key: the strip now holds this
+      // branch's tabs, so persistence may resume. Leaving the marker unset was
+      // what stopped this branch's tabs from ever being written again.
+      hydratedKeyRef.current = hydratedKey;
+      return { surviving, dropped, denied, superseded: false };
+    }
+
     setOpenTabs(survivors);
     // Activate `activePath` if it survived; else last surviving path; else null.
     const requested = activePath && survivors.some((t) => t.path === activePath)
       ? activePath
       : (survivors[survivors.length - 1]?.path ?? null);
     setActiveTabPath(requested);
-    hydratedKeyRef.current = persistenceBranchRef.current
-      ? `${workspaceId}.${persistenceBranchRef.current}`
-      : null;
-    return { surviving, dropped, denied };
-  }, [workspaceId]);
+    hydratedKeyRef.current = hydratedKey;
+    return { surviving, dropped, denied, superseded: false };
+  }, [workspaceId, workspaceBranch]);
 
   // ── Renderer value bridge → active tab.content ────────────────────────────
 
@@ -883,7 +1051,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const dirty = toClose.filter((t) => t.isDirty);
     if (dirty.length > 0) {
       const confirmed = window.confirm(UNSAVED_TABS_BULK_WARNING(dirty.map((t) => basename(t.path))));
-      if (!confirmed) return;
+      if (!confirmed) return false;
     }
     // Optimistic tree removal. A folder delete on the server takes 2-3s
     // (N per-file commits batched into one push) — without optimism the
@@ -1136,22 +1304,27 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // When the user switches branches, the previously-hydrated key no longer
   // applies. Clear the marker so the auto-persist effect waits for a fresh
   // `hydrateTabs` call before writing localStorage for the new branch.
+  //
+  // Keyed on `workspaceBranch` — the branch the workspace IS — not on
+  // `persistenceBranch`, the branch we're heading for. The two differ for the
+  // whole length of a switch, and keying on the destination is what let the
+  // old branch's tabs be persisted under the new branch's name.
   useEffect(() => {
-    if (!workspaceId || !persistenceBranch) {
+    if (!workspaceId || !workspaceBranch) {
       hydratedKeyRef.current = null;
       return;
     }
-    const key = `${workspaceId}.${persistenceBranch}`;
+    const key = `${workspaceId}.${workspaceBranch}`;
     if (hydratedKeyRef.current !== key) {
       hydratedKeyRef.current = null;
     }
-  }, [workspaceId, persistenceBranch]);
+  }, [workspaceId, workspaceBranch]);
 
   // ── Auto-persist tabs to localStorage (debounced) ─────────────────────────
 
   useEffect(() => {
-    if (!workspaceId || !persistenceBranch) return;
-    const key = `${workspaceId}.${persistenceBranch}`;
+    if (!workspaceId || !workspaceBranch) return;
+    const key = `${workspaceId}.${workspaceBranch}`;
     if (hydratedKeyRef.current !== key) return;
 
     const handle = window.setTimeout(() => {
@@ -1160,13 +1333,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           paths: openTabs.map((t) => t.path),
           activePath: activeTabPath,
         };
-        localStorage.setItem(tabsKey(workspaceId, persistenceBranch), JSON.stringify(payload));
+        localStorage.setItem(tabsKey(workspaceId, workspaceBranch), JSON.stringify(payload));
       } catch (err) {
         console.warn('Failed to persist tabs:', err);
       }
     }, PERSIST_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [openTabs, activeTabPath, workspaceId, persistenceBranch]);
+  }, [openTabs, activeTabPath, workspaceId, workspaceBranch]);
 
   const deleteWorkspace = useCallback(async () => {
     if (!workspaceId) return;
@@ -1179,13 +1352,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // swaps the user onto a different branch after a delete.
       const branch = persistenceBranchRef.current ?? undefined;
       const { workspace, fileTree: tree } = await getOrCreateWorkspace(branch);
-      setWorkspaceId(workspace.id);
+      adoptWorkspace(workspace.id, workspaceBranchOf(workspace.id, branch));
       setKbDirName(workspace.kbDirName);
       setFileTree(tree);
     } catch (err) {
       console.error('Failed to delete workspace:', err);
     }
-  }, [workspaceId, closeAllTabs]);
+  }, [workspaceId, closeAllTabs, adoptWorkspace]);
 
   // ── Live updates: react to other users' / agent's edits ───────────────────
   //
@@ -1214,13 +1387,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   // The bus only delivers workspace-scoped events for the currently
   // focused workspace (set by `EventBusFocusBinder`), so the workspace
   // filter on the handler is belt-and-braces.
-  // Track the current workspaceId in a ref so the async readFile handler
-  // below can detect a workspace switch that happened after it was
-  // subscribed but before its fetch resolved — otherwise a stale resolve
-  // would call `setOpenTabs` on the new workspace's tabs, replacing the
-  // wrong file's content with bytes from the old branch.
-  const workspaceIdRef = useRef<string | null>(workspaceId);
-  useEffect(() => { workspaceIdRef.current = workspaceId; }, [workspaceId]);
+  // The async readFile handler below detects a workspace switch that happened
+  // after it was subscribed but before its fetch resolved via `workspaceIdRef`
+  // (declared with the other refs above, advanced by `adoptWorkspace`) —
+  // otherwise a stale resolve would call `setOpenTabs` on the new workspace's
+  // tabs, replacing the wrong file's content with bytes from the old branch.
 
   // Reset the optimistic-overlay state on workspace switch. Without this,
   // pending entries from a partly-uploaded folder on branch A linger in
@@ -1385,6 +1556,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     kbDirName,
     fileTree,
     bootstrapError,
+    workspaceBranch,
+    retryBootstrap,
     openTabs,
     activeTab,
     dirtyTabFilenames,
@@ -1426,7 +1599,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setPersistenceBranch,
     deleteWorkspace,
   }), [
-    workspaceId, kbDirName, fileTree, bootstrapError, openTabs, activeTab, dirtyTabFilenames,
+    workspaceId, kbDirName, fileTree, bootstrapError, workspaceBranch, retryBootstrap, openTabs, activeTab, dirtyTabFilenames,
     openFilePath, openFileContent, openFileSavedContent, hasUnsavedFileChanges, pendingFileContent,
     setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadError, uploadNotice, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,

@@ -73,9 +73,12 @@ describe('membership by link', () => {
     // Not granted on Ops: needs setup, in ORANGE (it locks members out), and
     // says whose job it is.
     expect(withLinkHealth(shared, 'Ops').status).toMatchObject({ state: 'urgent', text: 'Needs setup' });
-    expect(withLinkHealth({ ...shared, owned: true }, 'Ops').status.text).toBe(
+    // "share with plugin members" is the WRITER's note — the repair is an
+    // edit, and a writer need not be an owner to make it.
+    expect(withLinkHealth({ ...shared, canWrite: true }, 'Ops').status.text).toBe(
       'Needs setup: share with plugin members',
     );
+    expect(withLinkHealth({ ...shared, owned: true, canWrite: false }, 'Ops').status.text).toBe('Needs setup');
     // Inline membership never wears it.
     expect(withLinkHealth(inline, 'GTM').status).toBe(OK);
   });
@@ -98,10 +101,10 @@ describe('membership by link', () => {
     const items = [shared, inline, personal, unsetTool] as unknown as LibraryItem[];
     // Ops: one tool to set up, one linked skill its members cannot read.
     expect(brokenLinksOf(items, 'Ops')).toBe(1);
-    expect(attentionOf(items, 'Ops')).toEqual({ total: 2, brokenLinks: 1 });
+    expect(attentionOf(items, 'Ops')).toEqual({ total: 2, brokenLinks: 1, warnings: 0 });
     // GTM's link is granted: nothing to report.
     expect(brokenLinksOf(items, 'GTM')).toBe(0);
-    expect(attentionOf(items, 'GTM')).toEqual({ total: 0, brokenLinks: 0 });
+    expect(attentionOf(items, 'GTM')).toEqual({ total: 0, brokenLinks: 0, warnings: 0 });
     // An inline skill is never a broken link, whatever `granted` says.
     const oddInline = { ...inline, plugins: [{ name: 'GTM', linked: false, granted: false }] };
     expect(brokenLinksOf([oddInline] as unknown as LibraryItem[], 'GTM')).toBe(0);
@@ -112,7 +115,13 @@ describe('membership by link', () => {
     // skill a missing grant is about — so the summary's count decides.
     const items = [shared, inline] as unknown as LibraryItem[];
     expect(brokenLinksOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toBe(2);
-    expect(attentionOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toEqual({ total: 2, brokenLinks: 2 });
+    expect(attentionOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2 }])).toEqual({ total: 2, brokenLinks: 2, warnings: 0 });
+    // What the definition left out counts as attention too, amber like a tool to set up.
+    expect(attentionOf(items, 'GTM', [{ name: 'GTM', brokenLinks: 2, warnings: ['server "docs" left out'] }])).toEqual({
+      total: 3,
+      brokenLinks: 2,
+      warnings: 1,
+    });
     // An older server sends no count: the catalog is the fallback.
     expect(brokenLinksOf(items, 'Ops', [{ name: 'Ops' }])).toBe(1);
     expect(brokenLinksOf(items, 'Ops', [])).toBe(1);

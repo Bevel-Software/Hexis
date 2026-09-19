@@ -55,6 +55,14 @@ export interface GitHubFacadeCredentialsStore {
    * is shown the winner's set — the only one Claude will accept.
    */
   replaceIfCurrent(expectedClientId: string, creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials>;
+  /**
+   * When an admin marked the deployment registered with Claude, or null.
+   * Reads the one unsealed column only: answering "is it registered?" must
+   * never decrypt a secret, and must work without the secrets key at all.
+   */
+  registeredAt(): Promise<Date | null>;
+  /** Record (a date) or clear (null) the registration on the existing row. */
+  setRegisteredAt(at: Date | null): Promise<void>;
 }
 
 const ROW_ID = 'default';
@@ -104,6 +112,22 @@ export class DbGitHubFacadeCredentialsStore implements GitHubFacadeCredentialsSt
       .set(this.seal(creds))
       .where(and(eq(githubFacadeIdentity.id, ROW_ID), eq(githubFacadeIdentity.clientId, expectedClientId)));
     return this.stored('replace');
+  }
+
+  async registeredAt(): Promise<Date | null> {
+    const [row] = await this.db
+      .select({ registeredAt: githubFacadeIdentity.registeredAt })
+      .from(githubFacadeIdentity)
+      .where(eq(githubFacadeIdentity.id, ROW_ID))
+      .limit(1);
+    return row?.registeredAt ?? null;
+  }
+
+  async setRegisteredAt(at: Date | null): Promise<void> {
+    await this.db
+      .update(githubFacadeIdentity)
+      .set({ registeredAt: at })
+      .where(eq(githubFacadeIdentity.id, ROW_ID));
   }
 
   private async stored(after: string): Promise<GitHubFacadeCredentials> {
@@ -169,6 +193,30 @@ export class GitHubFacadeCredentialsService {
     const current = await this.ensure();
     return this.store.replaceIfCurrent(current.clientId, generateCredentials(current.createdAt));
   }
+
+  /**
+   * Whether an admin has said this deployment is registered with their Claude
+   * organization. A boolean and nothing else — this is what every signed-in
+   * person may learn, so the External agent access page can tell them whether
+   * the Cowork route is open yet. No row yet means nobody has even seen the
+   * credentials, so it cannot be registered.
+   */
+  async isRegistered(): Promise<boolean> {
+    return (await this.store.registeredAt()) !== null;
+  }
+
+  /**
+   * Mark the deployment registered (or not). Rotation leaves this alone: it
+   * says the Claude side needs the new values, which is the rotate dialog's
+   * job to tell the admin, not a reason to hide the tutorial from everyone.
+   */
+  async setRegistered(registered: boolean): Promise<boolean> {
+    // The row must exist to carry the flag; registering credentials nobody
+    // generated would describe a registration that cannot have happened.
+    if (registered) await this.ensure();
+    await this.store.setRegisteredAt(registered ? new Date() : null);
+    return this.isRegistered();
+  }
 }
 
 function generateCredentials(createdAt: Date | null): GitHubFacadeCredentials {
@@ -194,8 +242,15 @@ function generateCredentials(createdAt: Date | null): GitHubFacadeCredentials {
 /** For tests: the row kept in memory, with the same conditional writes. */
 export class MemoryGitHubFacadeCredentialsStore implements GitHubFacadeCredentialsStore {
   private row: GitHubFacadeCredentials | null = null;
+  private registered: Date | null = null;
   async load(): Promise<GitHubFacadeCredentials | null> {
     return this.row;
+  }
+  async registeredAt(): Promise<Date | null> {
+    return this.row ? this.registered : null;
+  }
+  async setRegisteredAt(at: Date | null): Promise<void> {
+    if (this.row) this.registered = at;
   }
   async createIfAbsent(creds: GitHubFacadeCredentials): Promise<GitHubFacadeCredentials> {
     this.row ??= creds;

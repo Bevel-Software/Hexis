@@ -1,4 +1,7 @@
 import { eq } from 'drizzle-orm';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('directory-sync');
 import type { AuthUser } from '@bevel-software/platform-shared';
 import type { Database } from '../database/connection.js';
 import { users } from '../database/core-schema.js';
@@ -28,7 +31,7 @@ export async function ensureDirectorySyncBot(db: Database): Promise<AuthUser> {
     .returning();
   if (inserted.length > 0) {
     const row = inserted[0];
-    console.log(`[directory-sync] created sync-bot user id=${row.id} email=${row.email}`);
+    log.info(`created sync-bot user id=${row.id} email=${row.email}`);
     return { id: row.id, email: row.email, name: row.name, avatarUrl: row.avatarUrl ?? undefined };
   }
   const [row] = await db

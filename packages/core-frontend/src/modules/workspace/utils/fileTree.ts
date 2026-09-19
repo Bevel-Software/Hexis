@@ -36,6 +36,29 @@ export function findKbRoot(node: FileTreeEntry | null): FileTreeEntry | null {
   return null;
 }
 
+/**
+ * Whether the tree shows the caller anything of the knowledge base at all.
+ * What does not count: the reserved root folders themselves (every knowledge
+ * base has them, and the server keeps them visible even to a reader who may
+ * open nothing inside), and the root `.bevelignore` an admin sees in a
+ * knowledge base nobody has written to yet. Anything else — a file, or a
+ * folder, at any depth — is an entry on screen.
+ *
+ * A tree that predates the split has no reserved roots: the KB clone's own
+ * folder, when the tree wraps it, is where its content starts.
+ */
+export function treeHasVisibleEntries(tree: FileTreeEntry | null, kbDirName: string | null): boolean {
+  if (!tree) return false;
+  const kbRoot =
+    findKbRoot(tree) ??
+    tree.children?.find((c) => c.type === 'directory' && c.name === kbDirName) ??
+    tree;
+  return (kbRoot.children ?? []).some((c) => {
+    if (c.type === 'file') return c.name !== '.bevelignore';
+    return !KB_ROOT_DIRS.has(c.name) || (c.children?.length ?? 0) > 0;
+  });
+}
+
 /** Documents, as opposed to the data, config and archives beside them. */
 const READABLE_PAGE = /\.(md|markdown)$/i;
 

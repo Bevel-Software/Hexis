@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,7 +47,7 @@ describe('SkillService', () => {
   } as unknown as IAccessControl;
 
   const svc = (access: IAccessControl = allowAll) =>
-    new SkillService(workspaceService, access, KB_DIR);
+    new SkillService(workspaceService, access, KB_DIR, new NodeFs());
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'skills-'));

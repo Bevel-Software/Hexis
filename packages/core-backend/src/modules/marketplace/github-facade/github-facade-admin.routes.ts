@@ -1,4 +1,7 @@
 import express from 'express';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('github-facade');
 import '../../auth/auth.middleware.js'; // Express Request.userId / userEmail augmentation
 import {
   GitHubFacadeUnavailableError,
@@ -21,8 +24,18 @@ export interface GitHubFacadeAdminRoutesDeps {
  * trust the token exchange. Never cached: after a rotation or a sign-out no
  * copy of the old secrets may linger in a browser or a proxy.
  *
- *   GET  /api/admin/github-facade          the credentials and the two URLs
- *   POST /api/admin/github-facade/rotate   new credentials, all of them
+ *   GET  /api/admin/github-facade               the credentials and the two URLs
+ *   POST /api/admin/github-facade/rotate        new credentials, all of them
+ *   PUT  /api/admin/github-facade/registration  `{ registered }` — an admin says so
+ *
+ * And one read that is NOT admin-only, because the External agent access page
+ * shows every signed-in person either the tutorial or "an admin has to set
+ * this up first":
+ *
+ *   GET  /api/github-facade/registration        `{ registered: boolean }`, nothing else
+ *
+ * That answer is built from a boolean, never from the credentials object, so
+ * no future field on the credentials can ride along into it.
  */
 export function createGitHubFacadeAdminRoutes(deps: GitHubFacadeAdminRoutesDeps): express.Router {
   const router = express.Router();
@@ -60,7 +73,7 @@ export function createGitHubFacadeAdminRoutes(deps: GitHubFacadeAdminRoutesDeps)
         res.status(409).json({ error: err.message });
         return;
       }
-      console.error('[github-facade admin]', err);
+      log.error('admin route failed:', { err });
       res.status(500).json({ error: 'Internal error' });
     }
   };
@@ -73,6 +86,25 @@ export function createGitHubFacadeAdminRoutes(deps: GitHubFacadeAdminRoutesDeps)
       return describe();
     }),
   );
+
+  router.get('/github-facade/registration', (req, res) => {
+    // Mounted behind the session middleware; this is belt and braces for a
+    // mount that forgets it — anonymous callers learn nothing.
+    if (!req.userId) {
+      res.status(401).json({ error: 'Sign in first' });
+      return;
+    }
+    return send(res, async () => ({ registered: await deps.credentials.isRegistered() }));
+  });
+
+  router.put('/admin/github-facade/registration', requireAdmin, (req, res) => {
+    const registered = (req.body as { registered?: unknown } | undefined)?.registered;
+    if (typeof registered !== 'boolean') {
+      res.status(400).json({ error: '`registered` must be true or false' });
+      return;
+    }
+    return send(res, async () => ({ registered: await deps.credentials.setRegistered(registered) }));
+  });
 
   return router;
 }

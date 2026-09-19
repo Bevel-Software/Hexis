@@ -1,7 +1,11 @@
 import express from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('auth');
 import type { AuthService } from './auth.service.js';
 import { AUTH_COOKIE_NAME } from './auth.middleware.js'; // also imports Express Request augmentation
 import { FixedWindowRateLimiter } from './rate-limit.js';
+import { canonicalEmail } from '../../shared/email-identity.js';
 
 /**
  * Max age of the JWT cookie (seconds). Matches the JWT's own `expiresIn:
@@ -17,9 +21,11 @@ export const AUTH_COOKIE_MAX_AGE_S = 7 * 24 * 60 * 60;
  * (e.g. the enterprise "Sign in with Microsoft", owned by its sharepoint
  * module). A plugin mounts its own routes under `/auth/<key>/…` and is
  * advertised to the login screen by the capability probe, which renders one
- * button per provider from `label` + `startPath`. A plugin is only present
- * when its machinery is configured AND the instance hasn't switched it off —
- * presence means enabled.
+ * button per provider from `label` + `startPath`. A plugin is advertised while
+ * it is present and — if it implements {@link AuthProviderPlugin.isEnabled} —
+ * says it is enabled. That second half lets a provider configured at runtime
+ * (the generic OIDC one, from the setup screen) mount once at boot and appear
+ * the moment its configuration is complete.
  */
 export interface AuthProviderPlugin {
   /** Probe key + route namespace (e.g. 'oidc' → /auth/oidc/…). */
@@ -28,6 +34,11 @@ export interface AuthProviderPlugin {
   readonly label: string;
   /** Browser navigation target that starts the flow (e.g. '/api/auth/oidc/login'). */
   readonly startPath: string;
+  /**
+   * Whether the login screen should offer it right now; asked on every probe.
+   * Absent means always — a plugin whose presence is its enablement.
+   */
+  isEnabled?(): boolean;
   /** Mount the provider's routes (login redirect, callback) on the auth router. */
   mountRoutes(router: express.Router, authService: AuthService): void;
 }
@@ -76,7 +87,7 @@ export function createAuthRoutes(
       res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;
     }
-    const pairKey = `${ip}|${email.trim().toLowerCase()}`;
+    const pairKey = `${ip}|${canonicalEmail(email)}`;
     if (!loginPairLimiter.consume(pairKey)) {
       res.status(429).json({ error: 'Too many attempts. Try again later.' });
       return;
@@ -103,7 +114,7 @@ export function createAuthRoutes(
       res.json(result);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Login error:', msg);
+      log.error('Login error:', { detail: msg });
       res.status(401).json({ error: 'Authentication failed' });
     }
   });
@@ -114,7 +125,9 @@ export function createAuthRoutes(
   router.get('/auth/providers', (_req, res) => {
     res.json({
       password: passwordLoginEnabled,
-      sso: providers.map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
+      sso: providers
+        .filter((p) => p.isEnabled?.() ?? true)
+        .map((p) => ({ key: p.key, label: p.label, startPath: p.startPath })),
     });
   });
 
@@ -180,7 +193,7 @@ export function createAuthRoutes(
       // A raw driver message here would hand an unauthenticated-adjacent
       // caller the schema, the host, or the connection string.
       const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Onboarding-done error:', msg);
+      log.error('Onboarding-done error:', { detail: msg });
       res.status(500).json({ error: 'Could not save that' });
     }
   });

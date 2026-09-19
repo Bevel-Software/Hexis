@@ -13,6 +13,8 @@
 
 import { parse as parseFullYaml } from 'yaml';
 import { pluginManifestName } from '@bevel-software/platform-shared';
+import { canonicalEmail } from '../../shared/email-identity.js';
+import { scanFrontmatter } from './frontmatter-lines.js';
 import type { GroupsIndex } from './group-files.js';
 
 // ---------------------------------------------------------------------------
@@ -28,14 +30,16 @@ export const ADMIN_CANONICAL = 'admin';
  *
  * `read` controls who may VIEW a path (the file viewer, embed surface, and
  * the agent's read tools). It is **default-deny**: a path with no effective
- * `read:` or `owner:` grant is not readable. To make content public, list the
- * built-in role `everyone` under `read:`.
+ * `read:`, `write:`, `download:` or `owner:` grant is not readable. To make
+ * content public, list the built-in role `everyone` under `read:`.
  *
  * The verbs nest: `owner` is a superset of `read` + `write` + `download`, and
- * `write` is itself a superset of `read` (anyone who can edit can view). An
- * `owner` grant therefore confers all three lower verbs, a `write` grant
- * additionally confers `read`, and `owner` also marks the principal as a
- * contact point for the node (surfaced in the UI so users know who to ask).
+ * `write` and `download` are each a superset of `read` (anyone who can edit, or
+ * who may save a copy, can view). An `owner` grant therefore confers all three
+ * lower verbs, and a `write` or `download` grant additionally confers `read`;
+ * `owner` also marks the principal as a contact point for the node (surfaced in
+ * the UI so users know who to ask). `write` and `download` stay independent of
+ * each other — neither confers the other.
  * See `sourceVerbsFor` for how these implications fold into resolution.
  */
 export const KNOWN_VERBS = ['read', 'write', 'download', 'owner'] as const;
@@ -47,21 +51,34 @@ export const EVERYONE_DISPLAY = 'Everyone';
 
 /**
  * Verbs whose entries contribute to resolving `verb`, target verb first.
- * `owner` implies `read`, `write`, and `download`; `write` additionally
- * implies `read`. So resolving `read` folds in `write` and `owner`, resolving
- * `write`/`download` folds in `owner`, and resolving `owner` uses only `owner`.
+ * `owner` implies `read`, `write`, and `download`; `write` and `download` each
+ * additionally imply `read`. So resolving `read` folds in `write`, `download`
+ * and `owner`, resolving `write`/`download` folds in `owner`, and resolving
+ * `owner` uses only `owner`.
+ *
+ * `download` folds into `read` because the pair is otherwise a DEAD combination:
+ * the raw-file route read-gates before it download-gates, so a download-only
+ * grant let its holder neither open the file nor save it. Someone trusted with a
+ * copy on their own disk is trusted to look at it in the app.
  *
  * The implication is **grant-only** (see `resolveAtPath`): a superset grant
- * confers the lower verb, but a superset *denial* does not — `deny write` says
- * nothing about `read`, so it never strips a separate read grant. The target
- * verb itself contributes both its grants and its denials.
+ * confers the lower verb, but a superset *denial* does not — `deny write` and
+ * `deny download` say nothing about `read`, so neither ever strips a separate
+ * read grant. The target verb itself contributes both its grants and its denials.
+ *
+ * THIS TABLE IS THE ONLY COPY. Every place that folds verbs calls it:
+ * `resolveAtPath`, the plugin roster synthesis in `plugin-principals.ts` that
+ * decides who lands in `plugin/<slug>/read`, and `personal-spaces.step.ts`
+ * asking whether a space is already open. A second fold written out by hand
+ * somewhere else is how one of them comes to disagree with resolution about
+ * the same file — add a verb here, not there.
  */
 export function sourceVerbsFor(verb: Verb): Verb[] {
   switch (verb) {
     case 'owner':
       return ['owner'];
     case 'read':
-      return ['read', 'write', 'owner'];
+      return ['read', 'write', 'download', 'owner'];
     default:
       return [verb, 'owner'];
   }
@@ -494,26 +511,18 @@ export function parseYamlSubset(
 export function extractFrontmatter(
   text: string,
 ): { ok: true; frontmatter: string } | { ok: false; error: string } {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') {
-    return { ok: false, error: 'expected `---` on the first line' };
+  const scan = scanFrontmatter(text);
+  if (scan.kind === 'none') return { ok: false, error: 'expected `---` on the first line' };
+  if (scan.kind === 'unterminated') {
+    return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
   }
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      return { ok: true, frontmatter: lines.slice(1, i).join('\n') };
-    }
-  }
-  return { ok: false, error: 'unterminated frontmatter — no closing `---` found' };
+  return { ok: true, frontmatter: scan.fm.join('\n') };
 }
 
-/** The text AFTER the closing frontmatter fence ('' when there is no fence). */
+/** The text AFTER the closing frontmatter fence ('' when there is no closed block). */
 export function bodyAfterFrontmatter(text: string): string {
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 0 || lines[0].trim() !== '---') return '';
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return lines.slice(i + 1).join('\n');
-  }
-  return '';
+  const scan = scanFrontmatter(text);
+  return scan.kind === 'frontmatter' ? scan.post.slice(1).join('\n') : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -526,9 +535,13 @@ export function canonicalRoleName(name: string): string {
   return canonicalPluginToken(name) ?? name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-export function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
+/**
+ * Re-exported from `shared/email-identity.ts`, where it lives beside the
+ * identity HASH that must normalise identically. The grammar keeps the name
+ * because its parsers and splices read as prose with it, and its own callers
+ * keep importing it from here.
+ */
+export { canonicalEmail };
 
 // ---------------------------------------------------------------------------
 // Entry parser

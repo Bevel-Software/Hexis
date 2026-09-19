@@ -18,6 +18,15 @@
  */
 
 import path from 'node:path';
+import { logger } from '../../shared/logging.js';
+
+// One logger per tag this file has always written under, so a line's prefix
+// is unchanged for a reader and its `module` field is exact for a filter.
+const log = logger('workflow');
+const syncLog = logger('sync');
+const lockLog = logger('lock');
+const crLog = logger('cr');
+const mergeLog = logger('merge');
 import { promises as fs } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -31,20 +40,28 @@ import type {
   Change,
   ChangeInput,
   ChangeRequest,
+  ChangeRequestApplyFailureKind,
   ChangeRequestComment,
   ChangeRequestDetail,
   ChangeRequestState,
   ChangedFile,
   FileApproval,
   FileLock,
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
   IWorkflowService,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
   RemoteSyncPullResult,
 } from '@bevel-software/platform-shared';
-import { isProtectedBranch, DEFAULT_BRANCH } from '@bevel-software/platform-shared';
-import { and, eq, or } from 'drizzle-orm';
+import {
+  isProtectedBranch,
+  DEFAULT_BRANCH,
+  isFolderPlaceholder,
+  folderPlaceholderPath,
+} from '@bevel-software/platform-shared';
+import { and, eq, inArray, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import type { Database } from '../database/connection.js';
 import { changeRequests } from '../database/schema.js';
 import type { GitService } from './git/git.service.js';
@@ -54,13 +71,14 @@ import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { FileLockService } from './file-lock.service.js';
+import { canonicalFileIdentity } from '../../shared/canonical-file-identity.js';
 import { PendingCommitsService } from './pending-commits.service.js';
 import type { WorkflowEventBus } from './event-bus.js';
 import { sanitizeError } from './sanitize-error.js';
 import type { FileChangeNotifier } from '../kb-fs/file-change-notifier.js';
 import { WorkflowHooks } from './workflow-hooks.js';
 import { WorkspaceMutex } from '../kb-fs/mutex.js';
-import { hashEmail } from '../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../shared/email-identity.js';
 import {
   ChangeRequestConflictsError,
   DuplicateChangeRequestError,
@@ -73,11 +91,15 @@ import {
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
 
 /** The partial unique index that enforces one OPEN change request per (source, target) pair. */
 const OPEN_PAIR_CONSTRAINT = 'change_requests_open_pair_unq';
+
+/** Cap on a persisted apply refusal — long enough to name the files a gate waits on. */
+const APPLY_FAILURE_MAX_LEN = 1000;
 
 /**
  * True only for a Postgres unique violation (23505) on the open-CR-per-pair
@@ -160,7 +182,9 @@ const formatWriter = (u: { name: string; email: string }): string =>
  * the overflow is collapsed into a single deduped summary of every eligible
  * approver across the change. This keeps the body bounded regardless of how
  * many files the change touches (see {@link MAX_AFFECTED_PATHS_LISTED}).
- * Returns '' when no path has resolvable eligibility.
+ * Returns '' when no path has resolvable eligibility. The empty-folder
+ * placeholder is never listed or counted: it is not content, and no one
+ * reviews it.
  */
 export function formatAffectedOwnersBlock(
   paths: string[],
@@ -172,6 +196,7 @@ export function formatAffectedOwnersBlock(
   const allUsers = new Map<string, string>(); // email -> display, deduped
   let eligible = 0;
   for (const p of paths) {
+    if (isFolderPlaceholder(p)) continue;
     const info = resolved.get(p);
     if (!info) continue;
     const parts: string[] = [];
@@ -202,6 +227,28 @@ export function formatAffectedOwnersBlock(
     );
   }
   return out.join('\n');
+}
+
+/** Git commit subjects are capped at 200 characters (`GitService.commitFile`). */
+const MAX_COMMIT_SUBJECT = 200;
+
+/**
+ * A commit subject that always fits: `full` when it does, else `short` (the
+ * file's name instead of its path, a count instead of every request), cut to
+ * the cap as a last resort. A long path or many requests on one branch must
+ * never fail the commit — and with it the whole folder removal.
+ */
+function commitSubject(full: string, short: string): string {
+  if (full.length <= MAX_COMMIT_SUBJECT) return full;
+  if (short.length <= MAX_COMMIT_SUBJECT) return short;
+  return `${short.slice(0, MAX_COMMIT_SUBJECT - 1)}…`;
+}
+
+const basenameOf = (repoRelPath: string): string => repoRelPath.split('/').pop() ?? repoRelPath;
+
+/** `Docs/Sub` and `Docs/Sub/` both → `Docs/Sub/`: a prefix that cannot match `Docs/Subway`. */
+function folderPrefix(folder: string): string {
+  return `${folder.replace(/\/+$/, '')}/`;
 }
 
 export class WorkflowService implements IWorkflowService {
@@ -290,11 +337,11 @@ export class WorkflowService implements IWorkflowService {
         .sweepOrphanedWorkspaces(branches.map((b) => b.name))
         .then(({ removed }) => {
           if (removed.length > 0) {
-            console.log(`[workflow] swept ${removed.length} orphaned workspace(s):`, removed);
+            log.info(`swept ${removed.length} orphaned workspace(s):`, { removed });
           }
         })
         .catch((err) => {
-          console.warn('[workflow] orphan workspace sweep failed:', err);
+          log.warn('orphan workspace sweep failed:', { err });
         });
     }
     return branches;
@@ -453,10 +500,7 @@ export class WorkflowService implements IWorkflowService {
         await this.workspaceService.deleteWorkspace(branchWorkspaceId);
       }
     } catch (err) {
-      console.warn(
-        `[workflow] could not retire workspace clone of deleted branch "${name}":`,
-        err,
-      );
+      log.warn(`could not retire workspace clone of deleted branch "${name}":`, { err });
     }
   }
 
@@ -569,6 +613,15 @@ export class WorkflowService implements IWorkflowService {
    */
   private readonly owedAnnouncements = new Map<string, { after: string; changedPaths: string[] }>();
 
+  /**
+   * The latest RUNNING apply attempt per change-request number (see
+   * `beginApplyAttempt`). Entries leave when their attempt ends, so the map
+   * holds only attempts in flight, never every number anyone ever posted.
+   */
+  private readonly applyAttempts = new Map<number, number>();
+  /** Process-wide attempt counter: a token is never reissued, even after its entry leaves. */
+  private applyAttemptSeq = 0;
+
   async syncWorkspaceFromRemote(workspaceId: string): Promise<BranchSyncOutcome> {
     const branch = branchForWorkspaceId(workspaceId);
     const id = workspaceIdForBranch(branch);
@@ -594,7 +647,7 @@ export class WorkflowService implements IWorkflowService {
         // is a different tree, and replaying the old paths against it would
         // announce changes that never happened there.
         this.owedAnnouncements.delete(id);
-        console.log(`[sync] branch "${branch}" no longer exists on the host`);
+        syncLog.info(`branch "${branch}" no longer exists on the host`);
         return { branch, outcome: 'remote-gone' };
       }
       if (err instanceof PullRebaseConflictError) {
@@ -607,12 +660,12 @@ export class WorkflowService implements IWorkflowService {
         // next clean pull or push.
         await this.queuePullConflictRecovery(gitId, err);
         const message = syncConflictMessage(branch, err.conflictedPaths);
-        console.warn(`[sync] ${message}`);
+        syncLog.warn(message);
         this.noteGitSyncFailed(gitId, branch, err, { paths: err.conflictedPaths, message });
         return { branch, outcome: 'conflict', conflictedPaths: err.conflictedPaths, error: message };
       }
       const message = sanitizeError(err);
-      console.warn(`[sync] pull failed for branch "${branch}": ${message}`);
+      syncLog.warn(`pull failed for branch "${branch}": ${message}`);
       this.noteGitSyncFailed(gitId, branch, err);
       return { branch, outcome: 'error', error: message };
     }
@@ -672,7 +725,7 @@ export class WorkflowService implements IWorkflowService {
       // move HEAD again, so it must find the debt here rather than in the shas.
       this.owedAnnouncements.set(id, announce);
       const message = sanitizeError(err);
-      console.warn(`[sync] pulled "${branch}" but could not announce it: ${message}`);
+      syncLog.warn(`pulled "${branch}" but could not announce it: ${message}`);
       return { branch, outcome: 'error', error: message };
     }
     this.owedAnnouncements.delete(id);
@@ -719,15 +772,12 @@ export class WorkflowService implements IWorkflowService {
         authorName: user?.name ?? RECOVERY_BOT_NAME,
       });
       if (queued) {
-        console.warn(
-          `[workflow] pull conflict on ws=${workspaceId} branch=${err.branch} (${err.conflictedPaths.join(', ')}) — queued background recovery`,
+        log.warn(
+          `pull conflict on ws=${workspaceId} branch=${err.branch} (${err.conflictedPaths.join(', ')}) — queued background recovery`,
         );
       }
     } catch (queueErr) {
-      console.error(
-        `[workflow] failed to queue pull-conflict recovery for ws=${workspaceId}:`,
-        queueErr instanceof Error ? queueErr.message : queueErr,
-      );
+      log.error(`failed to queue pull-conflict recovery for ws=${workspaceId}:`, { err: queueErr });
     }
   }
 
@@ -795,6 +845,23 @@ export class WorkflowService implements IWorkflowService {
     toBranch: string,
   ): Promise<string> {
     return this.git.diffFileBetweenBranches(workspaceId, path, fromBranch, toBranch);
+  }
+
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null> {
+    return this.git.readFileAtForkPoint(workspaceId, baseBranch, sha, path);
+  }
+
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null> {
+    return this.git.mergeBaseForPr(workspaceId, baseBranch, headBranch);
   }
 
   showFileAtChange(workspaceId: string, path: string, sha: string): Promise<string> {
@@ -865,13 +932,26 @@ export class WorkflowService implements IWorkflowService {
 
   // ── File locks ────────────────────────────────────────────────────────────
 
+  // Every method below canonicalises the caller's spelling into ONE file
+  // identity before it does anything with it. `FileLockService` canonicalises
+  // too, and has to: it is the coordination point and a caller can reach it
+  // without coming through here. The reason to do it again at this layer is
+  // that the path does not only key a lock row here. It is also what the
+  // permission gate is evaluated against, what `commitFile` stages, what the
+  // commit queue enqueues, and what rides out on every `lock-*` event. Left
+  // raw, a checkpoint on `./x//a.md` would find its lock and then fail at the
+  // commit, and a release would enqueue a row the worker keys differently from
+  // the lock it just dropped. Canonicalising is idempotent, so the second pass
+  // inside the lock service is free.
+
   async acquireLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
     opts?: { coordination?: boolean },
   ): Promise<AcquireLockResult> {
+    const targetPath = canonicalFileIdentity(rawPath);
     // **Permission check at lock acquisition, not at commit time.** Under the
     // "disk is the source of truth" rule, once a write has landed on disk we
     // must never reject the commit that publishes it — otherwise we'd be
@@ -904,8 +984,8 @@ export class WorkflowService implements IWorkflowService {
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {
-      console.log(
-        `[lock] ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → acquired`,
+      lockLog.info(
+        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → acquired`,
       );
       // Only fire on successful acquisition — a contention "false" return
       // means nothing observable changed for other users (someone else
@@ -920,8 +1000,8 @@ export class WorkflowService implements IWorkflowService {
         holderName: user.name,
       });
     } else {
-      console.log(
-        `[lock] ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderName} (${result.lock.holderUserId})`,
+      lockLog.info(
+        `ACQUIRE ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → contended, held by ${result.lock.holderName} (${result.lock.holderUserId})`,
       );
     }
     return result;
@@ -930,18 +1010,19 @@ export class WorkflowService implements IWorkflowService {
   async heartbeatLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<FileLock> {
+    const targetPath = canonicalFileIdentity(rawPath);
     try {
       const lock = await this.fileLocks.heartbeat(workspaceId, branch, targetPath, user);
-      console.log(
-        `[lock] HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ok (expires ${lock.expiresAt})`,
+      lockLog.info(
+        `HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ok (expires ${lock.expiresAt})`,
       );
       return lock;
     } catch (err) {
-      console.warn(
-        `[lock] HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → FAIL ${err instanceof Error ? err.message : err}`,
+      lockLog.warn(
+        `HEARTBEAT ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → FAIL ${err instanceof Error ? err.message : err}`,
       );
       throw err;
     }
@@ -957,10 +1038,11 @@ export class WorkflowService implements IWorkflowService {
   async commitFileWhileLocked(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
     summary?: string,
   ): Promise<Change | null> {
+    const targetPath = canonicalFileIdentity(rawPath);
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
       throw new WorkflowValidationError(
@@ -1011,9 +1093,9 @@ export class WorkflowService implements IWorkflowService {
             this.noteGitSyncOk(workspaceId, branch);
           } catch (recoveryErr) {
             recoveryError = recoveryErr;
-            console.warn(
-              '[workflow] autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
-              recoveryErr instanceof Error ? recoveryErr.message : recoveryErr,
+            log.warn(
+              'autosave cooperative recovery (pull-rebase) failed; leaving the unpushed commit for the next save / releaseLock to surface:',
+              { err: recoveryErr },
             );
           }
         }
@@ -1032,10 +1114,7 @@ export class WorkflowService implements IWorkflowService {
           if (!looksLikeNonFastForward) {
             this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? err);
           }
-          console.warn(
-            '[workflow] push after autosave commit failed (commit landed locally):',
-            detail,
-          );
+          log.warn('push after autosave commit failed (commit landed locally):', { detail });
         }
       }
       this.events?.emit({
@@ -1084,21 +1163,20 @@ export class WorkflowService implements IWorkflowService {
   async releaseLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
+    const targetPath = canonicalFileIdentity(rawPath);
     // Ownership check — the lock service's `release` is idempotent and
     // would silently no-op for a non-holder, but we'd still enqueue a
     // commit attributed to whoever called us. The guard rejects callers
     // who don't actually hold the row so impersonation can't enqueue
     // commits as a third party.
-    console.log(
-      `[lock] RELEASE start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
-    );
+    lockLog.info(`RELEASE start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`);
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
-      console.warn(
-        `[lock] RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderName} (${lock.holderUserId})` : 'no lock row'}`,
+      lockLog.warn(
+        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${lock ? `held by ${lock.holderName} (${lock.holderUserId})` : 'no lock row'}`,
       );
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}": not held by you (or no longer exists).`,
@@ -1115,8 +1193,8 @@ export class WorkflowService implements IWorkflowService {
     // and `releaseLockUntouched`. Worst case a refused caller strands the
     // row until its TTL.
     if (lock.mode === 'coordination') {
-      console.warn(
-        `[lock] RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → coordination hold (no commit may be enqueued)`,
+      lockLog.warn(
+        `RELEASE refused ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → coordination hold (no commit may be enqueued)`,
       );
       throw new WorkflowValidationError(
         `Cannot release lock on "${targetPath}" with a commit: it is a coordination hold. Use releaseLockNoCommit.`,
@@ -1141,8 +1219,8 @@ export class WorkflowService implements IWorkflowService {
       authorName: user.name,
     });
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
-    console.log(
-      `[lock] RELEASE done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} (commit queued for background worker)`,
+    lockLog.info(
+      `RELEASE done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} (commit queued for background worker)`,
     );
     // The `file-changed` SSE event used to fire here after the synchronous
     // commit landed, carrying the new sha. Under the queue model the
@@ -1244,7 +1322,7 @@ export class WorkflowService implements IWorkflowService {
     // emitted id so every consumer sees one spelling.
     const id = branchForWorkspaceId(workspaceId);
     if (!this.gitSyncFailing.delete(id)) return;
-    console.log(`[workflow] git sync recovered for workspace=${id} branch=${branch}`);
+    log.info(`git sync recovered for workspace=${id} branch=${branch}`);
     this.events?.emit({ kind: 'git-sync-recovered', workspaceId: id, branch });
   }
 
@@ -1357,15 +1435,15 @@ export class WorkflowService implements IWorkflowService {
           await this.git.push(workspaceId, user, opts);
           recovered = true;
           this.noteGitSyncOk(workspaceId, branch);
-          console.log(
-            `[workflow] non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,
+          log.info(
+            `non-fast-forward push recovered via pull --rebase for workspace=${workspaceId} branch=${branch} path=${targetPath}`,
           );
         } catch (recoveryErr) {
           recoveryError = recoveryErr;
           recoveryDetail = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
-          console.warn(
-            `[workflow] cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
-            recoveryDetail,
+          log.warn(
+            `cooperative recovery (pull-rebase) failed for workspace=${workspaceId} user=${user.id}; handing off to agent:`,
+            { detail: recoveryDetail },
           );
         }
       }
@@ -1378,9 +1456,9 @@ export class WorkflowService implements IWorkflowService {
         // first rejection may be a stale non-fast-forward the pull already
         // cured); when it was skipped, the first error is all there is.
         this.noteGitSyncFailed(workspaceId, branch, recoveryError ?? firstPushErr);
-        console.warn(
-          `[workflow] push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
-          firstDetail,
+        log.warn(
+          `push failed for workspace=${workspaceId} user=${user.id}; throwing PushNeedsAgentResolutionError so the frontend can hand off to the agent:`,
+          { detail: firstDetail },
         );
         throw new PushNeedsAgentResolutionError(branch, targetPath, firstDetail, recoveryDetail);
       }
@@ -1399,22 +1477,23 @@ export class WorkflowService implements IWorkflowService {
   async releaseLockNoCommit(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
+    const targetPath = canonicalFileIdentity(rawPath);
     // Verify ownership first so the emit only fires when something
     // observable actually changed. `fileLocks.release` silently no-ops
     // when the caller doesn't hold the row (idempotent-by-design), so
     // without this guard a non-holder calling this method would emit
     // `lock-released` and trick every other client into clearing their
     // "Locked by X" banner even though the lock is still held.
-    console.log(
-      `[lock] RELEASE-NO-COMMIT start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
+    lockLog.info(
+      `RELEASE-NO-COMMIT start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
     );
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
-      console.log(
-        `[lock] RELEASE-NO-COMMIT no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
+      lockLog.info(
+        `RELEASE-NO-COMMIT no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
       );
       return;
     }
@@ -1442,10 +1521,9 @@ export class WorkflowService implements IWorkflowService {
       } catch (err) {
         // Queue unreadable — fall back to the discard (the strict default:
         // never let a coordination hold end with publishable stray bytes).
-        console.warn(
-          `[workflow] pending-commit lookup failed for workspace=${workspaceId} path=${targetPath}; discarding:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`pending-commit lookup failed for workspace=${workspaceId} path=${targetPath}; discarding:`, {
+          err,
+        });
       }
     }
     let discarded = false;
@@ -1457,15 +1535,14 @@ export class WorkflowService implements IWorkflowService {
         // Best-effort: a discard failure is logged but doesn't block the
         // lock release. Worst case the working tree stays dirty for one
         // path until the next save on it cleans up.
-        console.warn(
-          `[workflow] discardPath failed for workspace=${workspaceId} branch=${branch} path=${targetPath}:`,
-          err instanceof Error ? err.message : err,
-        );
+        log.warn(`discardPath failed for workspace=${workspaceId} branch=${branch} path=${targetPath}:`, {
+          err,
+        });
       }
     }
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
-    console.log(
-      `[lock] RELEASE-NO-COMMIT done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${discarded ? 'discarded + released' : 'released (working tree untouched)'}`,
+    lockLog.info(
+      `RELEASE-NO-COMMIT done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → ${discarded ? 'discarded + released' : 'released (working tree untouched)'}`,
     );
     this.events?.emit({
       kind: 'lock-released',
@@ -1504,22 +1581,23 @@ export class WorkflowService implements IWorkflowService {
   async releaseLockUntouched(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
     user: AuthUser,
   ): Promise<void> {
-    console.log(
-      `[lock] RELEASE-UNTOUCHED start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
+    const targetPath = canonicalFileIdentity(rawPath);
+    lockLog.info(
+      `RELEASE-UNTOUCHED start ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id}`,
     );
     const lock = await this.fileLocks.get(workspaceId, branch, targetPath);
     if (!lock || lock.holderUserId !== user.id) {
-      console.log(
-        `[lock] RELEASE-UNTOUCHED no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
+      lockLog.info(
+        `RELEASE-UNTOUCHED no-op ws=${workspaceId} path=${targetPath} → ${lock ? `held by ${lock.holderName}` : 'no lock row'}`,
       );
       return;
     }
     await this.fileLocks.release(workspaceId, branch, targetPath, user);
-    console.log(
-      `[lock] RELEASE-UNTOUCHED done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → released (disk + queue untouched)`,
+    lockLog.info(
+      `RELEASE-UNTOUCHED done ws=${workspaceId} branch=${branch} path=${targetPath} user=${user.id} → released (disk + queue untouched)`,
     );
     this.events?.emit({
       kind: 'lock-released',
@@ -1542,9 +1620,9 @@ export class WorkflowService implements IWorkflowService {
   getLock(
     workspaceId: string,
     branch: string,
-    targetPath: string,
+    rawPath: string,
   ): Promise<FileLock | null> {
-    return this.fileLocks.get(workspaceId, branch, targetPath);
+    return this.fileLocks.get(workspaceId, branch, canonicalFileIdentity(rawPath));
   }
 
   // ── Change Requests ───────────────────────────────────────────────────────
@@ -1700,7 +1778,7 @@ export class WorkflowService implements IWorkflowService {
           targetBranch: input.targetBranch,
           title: input.title.trim(),
           body,
-          authorEmail: user.email.trim().toLowerCase(),
+          authorEmail: canonicalEmail(user.email),
           authorName: user.name,
         })
         .returning({ number: changeRequests.number });
@@ -1786,6 +1864,12 @@ export class WorkflowService implements IWorkflowService {
    * automatically — they're pinned to the head SHA, and any new commit on
    * source drops the per-file approval gate (handled by the existing
    * approval staleness check). No special bookkeeping needed here.
+   *
+   * Authority: the request's author, or anyone who may apply it — the
+   * detail's `viewerCanUpdate`, computed for THIS caller, so the button and
+   * the enforcement read one predicate. A conflicting merge is aborted
+   * inside `mergeFromOrigin`: nothing is committed or pushed, and the branch
+   * is exactly what it was.
    */
   async updateFromTarget(
     workspaceId: string,
@@ -1805,6 +1889,29 @@ export class WorkflowService implements IWorkflowService {
         { kind: 'change-request-not-open', state: detail.state },
       );
     }
+    if (!detail.viewerCanUpdate) {
+      throw new WorkflowDomainError(
+        'Only the author of this change request, or someone who may apply it, can update it.',
+        403,
+      );
+    }
+    // Taken BEFORE the head moves (the pull below can move it too): only a
+    // refusal recorded earlier describes the revision this replaces (see
+    // `clearApplyFailure`).
+    const headMovedAfter = new Date();
+    // Freshen the source checkout first, and let a failure stop the Update:
+    // merging onto a head behind its own origin branch would leave a local
+    // merge commit that then cannot push, stranding it in the workspace. A
+    // rebase conflict hands the stranded saves to recovery, as every other
+    // pull does, before the refusal reaches the caller.
+    try {
+      await this.pullWorkspace(workspaceId);
+    } catch (err) {
+      if (err instanceof PullRebaseConflictError) {
+        await this.queuePullConflictRecovery(workspaceId, err, user);
+      }
+      throw err;
+    }
     const outcome = await this.git.mergeFromOrigin(
       workspaceId,
       detail.branch,
@@ -1818,6 +1925,8 @@ export class WorkflowService implements IWorkflowService {
     // already up to date there's nothing to share — short-circuit the push.
     if (!outcome.alreadyUpToDate) {
       await this.trackedPush(workspaceId, user);
+      // The source head moved: the refusal described a revision that is gone.
+      await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     }
     this.prs.invalidateDetailCache(number);
     const refreshed = await this.prs.getPrDetail(number, {
@@ -1874,6 +1983,8 @@ export class WorkflowService implements IWorkflowService {
     authorIdHash: string | null,
     workspaceId: string,
   ): Promise<FileApproval[]> {
+    // Taken BEFORE the approval lands (see `clearApplyFailure`).
+    const approvedAfter = new Date();
     const approvals = await this.reviewWorkflow.approveFile(
       number,
       path,
@@ -1884,6 +1995,14 @@ export class WorkflowService implements IWorkflowService {
       authorIdHash,
       workspaceId,
     );
+    // A recorded approval can answer a GATE refusal only — a conflict or a git
+    // error still describes the request — and only once the gate that refused
+    // would now pass: approving one file of several leaves the rest waiting,
+    // and the refusal naming them still stands. Warnings count too, since an
+    // apply without bypass is refused on them.
+    if (this.gateWouldPass(number, approvals)) {
+      await this.clearApplyFailure(number, { kinds: ['gate'], recordedBefore: approvedAfter });
+    }
     this.prs.invalidateDetailCache(number);
     this.events?.emit({
       kind: 'approval-changed',
@@ -1927,6 +2046,29 @@ export class WorkflowService implements IWorkflowService {
   }
 
   /**
+   * The folder placeholder a file's revert takes along, or null. When a
+   * request removed a folder's last file, the placeholder that keeps the
+   * folder came with it (git may even pair them as one rename); reverting the
+   * file alone would leave that hidden placeholder as a change nobody can
+   * see. So it is reverted too — when the request changed it, and only when
+   * that cannot leave the folder with nothing in git: either the file comes
+   * back, or the base had the placeholder to restore.
+   */
+  private async placeholderRevertedWith(
+    workspaceId: string,
+    mergeBase: string,
+    repoRelPath: string,
+    changedPaths: string[],
+  ): Promise<string | null> {
+    if (isFolderPlaceholder(repoRelPath)) return null;
+    const slash = repoRelPath.lastIndexOf('/');
+    const placeholder = folderPlaceholderPath(slash === -1 ? '' : repoRelPath.slice(0, slash));
+    if (!changedPaths.includes(placeholder)) return null;
+    if (await this.git.pathExistsAtRef(workspaceId, mergeBase, repoRelPath)) return placeholder;
+    return (await this.git.pathExistsAtRef(workspaceId, mergeBase, placeholder)) ? placeholder : null;
+  }
+
+  /**
    * Decline ONE file of an open change request: restore its merge-base
    * version on the SOURCE branch (commit + push), so the file drops out of
    * the request's three-dot diff — the same mechanics
@@ -1955,6 +2097,8 @@ export class WorkflowService implements IWorkflowService {
     }
     const baseBranch = summary.base;
     const headBranch = summary.branch;
+    // Taken BEFORE the head moves (see `clearApplyFailure`).
+    const headMovedAfter = new Date();
 
     const ws = await this.workspaceService.getOrCreateForBranch(headBranch);
     // Best-effort freshen of the source checkout: the diff below reads origin
@@ -1987,40 +2131,371 @@ export class WorkflowService implements IWorkflowService {
       throw new WorkflowDomainError('These branches share no history to revert to.', 422);
     }
 
+    const placeholder = await this.placeholderRevertedWith(ws.id, mergeBase, repoRelPath, paths);
+    const reverted = placeholder ? [repoRelPath, placeholder] : [repoRelPath];
+
     // Same per-file lock every other editor of this path takes — a concurrent
     // save must not race the restore between write and commit.
-    const lockPath = `${this.kbDirName}/${repoRelPath}`;
-    const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
-    if (!lock.acquired) {
-      throw new WorkflowDomainError(
-        `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
-        409,
-      );
-    }
+    const held: string[] = [];
+    let revertError: { reason: unknown } | null = null;
     try {
-      await this.git.restorePathFromRef(ws.id, mergeBase, repoRelPath);
-      await this.git.commitFile(
-        ws.id,
-        user,
-        repoRelPath,
-        `Revert ${repoRelPath} (declined in change request #${number})`,
-        true, // skipValidator — this restores an already-validated base version
-      );
+      for (const p of reverted) {
+        const lockPath = `${this.kbDirName}/${p}`;
+        const lock = await this.fileLocks.acquire(ws.id, headBranch, lockPath, user);
+        if (!lock.acquired) {
+          throw new WorkflowDomainError(
+            p === repoRelPath
+              ? `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`
+              : `The folder of ${repoRelPath} is being changed by ${lock.lock.holderName} — try again once the edit settles.`,
+            409,
+          );
+        }
+        held.push(lockPath);
+      }
+      for (const p of reverted) {
+        await this.git.restorePathFromRef(ws.id, mergeBase, p);
+        await this.git.commitFile(
+          ws.id,
+          user,
+          p,
+          `Revert ${p} (declined in change request #${number})`,
+          true, // skipValidator — this restores an already-validated base version
+        );
+      }
       await this.trackedPush(ws.id, user);
-    } finally {
-      // Committed inline — drop the lock row directly rather than enqueueing
-      // a duplicate commit through releaseLock.
-      await this.fileLocks.release(ws.id, headBranch, lockPath, user);
+    } catch (err) {
+      revertError = { reason: err };
     }
+    // Committed inline — drop the lock rows directly rather than enqueueing
+    // a duplicate commit through releaseLock. Each is released on its own, on
+    // success and failure alike: one failed release must not leave the other
+    // lock held. The revert's own error wins; otherwise a failed release
+    // still surfaces, as a single release's did.
+    const released = await Promise.allSettled(
+      held.map((lockPath) => this.fileLocks.release(ws.id, headBranch, lockPath, user)),
+    );
+    if (revertError) throw revertError.reason;
+    const failedRelease = released.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failedRelease) throw failedRelease.reason;
+    // The source head moved: the refusal described a revision that is gone.
+    await this.clearApplyFailure(number, { recordedBefore: headMovedAfter });
     this.prs.invalidateDetailCache(number);
 
     const remaining = await this.git.changedPathsForPr(ws.id, baseBranch, headBranch);
     if (remaining.length > 0) {
-      return { closed: false, remainingPaths: remaining };
+      // Answered like the file list: the placeholder is not a remaining file.
+      return { closed: false, remainingPaths: remaining.filter((p) => !isFolderPlaceholder(p)) };
     }
     // Every change declined → the request proposes nothing.
     await this.closeEmptyChangeRequest(number, user);
     return { closed: true, remainingPaths: [] };
+  }
+
+  /**
+   * The open change requests that propose files under a KB folder, and
+   * whether the caller may take those files out of each — what a folder
+   * delete asks before it offers "Delete folder and its proposed changes".
+   *
+   * The caller may act on a request they authored, on any request as an
+   * admin, or on a request whose every proposed file under the folder they
+   * may write — per file, not at the folder's top: a subfolder can deny a
+   * writer of its parent. The last two are judged on `origin/<base>`, like
+   * every other request verb. An access answer that cannot be resolved
+   * (null) is a no.
+   */
+  async changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]> {
+    const prefix = folderPrefix(folder);
+    const open = await this.prs.listOpenPrs({ fresh: true });
+    // The list's touched paths are best-effort: a diff it could not read comes
+    // back EMPTY, indistinguishable from a request proposing nothing. This
+    // answer gates a destructive action, so a request listed empty is read
+    // again here, and one whose diff still cannot be read fails the question
+    // rather than dropping out of it.
+    const resolved = await Promise.all(
+      open.map(async (cr) => {
+        if (cr.touchedNodePaths.length > 0) return { cr, touched: cr.touchedNodePaths };
+        try {
+          const ws = await this.workspaceService.getOrCreateForBranch(cr.branch);
+          return { cr, touched: await this.git.changedPathsForPr(ws.id, cr.base, cr.branch) };
+        } catch (err) {
+          log.warn(
+            `changedPathsForPr failed for #${cr.number} under folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
+          );
+          throw new WorkflowDomainError(
+            `Couldn't read what change request #${cr.number} proposes — try again in a moment.`,
+            500,
+          );
+        }
+      }),
+    );
+    const touching = resolved
+      .map(({ cr, touched }) => ({ cr, paths: touched.filter((p) => p.startsWith(prefix)) }))
+      .filter((t) => t.paths.length > 0);
+    if (touching.length === 0) return [];
+    const callerHash = hashEmail(user.email);
+    // One admin answer per base branch; the requests almost always share one.
+    const baseWorkspaces = new Map<string, Promise<string>>();
+    const baseWorkspace = (base: string): Promise<string> => {
+      let ws = baseWorkspaces.get(base);
+      if (!ws) {
+        ws = this.workspaceService.getOrCreateForBranch(base).then((w) => w.id);
+        baseWorkspaces.set(base, ws);
+      }
+      return ws;
+    };
+    const adminByBase = new Map<string, Promise<boolean>>();
+    const adminOn = (base: string): Promise<boolean> => {
+      let admin = adminByBase.get(base);
+      if (!admin) {
+        admin = baseWorkspace(base).then(
+          async (wsId) => (await this.accessControl.canWriteAtRef(wsId, `origin/${base}`, user.email, 'roles.yaml')) === true,
+        );
+        adminByBase.set(base, admin);
+      }
+      return admin;
+    };
+    const writerOfAll = async (base: string, paths: string[]): Promise<boolean> => {
+      const answers = await this.accessControl.canWriteBatchAtRef(
+        await baseWorkspace(base),
+        `origin/${base}`,
+        user.email,
+        paths,
+      );
+      return answers !== null && paths.every((p) => answers.get(p) === true);
+    };
+
+    return Promise.all(
+      touching.map(async ({ cr, paths }): Promise<FolderChangeRequest> => {
+        const mine = !!cr.authorId && cr.authorId === callerHash;
+        const listed = {
+          number: cr.number,
+          title: cr.title,
+          authorName: cr.appAuthor?.name ?? cr.author.name ?? null,
+          mine,
+          paths,
+        };
+        if (mine || (await adminOn(cr.base)) || (await writerOfAll(cr.base, paths))) {
+          return { ...listed, mayRemove: true };
+        }
+        return {
+          ...listed,
+          mayRemove: false,
+          reason: `#${cr.number} was proposed by ${cr.appAuthor?.name ?? 'someone else'}; only its author, an admin or someone who can write every file it proposes here can change it.`,
+        };
+      }),
+    );
+  }
+
+  /**
+   * Take every file under `folder` out of every open change request that
+   * proposes one — the request half of "Delete folder and its proposed
+   * changes". All-or-nothing on permission: when the caller may not act on
+   * even one of the requests, nothing is touched. A request left proposing
+   * nothing is withdrawn (closed, its branch retired), exactly as declining
+   * its last file would.
+   */
+  async removeFolderFromChangeRequests(
+    folder: string,
+    user: AuthUser,
+  ): Promise<FolderChangeRequestRemoval[]> {
+    const requests = await this.changeRequestsUnderFolder(folder, user);
+    const refused = requests.filter((r) => !r.mayRemove);
+    if (refused.length > 0) {
+      throw new WorkflowDomainError(
+        `You can't remove proposed changes from ${refused.map((r) => `#${r.number}`).join(', ')} — only the author, an admin or someone who can write every file it proposes here can.`,
+        403,
+      );
+    }
+    const prefix = folderPrefix(folder);
+
+    // Everything that can refuse happens before the first commit, so a
+    // refusal leaves every request as it was: each request's source checkout
+    // brought up to date (a failed pull stops here — restoring into a stale
+    // or conflicted tree could commit the wrong content), its paths read as
+    // they are NOW rather than as the list saw them, its merge base found,
+    // and every file's lock held.
+    const plans: { number: number; branch: string; wsId: string; paths: string[]; mergeBase: string | null }[] = [];
+    for (const request of requests) {
+      const summary = await this.prs.getPr(request.number);
+      if (!summary || summary.state !== 'open') continue;
+      const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
+      try {
+        await this.pullWorkspace(ws.id);
+      } catch (err) {
+        log.warn(
+          `pull failed for #${summary.number} before removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
+        );
+        throw new WorkflowDomainError(
+          `#${summary.number} could not be brought up to date, so nothing was removed — try again in a moment.`,
+          409,
+        );
+      }
+      const paths = (await this.git.changedPathsForPr(ws.id, summary.base, summary.branch)).filter((p) =>
+        p.startsWith(prefix),
+      );
+      // The permission above was judged on the paths the request proposed
+      // then. One proposed since was never judged — a writer of every earlier
+      // file need not be one of it — so the request has to be asked about again.
+      const unjudged = paths.filter((p) => !request.paths.includes(p));
+      if (unjudged.length > 0) {
+        throw new WorkflowDomainError(
+          `#${summary.number} changed while the folder was being deleted (${unjudged.length === 1 ? unjudged[0] :`${unjudged.length} new files`}), so no proposed changes were removed — try again.`,
+          409,
+        );
+      }
+      let mergeBase: string | null = null;
+      if (paths.length > 0) {
+        mergeBase = await this.git.mergeBaseForPr(ws.id, summary.base, summary.branch);
+        if (!mergeBase) {
+          throw new WorkflowDomainError(`#${summary.number} shares no history with its target to revert to.`, 422);
+        }
+      }
+      plans.push({ number: summary.number, branch: summary.branch, wsId: ws.id, paths, mergeBase });
+    }
+
+    // Requests can share a source branch, and so a workspace and even a file.
+    // The work is grouped per workspace: each file is locked, restored and
+    // committed once, and each branch pushed once. One restore can only undo a
+    // shared file for requests that agree on what it reverts TO — requests on
+    // one branch aimed at targets with different merge bases do not, and one
+    // of them would be reported emptied while still proposing the file. That
+    // combination is refused here, before anything is locked or changed.
+    const byWorkspace = new Map<
+      string,
+      { wsId: string; branch: string; plans: typeof plans; paths: { path: string; mergeBase: string }[] }
+    >();
+    for (const plan of plans) {
+      let group = byWorkspace.get(plan.wsId);
+      if (!group) {
+        group = { wsId: plan.wsId, branch: plan.branch, plans: [], paths: [] };
+        byWorkspace.set(plan.wsId, group);
+      }
+      group.plans.push(plan);
+      for (const repoRelPath of plan.paths) {
+        const seen = group.paths.find((p) => p.path === repoRelPath);
+        if (!seen) {
+          group.paths.push({ path: repoRelPath, mergeBase: plan.mergeBase! });
+        } else if (seen.mergeBase !== plan.mergeBase) {
+          const sharing = group.plans.map((other) => `#${other.number}`).join(', ');
+          throw new WorkflowDomainError(
+            `${sharing} propose ${repoRelPath} from the same branch against different targets, so it can't be taken out of both at once. Decline it in each request instead.`,
+            422,
+          );
+        }
+      }
+    }
+    const groups = [...byWorkspace.values()];
+    const toChange = groups.filter((g) => g.paths.length > 0);
+
+    const held: { wsId: string; branch: string; lockPath: string }[] = [];
+    // Every held lock is let go, each on its own: one failed release must not
+    // keep the rest held until they expire.
+    const releaseAll = async () => {
+      for (const h of held.splice(0)) {
+        try {
+          await this.fileLocks.release(h.wsId, h.branch, h.lockPath, user);
+        } catch (err) {
+          log.warn(`lock release failed for ${printable(h.lockPath)}: ${printable(sanitizeError(err))}`);
+        }
+      }
+    };
+    const pushed: typeof toChange = [];
+    let pushFailure: { group: (typeof toChange)[number]; err: unknown } | null = null;
+    try {
+      for (const group of toChange) {
+        for (const { path: repoRelPath } of group.paths) {
+          const lockPath = `${this.kbDirName}/${repoRelPath}`;
+          const lock = await this.fileLocks.acquire(group.wsId, group.branch, lockPath, user);
+          if (!lock.acquired) {
+            throw new WorkflowDomainError(
+              `${repoRelPath} is being edited by ${lock.lock.holderName} — try again once the edit settles.`,
+              409,
+            );
+          }
+          held.push({ wsId: group.wsId, branch: group.branch, lockPath });
+        }
+      }
+      // The git half is ONE operation under one reservation of every checkout
+      // involved: it records each HEAD, commits every revert before pushing
+      // anything, pushes branch by branch, and undoes what didn't publish (see
+      // `GitService.revertPathsAndPush`). A failed restore or commit throws
+      // with every request left as it was. Pushes can't be made atomic, so a
+      // failed push leaves the requests split into "done" and "untouched", and
+      // running the action again finishes the rest.
+      if (toChange.length > 0) {
+        const outcome = await this.git.revertPathsAndPush(
+          user,
+          toChange.map((group) => {
+            const numbers = group.plans.map((plan) => `#${plan.number}`).join(', ');
+            return {
+              workspaceId: group.wsId,
+              paths: group.paths.map(({ path: repoRelPath, mergeBase }) => ({
+                path: repoRelPath,
+                ref: mergeBase,
+                subject: commitSubject(
+                  `Revert ${repoRelPath} (folder deleted; removed from change request ${numbers})`,
+                  `Revert ${basenameOf(repoRelPath)} (folder deleted; removed from ${group.plans.length === 1 ? `change request ${numbers}` : `${group.plans.length} change requests`})`,
+                ),
+                undoSubject: commitSubject(
+                  `Undo revert of ${repoRelPath} (folder removal stopped)`,
+                  `Undo revert of ${basenameOf(repoRelPath)} (folder removal stopped)`,
+                ),
+              })),
+            };
+          }),
+        );
+        for (const group of toChange) {
+          if (outcome.pushed.includes(group.wsId)) {
+            this.noteGitSyncOk(group.wsId, group.branch);
+            pushed.push(group);
+            for (const plan of group.plans) this.prs.invalidateDetailCache(plan.number);
+          } else if (outcome.failed?.workspaceId === group.wsId) {
+            this.noteGitSyncFailed(group.wsId, group.branch, outcome.failed.error);
+            pushFailure = { group, err: outcome.failed.error };
+          }
+        }
+      }
+    } finally {
+      await releaseAll();
+    }
+
+    const finished = (pushFailure ? pushed : groups).flatMap((group) => group.plans);
+    if (pushFailure && finished.length === 0) throw pushFailure.err;
+    const results: FolderChangeRequestRemoval[] = [];
+    for (const plan of finished) {
+      const withdrawn = await this.closeEmptyChangeRequest(plan.number, user);
+      // A request still open is read once more, to say why: a file under the
+      // folder proposed while this ran (never judged, so left alone), or —
+      // proposing nothing at all — a save still landing kept it open.
+      let stillProposed: string[] = [];
+      let keptForSaves = false;
+      if (!withdrawn) {
+        try {
+          const summary = await this.prs.getPr(plan.number);
+          if (summary?.state === 'open') {
+            const now = await this.git.changedPathsForPr(plan.wsId, summary.base, summary.branch);
+            stillProposed = now.filter((p) => p.startsWith(prefix) && !isFolderPlaceholder(p));
+            keptForSaves = now.length === 0;
+          }
+        } catch (err) {
+          log.warn(
+            `could not re-read #${plan.number} after removing folder ${printable(folder)}: ${printable(sanitizeError(err))}`,
+          );
+        }
+      }
+      results.push({ number: plan.number, removedPaths: plan.paths, withdrawn, stillProposed, keptForSaves });
+    }
+    if (pushFailure) {
+      const failed = pushFailure.group.plans.map((plan) => `#${plan.number}`).join(', ');
+      log.warn(
+        `push failed for ${failed} removing folder ${printable(folder)}: ${printable(sanitizeError(pushFailure.err))}`,
+      );
+      throw new WorkflowDomainError(
+        `The folder's files were removed from ${finished.map((plan) => `#${plan.number}`).join(', ')}, but ${failed} could not be updated and it and any later requests were left as they were. Run the delete again to finish.`,
+        500,
+      );
+    }
+    return results;
   }
 
   /**
@@ -2126,23 +2601,29 @@ export class WorkflowService implements IWorkflowService {
    * is AUTHORITATIVE — recomputed, and a diff failure aborts rather than
    * closes, so a transient git error can never eat a live request.
    *
+   * An empty diff is not yet an empty request while a save to its branch is
+   * still landing: one under a held lock or queued for the commit worker is
+   * on disk but not in the diff. Retiring the branch deletes its checkout and
+   * that save with it, so such a request stays open — the save commits and it
+   * proposes something again, or a later look closes it.
+   *
    * Returns true when THIS call closed it.
    */
   async closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean> {
     const summary = await this.prs.getPr(number);
     if (!summary || summary.state !== 'open') return false;
     let paths: string[];
+    let wsId: string;
     try {
       const ws = await this.workspaceService.getOrCreateForBranch(summary.branch);
+      wsId = ws.id;
       paths = await this.git.changedPathsForPr(ws.id, summary.base, summary.branch);
     } catch (err) {
-      console.warn(
-        `[cr] empty-check for change request #${number} failed — leaving it open:`,
-        err,
-      );
+      crLog.warn(`empty-check for change request #${number} failed — leaving it open:`, { err });
       return false;
     }
     if (paths.length > 0) return false;
+    if (await this.savesInFlight(wsId)) return false;
 
     // Guard on `state = 'open'` so a concurrent merge or withdraw wins the
     // race and this becomes a no-op.
@@ -2157,6 +2638,21 @@ export class WorkflowService implements IWorkflowService {
     this.events?.emit({ kind: 'change-request-rejected', number });
     await this.retireMergedSourceBranch(number, summary.base, user);
     return true;
+  }
+
+  /**
+   * Whether a save to this branch's checkout is still landing: a live file
+   * lock (the write is mid-flight) or any queued commit, stuck ones included
+   * (their file is still only on disk). An answer that cannot be read is a
+   * yes — the caller is about to delete the checkout.
+   */
+  private async savesInFlight(wsId: string): Promise<boolean> {
+    try {
+      return (await this.fileLocks.hasAnyActive(wsId)) || (await this.pendingCommits.hasAnyForWorkspace(wsId));
+    } catch (err) {
+      crLog.warn(`could not tell whether saves are landing on ${printable(wsId)} — keeping its request open:`, { err });
+      return true;
+    }
   }
 
   /**
@@ -2222,13 +2718,13 @@ export class WorkflowService implements IWorkflowService {
       });
       live = new Set(branches.map((b) => b.name));
     } catch (err) {
-      console.warn('[cr] branch sweep skipped — could not list branches:', err);
+      crLog.warn('branch sweep skipped — could not list branches:', { err });
       return 0;
     }
     // An empty branch list means something is wrong with the clone, not that
     // every branch in the repo was deleted at once. Refuse to act on it.
     if (live.size === 0) {
-      console.warn('[cr] branch sweep skipped — branch list came back empty');
+      crLog.warn('branch sweep skipped — branch list came back empty');
       return 0;
     }
 
@@ -2254,9 +2750,7 @@ export class WorkflowService implements IWorkflowService {
       if (updated.length === 0) continue;
       this.prs.invalidateDetailCache(cr.number);
       this.events?.emit({ kind: 'change-request-rejected', number: cr.number });
-      console.log(
-        `[cr] closed change request #${cr.number}: branch "${missing}" no longer exists`,
-      );
+      crLog.info(`closed change request #${cr.number}: branch "${missing}" no longer exists`);
       closed++;
     }
     return closed;
@@ -2282,12 +2776,10 @@ export class WorkflowService implements IWorkflowService {
     this.sweepKick = this.closeChangeRequestsWithDeletedBranches()
       .then((n) => {
         if (n > 0) {
-          console.log(
-            `[cr] on-demand sweep closed ${n} stranded change request${n === 1 ? '' : 's'}`,
-          );
+          crLog.info(`on-demand sweep closed ${n} stranded change request${n === 1 ? '' : 's'}`);
         }
       })
-      .catch((err) => console.warn('[cr] on-demand deleted-branch sweep failed:', err))
+      .catch((err) => crLog.warn('on-demand deleted-branch sweep failed:', { err }))
       .finally(() => {
         this.sweepKick = null;
       });
@@ -2483,10 +2975,9 @@ export class WorkflowService implements IWorkflowService {
       if (err instanceof PullRebaseConflictError && targetWorkspaceId) {
         await this.queuePullConflictRecovery(targetWorkspaceId, err, user);
       }
-      console.warn(
-        `[merge] post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`,
+      mergeLog.warn(`post-merge pull of target "${baseBranch}" failed — its workspace may be momentarily behind origin`, {
         err,
-      );
+      });
     }
     this.prs.invalidateDetailCache(number);
     this.events?.emit({ kind: 'change-request-merged', number });
@@ -2494,6 +2985,139 @@ export class WorkflowService implements IWorkflowService {
     // and branch retirement is git IO it must never wait behind.
     await this.retireMergedSourceBranch(number, baseBranch, user);
     return { kind: 'merged', result };
+  }
+
+  /**
+   * Start an apply attempt on `number` and return its token. Only the latest
+   * attempt may record a refusal: when two people apply the same request at
+   * once, an older attempt that finishes last must not overwrite the newer
+   * one's verdict. In-process, like the detail and list caches this reads with.
+   * Every attempt must be ended with `endApplyAttempt`.
+   */
+  beginApplyAttempt(number: number): number {
+    const attempt = ++this.applyAttemptSeq;
+    this.applyAttempts.set(number, attempt);
+    return attempt;
+  }
+
+  /**
+   * An attempt finished. Its entry leaves only if no newer attempt replaced it;
+   * an older attempt ending later then finds no entry and records nothing,
+   * because its token can never match one issued again.
+   */
+  endApplyAttempt(number: number, attempt: number): void {
+    if (this.applyAttempts.get(number) === attempt) this.applyAttempts.delete(number);
+  }
+
+  /**
+   * Persist why an apply did not land and tell every session. The apply route
+   * already answers the clicker directly (user-scoped `merge-failed`); this is
+   * for everyone else who can see the still-open request — above all its
+   * author, who otherwise sees it pending forever with no word of the refusal.
+   * The event carries only the number: the reason is read back through the
+   * list and detail endpoints, so a session that misses the event gets the
+   * same answer on its next fetch.
+   *
+   * Returns false, writing and announcing nothing, when a newer attempt has
+   * started since `attempt` or the request is no longer open (a concurrent
+   * apply landed it) — a refusal nobody can act on must not reach anyone.
+   */
+  async recordApplyFailure(
+    number: number,
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
+    user: AuthUser,
+    attempt: number,
+  ): Promise<boolean> {
+    if (this.applyAttempts.get(number) !== attempt) return false;
+    const at = failure.at ?? new Date();
+    const updated = await this.db
+      .update(changeRequests)
+      .set({
+        applyFailureReason: sanitizeError(failure.reason, { maxLen: APPLY_FAILURE_MAX_LEN }),
+        applyFailureConflicts: failure.kind === 'conflicts',
+        applyFailureKind: failure.kind,
+        applyFailedAt: at,
+        applyFailedByName: user.name,
+      })
+      // The write itself refuses to go backwards: the attempt map above is an
+      // early exit within this process, but an older UPDATE still in flight (or
+      // one from another replica) must never replace a newer refusal.
+      .where(
+        and(
+          eq(changeRequests.number, number),
+          eq(changeRequests.state, 'open'),
+          or(isNull(changeRequests.applyFailedAt), lt(changeRequests.applyFailedAt, at)),
+        ),
+      )
+      .returning({ number: changeRequests.number });
+    if (updated.length === 0) return false;
+    this.prs.invalidateDetailCache(number);
+    this.events?.emit({ kind: 'change-request-apply-failed', number });
+    return true;
+  }
+
+  /**
+   * Forget a request's recorded refusal because a change made it obsolete.
+   * Otherwise the request keeps saying "<name> could not apply this: Waiting on
+   * approval…" after the approval arrived, with nothing dating it.
+   *
+   * WHICH refusals a change makes obsolete is `kinds`: an approval answers only
+   * the gate — a conflict or a git error is untouched by it and must keep
+   * saying so — while a moved source head replaces the revision every kind of
+   * refusal described (omit `kinds` to clear any). A row with no recorded kind
+   * is only cleared by the latter. `recordedBefore` is taken before the change
+   * starts: a refusal recorded after it is newer than the change and stays. Announced on the same event a new refusal
+   * uses — every list and open dialog re-reads the request. Best-effort: the
+   * mutation that triggered it already happened and must not fail on this.
+   */
+  /**
+   * Whether the merge gate would now let an apply through without bypass — no
+   * hard reason, no warning. Part of the best-effort clear: an evaluation that
+   * fails answers "no" (the refusal stays) instead of failing the approval.
+   */
+  private gateWouldPass(number: number, approvals: FileApproval[]): boolean {
+    try {
+      const gate = this.reviewWorkflow.evaluateMergeGate({ prNumber: number, state: 'open', approvals });
+      return gate?.mergeable === true && gate.warnings.length === 0;
+    } catch (err) {
+      crLog.warn(`could not re-evaluate the merge gate of change request #${number}; keeping its refusal:`, { err });
+      return false;
+    }
+  }
+
+  private async clearApplyFailure(
+    number: number,
+    scope: { kinds?: readonly ChangeRequestApplyFailureKind[]; recordedBefore: Date },
+  ): Promise<void> {
+    const { kinds, recordedBefore } = scope;
+    try {
+      const cleared = await this.db
+        .update(changeRequests)
+        .set({
+          applyFailureReason: null,
+          applyFailureConflicts: null,
+          applyFailedAt: null,
+          applyFailedByName: null,
+          applyFailureKind: null,
+        })
+        .where(
+          and(
+            eq(changeRequests.number, number),
+            isNotNull(changeRequests.applyFailedAt),
+            // Only a refusal that PREDATES the change: one an apply recorded
+            // while the change was landing may already have seen it, and is
+            // the newer verdict — never erase it.
+            lt(changeRequests.applyFailedAt, recordedBefore),
+            kinds ? inArray(changeRequests.applyFailureKind, [...kinds]) : undefined,
+          ),
+        )
+        .returning({ number: changeRequests.number });
+      if (cleared.length === 0) return;
+      this.prs.invalidateDetailCache(number);
+      this.events?.emit({ kind: 'change-request-apply-failed', number });
+    } catch (err) {
+      crLog.warn(`could not clear the recorded apply failure of change request #${number}:`, { err });
+    }
   }
 
   /**
@@ -2544,13 +3168,12 @@ export class WorkflowService implements IWorkflowService {
         // "does origin still have it?" probe skips the remote delete.
         await this.workspaceService.ensureRemotesFetched(targetWs.id).catch(() => {});
         await this.deleteBranchUnlocked(targetWs.id, sourceBranch, user, { systemCleanup: true });
-        console.log(`[merge] retired merged source branch "${sourceBranch}"`);
+        mergeLog.info(`retired merged source branch "${sourceBranch}"`);
       });
     } catch (err) {
-      console.warn(
-        `[merge] could not retire the merged source branch of change request #${number} (non-fatal):`,
+      mergeLog.warn(`could not retire the merged source branch of change request #${number} (non-fatal):`, {
         err,
-      );
+      });
     }
   }
 
@@ -2674,7 +3297,7 @@ export class WorkflowService implements IWorkflowService {
       const detail = err instanceof Error ? err.message : String(err);
       // Log the raw git/push detail server-side; the thrown error keeps it OFF
       // the client-facing 502 message (see RolesYamlPreservationError).
-      console.warn(`[merge] roles.yaml preservation failed for #${number}:`, detail);
+      mergeLog.warn(`roles.yaml preservation failed for #${number}:`, { detail });
       throw new RolesYamlPreservationError(detail);
     }
   }
@@ -2699,10 +3322,9 @@ export class WorkflowService implements IWorkflowService {
       );
       return stdout.split('\n').map((s) => s.trim()).filter(Boolean);
     } catch (err) {
-      console.warn(
-        '[workflow] listChangedPathsBetweenBranches failed:',
-        redactTokens(err instanceof Error ? err.message : String(err)),
-      );
+      log.warn('listChangedPathsBetweenBranches failed:', {
+        detail: redactTokens(err instanceof Error ? err.message : String(err)),
+      });
       return [];
     }
   }
@@ -2734,10 +3356,7 @@ export class WorkflowService implements IWorkflowService {
         paths,
       );
     } catch (err) {
-      console.warn(
-        '[workflow] eligibleWritersForPathsAtRef failed:',
-        err instanceof Error ? err.message : String(err),
-      );
+      log.warn('eligibleWritersForPathsAtRef failed:', { err });
     }
     if (!resolved || resolved.size === 0) return '';
 

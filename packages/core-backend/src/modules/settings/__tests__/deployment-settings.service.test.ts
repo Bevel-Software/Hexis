@@ -310,4 +310,35 @@ describe('DeploymentSettingsService — validation', () => {
     const staged = await settings.save({ kbDirName: 'company-brain' }, null);
     expect(staged.restartRequired).toBe(true);
   });
+
+  /** The OIDC provider reads these on every sign-in, so saving them owes no restart. */
+  it('never asks for a restart for the single sign-on settings', async () => {
+    const { db } = makeDb();
+    const settings = new DeploymentSettingsService(db, ENC_KEY);
+    const sso = await settings.save(
+      {
+        oidcIssuerUrl: 'https://idp.example.com',
+        oidcClientId: 'hexis',
+        oidcClientSecret: 'sso-very-secret',
+        oidcScopes: 'openid email',
+        oidcProviderLabel: 'Company SSO',
+      },
+      null,
+    );
+    expect(sso).toEqual({ restartRequired: false, restartKeys: [] });
+    const changed = await settings.save(
+      { oidcIssuerUrl: 'https://other-idp.example.com', oidcProviderLabel: 'Acme login' },
+      null,
+    );
+    expect(changed.restartRequired).toBe(false);
+    // …while one that genuinely needs it, saved alongside, still says so.
+    const mixed = await settings.save(
+      { oidcClientId: 'hexis-2', allowedEmailDomains: 'example.com' },
+      null,
+    );
+    expect(mixed.restartKeys).toEqual(['allowedEmailDomains']);
+    expect(
+      settings.describe().filter((s) => s.key.startsWith('oidc') && s.restartToApply),
+    ).toEqual([]);
+  });
 });

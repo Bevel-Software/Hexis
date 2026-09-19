@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import express from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import type { IWorkflowService } from '@bevel-software/platform-shared';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
@@ -65,6 +66,7 @@ async function makeHarness(): Promise<Harness> {
   // recursive-cleanup logic under test reacts to.
   const workspaceServiceMock: Partial<WorkspaceService> = {
     getWorkspacePath: vi.fn(async () => workspaceDir),
+    withFolderTurn: async <T>(_id: string, _dir: string, op: () => Promise<T>) => op(),
     deleteFile: vi.fn(async (_id: string, relPath: string) => {
       await fs.rm(path.resolve(workspaceDir, relPath));
     }),
@@ -102,6 +104,7 @@ async function makeHarness(): Promise<Harness> {
     stubCreatorAccess,
     // Not exercised here — only `.bevelignore`'s tree visibility consults it.
     { isAdmin: async () => false } as unknown as IAdminAccessService,
+    new NodeFs(),
   ));
 
   const server = await new Promise<Server>((resolve) => {

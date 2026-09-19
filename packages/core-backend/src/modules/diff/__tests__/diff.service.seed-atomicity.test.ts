@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -55,6 +56,7 @@ async function setup(): Promise<Fixture> {
     workspacesRoot,
     'https://github.com/Bevel-Software/knowledge-base.git',
     'knowledge-base',
+    new NodeFs(),
   );
   const mutex = new WorkspaceMutex();
   const diffService = new DiffService(
@@ -63,6 +65,7 @@ async function setup(): Promise<Fixture> {
     workspacesRoot,
     backupsRoot,
     'knowledge-base',
+    new NodeFs(),
   );
   workspaceService.setDiffService(diffService);
   return { workspacesRoot, backupsRoot, workspaceDir, repoDir, workspaceId, workspaceService, diffService };

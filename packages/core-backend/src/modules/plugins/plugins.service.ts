@@ -1,10 +1,13 @@
 import fs from 'node:fs/promises';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('plugins');
 import path from 'node:path';
 import {
   DEFAULT_BRANCH,
 } from '@bevel-software/platform-shared';
 import { isPrivateAccessMd } from '../access-model/access-grammar.js';
-import { isAbsence } from '../../shared/fs-errors.js';
+import { isAbsence } from '../../shared/fs.contract.js';
 import type { WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
@@ -14,9 +17,18 @@ import { TtlCache } from '../../shared/ttl-cache.js';
 import type { PluginCatalogEntry, IPluginIndexService } from './plugins.contract.js';
 import type { PluginLinkIndex } from './plugin-links.js';
 import type { PluginSource } from './discovery/plugin-source.js';
-import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 const CACHE_TTL_MS = 60_000;
+
+/** What one discovery pass keeps about a plugin, before the counts and verdicts. */
+interface ScannedPlugin {
+  folders: string[];
+  /** The roots it links skills from — see `PluginSummary.linkedRoots`. */
+  linkedRoots: string[];
+  linksAreManaged: boolean;
+  displayName: string;
+  warnings: string[];
+}
 
 /**
  * The plugin index: every plugin folder in the default-branch KB, with its
@@ -52,6 +64,8 @@ export class PluginIndexService implements IPluginIndexService {
     private readonly skillService: ISkillService,
     private readonly toolManualService: IToolManualService,
     private readonly kbDirName: string,
+    /** Where plugins come from — the one discovery every catalog shares. */
+    private readonly source: PluginSource,
     now: () => number = Date.now,
     /**
      * The link index, when the deployment has one: a plugin's skill count is
@@ -59,8 +73,6 @@ export class PluginIndexService implements IPluginIndexService {
      * set (and older tests) keep the inline-only count.
      */
     private readonly links?: PluginLinkIndex,
-    /** Where plugins come from — native manifests unless a dialect is configured. */
-    private readonly source: PluginSource = new KbPluginSource(),
   ) {
     this.cache = new TtlCache(CACHE_TTL_MS, now);
   }
@@ -112,7 +124,7 @@ export class PluginIndexService implements IPluginIndexService {
 
       const [{ skillCounts, brokenLinkCounts }, toolCounts] = await Promise.all([
         this.countThroughLinks(folders),
-        this.countTools(folders),
+        this.countTools(scanned),
       ]);
 
       const entries: PluginCatalogEntry[] = [];
@@ -129,6 +141,7 @@ export class PluginIndexService implements IPluginIndexService {
           name,
           displayName: scanned.get(name)?.displayName ?? name,
           folders: pluginFolders,
+          linkedRoots: scanned.get(name)?.linkedRoots ?? [],
           linksAreManaged: scanned.get(name)?.linksAreManaged ?? false,
           skillCount: skillCounts.get(name) ?? 0,
           toolCount: toolCounts.get(name) ?? 0,
@@ -137,13 +150,12 @@ export class PluginIndexService implements IPluginIndexService {
           writers,
           readers,
           isPrivate,
+          warnings: scanned.get(name)?.warnings ?? [],
         });
       }
       return entries.sort((a, b) => a.name.localeCompare(b.name));
     } catch (err) {
-      console.warn(
-        `[plugins] plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      log.warn(`plugin index unavailable: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   }
@@ -156,18 +168,24 @@ export class PluginIndexService implements IPluginIndexService {
    * source's existence rule (see `DiscoveredPlugin`) — for native plugins,
    * the `access.md` the class doc describes.
    */
-  private async scanFolders(
-    kbRoot: string,
-  ): Promise<Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>> {
-    const byName = new Map<string, { folders: string[]; linksAreManaged: boolean; displayName: string }>();
+  private async scanFolders(kbRoot: string): Promise<Map<string, ScannedPlugin>> {
+    const byName = new Map<string, ScannedPlugin>();
     const discovered = await this.source.discover(kbRoot);
-    for (const w of discovered.warnings) console.warn(`[plugins] ${w}`);
+    for (const w of discovered.warnings) log.warn(w);
     for (const plugin of discovered.plugins) {
       if (plugin.personal || !plugin.exists) continue;
       byName.set(plugin.name, {
         folders: [plugin.folder],
+        linkedRoots: plugin.linkedRoots,
         linksAreManaged: plugin.linksAreManaged,
         displayName: plugin.displayName,
+        // Discovery prefixes what it says about one plugin with that
+        // plugin's folder; the page names the plugin already, so the
+        // prefix goes. Whatever names no folder (an unreadable registry)
+        // stays in the log alone.
+        warnings: discovered.warnings
+          .filter((w) => w.startsWith(`${plugin.folder}: `) || w.startsWith(`${plugin.folder}/`))
+          .map((w) => w.slice(plugin.folder.length).replace(/^[:/]\s*/, '')),
       });
     }
     return byName;
@@ -216,14 +234,34 @@ export class PluginIndexService implements IPluginIndexService {
    * prefix against the discovered folders, not by `pluginOfPath`'s
    * second-segment rule, so a dialect plugin nested three folders deep still
    * counts the servers its bundle expands.
+   *
+   * And to every plugin one of whose LINKED ROOTS holds them. A root is a
+   * skill folder or a folder of skills, and a `.tool` manual sitting beside
+   * those skills reaches the plugin the same way they do — the plugin's page
+   * lists it, so the plugin's total has to count it. Once per plugin: a root
+   * inside the plugin's own folder says nothing the folder did not say first.
+   *
+   * Without a link index, inline only — the same degradation `countThroughLinks`
+   * makes for skills. A host that composes no link index has asked for totals
+   * that count what each plugin's folder holds, and a catalog that counted a
+   * plugin's linked tools while leaving its linked skills out would describe a
+   * plugin that exists nowhere.
    */
-  private async countTools(folders: Map<string, string[]>): Promise<Map<string, number>> {
+  private async countTools(scanned: Map<string, ScannedPlugin>): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
-    const byFolder = [...folders.entries()].map(([name, [folder]]) => ({ name, prefix: `${folder}/` }));
+    const plugins = [...scanned].map(([name, p]) => ({
+      name,
+      folders: p.folders,
+      roots: this.links ? p.linkedRoots : [],
+    }));
+    const bump = (name: string) => counts.set(name, (counts.get(name) ?? 0) + 1);
     for (const tool of await this.toolManualService.listAllSummaries()) {
-      const owner = byFolder.find((f) => tool.path.startsWith(f.prefix));
-      if (!owner) continue;
-      counts.set(owner.name, (counts.get(owner.name) ?? 0) + 1);
+      const inline = plugins.find((p) => p.folders.some((f) => tool.path.startsWith(`${f}/`)));
+      if (inline) bump(inline.name);
+      for (const p of plugins) {
+        if (p === inline) continue;
+        if (p.roots.some((root) => tool.path.startsWith(`${root}/`))) bump(p.name);
+      }
     }
     return counts;
   }

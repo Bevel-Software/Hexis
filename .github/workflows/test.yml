@@ -32,9 +32,11 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          # 22 is the minimum for isolated-vm@6, which is a transitive dep of
-          # @utcp/code-mode and won't compile against Node 20's V8 headers
-          # (missing `v8::SourceLocation`). engines pins >=22 <23 (native ABI).
+          # The version this repo's own image ships. 22 is also the minimum for
+          # isolated-vm@6, a transitive dep of @utcp/code-mode that won't compile
+          # against Node 20's V8 headers (missing `v8::SourceLocation`). The
+          # PUBLISHED local server supports more than this one major — see the
+          # `hexis-mcp` job below, which is where that range is tested.
           node-version: 22
           cache: pnpm
 
@@ -57,7 +59,14 @@ jobs:
       # `pnpm build` so the cross-package `dist/` types it resolves exist.
       - run: pnpm typecheck
 
-      - run: pnpm test
+      # `pnpm test` is `pnpm -r run test`, and a recursive run prefixes every
+      # child line with its package ("packages/core-backend test: …"). Vitest's
+      # built-in GitHub Actions reporter prints `::error file=…` annotations,
+      # but a workflow command only counts at the start of a line — so a failing
+      # test left nothing but "Process completed with exit code 1", and the job
+      # log that names it needs admin rights. Hiding the prefix turns every
+      # failure into a public annotation on the check.
+      - run: pnpm -r --reporter-hide-prefix run test
 
       # Design-system ratchet. The UI is migrating onto semantic tokens, so a
       # hard ban would fail against the remaining ~520 off-system call sites.
@@ -68,3 +77,52 @@ jobs:
       # Tailwind emits no rule for an unknown utility, so a stale class is a
       # no-op rather than a build error.
       - run: pnpm ds:check
+
+  # The local MCP server is the one thing in this repo that runs on OTHER
+  # PEOPLE'S machines, at whatever Node they happen to have — so "it works on
+  # the version we build the image with" says nothing about it. Its supported
+  # range is exactly the Node majors `isolated-vm` publishes a prebuilt binary
+  # for (`SUPPORTED_NODE_MAJORS` in packages/hexis-mcp/src/preflight.ts); a
+  # major without one would compile C++ on the user's laptop, which is the
+  # failure the range exists to prevent rather than a version we support. This
+  # matrix is therefore the evidence behind the `engines` field, and
+  # `supported-node.test.ts` fails if the two ever disagree.
+  hexis-mcp:
+    name: hexis-mcp (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      # WHICH majors still work is this job's entire output, so one failing
+      # must not cancel the other and leave that unanswered.
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      # Installing is itself part of what this job checks: `isolated-vm`'s
+      # install script downloads a prebuilt binary when one matches this ABI
+      # and falls back to a C++ compile when none does, so a major that lost
+      # its binary shows up here as a long, fragile step before any test runs.
+      - run: pnpm install --frozen-lockfile
+
+      # Only what the package under test needs. Its workspace dependency is
+      # consumed as built `dist/`, and the rest of the monorepo (the web app,
+      # the API server) is covered by the job above on the version its image
+      # actually ships.
+      - run: pnpm --filter "@bevel-software/hexis-mcp^..." run build
+
+      - run: >-
+          pnpm --filter @bevel-software/platform-mcp-core
+          --filter @bevel-software/hexis-mcp
+          --reporter-hide-prefix run test

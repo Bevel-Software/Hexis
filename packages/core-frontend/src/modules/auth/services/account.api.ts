@@ -5,8 +5,13 @@ export interface AccountSummary {
   id: string;
   email: string;
   name: string;
-  /** False for accounts that only ever signed in via SSO. */
+  /** A password hash is stored for this account. */
   hasPassword: boolean;
+  /**
+   * The deployment admin (`ADMIN_EMAIL` while `ADMIN_PASSWORD` is set): signs
+   * in with the environment password whether or not a hash is stored.
+   */
+  isEnvAdmin: boolean;
   createdAt: string;
 }
 

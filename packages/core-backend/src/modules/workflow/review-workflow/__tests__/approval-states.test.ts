@@ -12,7 +12,7 @@ import type { Database } from '../../../database/connection.js';
 import type { WorkspaceService } from '../../../workspace/workspace.service.js';
 import type { GitService } from '../../git/git.service.js';
 import type { IAccessControl } from '../../../access/access-control.interface.js';
-import { hashEmail as hash } from '../../../../shared/hash-email.js';
+import { hashEmail as hash } from '../../../../shared/email-identity.js';
 import { AccessUnreadableError } from '../../../access-model/access-errors.js';
 
 function file(overrides: Partial<PullRequestFile>): PullRequestFile {
@@ -234,6 +234,19 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
+    // Empty because it could not be resolved — not because nobody may write.
+    expect(states[0].eligibilityResolved).toBe(false);
+  });
+
+  it('a failed eligibility lookup is marked unresolved, not "outside the gate"', async () => {
+    const svc = makeService([], {});
+    const access = (svc as unknown as { accessControl: IAccessControl }).accessControl;
+    access.eligibleWritersForPathsAtRef = async () => {
+      throw new Error('git show timed out');
+    };
+    const states = await svc.getApprovalStates(1, [file({ path: 'Knowledge/Foo.md' })], HEAD, BASE, null, 'ws-1');
+    expect(states[0].eligibleApprovers.roles).toEqual([]);
+    expect(states[0].eligibilityResolved).toBe(false);
   });
 
   it('marks a file approved when an eligible approver has a non-stale approval', async () => {
@@ -358,6 +371,28 @@ describe('ReviewWorkflowService.getApprovalStates', () => {
     expect(states[0].eligibleApprovers.roles).toEqual([]);
     expect(states[0].eligibleApprovers.users).toEqual([]);
     expect(states[0].isApproved).toBe(false);
+    expect(states[0].inMergeGate).toBe(false);
+    // The tree answered: nobody may write it, so it truly is outside the gate.
+    expect(states[0].eligibilityResolved).toBe(true);
+  });
+
+  it('stamps each file with the gate\'s own relevance verdict', async () => {
+    const svc = makeService([], {
+      'Knowledge/Foo.md': ALICE_ELIGIBLE,
+      'assets/shot.png': ALICE_ELIGIBLE,
+      'roles.yaml': ALICE_ELIGIBLE,
+    });
+    const states = await svc.getApprovalStates(
+      1,
+      [file({ path: 'Knowledge/Foo.md' }), file({ path: 'assets/shot.png' }), file({ path: 'roles.yaml' })],
+      HEAD,
+      BASE,
+      null,
+      'ws-1',
+    );
+    // Markdown and access config with an eligible approver bind the gate;
+    // other files do not, owner or no owner.
+    expect(states.map((s) => s.inMergeGate)).toEqual([true, false, true]);
   });
 
   it('flags self-approval via the authorId hash marker', async () => {

@@ -14,6 +14,7 @@ import { validatedVariables } from './mcp-json-discovery.js';
 import { assertSafeFetchUrl } from '../../shared/ssrf.js';
 import { containsVariableReference, findReservedVariableRef } from '../../shared/variable-refs.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
+import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { IToolManualService, ToolVariable } from './tool-manuals.contract.js';
 
 /**
@@ -127,6 +128,7 @@ export class McpServerEditService {
     private readonly accessControl: IAccessControl,
     private readonly toolManuals: IToolManualService,
     private readonly kbDirName: string,
+    private readonly disk: IFsProbe,
   ) {}
 
   /** The merged view of one server, or null when unknown/unreadable (indistinguishable, fail closed). */
@@ -418,8 +420,8 @@ export class McpServerEditService {
     const mcpAbs = path.join(pluginDir, PLUGIN_MCP_FILE);
     const manifestAbs = path.join(pluginDir, PLUGIN_MANIFEST_FILE);
     return {
-      mcp: await readJson(mcpAbs),
-      manifest: await readJson(manifestAbs),
+      mcp: await this.disk.readJsonObject(mcpAbs),
+      manifest: await this.disk.readJsonObject(manifestAbs),
       mcpAbs,
       manifestAbs,
     };
@@ -430,16 +432,5 @@ export class McpServerEditService {
     const servers = (ns as Record<string, unknown> | undefined)?.mcpServers;
     const entry = (servers as Record<string, unknown> | undefined)?.[name];
     return entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
-  }
-}
-
-async function readJson(p: string): Promise<Record<string, unknown> | null> {
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(p, 'utf-8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
   }
 }

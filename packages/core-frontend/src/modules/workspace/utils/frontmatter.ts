@@ -1,4 +1,5 @@
 import { parseDocument } from 'yaml';
+import { extractFrontmatter } from '@bevel-software/platform-shared';
 
 export type FrontmatterData = Record<string, string | string[]>;
 
@@ -45,10 +46,13 @@ function coerce(value: unknown): string | string[] {
  * carry access entries that must always surface.
  */
 export function parseFrontmatter(content: string): { data: FrontmatterData; body: string } {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) return { data: {}, body: content };
+  // The SHARED splitter, not a copy of its regex: this panel and the backend
+  // have to agree about which files have frontmatter at all, or a file shows
+  // no fields here while the catalog reads an id out of it.
+  const split = extractFrontmatter(content);
+  if (!split) return { data: {}, body: content };
 
-  const body = match[2].trimStart();
+  const body = split.body.trimStart();
   const data: FrontmatterData = {};
 
   let parsed: unknown;
@@ -57,7 +61,7 @@ export function parseFrontmatter(content: string): { data: FrontmatterData; body
     // the best-effort value of whatever parsed — so a single malformed entry
     // doesn't blank the block. (`.toJS()` itself can still throw, e.g. on an
     // alias bomb; the catch keeps the body readable.)
-    parsed = parseDocument(match[1]).toJS();
+    parsed = parseDocument(split.frontmatter).toJS();
   } catch {
     return { data: {}, body };
   }

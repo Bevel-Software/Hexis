@@ -11,16 +11,91 @@ import {
 } from '../../auth/services/account.api';
 
 /**
+ * How an account signs in, in the words this page uses everywhere (the row and
+ * the delete confirmation). The deployment admin wins over a stored hash: both
+ * can be true, and the environment credential is the one that survives.
+ */
+function signInMethodLabel(account: Pick<AccountSummary, 'hasPassword' | 'isEnvAdmin'>): string {
+  if (account.isEnvAdmin) return 'Password (deployment admin)';
+  if (account.hasPassword) return 'Password';
+  return 'No password — signs in with single sign-on';
+}
+
+/**
+ * What deleting the account means for signing in again, keyed off the same
+ * facts as {@link signInMethodLabel} and opening with its wording.
+ */
+function signInAfterDelete(account: AccountSummary): string {
+  const label = signInMethodLabel(account);
+  if (account.isEnvAdmin) {
+    return `${label}: they can still sign in with the deployment admin password, but will start fresh.`;
+  }
+  if (account.hasPassword) {
+    return `${label}: to sign in again they will need an admin to create a new account for them.`;
+  }
+  return `${label}: they can sign in again later with single sign-on, but will start fresh.`;
+}
+
+/**
+ * The two password actions and everything the page says about each. Setting a
+ * first password and replacing one someone signs in with today are different
+ * acts — the second takes a working credential away — so they get different
+ * labels and different copy, and a reset asks before it does it.
+ *
+ * The whole branch is `hasPassword`, the flag the list already carries for the
+ * sign-in method line: nothing about the credential itself is read here, and
+ * nothing more needs to be.
+ */
+type PasswordAction = {
+  /** The row button, the dialog title and the confirm button all read this. */
+  label: string;
+  /** The row button's tooltip. */
+  title: string;
+  /** What the new password does, said after the account it is for. */
+  effect: string;
+  /** The question the confirm button answers, or none when there is nothing to lose. */
+  confirm: string | null;
+  /** The inline banner once it is done. */
+  done: string;
+};
+
+const SET_PASSWORD: PasswordAction = {
+  label: 'Set password',
+  title: 'Set a sign-in password for this account.',
+  effect:
+    'They have no password today, so from now on they will be able to sign in with this one as well as with single sign-on.',
+  confirm: null,
+  done: 'Password set',
+};
+
+const RESET_PASSWORD: PasswordAction = {
+  label: 'Reset password',
+  title: 'Replace the sign-in password this account has now.',
+  effect:
+    'Their current password stops working immediately and this one takes its place, so they are locked out of password sign-in until they have it.',
+  confirm: 'Reset it?',
+  done: 'Password reset',
+};
+
+function passwordAction(account: Pick<AccountSummary, 'hasPassword'>): PasswordAction {
+  return account.hasPassword ? RESET_PASSWORD : SET_PASSWORD;
+}
+
+/**
  * The User Accounts page (`/user-accounts`, admins only) — the ONE
  * account-management surface: every account on the deployment, whether it can
- * sign in with a password, set a user's password (accounts that predate
- * per-user passwords can't sign in until an admin sets one), permanently
- * delete an account (the GDPR erasure path — overlays contribute their data
- * slices via erasure participants), and add a new account. Password
- * set/create both go through `POST /api/admin/accounts`, an upsert-by-email
- * that preserves an existing display name when none is supplied. The
- * signed-in admin's own row offers neither action — the backend refuses
- * self-erasure, and their own password lives on the Account page.
+ * sign in with a password, set a user's first password (accounts that predate
+ * per-user passwords can't sign in until an admin sets one) or reset the one
+ * they have — two acts the page names apart, see {@link PasswordAction} —
+ * permanently delete an account (the GDPR erasure path — overlays contribute
+ * their data slices via erasure participants), and add a new account. Set,
+ * reset and create all go through `POST /api/admin/accounts`, an
+ * upsert-by-email that preserves an existing display name when none is
+ * supplied. The signed-in admin's own row offers neither action — the backend
+ * refuses self-erasure, and their own password lives on the Account page. The
+ * deployment admin's row offers no password action either, from any admin:
+ * that account's password is set in the deployment environment, and the
+ * backend refuses to store one for it.
  */
 export function UserAccountsPage() {
   const { isAdmin } = useAdmin();
@@ -37,7 +112,13 @@ export function UserAccountsPage() {
   const [newPassword, setNewPassword] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [savingPassword, setSavingPassword] = useState(false);
-  const [passwordSetFor, setPasswordSetFor] = useState<string | null>(null);
+  // Which account was just given a password, and which of the two actions it
+  // was — the target is cleared when the dialog closes, and "set" and "reset"
+  // are not the same news to report.
+  const [passwordDone, setPasswordDone] = useState<{
+    email: string;
+    action: PasswordAction;
+  } | null>(null);
   // Add-account form.
   const [addEmail, setAddEmail] = useState('');
   const [addName, setAddName] = useState('');
@@ -84,21 +165,21 @@ export function UserAccountsPage() {
     setPasswordTarget(account);
     setNewPassword('');
     setPasswordError(null);
-    setPasswordSetFor(null);
+    setPasswordDone(null);
   }
 
-  async function confirmSetPassword() {
+  async function confirmPasswordChange() {
     if (!passwordTarget || savingPassword || newPassword.length === 0) return;
     setSavingPassword(true);
     setPasswordError(null);
     try {
       // No name → the upsert keeps the account's existing display name.
       await createAccount(passwordTarget.email, '', newPassword);
-      setPasswordSetFor(passwordTarget.email);
+      setPasswordDone({ email: passwordTarget.email, action: passwordAction(passwordTarget) });
       setPasswordTarget(null);
       refresh();
     } catch (err) {
-      setPasswordError(err instanceof Error ? err.message : "Couldn't set the password.");
+      setPasswordError(err instanceof Error ? err.message : "Couldn't save the password.");
     } finally {
       setSavingPassword(false);
     }
@@ -135,6 +216,10 @@ export function UserAccountsPage() {
   const inputClass =
     'w-full rounded-md bg-sunken border border-line-strong px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent';
 
+  // Which of the two the open dialog is. The Dialog renders nothing without a
+  // target, so the fallback is never on screen — it just keeps the type honest.
+  const passwordDialog = passwordTarget ? passwordAction(passwordTarget) : SET_PASSWORD;
+
   return (
     <>
       <PageShell title="User accounts">
@@ -143,7 +228,8 @@ export function UserAccountsPage() {
             Everyone with an account on this deployment. Deleting an account permanently removes
             the person&apos;s data and anonymizes their past review activity; their saves in the
             knowledge base keep their history. Setting a password lets someone sign in with
-            email + password (existing accounts keep everything else).
+            email + password (existing accounts keep everything else); resetting one replaces
+            the password they have now.
           </p>
 
           {error && (
@@ -154,12 +240,12 @@ export function UserAccountsPage() {
               {error}
             </div>
           )}
-          {passwordSetFor && (
+          {passwordDone && (
             <div
               className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-sm px-2 py-1.5"
               role="status"
             >
-              Password set for {passwordSetFor}.
+              {passwordDone.action.done} for {passwordDone.email}.
             </div>
           )}
 
@@ -185,19 +271,30 @@ export function UserAccountsPage() {
                       </div>
                       <div className="text-meta text-ink-muted truncate">
                         {account.email} · Joined {new Date(account.createdAt).toLocaleDateString()} ·{' '}
-                        {account.hasPassword ? 'Password sign-in' : 'Single sign-on only'}
+                        {signInMethodLabel(account)}
                       </div>
                     </div>
-                    {!isSelf && (
-                      <button
-                        onClick={() => openPasswordDialog(account)}
-                        className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
-                        title="Set a new sign-in password for this account."
-                        aria-label={`Set password for ${account.email}`}
-                      >
-                        Set password
-                      </button>
-                    )}
+                    {!isSelf &&
+                      (account.isEnvAdmin ? (
+                        // Neither password action for the deployment admin: its
+                        // password is the environment's, and a stored one
+                        // would only ADD a credential that outlives rotating
+                        // ADMIN_PASSWORD. The backend refuses it too — this
+                        // says why instead of offering a button that fails.
+                        // `hasPassword` does not change that on this row.
+                        <span className="text-meta text-ink-muted text-right max-w-[13rem]">
+                          Password set in the deployment environment
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => openPasswordDialog(account)}
+                          className="text-xs px-2 py-1 rounded-sm text-ink hover:bg-hover border border-line"
+                          title={passwordAction(account).title}
+                          aria-label={`${passwordAction(account).label} for ${account.email}`}
+                        >
+                          {passwordAction(account).label}
+                        </button>
+                      ))}
                     {!isSelf && (
                       <button
                         onClick={() => setPendingDelete(account)}
@@ -271,7 +368,7 @@ export function UserAccountsPage() {
       <Dialog
         open={passwordTarget !== null}
         onClose={() => setPasswordTarget(null)}
-        title="Set password"
+        title={passwordDialog.label}
         size="sm"
         busy={savingPassword}
         footer={
@@ -284,11 +381,11 @@ export function UserAccountsPage() {
               Cancel
             </button>
             <button
-              onClick={confirmSetPassword}
+              onClick={confirmPasswordChange}
               disabled={savingPassword || newPassword.length === 0}
               className="px-3 py-1.5 text-sm rounded-sm bg-accent hover:bg-accent-hover text-white disabled:opacity-50"
             >
-              {savingPassword ? 'Saving…' : 'Set password'}
+              {savingPassword ? 'Saving…' : passwordDialog.label}
             </button>
           </>
         }
@@ -299,7 +396,9 @@ export function UserAccountsPage() {
             <span className="font-medium">
               {passwordTarget?.name} ({passwordTarget?.email})
             </span>
-            . Share it with them out-of-band; they can change it later on their Account page.
+            . {passwordDialog.effect} Share it with them out-of-band; they can change it later on
+            their Account page.
+            {passwordDialog.confirm && ` ${passwordDialog.confirm}`}
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-ink-muted">New password</span>
@@ -351,9 +450,7 @@ export function UserAccountsPage() {
           </span>
           ? This removes their personal data for good and anonymizes their past review activity.
           Their saves in the knowledge base keep their history.{' '}
-          {pendingDelete?.hasPassword
-            ? 'To sign in again they will need an admin to create a new account for them.'
-            : 'They can sign in again later with single sign-on, but will start fresh.'}
+          {pendingDelete && signInAfterDelete(pendingDelete)}
         </p>
       </Dialog>
     </>

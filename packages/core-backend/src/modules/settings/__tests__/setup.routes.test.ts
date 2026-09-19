@@ -1,11 +1,40 @@
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  DEFAULT_KB_LAYOUT,
+  branchModelFromEnv,
+  configureBranchModel,
+  configureKbLayout,
+  currentKbLayout,
+  type KbLayout,
+} from '@bevel-software/platform-shared';
+
+/**
+ * test-setup configures the branch model from the environment, and nothing
+ * unconfigures it; a test that needs the first-run "no branch model yet" state
+ * says so here. Everything else is the real module.
+ */
+const branchModel = vi.hoisted(() => ({ pretendUnconfigured: false }));
+vi.mock('@bevel-software/platform-shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@bevel-software/platform-shared')>();
+  return {
+    ...actual,
+    isBranchModelConfigured: () => !branchModel.pretendUnconfigured && actual.isBranchModelConfigured(),
+    // Applying a model configures it, as the real module does.
+    configureBranchModel: (model: Parameters<typeof actual.configureBranchModel>[0]) => {
+      actual.configureBranchModel(model);
+      branchModel.pretendUnconfigured = false;
+    },
+  };
+});
 import { createSetupRoutes } from '../setup.routes.js';
 import { DeploymentSettingsService } from '../deployment-settings.service.js';
 import type { Database } from '../../database/connection.js';
 import type { IAdminAccessService } from '../../admin/admin.interface.js';
+import type { ConnectionCheck, RepositoryConnection } from '../connection-check.js';
+import type { RootFolderListing } from '../git-root-folders.js';
 
 const ENC_KEY = 'kToAi8FXWDpDn3A6yQ/60O39bv05N7XzVOIu/0CJrFc=';
 
@@ -18,7 +47,16 @@ let server: HttpServer | null = null;
  * that runs later in the same worker would otherwise see a different
  * environment than the one it was written against.
  */
-const KB_ENV = ['KB_REPO_URL', 'GIT_TOKEN', 'GIT_USERNAME', 'KB_DIR_NAME', 'GITHUB_TOKEN'] as const;
+const KB_ENV = [
+  'KB_REPO_URL',
+  'GIT_TOKEN',
+  'GIT_USERNAME',
+  'KB_DIR_NAME',
+  'GITHUB_TOKEN',
+  'KB_KNOWLEDGE_BASE_DIR',
+  'KB_SKILLS_DIR',
+  'KB_PLUGINS_DIR',
+] as const;
 let savedEnv: Partial<Record<(typeof KB_ENV)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -39,8 +77,28 @@ afterEach(() => {
   }
 });
 
-/** Mount the setup router on a throwaway port and hand back its base URL. */
-function listen(isAdmin = true, runAll: () => Promise<void> = async () => {}) {
+/** Stands in for the remote: says a connection reads and writes, and counts the asks. */
+function connectedCheck() {
+  const asked: RepositoryConnection[] = [];
+  const check = async (connection: RepositoryConnection): Promise<ConnectionCheck> => {
+    asked.push(connection);
+    return { outcome: 'connected', branches: ['main'], defaultBranch: 'main', empty: false };
+  };
+  return { asked, check };
+}
+
+/**
+ * Mount the setup router on a throwaway port and hand back its base URL.
+ * `checkConnection` defaults to the REAL check — the test-connection suites
+ * aim it at a port nothing listens on — and save suites pass a stand-in.
+ * `isAdmin` may be a function, for suites that change who is asking mid-test.
+ */
+function listen(
+  isAdmin: boolean | (() => boolean) = true,
+  runAll: () => Promise<void> = async () => {},
+  checkConnection?: (connection: RepositoryConnection) => Promise<ConnectionCheck>,
+  listFolders?: (listing: RootFolderListing) => Promise<string[] | null>,
+) {
   const db = {
     select: () => ({ from: () => Promise.resolve([]) }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
@@ -58,10 +116,15 @@ function listen(isAdmin = true, runAll: () => Promise<void> = async () => {}) {
     '/api',
     createSetupRoutes(
       settings,
-      { isAdmin: async () => isAdmin } as IAdminAccessService,
+      {
+        isAdmin: async () => (typeof isAdmin === 'function' ? isAdmin() : isAdmin),
+      } as IAdminAccessService,
       // Default no-op: most suites never complete setup, so the runner is
       // never reached. The completion-transition suite passes its own spy.
       { runAll },
+      undefined,
+      checkConnection,
+      listFolders,
     ),
   );
   server = app.listen(0);
@@ -104,6 +167,17 @@ describe('POST /setup/test-connection — what may reach git', () => {
     const { base } = listen();
     const res = await post(base, '/api/setup/test-connection', { kbRepoUrl: 'file:///etc/passwd' });
     expect(res.status).toBe(400);
+  });
+
+  /** The KB startup refuses such a URL; the credential would sit in git's argv. */
+  it('refuses a URL carrying credentials', async () => {
+    const { base } = listen();
+    const res = await post(base, '/api/setup/test-connection', {
+      kbRepoUrl: 'https://x-access-token:ghp_embedded@example.com/acme/kb.git',
+      gitToken: 'ghp_x',
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Remove the username and token from the URL/);
   });
 
   it('refuses a username that would break out of the credential-helper snippet', async () => {
@@ -209,7 +283,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     let runs = 0;
     const { base } = listen(true, async () => {
       runs++;
-    });
+    }, connectedCheck().check);
     // First save: an incomplete configuration — no phase.
     let res = await post(base, '/api/setup/settings', { settings: { gitUsername: 'x-access-token' } });
     expect(res.status).toBe(200);
@@ -234,26 +308,176 @@ describe('POST /setup/settings — the completion transition and the KB startup 
       const { base } = listen(true, async () => {
         attempts++;
         if (fail) throw new Error('remote said no');
-      });
+      }, connectedCheck().check);
       const res = await post(base, '/api/setup/settings', { settings: completing });
       expect(res.status).toBe(500);
-      expect((await res.json()).error).toMatch(/could not be initialized/i);
+      const body = await res.json();
+      expect(body.error).toMatch(/could not be initialized/i);
+      expect(body.kbInit.kind).toBe('unknown');
       expect(attempts).toBe(1);
-      // The gate stays shut: status reports incomplete, with the admin's hint.
+      // The gate stays shut: status reports incomplete, with the same classified cause.
       let status = await (await fetch(`${base}/api/setup/status`)).json();
       expect(status.complete).toBe(false);
-      expect(status.kbInitError).toMatch(/remote said no/);
-      // Any save while the failure stands retries the phase.
+      expect(status.kbInit).toEqual(body.kbInit);
+      // An EMPTY save — what "Retry initialization" sends — retries the phase.
       fail = false;
-      const retry = await post(base, '/api/setup/settings', {
-        settings: { gitUsername: 'x-access-token' },
-      });
+      const retry = await post(base, '/api/setup/settings', { settings: {} });
       expect(retry.status).toBe(200);
       expect(attempts).toBe(2);
       expect((await retry.json()).complete).toBe(true);
       status = await (await fetch(`${base}/api/setup/status`)).json();
       expect(status.complete).toBe(true);
-      expect(status.kbInitError).toBeUndefined();
+      expect(status.kbInit).toBeUndefined();
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('a retry that fails again answers with the fresh classification', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const failures = [
+        'git ls-remote failed: fatal: Authentication failed for x',
+        'KB startup step "template-files" failed: disk full',
+      ];
+      const { base } = listen(true, async () => {
+        throw new Error(failures.shift());
+      }, connectedCheck().check);
+      const first = await (await post(base, '/api/setup/settings', { settings: completing })).json();
+      expect(first.kbInit.kind).toBe('credentials-rejected');
+      const second = await post(base, '/api/setup/settings', { settings: {} });
+      expect(second.status).toBe(500);
+      const body = await second.json();
+      expect(body.kbInit.kind).toBe('step-failed');
+      expect(body.kbInit.cause).toContain('"template-files"');
+      const status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status.kbInit).toEqual(body.kbInit);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('sends the browser { kind, cause } and never the raw message; the raw message is logged', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const raw =
+        "git push failed: Command failed: git push origin HEAD:refs/heads/main\nremote: Permission to acme/kb.git denied to bot-7f3a.\nfatal: unable to access 'https://github.com/acme/kb.git/': The requested URL returned error: 403";
+      const { base } = listen(true, async () => {
+        throw new Error(raw);
+      }, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', { settings: completing });
+      const body = await res.json();
+      expect(Object.keys(body.kbInit).sort()).toEqual(['cause', 'kind']);
+      expect(body.kbInit.kind).toBe('write-refused');
+      const statusText = await (await fetch(`${base}/api/setup/status`)).text();
+      for (const text of [JSON.stringify(body), statusText]) {
+        expect(text).not.toContain('bot-7f3a');
+        expect(text).not.toContain('Permission to');
+        expect(text).not.toContain('kbInitError');
+      }
+      expect(logged.some((line) => line.includes('bot-7f3a'))).toBe(true);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('scrubs the settings-stored token from the logged message, even when the environment has none', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const { base } = listen(true, async () => {
+        // The save publishes a stored token to GITHUB_TOKEN; take it away so
+        // only the settings service still knows it.
+        delete process.env.GITHUB_TOKEN;
+        throw new Error('fatal: helper answered ghp_storedsecret12345 and was refused');
+      }, connectedCheck().check);
+      await post(base, '/api/setup/settings', {
+        settings: { ...completing, gitToken: 'ghp_storedsecret12345' },
+      });
+      expect(logged.length).toBeGreaterThan(0);
+      expect(logged.join('\n')).not.toContain('ghp_storedsecret12345');
+      expect(logged.join('\n')).toContain('***');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('logs the failure as one line: git text cannot forge a log entry', async () => {
+    const logged: string[] = [];
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    };
+    try {
+      const { base } = listen(true, async () => {
+        throw new Error('git push failed: remote: boom\n[setup] everything is fine[31m');
+      }, connectedCheck().check);
+      await post(base, '/api/setup/settings', { settings: completing });
+      const line = logged.find((l) => l.includes('KB initialization failed'));
+      expect(line).toBeDefined();
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('classifies the text as thrown, not the scrubbed copy', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const { base } = listen(true, async () => {
+        delete process.env.GITHUB_TOKEN;
+        // A token that spells part of git's own wording: scrubbing it first
+        // would turn "not found" into "not ***" and read as unknown.
+        throw new Error("git ls-remote failed: remote: Repository not found.\nfatal: repository 'x' not found");
+      }, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', { settings: { ...completing, gitToken: 'found' } });
+      expect((await res.json()).kbInit.kind).toBe('not-found');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it("answers with the classification the runner's failure carries, not a re-read of its scrubbed message", async () => {
+    const { ClassifiedFailure, classifyGitFailure } = await import('../../../shared/git-failure.js');
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const carried = classifyGitFailure('git push failed: remote: Permission to acme/kb.git denied to bot.');
+      const { base } = listen(true, async () => {
+        throw new ClassifiedFailure('git push failed: *** *** ***', carried);
+      }, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', { settings: completing });
+      expect((await res.json()).kbInit).toEqual(carried);
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  it('tells a non-admin nothing about a standing failure', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      let admin = true;
+      const { base } = listen(
+        () => admin,
+        async () => {
+          throw new Error('KB startup step "roles-yaml" failed: boom');
+        },
+      );
+      await post(base, '/api/setup/settings', { settings: completing });
+      admin = false;
+      const status = await (await fetch(`${base}/api/setup/status`)).json();
+      expect(status).toEqual({ complete: false, isAdmin: false });
     } finally {
       console.error = consoleError;
     }
@@ -266,7 +490,7 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     const { base } = listen(true, async () => {
       runs++;
       await running;
-    });
+    }, connectedCheck().check);
     // The completing save blocks inside the phase...
     const first = post(base, '/api/setup/settings', { settings: completing });
     // release() in a finally: a mid-test assertion failure must still unblock
@@ -300,6 +524,391 @@ describe('POST /setup/settings — the completion transition and the KB startup 
     expect(res2.status).toBe(200);
     expect(runs).toBe(1);
     expect((await (await fetch(`${base}/api/setup/status`)).json()).complete).toBe(true);
+  });
+});
+
+/**
+ * The folder names are applied once at boot, so a first-run choice would be
+ * ignored by the phase — `Skills/` scaffolded beside the `skills/` the admin
+ * named — until a restart. The completing save applies them first, while the
+ * process still holds the defaults; after that they stay restart-to-apply.
+ */
+describe('POST /setup/settings — the folder names on the completing save', () => {
+  const completing = { kbRepoUrl: 'https://example.com/acme/kb.git', gitToken: 'ghp_x' };
+  afterEach(() => configureKbLayout({ ...DEFAULT_KB_LAYOUT }));
+
+  it('applies them before the phase runs, and asks for no restart over them', async () => {
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    }, connectedCheck().check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { ...completing, knowledgeBaseDir: 'Docs', skillsDir: 'skills' },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.complete).toBe(true);
+    expect(body.restartRequired).toBe(false);
+    expect(seenByPhase).toEqual([{ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' }]);
+    expect(currentKbLayout()).toEqual({ knowledgeBaseDir: 'Docs', skillsDir: 'skills', pluginsDir: 'Plugins' });
+  });
+
+  it('applies names stored by an earlier, incomplete save', async () => {
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    }, connectedCheck().check);
+    await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
+    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+    await post(base, '/api/setup/settings', { settings: completing });
+    expect(seenByPhase[0]?.pluginsDir).toBe('plugins');
+  });
+
+  it('leaves them restart-to-apply once setup is complete', async () => {
+    const { base } = listen(true, undefined, connectedCheck().check);
+    await post(base, '/api/setup/settings', { settings: completing });
+    const res = await post(base, '/api/setup/settings', { settings: { pluginsDir: 'plugins' } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).restartRequired).toBe(true);
+    expect(currentKbLayout().pluginsDir).toBe('Plugins');
+  });
+
+  it('does not replace a layout the process already runs', async () => {
+    configureKbLayout({ knowledgeBaseDir: 'docs', skillsDir: 'skills', pluginsDir: 'plugins' });
+    const seenByPhase: KbLayout[] = [];
+    const { base } = listen(true, async () => {
+      seenByPhase.push(currentKbLayout());
+    }, connectedCheck().check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { ...completing, skillsDir: 'capabilities' },
+    });
+    expect((await res.json()).restartRequired).toBe(true);
+    expect(seenByPhase[0]?.skillsDir).toBe('skills');
+  });
+
+  it('applies names corrected between a failed run and its retry', async () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      const seenByPhase: KbLayout[] = [];
+      let fail = true;
+      const { base } = listen(true, async () => {
+        seenByPhase.push(currentKbLayout());
+        if (fail) throw new Error('remote said no');
+      }, connectedCheck().check);
+      const first = await post(base, '/api/setup/settings', {
+        settings: { ...completing, skillsDir: 'skills' },
+      });
+      expect(first.status).toBe(500);
+      // The gate never opened, so the retry initializes what is saved NOW.
+      fail = false;
+      const retry = await post(base, '/api/setup/settings', { settings: { skillsDir: 'capabilities' } });
+      expect(retry.status).toBe(200);
+      const body = await retry.json();
+      expect(body.complete).toBe(true);
+      expect(body.restartRequired).toBe(false);
+      expect(seenByPhase.map((l) => l.skillsDir)).toEqual(['skills', 'capabilities']);
+      expect(currentKbLayout().skillsDir).toBe('capabilities');
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  /**
+   * The vitest config pins the branch pair in the environment, which makes the
+   * settings env-sourced and so refused by a save; these tests store their own.
+   */
+  async function withoutBranchEnv(test: () => Promise<void>) {
+    const saved = { DEFAULT_BRANCH: process.env.DEFAULT_BRANCH, PROTECTED_BRANCHES: process.env.PROTECTED_BRANCHES };
+    delete process.env.DEFAULT_BRANCH;
+    delete process.env.PROTECTED_BRANCHES;
+    try {
+      await test();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      // Whatever the test applied, the rest of the worker runs on the pinned model.
+      configureBranchModel(branchModelFromEnv());
+    }
+  }
+
+  it('asks for no restart over a branch model the completing save also applied', () =>
+    withoutBranchEnv(async () => {
+    branchModel.pretendUnconfigured = true;
+    try {
+      const { base } = listen(true, undefined, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', {
+        settings: {
+          ...completing,
+          skillsDir: 'skills',
+          defaultBranch: 'production',
+          protectedBranches: 'production,staging',
+        },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.complete).toBe(true);
+      expect(body.restartRequired).toBe(false);
+    } finally {
+      branchModel.pretendUnconfigured = false;
+    }
+    }));
+
+  it('still asks for a restart over a branch change once a branch model is in effect', () =>
+    withoutBranchEnv(async () => {
+      const { base } = listen(true, undefined, connectedCheck().check);
+      const res = await post(base, '/api/setup/settings', {
+        settings: { ...completing, defaultBranch: 'production', protectedBranches: 'production,staging' },
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).restartRequired).toBe(true);
+    }));
+});
+
+/**
+ * A saved connection is one the host has accepted for reading AND writing. The
+ * save runs the same check as Test connection, on the values it would put in
+ * effect, and a failure stores nothing and says which field to fix.
+ */
+describe('POST /setup/settings — the connection is checked before it is stored', () => {
+  const REPO = 'https://example.com/acme/kb.git';
+  const refusing = (result: ConnectionCheck) => {
+    const asked: RepositoryConnection[] = [];
+    return {
+      asked,
+      check: async (connection: RepositoryConnection) => {
+        asked.push(connection);
+        return result;
+      },
+    };
+  };
+
+  it('refuses a save whose token cannot read the repository, and stores nothing', async () => {
+    const remote = refusing({
+      outcome: 'rejected',
+      reason: 'credentials',
+      field: 'gitToken',
+      error: 'The host rejected those credentials.',
+    });
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: REPO, gitToken: 'ghp_wrong' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({ gitToken: 'The host rejected those credentials.' });
+    // Checked on exactly the values the save would have put in effect.
+    expect(remote.asked).toEqual([{ url: REPO, token: 'ghp_wrong', username: 'x-access-token' }]);
+    expect(settings.resolve('kbRepoUrl')).toBe('');
+    expect(settings.resolve('gitToken')).toBe('');
+  });
+
+  it('refuses a token that can read but not write, naming the permission', async () => {
+    const remote = refusing({
+      outcome: 'read-only',
+      field: 'gitToken',
+      error:
+        'This token can read the repository but cannot write to it. Grant it write access: on GitHub, “Contents: Read and write”.',
+      branches: ['main'],
+      defaultBranch: 'main',
+      empty: false,
+    });
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: REPO, gitToken: 'ghp_readonly' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.gitToken).toMatch(/Contents: Read and write/);
+    expect(settings.resolve('gitToken')).toBe('');
+  });
+
+  it('refuses when the host cannot be reached, against the address', async () => {
+    const remote = refusing({
+      outcome: 'rejected',
+      reason: 'unreachable',
+      field: 'kbRepoUrl',
+      error: 'Could not reach that host from this server. Check the URL and any network egress rules, then try again.',
+    });
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: REPO, gitToken: 'ghp_x' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/could not reach that host/i);
+    expect(settings.resolve('kbRepoUrl')).toBe('');
+  });
+
+  it('refuses a new address without a token, and never sends the saved token there', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_verysecret' }, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://attacker.example/collector.git' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.gitToken).toMatch(/access token for that repository/i);
+    expect(remote.asked).toEqual([]);
+    expect(settings.resolve('kbRepoUrl')).toBe(REPO);
+  });
+
+  it('checks a new address with the token that arrives beside it, then stores both', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_old' }, null);
+    const moved = 'https://example.com/acme/moved.git';
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: moved, gitToken: 'ghp_new' },
+    });
+    expect(res.status).toBe(200);
+    expect(remote.asked).toEqual([{ url: moved, token: 'ghp_new', username: 'x-access-token' }]);
+    expect(settings.resolve('kbRepoUrl')).toBe(moved);
+  });
+
+  it('checks a changed username against the stored address and token', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_x' }, null);
+    const res = await post(base, '/api/setup/settings', { settings: { gitUsername: 'oauth2' } });
+    expect(res.status).toBe(200);
+    expect(remote.asked).toEqual([{ url: REPO, token: 'ghp_x', username: 'oauth2' }]);
+  });
+
+  it('never probes a save that touches nothing about the connection', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    await settings.save({ kbRepoUrl: REPO, gitToken: 'ghp_x' }, null);
+    const res = await post(base, '/api/setup/settings', {
+      settings: {
+        oidcClientId: 'hexis-app',
+        oidcProviderLabel: 'Company SSO',
+        // Re-sending the stored values unchanged is not a change either.
+        kbRepoUrl: REPO,
+        gitUsername: 'x-access-token',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(remote.asked).toEqual([]);
+  });
+
+  it('refuses a malformed field on its own terms, before asking the remote anything', async () => {
+    const remote = connectedCheck();
+    const { base } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'git@example.com:acme/kb.git', gitToken: 'ghp_x' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/full URL|https/);
+    expect(remote.asked).toEqual([]);
+  });
+
+  it('refuses an address carrying credentials, before asking the remote anything', async () => {
+    const remote = connectedCheck();
+    const { base, settings } = listen(true, undefined, remote.check);
+    const res = await post(base, '/api/setup/settings', {
+      settings: { kbRepoUrl: 'https://user:ghp_embedded@example.com/acme/kb.git', gitToken: 'ghp_x' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems.kbRepoUrl).toMatch(/Remove the username and token from the URL/);
+    expect(remote.asked).toEqual([]);
+    expect(settings.resolve('kbRepoUrl')).toBe('');
+  });
+
+  /**
+   * An address already in effect with credentials in it — set before the rule
+   * tightened — is not re-validated by a save that leaves it alone. The REAL
+   * check must still answer that save with a fielded 400, not a 500.
+   */
+  it('refuses a token-only save against an address already carrying credentials, as a 400 on the address', async () => {
+    process.env.KB_REPO_URL = 'https://u:ghp_embedded@127.0.0.1:1/acme/kb.git';
+    const { base, settings } = listen();
+    const res = await post(base, '/api/setup/settings', { settings: { gitToken: 'ghp_new' } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).problems).toEqual({
+      kbRepoUrl: 'Remove the username and token from the URL — enter the token in its own field.',
+    });
+    expect(settings.resolve('gitToken')).toBe('');
+  });
+});
+
+/**
+ * Test connection reports the repository's top-level folders beside the
+ * branches: listed from the branch the remote calls its trunk, `[]` for an
+ * empty repository without a lookup, and `null` when the listing could not be
+ * read — which never turns a proven connection into a failure.
+ */
+describe('POST /setup/test-connection — the root folders it reports', () => {
+  const REPO = 'https://example.com/acme/kb.git';
+  const answering = (check: ConnectionCheck, folders: string[] | null) => {
+    const listed: RootFolderListing[] = [];
+    return {
+      listed,
+      check: async () => check,
+      list: async (listing: RootFolderListing) => {
+        listed.push(listing);
+        return folders;
+      },
+    };
+  };
+
+  it('lists the folders of the branch the remote calls its trunk', async () => {
+    const remote = answering(
+      { outcome: 'connected', branches: ['main', 'production'], defaultBranch: 'production', empty: false },
+      ['Docs', 'skills'],
+    );
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const res = await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' });
+    expect(await res.json()).toEqual({
+      ok: true,
+      outcome: 'connected',
+      empty: false,
+      branches: ['main', 'production'],
+      defaultBranch: 'production',
+      rootFolders: ['Docs', 'skills'],
+    });
+    expect(remote.listed).toEqual([
+      { url: REPO, branch: 'production', username: 'x-access-token', token: 'ghp_x' },
+    ]);
+  });
+
+  it('answers an empty list for an empty repository, without looking', async () => {
+    const remote = answering({ outcome: 'connected', branches: [], defaultBranch: null, empty: true }, ['x']);
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const res = await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' });
+    expect((await res.json()).rootFolders).toEqual([]);
+    expect(remote.listed).toEqual([]);
+  });
+
+  it('still lists for a token that reads but cannot write', async () => {
+    const remote = answering(
+      { outcome: 'read-only', field: 'gitToken', error: 'Grant it write access.', branches: ['main'], defaultBranch: 'main', empty: false },
+      ['skills'],
+    );
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const body = await (await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' })).json();
+    expect(body.ok).toBe(false);
+    expect(body.outcome).toBe('read-only');
+    expect(body.rootFolders).toEqual(['skills']);
+  });
+
+  it('reports null when the listing fails, and the connection still stands', async () => {
+    const remote = answering({ outcome: 'connected', branches: ['main'], defaultBranch: 'main', empty: false }, null);
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const body = await (await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' })).json();
+    expect(body.ok).toBe(true);
+    expect(body.rootFolders).toBeNull();
+  });
+
+  it('lists nothing for a rejected connection', async () => {
+    const remote = answering(
+      { outcome: 'rejected', reason: 'credentials', field: 'gitToken', error: 'The host rejected those credentials.' },
+      ['x'],
+    );
+    const { base } = listen(true, undefined, remote.check, remote.list);
+    const body = await (await post(base, '/api/setup/test-connection', { kbRepoUrl: REPO, gitToken: 'ghp_x' })).json();
+    expect(body.ok).toBe(false);
+    expect(body).not.toHaveProperty('rootFolders');
+    expect(remote.listed).toEqual([]);
   });
 });
 

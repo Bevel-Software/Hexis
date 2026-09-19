@@ -147,6 +147,16 @@ export const changeRequests = pgTable('change_requests', {
   authorName: text('author_name').notNull(),
   state: text('state').notNull().default('open'), // 'open' | 'merged' | 'closed'
   mergedSha: text('merged_sha'),
+  // The last apply attempt that did not land (null when none, or once a gate
+  // input it depended on changed). Persisted rather than only pushed to the
+  // clicker so every viewer of the still-open request — its author first —
+  // sees the refusal.
+  applyFailureReason: text('apply_failure_reason'),
+  applyFailureConflicts: boolean('apply_failure_conflicts'),
+  applyFailedAt: timestamp('apply_failed_at'),
+  applyFailedByName: text('apply_failed_by_name'),
+  /** What refused the last apply: 'gate' (approvals), 'conflicts' (git), 'error' (anything else). */
+  applyFailureKind: text('apply_failure_kind'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at'),
   closedAt: timestamp('closed_at'),
@@ -527,6 +537,13 @@ export const githubFacadeIdentity = pgTable('github_facade_identity', {
   publicKeyPem: text('public_key_pem').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   rotatedAt: timestamp('rotated_at'),
+  /**
+   * When an admin said the deployment is registered with their Claude
+   * organization; null while it is not. Nothing on the Claude side reports
+   * this back, so an admin states it. Not sealed: it is the one fact about
+   * this row every signed-in person may read.
+   */
+  registeredAt: timestamp('registered_at'),
 });
 
 /**

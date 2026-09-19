@@ -28,14 +28,14 @@ export function SharedViaPlugins({
   skillName,
   skillPath,
   memberships,
-  owned,
+  canWrite,
   onChanged,
 }: {
   skillName: string;
   skillPath: string;
   memberships: PluginMembership[];
   /** The caller may edit the skill (its SKILL.md) — the repair verb. */
-  owned: boolean;
+  canWrite: boolean;
   onChanged(): void;
 }) {
   const data = useLibrary();
@@ -53,15 +53,9 @@ export function SharedViaPlugins({
       ),
     [data.pluginSummaries],
   );
-  // A retired skill is never shared onward — the link API refuses it, so the
-  // chooser offers nothing rather than a list of refusals.
-  const retired = useMemo(
-    () => data.items.some((i) => i.kind === 'skill' && i.id === skillName && i.lifecycle === 'retired'),
-    [data.items, skillName],
-  );
   const addable = useMemo(
-    () => (retired ? [] : [...managed].filter((name) => !memberships.some((m) => m.name === name)).sort()),
-    [managed, memberships, retired],
+    () => [...managed].filter((name) => !memberships.some((m) => m.name === name)).sort(),
+    [managed, memberships],
   );
 
   async function run(label: string, op: () => Promise<unknown>, done: string) {
@@ -105,7 +99,7 @@ export function SharedViaPlugins({
                 </div>
                 <small className={cn('block text-meta', broken ? 'text-urgent' : 'text-ink-faint')}>
                   {broken
-                    ? owned
+                    ? canWrite
                       ? `Needs setup: ${m.name}'s members can't read this skill until the link is repaired.`
                       : `Needs setup: ${m.name}'s members can't read this skill. Ask an editor to repair the link.`
                     : m.linked
@@ -115,7 +109,7 @@ export function SharedViaPlugins({
               </div>
               <div className="ml-auto flex shrink-0 items-center gap-2">
                 {broken && <StatusDot state="urgent" />}
-                {broken && owned && (
+                {broken && canWrite && (
                   <Button
                     variant="outline"
                     size="tiny"

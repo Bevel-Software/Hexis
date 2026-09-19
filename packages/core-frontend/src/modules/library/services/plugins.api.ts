@@ -33,6 +33,17 @@ export interface PluginSummary {
   displayName?: string;
   /** Repo-relative constituent folders, e.g. `['Plugins/GTM']`. */
   folders: string[];
+  /**
+   * Repo-relative roots the plugin LINKS skills from, e.g. `['Skills/Testing']`.
+   *
+   * What lets the plugin's page tell a card that LIVES here from one it only
+   * points at. A skill says so itself (`PluginMembership.linked`); a tool
+   * says nothing — a `.tool` beside the skills under a linked root reaches
+   * the plugin the same way they do, and only these roots reveal it. Absent
+   * from an older server: every tool then reads as inline, which is what the
+   * page showed before.
+   */
+  linkedRoots?: string[];
   /** Per-caller: can read the folder (membership). Locked === !canRead. */
   canRead: boolean;
   /** Per-caller; true ⇒ may manage the plugin's access (admin-rescue applies). */
@@ -70,6 +81,13 @@ export interface PluginSummary {
    * "Private" mark on the row. Absent from an older server.
    */
   isPrivate?: boolean;
+  /**
+   * What the platform left out of this plugin's definition and why, in
+   * plain words — an MCP server its profile selects that could not be kept,
+   * a skill root that is not a folder. Shown on the plugin's page, counted
+   * as attention on its row. Absent from an older server.
+   */
+  warnings?: string[];
   /** The caller has an OPEN join change request for this plugin. */
   hasRequested: boolean;
   /** That CR's number when `hasRequested` (deep-links the review UI). */
@@ -94,8 +112,15 @@ export async function listPlugins(): Promise<PluginSummary[]> {
  * Make a plugin. `parent` is a grouping folder below the plugins root to
  * make it in (`Teams`, `Teams/EU`); omitted or empty, it goes at the root.
  * The server owns every rule about where a plugin may go.
+ *
+ * The answer carries both names as the manifest now holds them: the identity
+ * the endpoint derived, and the display name — the typed name, trimmed —
+ * that was written into the file.
  */
-export async function createPlugin(name: string, parent = ''): Promise<{ folder: string; name: string }> {
+export async function createPlugin(
+  name: string,
+  parent = '',
+): Promise<{ folder: string; name: string; displayName: string }> {
   const res = await authFetch('/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -105,7 +130,7 @@ export async function createPlugin(name: string, parent = ''): Promise<{ folder:
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Couldn't create that plugin.");
   }
-  return (await res.json()) as { folder: string; name: string };
+  return (await res.json()) as { folder: string; name: string; displayName: string };
 }
 
 /**

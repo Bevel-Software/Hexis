@@ -18,6 +18,7 @@
  */
 
 import type { AuthUser } from '../auth/types.js';
+import type { ChangeRequestApplyFailureKind } from '../git/pr.types.js';
 import type {
   AcquireLockResult,
   Branch,
@@ -33,6 +34,8 @@ import type {
   ChangedFile,
   FileApproval,
   FileLock,
+  FolderChangeRequest,
+  FolderChangeRequestRemoval,
   MergeChangeRequestOutcome,
   OpenChangeRequestInput,
   PostChangeRequestCommentInput,
@@ -222,8 +225,37 @@ export interface IWorkflowService {
     path: string,
     sha: string,
   ): Promise<{ baseline: string | null; current: string | null }>;
+  /**
+   * One file as it stood at a change request's fork point (`sha`, which must
+   * lie on the target branch's history) — the "before" side of the request
+   * dialog's diff. `null` when the path did not exist there. Access is the
+   * caller's to check.
+   */
+  fileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null>;
+  /**
+   * A change request's current fork point: the merge base of the freshly
+   * fetched target and source branches, or `null` when they share no history.
+   */
+  changeRequestForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+  ): Promise<string | null>;
 
   // ── File locks (new — currently NotImplementedWorkflowError) ──────────────
+
+  // Every lock method below coordinates on ONE canonical identity per file:
+  // `x/a.md`, `./x/a.md` and `x//a.md` name the same lock, so a lock acquired
+  // under any of them is contended, heartbeated, checkpointed, released and
+  // read under any other. A path that escapes the workspace, or that only
+  // becomes relative by being laundered, is refused with the same status the
+  // file verbs answer for that input: 400 for an unusable path, 403 for one
+  // that resolves outside the workspace.
 
   /**
    * Try to acquire an edit lock on `(branch, path)` for the caller. Returns
@@ -394,9 +426,12 @@ export interface IWorkflowService {
   ): Promise<ChangeRequestDetail>;
 
   /**
-   * Re-run `targetBranch → sourceBranch` merge on an existing change request.
-   * Used when the target has advanced since the change request was opened.
-   * Throws `NotImplementedWorkflowError` until the backing merge path lands.
+   * Re-run `targetBranch → sourceBranch` merge on an existing change request
+   * and push it — the request dialog's Update, offered when the target has
+   * advanced since the request was opened. Only the request's author or
+   * someone who may apply it (`viewerCanUpdate`) may run it (403 otherwise).
+   * A conflicting merge is aborted, leaving the branch exactly as it was, and
+   * surfaces as `ChangeRequestConflictsError` (409).
    */
   updateFromTarget(workspaceId: string, user: AuthUser, number: number): Promise<ChangeRequestDetail>;
 
@@ -455,6 +490,22 @@ export interface IWorkflowService {
   closeEmptyChangeRequest(number: number, user: AuthUser): Promise<boolean>;
 
   /**
+   * The open change requests proposing files under a KB-repo-relative
+   * folder, each with whether the caller may take those files out of it
+   * (their own request, they are an admin, or they may write every file it
+   * proposes under the folder).
+   */
+  changeRequestsUnderFolder(folder: string, user: AuthUser): Promise<FolderChangeRequest[]>;
+
+  /**
+   * Take every file under the folder out of every open change request
+   * proposing one; a request left empty is withdrawn. All or nothing: refused
+   * (403), with nothing touched, when the caller may not act on even one of
+   * them.
+   */
+  removeFolderFromChangeRequests(folder: string, user: AuthUser): Promise<FolderChangeRequestRemoval[]>;
+
+  /**
    * Close every open change request either of whose branches no longer exists
    * — source or target, since a proposal needs both ends. Such a request
    * cannot be read, reviewed, applied or declined — it is a tombstone, and it
@@ -510,4 +561,24 @@ export interface IWorkflowService {
     workspaceId: string,
     opts?: { bypass?: boolean },
   ): Promise<MergeChangeRequestOutcome>;
+
+  /** Start an apply attempt on a request; the token scopes `recordApplyFailure`. */
+  beginApplyAttempt(number: number): number;
+
+  /** End an attempt `beginApplyAttempt` started, whatever its outcome. */
+  endApplyAttempt(number: number, attempt: number): void;
+
+  /**
+   * Persist why an apply did not land on the (still open) request, and
+   * announce `change-request-apply-failed` to every session so the author and
+   * other viewers re-read it — not only the user who clicked. Resolves false,
+   * recording and announcing nothing, when `attempt` is no longer the latest
+   * or the request is no longer open.
+   */
+  recordApplyFailure(
+    number: number,
+    failure: { reason: string; kind: ChangeRequestApplyFailureKind; at?: Date },
+    user: AuthUser,
+    attempt: number,
+  ): Promise<boolean>;
 }

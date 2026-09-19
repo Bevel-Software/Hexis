@@ -114,6 +114,16 @@ export interface AccessResponse {
    * is how the dialog chains into "Remove from parent?".
    */
   sources: Record<string, GrantSources>;
+  /**
+   * Present for a file that cannot carry frontmatter (a PDF, a deck, an
+   * image — or binary bytes saved under a note's name, which the server
+   * judges by reading them): the repo-relative folder (`''` for the root)
+   * whose rules govern it. Such a file has no per-file rules, and the
+   * mutation routes refuse it with `folder-governs-access`. This is the
+   * server's ruling, and the dialog follows it rather than re-deciding from
+   * the path, so the sheet and the routes can never disagree.
+   */
+  governedByFolder?: string;
 }
 
 /**
@@ -268,19 +278,23 @@ export async function fetchFileAccess(
 }
 
 /**
- * Batch lookup — one round trip resolves write permission for multiple paths.
+ * Batch lookup — one round trip resolves one verb for multiple paths: write
+ * permission by default, or `owner` — membership in an `owner:` grant, which
+ * a writer (an Admin included) does not have by writing.
  * Caller-supplied path strings are the keys of the returned record. Throws if
  * any path is rejected by the backend.
  */
 export async function fetchFileAccessBatch(
   workspaceId: string,
   relativePaths: string[],
+  verb: 'write' | 'owner' = 'write',
 ): Promise<{ results: Record<string, boolean> }> {
   return handleApiResponse(
     await authFetch(`/api/workspace/${workspaceId}/access/batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: relativePaths }),
+      // The default goes unsent, so a write lookup is the request it always was.
+      body: JSON.stringify(verb === 'write' ? { paths: relativePaths } : { paths: relativePaths, verb }),
     }),
   );
 }

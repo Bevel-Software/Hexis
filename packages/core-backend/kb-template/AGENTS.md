@@ -168,6 +168,31 @@ and `Pipelines/` scaffold an agentic execution layer in some installations.
 They are not part of this template and are not created here; where they exist,
 each carries its own `README.md` describing what belongs in it.
 
+## Where a new file goes
+
+Decide by what the file IS, not by which folder you already hold rights in.
+Write access is not evidence that a file belongs somewhere.
+
+- **Any document goes under `{{knowledgeBaseDir}}/`.** Knowledge, notes,
+  reports, tickets, specifications, plans, meeting minutes — anything written
+  to be read by a person. That is what the root is for, and its shape inside
+  is yours to choose.
+- **A shared skill goes under `{{skillsDir}}/`**, or under
+  `{{pluginsDir}}/<Plugin>/skills/<skill>/SKILL.md` when it belongs to one
+  plugin alone. A person's private skill goes in their own space (`my_plugin`).
+- **Tool manuals, MCP server declarations and manifests go inside a plugin:**
+  `.tool` manuals under `{{pluginsDir}}/<Plugin>/software.bevel.hexis/tools/`,
+  servers in that plugin's `mcp.json`, and `plugin.json` at its root.
+- **A plugin folder never holds a document.** `{{pluginsDir}}/` carries
+  machinery — manifests, tool manuals, server declarations, access rules, and
+  the skills a plugin owns. A ticket or a report written there is filed where
+  nobody will look for it, under rules written for tools.
+- **When the place named does not exist, or nothing fits, ask.** If the user
+  names a folder that is not there, or the file is of a kind this deployment
+  has made no home for, say so and ask where it should go. Do not settle for a
+  folder you happen to be able to write to; a wrong guess is discovered much
+  later than a question.
+
 ## Access control
 
 Access to any path — reading it as much as writing it — is governed by
@@ -210,6 +235,14 @@ Access to any path — reading it as much as writing it — is governed by
   A body that does not parse as YAML naming at least one verb is read in the
   older format instead, where the FRONTMATTER carried the folder's rules — so a
   stray line of prose silently changes which block governs the folder.
+- **The verbs nest.** `owner` sits over `write` and `download`; `write` and
+  `download` each sit over `read` — anyone who may edit a node, or save a copy
+  of it, may also view it. `write` and `download` say nothing about each other.
+  The nesting is GRANT-ONLY: a grant of a higher verb confers the lower ones,
+  but `deny write` or `deny download` says nothing about `read` and never
+  strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
+  open the node as well as download it, and a `deny download` beside an
+  inherited read leaves her able to open it but not save it.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
@@ -217,9 +250,53 @@ Access to any path — reading it as much as writing it — is governed by
   never overridable by an `access.md`.
 - **`access.md` files are picked up at any depth**, so a folder can tighten or
   widen what it inherited from its parent.
+- **Per-file rules exist for Markdown notes only.** A note (`.md`, lowercase)
+  may name verbs in its own frontmatter, and those rules apply to that one
+  note. (A `.tool` definition keeps the access verbs in its own YAML the same
+  way.) Every other file (a PDF, a presentation, a spreadsheet, an image, any
+  binary, a `.markdown` or `.MD` file, or binary content saved as `.md`)
+  takes its folder's rules: sharing it on its own is refused with
+  `folder-governs-access`, naming the folder. To change who
+  can open such a file, change its folder's `access.md`, or move the file to a
+  folder whose rules fit.
 
 Rules are enforced at runtime; a malformed `roles.yaml` or `access.md` surfaces
 when access is resolved.
+
+### Roles are pre-set — a "new role" is usually a group
+
+**What a role is.** A role in `roles.yaml` is an app role: a capability the
+platform defines and acts on (`Admin` is one), listed with the people who hold
+it. The set of roles is pre-set by the platform. A role is not a way to name a
+team.
+
+**Agents never create roles.** Add people to a role that already exists, or
+remove them, and nothing more: never add a role name to `roles.yaml`, and never
+rename one — a rename is a delete plus a create. Such a write is refused with a
+422 that names the role and says: app roles are pre-set — add people to
+existing roles, and use a GROUP for a task- or team-scoped set of people.
+Relay that refusal to your user as it stands; do not look for another way to
+write the file.
+
+**Is it really a group?** When someone asks for a "new role", it almost always
+is. It is a group when any of these hold:
+
+- the name says who the people are — a team, a project, a customer, a
+  committee — rather than a capability the platform already has;
+- it would change or disappear when the project ends or the team reshuffles;
+- its purpose is to give those people access to some folders or files.
+
+A request that matches a role that already exists is membership, not a new
+role.
+
+**What to do instead.**
+
+1. If an existing role already carries the capability, add the people to it.
+2. Otherwise make it a group: add or extend the group in `groups.yaml` (or
+   point your user at the app's Groups page), then grant the group in the
+   `access.md` of the folders it should reach.
+3. If your user still needs a role the platform does not have, that is not an
+   edit you can make — say so, and leave the decision to an admin.
 
 ### Direct writes vs change requests
 
@@ -242,7 +319,7 @@ skills live under `{{skillsDir}}/`, organised by ownership; a skill that belongs
 exactly one plugin may live inside that plugin's `skills/` folder instead.
 Skill names are unique across the whole catalog, whichever home they have.
 The frontmatter names it, declares which tools it may use, and may carry a
-governance record:
+version:
 
 ```yaml
 ---
@@ -251,16 +328,14 @@ description: Drafts the Friday newsletter for review.
 allowed-tools: [slack_post_message]
 metadata:
   version: "1.4.0"
-  owner: "GTM"
-  lifecycle: active
 ---
 ```
 
 The body is the instructions, in plain markdown. `allowed-tools` entries are
 tool names from the `.tool` manuals and MCP servers of the plugins that hold
-the skill. `metadata.version` is semver; `metadata.lifecycle` is `active`,
-`deprecated` (still served, flagged in the library) or `retired` (kept for
-its owners, never distributed to agents).
+the skill. `metadata.version` is semver. Any other `metadata` keys are the
+author's own notes — the catalog carries the file as it is and acts on none
+of them.
 
 **How skills reach agents.** Through the MCP server (`list_skills`,
 `get_skill`), or as native plugins: every user can clone a git remote from
@@ -423,6 +498,8 @@ Call the **`list_tool_setup`** tool to see, for every accessible tool — `.tool
 
 - **`setup.kind`** (for MCP servers): `open` = no credentials needed; `oauth-auto` = the platform registered itself with the server automatically and users just authorize on the **Connect page**; `oauth-manual` = the sign-in uses an OAuth app the owner registers (the provider offers no automatic registration, or the declaration already names a client id). `setup.reason` is present only while something still blocks that sign-in — no declaration yet, or endpoints that could not be discovered — and says what to do.
 - **Per variable**: `adminConfigured` (the shared value — or, for a sign-in, the owner-side provider setup — is done), `userConfigured` / `authorized` (the CURRENT user's own value / sign-in), and `canWrite` (whether the current user may set the tool's shared config).
+
+**Tools are served from the default branch only.** An `mcp.json` entry or `.tool` you write on a draft is committed to that draft and nowhere else: it is not listed, not callable and has no sign-in on the Connect page until the draft is merged. After declaring a tool on a draft, call `list_tool_setup` with `branch` set to that draft — `onBranchOnly` names what is still waiting there — and tell the user it goes live once the change request is merged. A tool that stays in `tools` is released, and a restart does not remove it or its sign-ins; if one disappears, check the caller's read access to the file that declares it.
 
 The listing is scoped by the same access controls as everything else: a tool the caller can't READ doesn't appear at all, and `canWrite` means write access **on the file that declares it** — the `.tool` file itself (via its frontmatter `write:`/`owner:` verbs or the `access.md` chain), or the plugin's `mcp.json` for an MCP server (via the plugin's `access.md` chain — `mcp.json` carries no verb list of its own) — NOT any platform role. The people who manage that file are exactly the people who configure its shared secrets. To delegate a `.tool` to someone, add them to that file's `write:`/`owner:` list; to delegate an MCP server, grant them `write` on the plugin in its `access.md` (both are edits you can make via change request). That alone lets them configure it.
 

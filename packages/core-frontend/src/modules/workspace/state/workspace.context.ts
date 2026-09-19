@@ -48,6 +48,25 @@ export interface OpenTab {
   pendingFileContent: string | null;
 }
 
+/** What a `hydrateTabs` call read, and whether its result reached the strip. */
+export interface HydrateResult {
+  /** Paths that were read successfully. */
+  surviving: string[];
+  /** Paths that 404'd — no longer on this branch. */
+  dropped: string[];
+  /** Paths that 403'd — the user may not read them. */
+  denied: string[];
+  /**
+   * True when this restore never took ownership of the tab strip: the
+   * workspace moved to another branch, or a newer restore started, while its
+   * reads were in flight. The paths above still describe what was read (so a
+   * deeplink can be classified), but nothing was applied — a caller tracking
+   * "this (workspace, branch) has been hydrated" must NOT record this one, or
+   * the branch's tabs are never restored and never persisted again.
+   */
+  superseded: boolean;
+}
+
 export interface WorkspaceContextValue {
   workspaceId: string | null;
   /**
@@ -64,9 +83,25 @@ export interface WorkspaceContextValue {
    * leaves `workspaceId` on whatever it was, so without this a route could
    * only wait forever; `status` is the HTTP status the bootstrap answered
    * (410: the branch no longer exists on the git host), 0 for a transport
-   * failure. Cleared by the next successful bootstrap.
+   * failure, and `message` is what the failure said, so a screen can name it
+   * rather than only naming the branch. Cleared by the next successful
+   * bootstrap and by `retryBootstrap`.
    */
-  bootstrapError: { branch: string; status: number } | null;
+  bootstrapError: { branch: string; status: number; message: string } | null;
+  /**
+   * The branch `workspaceId` actually is, or null before the first bootstrap
+   * lands. Distinct from the branch a route is NAVIGATING to: mid-switch, the
+   * URL names the destination and this still names the workspace on screen.
+   * Anything keyed "per branch" off the live workspace (tab persistence) must
+   * use this, or it crosses one branch's content with another's key.
+   */
+  workspaceBranch: string | null;
+  /**
+   * Re-run the bootstrap for the branch currently asked for. Clears
+   * `bootstrapError` and starts again — the recovery behind the file page's
+   * Retry, so a 500 or a dropped connection doesn't need a page reload.
+   */
+  retryBootstrap: () => void;
 
   /** All tabs currently open in the editor strip. */
   openTabs: OpenTab[];
@@ -188,7 +223,7 @@ export interface WorkspaceContextValue {
   hydrateTabs: (
     paths: string[],
     activePath: string | null,
-  ) => Promise<{ surviving: string[]; dropped: string[]; denied: string[] }>;
+  ) => Promise<HydrateResult>;
 
   createFile: (relativePath: string, content?: string) => Promise<void>;
   createDirectory: (relativePath: string) => Promise<void>;
@@ -217,7 +252,11 @@ export interface WorkspaceContextValue {
    */
   dispatchUpload: (input: UploadInput, targetDirectory: string) => Promise<void>;
   clearUploadError: () => void;
-  deleteEntry: (relativePath: string) => Promise<void>;
+  /**
+   * Delete this branch's copy of a file or folder. Resolves `false` when
+   * nothing was deleted because the user kept their unsaved tabs.
+   */
+  deleteEntry: (relativePath: string) => Promise<void | false>;
   moveEntry: (oldPath: string, newPath: string) => Promise<void>;
   saveFile: (relativePath: string, content: string) => Promise<void>;
   /**

@@ -27,10 +27,14 @@ import { LinkSkillPanel } from '../components/LinkSkillPanel';
 
 const OK = { state: 'ok' as const, text: 'Ready' };
 const items: LibraryItem[] = [
-  { kind: 'skill', id: 'deploy', name: 'deploy', description: 'Ship it.', owned: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/deploy', status: OK },
-  { kind: 'skill', id: 'outreach', name: 'outreach', description: '', owned: true, plugin: 'GTM', plugins: [{ name: 'GTM', linked: false, granted: true }], path: 'Plugins/GTM/skills/outreach', status: OK },
-  { kind: 'skill', id: 'pitch', name: 'pitch', description: 'Sales pitch.', owned: false, plugin: 'Sales', plugins: [{ name: 'Sales', linked: false, granted: true }], path: 'Plugins/Sales/skills/pitch', status: OK },
-  { kind: 'integration', id: 'notion', name: 'Notion', description: '', owned: false, plugin: 'GTM', path: 'Plugins/GTM/mcp.json', status: OK },
+  { kind: 'skill', id: 'deploy', name: 'deploy', description: 'Ship it.', owned: false, canWrite: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/deploy', status: OK },
+  { kind: 'skill', id: 'outreach', name: 'outreach', description: '', owned: true, canWrite: true, plugin: 'GTM', plugins: [{ name: 'GTM', linked: false, granted: true }], path: 'Plugins/GTM/skills/outreach', status: OK },
+  { kind: 'skill', id: 'pitch', name: 'pitch', description: 'Sales pitch.', owned: false, canWrite: false, plugin: 'Sales', plugins: [{ name: 'Sales', linked: false, granted: true }], path: 'Plugins/Sales/skills/pitch', status: OK },
+  { kind: 'integration', id: 'notion', name: 'Notion', description: '', owned: false, canWrite: false, plugin: 'GTM', path: 'Plugins/GTM/mcp.json', status: OK },
+  // A skill whose SKILL.md still declares the old governance keys. The cast
+  // is the point: `lifecycle` is no longer part of `LibraryItem`, and a server
+  // that still sends it must not change what the picker offers.
+  { kind: 'skill', id: 'legacy', name: 'legacy', description: 'Old but readable.', owned: false, canWrite: false, plugin: null, shared: true, plugins: [], path: 'Skills/Eng/legacy', status: OK, lifecycle: 'retired' } as LibraryItem,
 ];
 
 function renderPanel() {
@@ -57,6 +61,17 @@ describe('LinkSkillPanel', () => {
     expect(screen.queryByText('Notion')).not.toBeInTheDocument();
   });
 
+  /**
+   * The picker used to hide skills declaring `metadata.lifecycle: retired`,
+   * mirroring a server refusal that no longer exists. Lifecycle is the
+   * authors' business now: the list offers every readable skill, and the key
+   * is ignored rather than acted on.
+   */
+  it('offers a skill whose frontmatter still says retired, like any other', () => {
+    renderPanel();
+    expect(screen.getByText('legacy')).toBeInTheDocument();
+  });
+
   it('narrows by the search box', () => {
     renderPanel();
     fireEvent.change(screen.getByLabelText('Search skills to link'), { target: { value: 'pit' } });
@@ -80,7 +95,7 @@ describe('LinkSkillPanel', () => {
     // The clicked row says what is happening; the others wait, still saying Link.
     const linking = await screen.findByRole('button', { name: 'Linking…' });
     expect(linking).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Link' })).toBeDisabled();
+    for (const other of screen.getAllByRole('button', { name: 'Link' })) expect(other).toBeDisabled();
     // A disabled button drops focus, so the word is ALSO in a live region
     // that assistive tech reads out — and it clears once the link lands.
     expect(screen.getByRole('status', { name: 'Link progress' })).toHaveTextContent('Linking deploy…');

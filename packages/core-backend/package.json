@@ -33,6 +33,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "vitest run .live.test",
+    "probe:first-call": "tsx src/modules/mcp/first-call-probe.cli.ts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
@@ -45,8 +46,8 @@
     "@utcp/code-mode": "^1.2.13",
     "@utcp/direct-call": "^1.1.1",
     "@utcp/http": "^1.1.12",
-    "@utcp/mcp": "^1.1.7",
-    "@utcp/sdk": "^1.1.1",
+    "@utcp/mcp": "^1.2.0",
+    "@utcp/sdk": "^1.2.0",
     "adm-zip": "^0.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",

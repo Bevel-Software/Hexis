@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('probe');
 import '@utcp/http'; // side effect: registers the 'http' UTCP communication protocol
 import '@utcp/mcp'; // side effect: registers the 'mcp' protocol (remote MCP `.tool` sources)
 import { CommunicationProtocol, UtcpClientConfigSerializer, type CallTemplate } from '@utcp/sdk';
@@ -121,7 +124,7 @@ async function withProbeTimeout<T>(
       () => (abandoned ? onLateSettle?.() : undefined),
     )
     .catch((err) => {
-      console.warn(`[probe] late cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn(`late cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
     timer = setTimeout(() => {
@@ -335,7 +338,7 @@ async function closeProbeSessions(client: CodeModeUtcpClient, template: CallTemp
     const protocol = CommunicationProtocol.communicationProtocols[template.call_template_type];
     await protocol?.deregisterManual(client as never, template);
   } catch (err) {
-    console.warn(`[probe] closing session failed: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn(`closing session failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

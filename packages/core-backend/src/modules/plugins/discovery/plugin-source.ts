@@ -1,4 +1,4 @@
-import type { KbWalkListener } from '../../../shared/kb-walk.js';
+import type { WalkListener } from '../../../shared/fs.contract.js';
 
 /**
  * Plugin DISCOVERY as an interface — the one seam between "what a plugin is
@@ -26,7 +26,12 @@ export interface DiscoveredPlugin {
    * plugin's is the bundle's `name`. Unique per source.
    */
   name: string;
-  /** What a person sees it called: the manifest's `displayName`, else the folder name. */
+  /**
+   * What a person sees it called: the manifest's `displayName`, else its
+   * `name`. The manifest is the only source — never the folder. (The bundle
+   * dialect's own folder rule is resolved INTO the manifest it synthesizes,
+   * so the shared reader still says what the source reports.)
+   */
   displayName: string;
   /** Repo-relative folder holding the plugin, e.g. `Plugins/GTM`. */
   folder: string;
@@ -104,5 +109,5 @@ export interface PluginSource {
    * one set of holes. Optional: a source that cannot share its walk is
    * discovered on its own and the caller walks separately.
    */
-  walkWith?(kbRoot: string, listeners: readonly KbWalkListener[]): Promise<PluginSourceWalk>;
+  walkWith?(kbRoot: string, listeners: readonly WalkListener[]): Promise<PluginSourceWalk>;
 }

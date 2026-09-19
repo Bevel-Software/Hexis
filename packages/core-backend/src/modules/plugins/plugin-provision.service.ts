@@ -34,15 +34,15 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { isAbsence } from '../../shared/fs-errors.js';
+import type { IFsProbe } from '../../shared/fs.contract.js';
 import type { Discovery, PluginSource } from './discovery/plugin-source.js';
-import { KbPluginSource } from './discovery/kb-plugin-source.js';
 
 import {
   DEFAULT_BRANCH,
   PLUGINS_DIR,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_SKILLS_DIR,
+  pluginDisplayNameOf,
   pluginManifestName,
   renderPluginManifest,
   PERSONAL_PLUGIN_PREFIX,
@@ -77,13 +77,13 @@ export interface ProvisionCommitDriver {
  * first is a 404 to a caller, the second an outage an operator must see.
  */
 async function listDirOrIncomplete(
+  disk: IFsProbe,
   dir: string,
   repoRel: string,
 ): Promise<Array<{ name: string; isDirectory(): boolean }> | null> {
   try {
-    return await fs.readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (isAbsence(err)) return null;
+    return await disk.listDir(dir);
+  } catch {
     // The same refusal a hole in discovery gets: this listing is one more
     // read the operation needed and could not have.
     throw incompleteDiscovery([repoRel]);
@@ -107,6 +107,12 @@ export interface ProvisionedPlugin {
   skillsDir: string;
   /** The plugin's identity — the manifest name written for it. */
   name: string;
+  /**
+   * What a person sees it called — the manifest's `displayName`, which is the
+   * name the creator typed, trimmed. Exactly as persisted: the answer and the
+   * file on disk can never say two different things.
+   */
+  displayName: string;
   /** False when an ensure found the folder already there. */
   created: boolean;
 }
@@ -123,9 +129,9 @@ export class PluginProvisionError extends Error {
 }
 
 /** The one shape every provisioning answer has: the folder in both spellings, and where its skills go. */
-function provisioned(folder: string, name: string, created: boolean): ProvisionedPlugin {
+function provisioned(folder: string, name: string, displayName: string, created: boolean): ProvisionedPlugin {
   const path = `${PLUGINS_DIR}/${folder}`;
-  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, created };
+  return { folder, path, skillsDir: `${path}/${PLUGIN_SKILLS_DIR}`, name, displayName, created };
 }
 
 export class PluginProvisionService {
@@ -144,9 +150,10 @@ export class PluginProvisionService {
     private readonly commits: ProvisionCommitDriver,
     private readonly accessControl: IAccessControl,
     private readonly kbDirName: string,
-    private readonly events?: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void },
+    private readonly events: { emit(event: { kind: 'fs-tree-changed'; workspaceId: string; branch: string }): void } | undefined,
     /** Which names are TAKEN is discovery's answer — the same one every catalog gets. */
-    private readonly source: PluginSource = new KbPluginSource(),
+    private readonly source: PluginSource,
+    private readonly disk: IFsProbe,
   ) {}
 
   /**
@@ -216,8 +223,10 @@ export class PluginProvisionService {
         );
       }
       const folder = parent ? `${parent}/${name}` : name;
+      // `name` is the creator's own spelling, trimmed — the folder's leaf AND
+      // the display name persisted for it, whether or not it equals either.
       await this.provision(user, folder, name, pluginAccessMd(user));
-      return provisioned(folder, pluginManifestName(name), true);
+      return provisioned(folder, pluginManifestName(name), name, true);
     });
   }
 
@@ -268,13 +277,17 @@ export class PluginProvisionService {
 
   /**
    * Ensure the caller's personal folder exists — idempotent, keyed to the
-   * stable user id. Returns `created: false` when it is already there.
+   * stable user id. Returns `created: false` when it is already there, and
+   * with it the display name the existing manifest carries (see
+   * {@link persistedDisplayName}): the answer is what the file says, so the
+   * call that made the folder and every call after it agree.
    */
   async ensurePersonalPlugin(user: AuthUser): Promise<ProvisionedPlugin> {
     const folder = personalPluginFolderName(user.id);
     return this.creations.run(`plugin:${pluginManifestName(folder)}`, async () => {
-      if ((await this.existingFolder(folder)) !== null) {
-        return provisioned(folder, pluginManifestName(folder), false);
+      const existing = await this.existingFolder(folder);
+      if (existing !== null) {
+        return provisioned(folder, pluginManifestName(folder), await this.persistedDisplayName(existing, folder), false);
       }
       try {
         await this.provision(user, folder, folder, personalAccessMd(user));
@@ -283,11 +296,11 @@ export class PluginProvisionService {
         // process, a checkout that appeared between check and write): the
         // folder existing is this method's success case, never its error.
         if (err instanceof PluginProvisionError && err.status === 409) {
-          return provisioned(folder, pluginManifestName(folder), false);
+          return provisioned(folder, pluginManifestName(folder), await this.persistedDisplayName(folder, folder), false);
         }
         throw err;
       }
-      return provisioned(folder, pluginManifestName(folder), true);
+      return provisioned(folder, pluginManifestName(folder), folder, true);
     });
   }
 
@@ -411,7 +424,7 @@ export class PluginProvisionService {
     let dir = root;
     let rel = PLUGINS_DIR;
     for (const segment of segments) {
-      const entries = await listDirOrIncomplete(dir, rel);
+      const entries = await listDirOrIncomplete(this.disk, dir, rel);
       if (!entries?.some((e) => e.isDirectory() && e.name === segment)) return false;
       dir = path.join(dir, segment);
       rel = `${rel}/${segment}`;
@@ -428,10 +441,29 @@ export class PluginProvisionService {
     const wsDir = await this.workspaceService.getWorkspacePath(wsId);
     const rel = parent ? `${PLUGINS_DIR}/${parent}` : PLUGINS_DIR;
     // No Plugins/ root yet — nothing can collide.
-    const children = await listDirOrIncomplete(path.join(wsDir, this.kbDirName, rel), rel);
+    const children = await listDirOrIncomplete(this.disk, path.join(wsDir, this.kbDirName, rel), rel);
     if (!children) return null;
     const lower = name.toLowerCase();
     return children.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
+  }
+
+  /**
+   * What the plugin at `folder` is ALREADY called, read from its manifest by
+   * the one shared rule — `fallback` only when there is no manifest to read
+   * (a folder mid-creation, a `plugin.json` that is not an object).
+   *
+   * An ensure that found the folder already there answers with the FILE's
+   * answer, never the folder's spelling: the folder is an input to no name,
+   * and an idempotent call whose second answer differed from its first would
+   * be this service telling the caller a plugin had been renamed.
+   */
+  private async persistedDisplayName(folder: string, fallback: string): Promise<string> {
+    const wsId = await this.readyWorkspaceId();
+    const wsDir = await this.workspaceService.getWorkspacePath(wsId);
+    const manifest = await this.disk.readJsonObject(
+      path.join(wsDir, this.kbDirName, PLUGINS_DIR, ...folder.split('/'), PLUGIN_MANIFEST_FILE),
+    );
+    return pluginDisplayNameOf(manifest) || fallback;
   }
 
   /**
@@ -505,6 +537,13 @@ export class PluginProvisionService {
       // this app, so it lands in the same commit as the access rules — and
       // INSIDE the rollback scope: a manifest write that fails must clean up
       // the access.md it would otherwise strand as a half-made plugin.
+      //
+      // `leaf` is the name its creator typed, trimmed — the folder's last
+      // segment and, as the renderer's `displayName`, what people will see it
+      // called, persisted whether or not it equals the identifier the name
+      // folds to. Every door into here (the dialog's route, the
+      // `create_plugin` tool, the personal-folder ensure) arrives through
+      // this one write, so no two of them can derive a different name.
       await this.workspaceService.writeFile(
         wsId,
         `${folderPath}/${PLUGIN_MANIFEST_FILE}`,

@@ -1,8 +1,12 @@
 import type { Request, Response, NextFunction } from 'express';
+import { logger } from '../../shared/logging.js';
+
+const log = logger('mcp-auth');
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthService } from '../auth/auth.service.js';
 import type { IExternalApiKeyService } from '../tool-auth/external-api-key.interface.js';
 import type { InternalTokenService } from '../tool-auth/internal-token.service.js';
+import { rejectConnectionKey } from '../tool-auth/connection-key-rejection.js';
 import type { BevelOAuthProvider } from './oauth/bevel-oauth-provider.js';
 import '../tool-auth/external-api-key.interface.js'; // Express Request augmentation (req.externalApiKeyId)
 
@@ -15,7 +19,8 @@ import '../tool-auth/external-api-key.interface.js'; // Express Request augmenta
  *      authorization server after the /connect consent flow, resolved via
  *      BevelOAuthProvider.
  *   3. An internal token (Bearer `<tenant>-int_…`) — minted server-side only
- *      (createSession's loopback bearer, the /mcp/local-token exchange). The
+ *      (the per-request loopback bearer `createRequestServer` mints, the
+ *      /mcp/local-token exchange). The
  *      local MCP server (hexis-mcp) exchanges its OAuth grant for one and
  *      then uses it EVERYWHERE a connection key goes — the agent REST surface
  *      already accepts it, and refusing it here made OAuth-mode hexis-mcp
@@ -28,13 +33,16 @@ import '../tool-auth/external-api-key.interface.js'; // Express Request augmenta
  *      hit the MCP endpoint from their browser if we ever need it
  *      (e.g. an in-app debugger). Keeps the surface from forking.
  *
- * The middleware **must** run before the MCP transport handler — the
- * transport pulls `req.userId` to populate the session row at `initialize`.
+ * The middleware **must** run before the MCP transport handler — every
+ * request's server is built from `req.userId` (there is no session row to
+ * carry it; the endpoint is stateless per request).
  *
  * Failures return 401 with a `WWW-Authenticate` challenge carrying
  * `resource_metadata` (RFC 9728) so an OAuth-capable MCP client discovers our
- * authorization server and starts the flow, while clients configured with a
- * key simply prompt for it.
+ * authorization server and starts the flow — EXCEPT a bearer shaped like a
+ * connection key that does not verify: that caller configured a key, so it
+ * gets a plain `invalid_token` answer and no sign-in invitation (see
+ * `connection-key-rejection.ts`).
  */
 export function createMcpAuthMiddleware(
   authService: AuthService,
@@ -77,7 +85,7 @@ export function createMcpAuthMiddleware(
         // `externalApiKeyId` unset and are not metered.
         const resolved = await externalApiKeyService.verifyAndLoadToken(token);
         if (!resolved) {
-          unauthorized(res, 'Invalid or revoked connection key');
+          rejectConnectionKey(res);
           return;
         }
         req.userId = resolved.user.id;
@@ -88,7 +96,7 @@ export function createMcpAuthMiddleware(
       } catch (err) {
         // A DB error during verification is a 500, not a 401 — the caller's
         // credentials may be valid; we just can't check them right now.
-        console.error('[mcp-auth] connection-key verification failed:', err);
+        log.error('connection-key verification failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }
@@ -111,7 +119,7 @@ export function createMcpAuthMiddleware(
         if (err instanceof InvalidTokenError) {
           unauthorized(res, 'Invalid, expired, or revoked access token');
         } else {
-          console.error('[mcp-auth] OAuth token verification failed:', err);
+          log.error('OAuth token verification failed:', { err });
           res.status(500).json({ error: 'Authentication backend unavailable' });
         }
         return;
@@ -130,13 +138,14 @@ export function createMcpAuthMiddleware(
     // downstream resolve access against it.
     //
     // ONLY the `externalProxy` shape is admitted: that claim marks the
-    // loopback identity of an external caller (createSession's session
-    // bearer, the /mcp/local-token exchange), which is the one internal-token
-    // kind that has any business arriving here as an MCP client. A plain
-    // in-process internal token — the per-run credential the agent factory
-    // mints for its own code-mode client — is a loopback-surface credential,
-    // and accepting it would let it open an MCP session (createSession would
-    // even mint it a fresh externalProxy bearer, upgrading it).
+    // loopback identity of an external caller (the per-request bearer
+    // `createRequestServer` mints, the /mcp/local-token exchange), which is
+    // the one internal-token kind that has any business arriving here as an
+    // MCP client. A plain in-process internal token — the per-run credential
+    // the agent factory mints for its own code-mode client — is a
+    // loopback-surface credential, and accepting it would let it drive the
+    // MCP endpoint (createRequestServer would even mint it a fresh
+    // externalProxy bearer, upgrading it).
     if (internalTokens.looksLikeInternalToken(token)) {
       // `verify` answers null for the invalid/expired cases it can see coming,
       // but a malformed token of plausible shape can still THROW from inside
@@ -157,7 +166,7 @@ export function createMcpAuthMiddleware(
       try {
         user = await authService.getUserById(claim.userId);
       } catch (err) {
-        console.error('[mcp-auth] internal-token user lookup failed:', err);
+        log.error('internal-token user lookup failed:', { err });
         res.status(500).json({ error: 'Authentication backend unavailable' });
         return;
       }

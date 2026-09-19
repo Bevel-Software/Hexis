@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { NodeFs } from '../../kb-fs/node-fs.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -65,7 +66,7 @@ describe('plugin principals', () => {
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, contents);
     }
-    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR);
+    return new AccessControlService(stubWorkspaceService(workspaceId, workspaceDir), KB_DIR, new NodeFs());
   }
 
   // A plugin IS a folder with a manifest; its access.md is its roster.
@@ -112,6 +113,22 @@ describe('plugin principals', () => {
       expect(await svc.canRead(workspaceId, 'mallory@x.io', skill)).toBe(false);
       // Read on the plugin is read on the skill, nothing more.
       expect(await svc.canWrite(workspaceId, 'sam@x.io', skill)).toBe(false);
+    });
+
+    it('counts a download-only member of the plugin among its readers', async () => {
+      const svc = await makeService({
+        ...BASE,
+        'Plugins/GTM/access.md': pluginAccessMd('download:\n  - Dana <dana@x.io>\n'),
+        'Skills/Eng/deploy/access.md': '---\n---\nread:\n  - plugin/GTM/read\n',
+      });
+      const skill = 'Skills/Eng/deploy/SKILL.md';
+      // The roster folds exactly the way resolution does — one shared
+      // `sourceVerbsFor` table — so someone the plugin trusts with a copy of
+      // its files is one of its readers, and the read token names them.
+      expect(await svc.canRead(workspaceId, 'dana@x.io', skill)).toBe(true);
+      // Download is not write, and there is no download token: the read
+      // principal is the only one she lands in.
+      expect(await svc.canWrite(workspaceId, 'dana@x.io', skill)).toBe(false);
     });
 
     it('the write token names the plugin\'s writers and owners only', async () => {

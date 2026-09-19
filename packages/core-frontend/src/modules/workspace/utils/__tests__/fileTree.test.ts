@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { FileTreeEntry } from '@bevel-software/platform-shared';
-import { omitPathFromTree, pathExistsInTree, suggestedPages } from '../fileTree';
+import { omitPathFromTree, pathExistsInTree, suggestedPages, treeHasVisibleEntries } from '../fileTree';
 
 /**
  * The empty state's opening offer walks the tree the server already filtered
@@ -91,5 +91,38 @@ describe('omitPathFromTree', () => {
 
   it('returns the original tree when the path is already absent', () => {
     expect(omitPathFromTree(TREE, 'knowledge-base/mcp-description.md')).toBe(TREE);
+  });
+});
+
+describe('treeHasVisibleEntries', () => {
+  const d = (rel: string, children: FileTreeEntry[] = []): FileTreeEntry => ({
+    name: rel.split('/').pop()!,
+    relativePath: rel,
+    type: 'directory',
+    children,
+  });
+  const f = (rel: string): FileTreeEntry => ({ name: rel.split('/').pop()!, relativePath: rel, type: 'file' });
+  const kb = (...children: FileTreeEntry[]) =>
+    d('.', [d('kb', [d('kb/KnowledgeBase'), d('kb/Skills'), ...children])]);
+
+  it('is false for null, and for reserved roots with nothing in them', () => {
+    expect(treeHasVisibleEntries(null, 'kb')).toBe(false);
+    expect(treeHasVisibleEntries(kb(), 'kb')).toBe(false);
+  });
+
+  it('does not count the root .bevelignore', () => {
+    expect(treeHasVisibleEntries(kb(f('kb/.bevelignore')), 'kb')).toBe(false);
+  });
+
+  it('counts a file or folder inside a reserved root, a stray folder, and a loose file', () => {
+    expect(treeHasVisibleEntries(d('.', [d('kb', [d('kb/KnowledgeBase', [f('kb/KnowledgeBase/a.md')])])]), 'kb')).toBe(true);
+    expect(treeHasVisibleEntries(d('.', [d('kb', [d('kb/Skills', [d('kb/Skills/Eng')])])]), 'kb')).toBe(true);
+    expect(treeHasVisibleEntries(kb(d('kb/Legal')), 'kb')).toBe(true);
+    expect(treeHasVisibleEntries(kb(f('kb/notes.md')), 'kb')).toBe(true);
+  });
+
+  it('reads a tree without the split from the KB clone folder down', () => {
+    expect(treeHasVisibleEntries(d('.', [d('kb')]), 'kb')).toBe(false);
+    expect(treeHasVisibleEntries(d('.', [d('kb', [f('kb/a.md')])]), 'kb')).toBe(true);
   });
 });

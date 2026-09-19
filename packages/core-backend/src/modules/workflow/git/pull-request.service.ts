@@ -1,4 +1,7 @@
 import { desc, eq } from 'drizzle-orm';
+import { logger } from '../../../shared/logging.js';
+
+const log = logger('cr');
 import type {
   FileApprovalState,
   IPullRequestService,
@@ -9,13 +12,15 @@ import type {
   PullRequestSummary,
   IGitService,
 } from '@bevel-software/platform-shared';
+import { isFolderPlaceholder } from '@bevel-software/platform-shared';
 import type { Database } from '../../database/connection.js';
 import { changeRequests } from '../../database/schema.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { IAccessControl } from '../../access/access-control.interface.js';
 import { AccessUnreadableError } from '../../access-model/access-errors.js';
 import { WorkflowValidationError } from '../../../shared/domain-errors.js';
-import { hashEmail } from '../../../shared/hash-email.js';
+import { canonicalEmail, hashEmail } from '../../../shared/email-identity.js';
+import { changeRequestLink, changeRequestLinkBase } from './change-request-link.js';
 
 const LIST_PR_CACHE_TTL_MS = 30_000;
 const DETAIL_CACHE_TTL_MS = 30_000;
@@ -78,6 +83,14 @@ export class PullRequestService implements IPullRequestService {
    */
   private cachedList = new Map<string, { at: number; value: PullRequestSummary[] }>();
   /**
+   * What each listed summary is ROUTED by: its touched paths with the
+   * empty-folder placeholders kept. A summary never shows a placeholder, but a
+   * request that only creates a folder still belongs to that folder's owners,
+   * so `listPrsForOwnerEmail` matches on these. Held beside the summaries the
+   * list cache stores, so it lives and dies with them.
+   */
+  private routingPaths = new WeakMap<PullRequestSummary, string[]>();
+  /**
    * Per-CR detail cache, keyed by `${workspaceId ?? 'global'}:${viewer}:${number}`.
    * The payload includes per-file approvals resolved against the caller's
    * workspace KB, so it can't be shared across workspaces or viewers. The stored
@@ -86,7 +99,7 @@ export class PullRequestService implements IPullRequestService {
    */
   private detailCache = new Map<
     string,
-    { at: number; headSha: string; value: PullRequestDetail }
+    { at: number; headSha: string; baseSha: string; value: PullRequestDetail }
   >();
 
   /**
@@ -97,12 +110,26 @@ export class PullRequestService implements IPullRequestService {
    */
   private detailEnricher: PrDetailEnricher | null = null;
 
+  /** Origin + path prefix change-request links are built on; null when none is configured. */
+  private readonly linkBase: string | null;
+
+  /**
+   * Bumped by every invalidation. A read captures it before touching the DB and
+   * caches its result only if it is unchanged afterwards — otherwise a read that
+   * started before a mutation could republish the pre-mutation row for a TTL.
+   */
+  private cacheGeneration = 0;
+
   constructor(
     private readonly db: Database,
     private readonly workspaceService: WorkspaceService,
     private readonly accessControl: IAccessControl,
     private readonly gitService: IGitService,
-  ) {}
+    /** Configured public frontend address; null keeps `url` relative (with a `urlNote`). */
+    publicFrontendUrl: string | null = null,
+  ) {
+    this.linkBase = changeRequestLinkBase(publicFrontendUrl);
+  }
 
   setDetailEnricher(enricher: PrDetailEnricher): void {
     this.detailEnricher = enricher;
@@ -137,29 +164,61 @@ export class PullRequestService implements IPullRequestService {
       // Provider reviews are gone; the real approval state lives in the detail
       // view (per-file, DB-backed). The summary badge is derived there.
       review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
-      // In-app change-request route; there's no external PR URL to link to.
-      url: `/change-requests/${row.number}`,
+      // The in-app change-request route, absolute when a public address is
+      // configured so an agent can hand it to a person.
+      ...changeRequestLink(row.number, this.linkBase),
+      // Only an OPEN request can still be retried, so only it reports a refusal.
+      lastApplyFailure:
+        row.state === 'open' && row.applyFailureReason && row.applyFailedAt
+          ? {
+              reason: row.applyFailureReason,
+              conflicts: row.applyFailureConflicts === true,
+              at: row.applyFailedAt.toISOString(),
+              byName: row.applyFailedByName ?? '',
+            }
+          : null,
     };
   }
 
-  /** Cheap touched-paths for a CR row (empty when no workspace exists yet). */
+  /**
+   * Cheap touched-paths for a CR row (empty when no workspace exists yet),
+   * placeholders included — see {@link summaryOf} for what a summary shows.
+   */
   private async touchedPathsFor(
     row: ChangeRequestRow,
     workspaceId: string | null,
+    opts: { fetch?: boolean } = {},
   ): Promise<string[]> {
     if (!workspaceId) return [];
     return this.gitService
-      .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch)
+      .changedPathsForPr(workspaceId, row.targetBranch, row.sourceBranch, opts)
       .catch((err) => {
         // Best-effort, but log it: an empty result silently hides a CR from the
         // owner-routing match in `listPrsForOwnerEmail`, so a swallowed failure
         // shouldn't be invisible.
-        console.warn(
-          `[cr] changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
-          err,
+        log.warn(
+          `changedPathsForPr failed for #${row.number} (${row.sourceBranch} → ${row.targetBranch}) in ${workspaceId}:`,
+          { err },
         );
         return [] as string[];
       });
+  }
+
+  /**
+   * The summary of a CR row. The empty-folder placeholder is never content,
+   * so it is not a touched path on the summary: it would inflate the file
+   * count a list shows. The unfiltered paths are kept for routing, where a
+   * folder-only request must still reach the folder's owners.
+   */
+  private async summaryOf(
+    row: ChangeRequestRow,
+    workspaceId: string | null,
+    opts: { fetch?: boolean } = {},
+  ): Promise<PullRequestSummary> {
+    const touched = await this.touchedPathsFor(row, workspaceId, opts);
+    const summary = this.rowToSummary(row, touched.filter((p) => !isFolderPlaceholder(p)));
+    this.routingPaths.set(summary, touched);
+    return summary;
   }
 
   async listOpenPrs(
@@ -172,15 +231,46 @@ export class PullRequestService implements IPullRequestService {
     if (!opts.fresh && cached && now - cached.at < LIST_PR_CACHE_TTL_MS) {
       return cached.value;
     }
+    const generation = this.cacheGeneration;
     const rows = await this.db
       .select()
       .from(changeRequests)
       .where(eq(changeRequests.state, 'open'))
       .orderBy(desc(changeRequests.createdAt));
+    // ONE fetch of the clone for the whole list, not one per request.
+    //
+    // Every summary needs the request's touched paths, and
+    // `changedPathsForPr` fetches the two refs it is about before diffing
+    // them. That is a network round trip PER OPEN REQUEST, on a list that is
+    // re-read after every proposal and polled every 60s while the tab is
+    // visible — measured at ~0.55s per additional open request, which is the
+    // "very slow loading" this list was reported for. `ensureRemotesFetched`
+    // refreshes every `origin/*` ref of the clone in one round trip and
+    // shares an in-flight fetch between callers — so the two list endpoints
+    // the tree calls together cost one fetch BETWEEN them instead of two per
+    // request.
+    //
+    // `force` on a fresh read, for the same reason the read is fresh at all:
+    // it exists because the caller knows the remote just moved, and a fetch
+    // skipped by its 30s TTL would answer about a request whose branch this
+    // clone has not seen — which is the request missing from its own
+    // author's tree. A non-fresh poll keeps the TTL; `changedPathsForPr`
+    // fetches for itself if a branch is missing even then, so the worst a
+    // stale window can do is report a known branch one poll behind.
+    //
+    // Best-effort, exactly as the per-request fetch was: a request whose diff
+    // cannot be computed degrades to no touched paths as before.
+    if (workspaceId && rows.length > 0) {
+      await this.workspaceService
+        .ensureRemotesFetched(workspaceId, { force: opts.fresh === true })
+        .catch(() => undefined);
+    }
     const summaries = await Promise.all(
-      rows.map(async (row) => this.rowToSummary(row, await this.touchedPathsFor(row, workspaceId))),
+      rows.map((row) => this.summaryOf(row, workspaceId, { fetch: false })),
     );
-    this.cachedList.set(cacheKey, { at: now, value: summaries });
+    if (generation === this.cacheGeneration) {
+      this.cachedList.set(cacheKey, { at: now, value: summaries });
+    }
     return summaries;
   }
 
@@ -188,7 +278,7 @@ export class PullRequestService implements IPullRequestService {
     loginOrEmail: string,
     opts: { fresh?: boolean } = {},
   ): Promise<PullRequestSummary[]> {
-    const needle = loginOrEmail.trim().toLowerCase();
+    const needle = canonicalEmail(loginOrEmail);
     if (!needle) return [];
     const prs = await this.listOpenPrs(opts);
     const needleIsEmail = needle.includes('@');
@@ -204,7 +294,7 @@ export class PullRequestService implements IPullRequestService {
     email: string,
     opts: { fresh?: boolean } = {},
   ): Promise<PullRequestSummary[]> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalEmail(email);
     if (!normalized) return [];
     const prs = await this.listOpenPrs({ ...opts, workspaceId });
 
@@ -221,15 +311,16 @@ export class PullRequestService implements IPullRequestService {
     // collecting unique (ref, path) pairs and resolving them in one round keeps
     // the ls-tree/git-show fan-out bounded even with dozens of open PRs.
     const pathsByRef = new Map<string, Set<string>>();
+    const routedBy = (pr: PullRequestSummary) => this.routingPaths.get(pr) ?? pr.touchedNodePaths;
     for (const pr of prs) {
-      if (pr.touchedNodePaths.length === 0) continue;
+      if (routedBy(pr).length === 0) continue;
       for (const ref of [pr.branch, pr.base]) {
         let bucket = pathsByRef.get(ref);
         if (!bucket) {
           bucket = new Set();
           pathsByRef.set(ref, bucket);
         }
-        for (const p of pr.touchedNodePaths) bucket.add(p);
+        for (const p of routedBy(pr)) bucket.add(p);
       }
     }
     const writeByRef = new Map<string, Map<string, boolean>>();
@@ -254,10 +345,10 @@ export class PullRequestService implements IPullRequestService {
         matches.push(pr);
         continue;
       }
-      if (pr.touchedNodePaths.length === 0) continue;
+      if (routedBy(pr).length === 0) continue;
       const headWrite = writeByRef.get(pr.branch);
       const baseWrite = writeByRef.get(pr.base);
-      const matched = pr.touchedNodePaths.some(
+      const matched = routedBy(pr).some(
         (p) => headWrite?.get(p) === true || baseWrite?.get(p) === true,
       );
       if (matched) matches.push(pr);
@@ -272,7 +363,7 @@ export class PullRequestService implements IPullRequestService {
     const row = await this.findRow(prNumber);
     if (!row) return null;
     const workspaceId = await this.resolveWorkspaceId();
-    return this.rowToSummary(row, await this.touchedPathsFor(row, workspaceId));
+    return this.summaryOf(row, workspaceId);
   }
 
   async getPrDetail(
@@ -282,11 +373,12 @@ export class PullRequestService implements IPullRequestService {
     if (!Number.isInteger(prNumber) || prNumber <= 0) {
       throw new WorkflowValidationError('PR number must be a positive integer');
     }
+    const generation = this.cacheGeneration;
     const row = await this.findRow(prNumber);
     if (!row) return null;
 
     const now = Date.now();
-    const viewerKey = opts.viewerEmail ? opts.viewerEmail.trim().toLowerCase() : 'anon';
+    const viewerKey = opts.viewerEmail ? canonicalEmail(opts.viewerEmail) : 'anon';
     const workspaceId = await this.resolveWorkspaceId(opts.workspaceId);
     const cacheKey = `${workspaceId ?? 'global'}:${viewerKey}:${prNumber}`;
 
@@ -296,6 +388,10 @@ export class PullRequestService implements IPullRequestService {
     let baseSha = '';
     let headSha = '';
     let files: PullRequestFile[] = [];
+    let forkPoint: { mergeBaseSha: string | null; behind: boolean } = {
+      mergeBaseSha: null,
+      behind: false,
+    };
     if (workspaceId) {
       const shas = await this.gitService.resolvePrShas(
         workspaceId,
@@ -318,6 +414,9 @@ export class PullRequestService implements IPullRequestService {
         row.sourceBranch,
         { at: { baseSha, headSha }, ...(opts.patches === false ? { patchCap: 0 } : {}) },
       );
+      // Pinned to the same two commits as the file list, so "needs updating"
+      // and the diff it qualifies can never describe different heads.
+      forkPoint = await this.gitService.forkPointForPr(workspaceId, { baseSha, headSha });
     }
 
     // Validated cache hit: TTL fresh AND head SHA unchanged since we cached.
@@ -326,7 +425,9 @@ export class PullRequestService implements IPullRequestService {
       !opts.fresh &&
       cached &&
       now - cached.at < DETAIL_CACHE_TTL_MS &&
-      cached.headSha === headSha
+      cached.headSha === headSha &&
+      // The target moving on changes `behind` without touching the head.
+      cached.baseSha === baseSha
     ) {
       return cached.value;
     }
@@ -339,7 +440,7 @@ export class PullRequestService implements IPullRequestService {
     const [comments, approvals] = this.detailEnricher
       ? await Promise.all([
           this.detailEnricher.listComments(prNumber).catch((err) => {
-            console.warn(`[cr] listComments failed for #${prNumber}:`, err);
+            log.warn(`listComments failed for #${prNumber}:`, { err });
             return [] as PrReviewComment[];
           }),
           this.detailEnricher
@@ -357,7 +458,7 @@ export class PullRequestService implements IPullRequestService {
               // with empty approvals would tell the merge gate "nothing to
               // approve", and a reviewer nothing at all.
               if (err instanceof AccessUnreadableError) throw err;
-              console.warn(`[cr] getApprovalStates failed for #${prNumber}:`, err);
+              log.warn(`getApprovalStates failed for #${prNumber}:`, { err });
               return [] as FileApprovalState[];
             }),
         ])
@@ -386,7 +487,7 @@ export class PullRequestService implements IPullRequestService {
         );
         viewerCanBypassMerge = isAdmin === true;
       } catch (err) {
-        console.warn(`[cr] viewerCanBypassMerge lookup failed for #${prNumber}:`, err);
+        log.warn(`viewerCanBypassMerge lookup failed for #${prNumber}:`, { err });
       }
     }
 
@@ -402,6 +503,14 @@ export class PullRequestService implements IPullRequestService {
       viewerWritesAllFiles: approvals.length > 0 && approvals.every((a) => a.viewerCanApprove),
     });
 
+    const viewerCanUpdate = computeViewerCanUpdate({
+      state: summary.state,
+      authorId: summary.authorId,
+      viewerEmail: opts.viewerEmail,
+      viewerCanBypassMerge,
+      approvals,
+    });
+
     const detail: PullRequestDetail = {
       ...summary,
       body: row.body,
@@ -415,12 +524,21 @@ export class PullRequestService implements IPullRequestService {
       mergeWarnings: gate.warnings,
       viewerCanBypassMerge,
       viewerCanCancel,
+      mergeBaseSha: forkPoint.mergeBaseSha,
+      behind: summary.state === 'open' && forkPoint.behind,
+      viewerCanUpdate,
     };
 
     // A patch-less detail is an internal read; it must not be served to the
-    // next client poll as if it were the full one.
-    if (opts.patches !== false) {
-      this.detailCache.set(cacheKey, { at: now, headSha: detail.headSha, value: detail });
+    // next client poll as if it were the full one. Nor may a read a mutation
+    // overtook: its row predates that mutation.
+    if (opts.patches !== false && generation === this.cacheGeneration) {
+      this.detailCache.set(cacheKey, {
+        at: now,
+        headSha: detail.headSha,
+        baseSha: detail.baseSha,
+        value: detail,
+      });
     }
     return detail;
   }
@@ -431,6 +549,7 @@ export class PullRequestService implements IPullRequestService {
    * cancel, comment). Keeps the cache-busting plumbing internal to this service.
    */
   invalidateDetailCache(prNumber: number): void {
+    this.cacheGeneration++;
     const suffix = `:${prNumber}`;
     for (const key of this.detailCache.keys()) {
       if (key.endsWith(suffix)) this.detailCache.delete(key);
@@ -444,6 +563,7 @@ export class PullRequestService implements IPullRequestService {
    * that tree makes them stale without touching any one request.
    */
   invalidateListCache(): void {
+    this.cacheGeneration++;
     this.cachedList.clear();
   }
 
@@ -480,6 +600,38 @@ export function computeViewerCanCancel(input: {
   return viewerIsAuthor || input.viewerCanBypassMerge || input.viewerWritesAllFiles;
 }
 
+/**
+ * Pure predicate for `viewerCanUpdate` — who may merge a request's target
+ * into it. The request's author (it is their proposal to bring up to date)
+ * and anyone who may apply it, by the merge gate's own reading: every file
+ * the gate binds (`isGateRelevant`) already approved or approvable by this
+ * viewer — files outside the gate (`inMergeGate: false`) need nobody's
+ * approval to apply, so they cannot withhold Update either — or an admin, who
+ * may apply over missing approvals. That exemption holds only for a file whose
+ * approvers were actually resolved (`eligibilityResolved`): when the access
+ * tree could not be read, every file reads as outside the gate, and that
+ * emptiness must not become a grant — Update fails closed. Fail-closed on no viewer, and nothing but an open request can be
+ * updated. The update route enforces exactly this.
+ */
+export function computeViewerCanUpdate(input: {
+  state: PullRequestState;
+  authorId: string | undefined;
+  viewerEmail: string | undefined;
+  viewerCanBypassMerge: boolean;
+  approvals: FileApprovalState[];
+}): boolean {
+  if (input.state !== 'open') return false;
+  if (!input.viewerEmail) return false;
+  const viewerIsAuthor = !!(input.authorId && input.authorId === hashEmail(input.viewerEmail));
+  const viewerMayApply =
+    input.approvals.length > 0 &&
+    input.approvals.every(
+      (a) => (a.eligibilityResolved === true && !a.inMergeGate) || a.isApproved || a.viewerCanApprove,
+    );
+  return viewerIsAuthor || input.viewerCanBypassMerge || viewerMayApply;
+}
+
 export const __testing = {
   computeViewerCanCancel,
+  computeViewerCanUpdate,
 };
