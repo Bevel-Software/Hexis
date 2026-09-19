@@ -22,6 +22,16 @@ import { LockGlyph } from './LockGlyph';
  * It is the SAME frame as the member view — breadcrumb, h1, run-by lede — so
  * the two never read as different products. Only the middle changes.
  *
+ * ASKING HAS THREE STATES, and the button carries two of them. It reads
+ * "Requesting…" and refuses further clicks from the moment it is pressed
+ * until the server answers; the "Requested" card replaces it on that answer,
+ * which the server gives as soon as it has RECORDED the request rather than
+ * once the change request exists. If the git work that follows the answer
+ * fails, the next load has `requestFailure` set and no request standing, so
+ * the button is back with a sentence above it naming what went wrong —
+ * pressing it again continues the recorded request rather than opening a
+ * second one.
+ *
  * `Manage access` is the escape hatch for a locked-out platform Admin. Admin
  * rescue applies to WRITING `access.md`, not to reading the folder, so an Admin
  * can genuinely be locked out of a plugin they are nevertheless the right person
@@ -50,6 +60,10 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
   const adminsText = ownersTextOf(plugin);
   const primaryFolder = primaryFolderOf(plugin);
   const pending = plugin.hasRequested || requested;
+  // The server could not finish the last request. It says so only while there
+  // is no request standing — `hasRequested` and this are never both true —
+  // so the sentence always sits above a button the person can press again.
+  const failure = pending ? null : (plugin.requestFailure ?? null);
 
   async function request() {
     setRequesting(true);
@@ -111,9 +125,21 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
             </p>
           </Surface>
         ) : (
-          <Button variant="primary" disabled={requesting} onClick={() => void request()}>
-            Subscribe to this plugin
-          </Button>
+          <>
+            {failure && (
+              <p className="mb-2.5 max-w-lg text-body text-ink-muted">
+                {`Your request to join ${plugin.displayName || plugin.name} could not be sent: ${failure}. Try again.`}
+              </p>
+            )}
+            {/* The label is the acknowledgement. Nothing else on the page can
+                say "we heard you" in the render that follows the click — the
+                server's answer is a round-trip away, and the whole reason the
+                click used to look like a freeze is that this button greyed out
+                and kept its word. */}
+            <Button variant="primary" disabled={requesting} onClick={() => void request()}>
+              {requesting ? 'Requesting…' : 'Subscribe to this plugin'}
+            </Button>
+          </>
         )}
       </div>
 
