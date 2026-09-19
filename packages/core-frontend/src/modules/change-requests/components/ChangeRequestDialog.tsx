@@ -48,6 +48,17 @@ export interface ChangeRequestScope {
 interface ChangeRequestDialogProps {
   cr: PullRequestSummary;
   scope?: ChangeRequestScope;
+  /**
+   * The file to land on, repo-relative — for a surface that opened the
+   * dialog ABOUT one file (a proposed row in the explorer). Without it the
+   * dialog lands on the request's first changed file, as it always has.
+   *
+   * Read once, as the initial selection: the reader is free to click away,
+   * and re-imposing the caller's file on every render would take the dialog
+   * back off them. A caller that needs to re-point an OPEN dialog remounts it
+   * (key on the path), which is what the explorer does.
+   */
+  initialPath?: string;
   onClose(): void;
   /** Applying is the only verdict this view reaches. Declining a change
    *  request lives on the skill page, beside the request's own row. */
@@ -72,6 +83,7 @@ interface ChangeRequestDialogProps {
 export function ChangeRequestDialog({
   cr,
   scope,
+  initialPath,
   onClose,
   onResolved,
 }: ChangeRequestDialogProps) {
@@ -191,10 +203,25 @@ export function ChangeRequestDialog({
    * the landing happens on the render the detail arrives rather than one render
    * later. `picked` staying null is what keeps "I haven't chosen yet" distinct
    * from "I chose the first file".
+   *
+   * A caller that opened the dialog ABOUT a file seeds the pick with it: the
+   * row the user clicked IS a choice, made before the dialog existed, and
+   * seeding is what makes it survive the detail arriving. The seed holds
+   * while the detail is in flight — that is the landing this exists for.
+   *
+   * Once the detail is here it decides: a pick the request does not contain
+   * is DROPPED for the ordinary first-file landing. A `?cr=&file=` link
+   * outlives the request it was copied from — the file gets renamed, reverted
+   * out of the request, or the link is simply old — and keeping such a seed
+   * would read a path off the branch that is not part of the request at all,
+   * leaving the pane reporting an unreadable or stale file. Nothing selected
+   * is the honest version of that, and the request still opens.
    */
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initialPath ?? null);
+  const pickHolds =
+    detail === null || (picked !== null && (changedFiles.has(picked) || mainFiles.includes(picked)));
   const selected =
-    picked ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
+    (pickHolds ? picked : null) ?? allFiles.find((f) => changedFiles.has(f)) ?? allFiles[0] ?? '';
   const setSelected = setPicked;
 
   /**
