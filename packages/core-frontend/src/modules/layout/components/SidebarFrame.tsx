@@ -280,12 +280,14 @@ export function SidebarFrame({
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
             column does not reflow while the frame animates to zero.
 
-            The 16px TOP is now the SHARED offset: it used to be half of the
-            sidebar header row's height, with the slot's own content supplying
-            the rest, and a height nobody could name is a height the page
-            beside it could not match. `HEADER_COLUMN_TOP` is the same 12px
-            the page column opens on, and the band below is the same height —
-            which is what puts the two rows on one line. */}
+            The prototype's 16px TOP is the one number of the three that did
+            not survive: it used to stand in for half of the sidebar header
+            row's height, with the slot's own content supplying the rest, and
+            a height nobody could name is a height the page beside it could
+            not match. `HEADER_COLUMN_TOP` replaces it with 12px — the offset
+            the page column already opened on — and the band below is the
+            same height on both sides, which is what puts the two rows on one
+            line. */}
         <div
           className={cn('flex h-full flex-col px-3.5 pb-[18px]', HEADER_COLUMN_TOP)}
           style={{

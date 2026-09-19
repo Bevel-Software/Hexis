@@ -282,8 +282,6 @@ export function PluginPage() {
 
   return (
     <div className="pb-14">
-      <PluginBreadcrumb name={label} />
-
       {/* The title row carries the page's one persistent action. `Share` IS
           the manage-access dialog — not a doorway to it. It stays un-gated:
           for a non-writer the dialog renders read-only (its own `canWrite`
@@ -292,14 +290,20 @@ export function PluginPage() {
       {/* Three actions, beside the title, for everyone (proto:3012-3025).
           Share stays un-gated: for a non-writer the dialog renders read-only,
           which is exactly what "who is this shared with?" should answer. */}
-      {/* On the shared band, the same height as the sidebar's header row. The
-          hand-tuned `mt-1.5` that used to nudge the heading and the actions
-          into agreement with each other is gone with it — the band centres
-          both, and it is the only thing deciding how tall this row is. */}
+      {/* On the shared band, the same height as the sidebar's header row, and
+          the FIRST row of the page — the breadcrumb rides on the band rather
+          than in a row above it, because a row above would push this one off
+          the line the sidebar's header row holds. The hand-tuned `mt-1.5`
+          that used to nudge the heading and the actions into agreement with
+          each other is gone too: the band centres both, and it is the only
+          thing deciding how tall this row is. */}
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
-        <h1 className="min-w-0 truncate text-display font-semibold" title={label}>
-          {label}
-        </h1>
+        <div className="flex min-w-0 items-center gap-2">
+          <PluginBreadcrumb />
+          <h1 className="min-w-0 truncate text-display font-semibold" title={label}>
+            {label}
+          </h1>
+        </div>
         <div className="flex flex-none items-center gap-1">
           <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
           <PageActions

@@ -20,8 +20,8 @@
  * `modules/layout/__tests__/HeaderAlignment.test.tsx`.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HEADER_BAND, HEADER_COLUMN_TOP } from '../header';
 
@@ -60,17 +60,43 @@ const HEADER_COLUMNS = [
   'modules/workspace/components/KbDocumentShell.tsx',
 ];
 
+/** What marks an element as a header row, and as a header column. */
+const ROW_MARKER = String.raw`data-testid=\{(?:PAGE_HEADER_TESTID|SIDEBAR_HEADER_TESTID)\}`;
+const COLUMN_MARKER = String.raw`\bHEADER_COLUMN_TOP\b`;
+
 /**
- * The opening tags of the header rows in a source file — from the
- * `data-testid` that names one to the end of that tag. Scoped to the tag
- * rather than the whole file on purpose: a page is allowed its own `h-[60vh]`
- * panel three hundred lines further down; what it is not allowed is a height
- * on the row that has to agree with the sidebar.
+ * Every `.tsx` under `src/` that a header row or a header column could be
+ * hiding in — the app's own code, not its tests.
+ *
+ * This is what stops `HEADER_ROWS` and `HEADER_COLUMNS` from going quietly
+ * stale. Two enumerations of "every page with a title bar", maintained by
+ * hand, are two more things that can be forgotten: a page added next year
+ * would render a private header height and the whole suite would stay green,
+ * which is the exact shape of the bug this file exists to prevent. So the
+ * lists are checked against the tree rather than trusted — see 'the list of
+ * header rows is the whole list' below.
  */
-function headerRowTagsIn(source: string): string[] {
+const APP_SOURCES = readdirSync(SRC, { recursive: true, encoding: 'utf8' })
+  .map((entry) => entry.split(sep).join('/'))
+  .filter((entry) => entry.endsWith('.tsx') && !entry.includes('__tests__/'));
+
+/** The app files whose source matches `pattern`, as paths relative to `src/`. */
+function sourcesMatching(pattern: string): string[] {
+  return APP_SOURCES.filter((file) => new RegExp(pattern).test(read(file))).sort();
+}
+
+/**
+ * The opening tag around each hit of `marker` in a source file — from the
+ * `<` that opens it to the end of that tag. Scoped to the tag rather than the
+ * whole file on purpose: a page is allowed its own `h-[60vh]` panel three
+ * hundred lines further down, and its own `pt-[34px]` on something that is
+ * not a header column; what it is not allowed is a height or an offset on the
+ * element that has to agree with the sidebar.
+ */
+function tagsAround(source: string, marker: string): string[] {
   const tags: string[] = [];
-  const marker = /data-testid=\{(?:PAGE_HEADER_TESTID|SIDEBAR_HEADER_TESTID)\}/g;
-  for (let hit = marker.exec(source); hit; hit = marker.exec(source)) {
+  const hits = new RegExp(marker, 'g');
+  for (let hit = hits.exec(source); hit; hit = hits.exec(source)) {
     // From the '<' that opens the tag, so the attribute order does not
     // decide whether the test can see the className.
     const start = source.lastIndexOf('<', hit.index);
@@ -81,6 +107,9 @@ function headerRowTagsIn(source: string): string[] {
   }
   return tags;
 }
+
+const headerRowTagsIn = (source: string) => tagsAround(source, ROW_MARKER);
+const columnTagsIn = (source: string) => tagsAround(source, COLUMN_MARKER);
 
 describe('the header height token', () => {
   it('is declared once, in tokens.css', () => {
@@ -97,6 +126,20 @@ describe('the header height token', () => {
     // 13px nav row against a 26px title — and centring identical boxes is the
     // only rule that survives either of them changing.
     expect(HEADER_BAND).toContain('items-center');
+  });
+});
+
+describe('the enumerations cannot go stale', () => {
+  // Both directions, in one assertion each. A header row in a file nobody
+  // listed is a page that quietly kept a private height; a listed file that
+  // no longer renders one is a list describing an app that no longer exists,
+  // and its `it.each` case would keep passing vacuously either way.
+  it('the list of header rows is the whole list', () => {
+    expect(sourcesMatching(ROW_MARKER)).toEqual([...HEADER_ROWS].sort());
+  });
+
+  it('the list of header columns is the whole list', () => {
+    expect(sourcesMatching(COLUMN_MARKER)).toEqual([...HEADER_COLUMNS].sort());
   });
 });
 
@@ -122,11 +165,22 @@ describe('every header row uses the shared band', () => {
   });
 
   it.each(HEADER_COLUMNS)('%s opens on the shared offset', (file) => {
-    expect(read(file)).toMatch(
+    const source = read(file);
+    expect(source).toMatch(
       /import \{[^}]*\bHEADER_COLUMN_TOP\b[^}]*\} from '[^']*shared\/theme\/header'/,
     );
-    // The 34px the Library used to open on was the other half of the seam.
-    expect(read(file)).not.toContain('pt-[34px]');
+    const columns = columnTagsIn(source);
+    expect(columns.length).toBeGreaterThan(0);
+    for (const tag of columns) {
+      // Scoped to the column's own tag, the same way the rows are: a page is
+      // allowed a `pt-[34px]` on some panel far below, and even a comment
+      // quoting the class it used to open on. What it may not have is a
+      // literal top padding on the element that opens the column — the 34px
+      // the Library used to open on was the other half of the seam, and any
+      // second number here re-creates it whatever its value.
+      expect(tag).not.toMatch(/'[^']*\bpt-/);
+      expect(tag).not.toMatch(/"[^"]*\bpt-/);
+    }
   });
 
   it('states the column offset once', () => {

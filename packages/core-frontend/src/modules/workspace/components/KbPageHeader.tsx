@@ -227,32 +227,41 @@ export function KbPageHeader({
       data-testid={PAGE_HEADER_TESTID}
       className={cn(HEADER_BAND, 'mb-2 w-full gap-3')}
     >
-      {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
-          `.focus()` land on it — the standard way to hand focus to a region
-          after a view swap. No focus ring: this is a programmatic landing
-          after the user's own click, not a control they are about to use. */}
-      <h1
-        ref={titleRef}
-        tabIndex={-1}
-        // `title` because `truncate` hides the rest of a long file name, and
-        // a heading you cannot finish reading needs somewhere to say it.
-        title={titleOf(path)}
-        className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
-      >
-        {titleOf(path)}
-      </h1>
+      {/* The title and its chips are the one part of this row allowed to run
+          out of space. They share a `min-w-0` group so that the row's
+          leftover width is taken from THEM and never from the actions: a
+          band cannot wrap, so something has to give first, and a file name
+          the reader can still hover for (`title`, below) is a far cheaper
+          loss than a Share button pushed off the side of the page. The
+          chips clip from the right in the order they are least urgent. */}
+      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+        {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
+            `.focus()` land on it — the standard way to hand focus to a region
+            after a view swap. No focus ring: this is a programmatic landing
+            after the user's own click, not a control they are about to use. */}
+        <h1
+          ref={titleRef}
+          tabIndex={-1}
+          // `title` because `truncate` hides the rest of a long file name, and
+          // a heading you cannot finish reading needs somewhere to say it.
+          title={titleOf(path)}
+          className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
+        >
+          {titleOf(path)}
+        </h1>
 
-      {/* The three chips the deleted strip used to carry. */}
-      {isDirty && <Badge tone="wait">Unsaved</Badge>}
-      {waitingOnAgentUpdate && (
-        <Badge tone="wait">
-          <Clock4 size={12} />
-          Agent update waiting
-        </Badge>
-      )}
-      {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
+        {/* The three chips the deleted strip used to carry. */}
+        {isDirty && <Badge tone="wait">Unsaved</Badge>}
+        {waitingOnAgentUpdate && (
+          <Badge tone="wait">
+            <Clock4 size={12} />
+            Agent update waiting
+          </Badge>
+        )}
+        {isReviewingPending && <Badge tone="ok">Reviewing agent update</Badge>}
+      </div>
 
-      <div className="ml-auto flex flex-none items-center gap-1.5">
+      <div className="flex flex-none items-center gap-1.5">
         {/* Share: bounded, and split. Bounded because it is the one action on
             this page with a consequence for other people. The chevron carries
             the quieter sibling errand — copying a link to the page — so that

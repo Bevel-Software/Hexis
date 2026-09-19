@@ -86,18 +86,21 @@ export function PersonalPluginPage() {
 
   return (
     <div className="pb-14">
-      <PluginBreadcrumb name={name} />
-
       {/* The same title row every plugin page has — the shared header band,
-          the height the sidebar's header row is. The description line that
-          used to sit under it is gone: "Only you see this" is what the page's
-          own name already says, and a subtitle explaining a heading is the
-          heading admitting it did not work (proto: the personal list carries
-          no lede). */}
+          the height the sidebar's header row is, and the page's FIRST row:
+          the breadcrumb rides on the band, because a crumb row above it would
+          push the title bar off the line the sidebar's header row holds. The
+          description line that used to sit under it is gone: "Only you see
+          this" is what the page's own name already says, and a subtitle
+          explaining a heading is the heading admitting it did not work
+          (proto: the personal list carries no lede). */}
       <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
-        <h1 className="min-w-0 truncate text-display font-semibold" title={name}>
-          {name}
-        </h1>
+        <div className="flex min-w-0 items-center gap-2">
+          <PluginBreadcrumb />
+          <h1 className="min-w-0 truncate text-display font-semibold" title={name}>
+            {name}
+          </h1>
+        </div>
         <div className="flex-none">
           <PageActions
             onAdd={() => setAddOpen(true)}

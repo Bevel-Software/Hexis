@@ -630,13 +630,16 @@ export function SkillPage({
   // second layout when the detail request settles.
   return (
     <Article>
-      {backLink}
-
-      <header className="mt-4">
+      <header>
         {/* The shared header band — one height for this title bar and the
             sidebar's header row beside it, so a skill page opens on the same
-            line a file page and the Library's own pages do. */}
+            line a file page and the Library's own pages do. The way back
+            rides ON the band, as its leading item: a back link in a row above
+            would push this row down off that line, which is the whole seam.
+            (The error and not-found returns above still lead with it on its
+            own row — they have no title bar to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-3')}>
+          <div className="-ml-2 flex-none">{backLink}</div>
           {/* `tabIndex={-1}` keeps the heading out of the tab order while
               letting `.focus()` land on it — where focus goes when closing
               the log finds no clock to hand back to. No focus ring: it is a

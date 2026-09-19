@@ -141,14 +141,18 @@ export function ToolPage({
         </Banner>
       )}
 
-      {backLink}
-
-      <header className="mt-4">
+      <header>
         {/* The logo and the name are the title BAR — one band, the height the
             sidebar's header row is. The description reads below it: a line of
             prose inside the row would make this page's header taller than
-            every other page's, which is the drift the band removes. */}
+            every other page's, which is the drift the band removes. The way
+            back rides ON the band, as its leading item, for the same reason:
+            a back link in a row above would push the title bar off the line
+            the sidebar's header row holds. (The error and not-found returns
+            above still lead with it on its own row — they have no title bar
+            to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
+          <div className="-ml-2 flex-none">{backLink}</div>
           <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="flex-none" />
           <h1 className="min-w-0 truncate text-display font-semibold text-ink" title={tool.name}>
             {tool.name}

@@ -110,9 +110,12 @@
      drift this token exists to prevent, and `__tests__/header-band.test.ts`
      fails if one appears.
 
-     48px is the sidebar header row's own height today — 16px of column
-     padding over a 31.5px pill — kept deliberately. The fix moves the page
-     title bar onto the sidebar's line, not the sidebar onto a new one.     */
+     48px is the smallest 4px step that holds BOTH sides at their present
+     size, which is why the fix moves the page title bar onto the sidebar's
+     line rather than either side onto a new one. The sidebar's pill is
+     31.5px (`py-1.5` over `--text-ui` 13px at a 1.5 line height); a page's
+     `--text-display` heading is 29.9px (26px at 1.15). The band centres the
+     taller of the two with 9px of air above and below.                     */
   --spacing-header: 48px;
 
   /* ── radii ────────────────────────────────────────────────────────────
