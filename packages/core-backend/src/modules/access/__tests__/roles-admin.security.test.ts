@@ -98,12 +98,15 @@ function close(s: Server): Promise<void> {
 }
 
 describe('SECURITY: Admin-role removal takes effect on the next request', () => {
-  let root: string;
   let repo: string;
   let access: AccessControlService;
   let rolesAdmin: RolesAdminService;
-  let server: Server;
   let baseUrl: string;
+  // Both stay undefined until `beforeEach` gets that far. Vitest runs
+  // `afterEach` even when setup threw, so tear-down must not throw over the
+  // top of the real failure.
+  let root: string | undefined;
+  let server: Server | undefined;
 
   /** The admin-only request under test, made AS `email`. */
   async function adminOnlyRequest(email: string): Promise<number> {
@@ -151,8 +154,10 @@ describe('SECURITY: Admin-role removal takes effect on the next request', () => 
   });
 
   afterEach(async () => {
-    await close(server);
-    await fs.rm(root, { recursive: true, force: true });
+    if (server) await close(server);
+    server = undefined;
+    if (root) await fs.rm(root, { recursive: true, force: true });
+    root = undefined;
   });
 
   it('a regular account removed from Admin is denied its NEXT admin-only request', async () => {
