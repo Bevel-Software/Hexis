@@ -1810,10 +1810,10 @@ function useCanWriteFolder(workspacePath: string | null): boolean {
  * on a touch device could open, over text that had already cut the reason off.
  */
 export function UploadNotices() {
-  const { uploadError, clearUploadError, uploadNotice, clearUploadNotice } = useWorkspace();
+  const { uploadErrors, clearUploadError, uploadNotices, clearUploadNotice } = useWorkspace();
   const target = useUploadTarget();
-  const error = uploadError?.target === target ? uploadError : null;
-  const notice = uploadNotice?.target === target ? uploadNotice : null;
+  const error = uploadErrors.get(target) ?? null;
+  const notice = uploadNotices.get(target) ?? null;
   return (
     <>
       {error && (
@@ -1824,14 +1824,14 @@ export function UploadNotices() {
           <div className="flex-1 min-w-0 space-y-0.5 whitespace-pre-wrap break-words">
             <div className="font-medium">Couldn't add {error.filename}</div>
             <div>{error.reason}</div>
-            <div className="text-ink-muted">{uploadErrorNextStep(error.reason)}</div>
+            <div className="text-ink-muted">{uploadErrorNextStep(error.status)}</div>
           </div>
           <IconButton
             size={18}
             tone="danger"
             title="Dismiss"
             aria-label="Dismiss upload error"
-            onClick={clearUploadError}
+            onClick={() => clearUploadError(target)}
           >
             <X size={12} />
           </IconButton>
@@ -1855,7 +1855,7 @@ export function UploadNotices() {
               size={18}
               title="Dismiss"
               aria-label="Dismiss upload notice"
-              onClick={clearUploadNotice}
+              onClick={() => clearUploadNotice(target)}
             >
               <X size={12} />
             </IconButton>

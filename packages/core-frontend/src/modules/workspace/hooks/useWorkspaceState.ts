@@ -142,6 +142,26 @@ function describeUpload(input: UploadInput, targetDirectory: string): string {
   return where ? `${what} to ${where}` : what;
 }
 
+const EMPTY_ERRORS: ReadonlyMap<UploadTarget, UploadError> = new Map();
+const EMPTY_NOTICES: ReadonlyMap<UploadTarget, UploadNotice> = new Map();
+
+/**
+ * Set or remove one tree's upload banner, leaving every other tree's alone.
+ * Returns the map unchanged when there was nothing to remove, so a dispatch
+ * into a tree with no banner doesn't re-render the ones that have.
+ */
+function withBanner<V>(
+  current: ReadonlyMap<UploadTarget, V>,
+  target: UploadTarget,
+  value: V | null,
+): ReadonlyMap<UploadTarget, V> {
+  if (value === null && !current.has(target)) return current;
+  const next = new Map(current);
+  if (value === null) next.delete(target);
+  else next.set(target, value);
+  return next;
+}
+
 interface UseWorkspaceStateReturn extends WorkspaceContextValue {
   setPersistenceBranch: (branch: string | null) => void;
   deleteWorkspace: () => Promise<void>;
@@ -169,8 +189,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const [fileTree, setFileTree] = useState<FileTreeEntry | null>(null);
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
-  const [uploadError, setUploadError] = useState<UploadError | null>(null);
-  const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
+  // Upload banners are per-TREE, not per-workspace: the Library sidebar shows
+  // two upload targets at once, and with a single slot each the second drop's
+  // notice replaced the first's — and the first upload to settle cleared the
+  // second's. Either way one of the two drops went silent, which is the whole
+  // failure this module exists to prevent. See `withBanner`.
+  const [uploadErrors, setUploadErrors] = useState<ReadonlyMap<UploadTarget, UploadError>>(EMPTY_ERRORS);
+  const [uploadNotices, setUploadNotices] = useState<ReadonlyMap<UploadTarget, UploadNotice>>(EMPTY_NOTICES);
   const [isUploading, setIsUploading] = useState(false);
   // Who is signed in — the suggestion-routed upload needs an author for the
   // branch name and the change request. Read nullable (not `useAuth`, which
@@ -686,8 +711,24 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     bumpFs();
   }, [workspaceId, refreshFileTree, bumpFs]);
 
-  const clearUploadError = useCallback(() => setUploadError(null), []);
-  const clearUploadNotice = useCallback(() => setUploadNotice(null), []);
+  const clearUploadError = useCallback(
+    (target: UploadTarget) => setUploadErrors((current) => withBanner(current, target, null)),
+    [],
+  );
+  const clearUploadNotice = useCallback(
+    (target: UploadTarget) => setUploadNotices((current) => withBanner(current, target, null)),
+    [],
+  );
+  /**
+   * Retire a tree's "this is happening" notice without touching a RESULT that
+   * has already replaced it — a suggestion notice stays until the user
+   * dismisses it.
+   */
+  const clearProgressNotice = useCallback((target: UploadTarget) => {
+    setUploadNotices((current) => (
+      current.get(target)?.kind === 'progress' ? withBanner(current, target, null) : current
+    ));
+  }, []);
 
   // Pending overlay: files/dirs the user dropped but whose server commits
   // haven't echoed back yet. The ref holds the mutable working set the
@@ -752,6 +793,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   );
 
   const activeUploadsRef = useRef(0);
+  // How many dispatches are still running INTO EACH TREE. A progress notice
+  // belongs to its tree, not to the dispatch that raised it: the one that
+  // settles first must not pull the notice out from under a sibling drop into
+  // the same tree that is still waiting on its routing round-trip.
+  const activeUploadsByTargetRef = useRef(new Map<UploadTarget, number>());
   const dispatchUpload = useCallback(async (
     input: UploadInput,
     targetDirectory: string,
@@ -780,13 +826,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // The SECOND upload finds the branch, the workspace and the request all
     // there and answers at once, which is why the report was "the first
     // showed nothing, the second showed the notice".
-    setUploadError(null);
-    setUploadNotice({
+    setUploadErrors((current) => withBanner(current, uploadTarget, null));
+    setUploadNotices((current) => withBanner(current, uploadTarget, {
       kind: 'progress',
-      target: uploadTarget,
       message: `Adding ${describeUpload(input, targetDirectory)}…`,
-    });
+    }));
     activeUploadsRef.current += 1;
+    const activeHere = activeUploadsByTargetRef.current;
+    activeHere.set(uploadTarget, (activeHere.get(uploadTarget) ?? 0) + 1);
     setIsUploading(true);
 
     // ── Suggestion routing ──
@@ -807,8 +854,11 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     // overlay below puts them in the tree within the frame. The progress
     // notice was only covering the wait for this answer, so it goes now
     // rather than flashing over the rows for the length of the upload.
-    if (!suggestion && isCurrent()) {
-      setUploadNotice((current) => (current?.kind === 'progress' ? null : current));
+    // Only when this is the only drop this tree is waiting on: a sibling
+    // upload into the same tree may still be mid-routing, and its progress
+    // notice is the only thing it has to show.
+    if (!suggestion && isCurrent() && (activeHere.get(uploadTarget) ?? 0) <= 1) {
+      clearProgressNotice(uploadTarget);
     }
     const uploadWorkspaceId = suggestion?.workspaceId ?? workspaceId;
     // No optimistic tree overlay for a suggestion-routed upload: the files
@@ -862,10 +912,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const recordError = (filename: string, err: unknown) => {
       if (firstError) return;
       const reason = err instanceof Error ? err.message : 'Upload failed';
+      // The status, not the wording, decides what we tell the user to do
+      // next: the backend is free to rephrase "you can't write here" without
+      // the banner quietly starting to give the wrong advice.
+      const status = err instanceof WorkspaceApiError ? err.status : undefined;
       // The NAME, not the workspace path: the banner's first line is what the
       // user dropped. A path is what produced "Couldn't add knowledge-base/K…"
       // — a line so long the reason behind it never fitted on screen.
-      firstError = { filename: fileNameOf(filename), reason, target: uploadTarget };
+      firstError = { filename: fileNameOf(filename), reason, status };
       abort = true;
     };
 
@@ -1034,13 +1088,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           }
           window.dispatchEvent(new Event(PR_STALE_EVENT));
           if (isCurrent()) {
-            setUploadNotice({
+            setUploadNotices((current) => withBanner(current, uploadTarget, {
               kind: 'suggestion',
-              target: uploadTarget,
               message:
                 "You can't write to that folder, so the upload became a suggestion: " +
                 'it is now a change request for the folder’s owners to review.',
-            });
+            }));
           }
         } catch (err) {
           recordError('change request', err);
@@ -1058,9 +1111,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
       // they already left. The workspace-change effect already reset the
       // optimistic overlays.
       activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+      const remainingHere = Math.max(0, (activeHere.get(uploadTarget) ?? 1) - 1);
+      if (remainingHere === 0) activeHere.delete(uploadTarget);
+      else activeHere.set(uploadTarget, remainingHere);
       if (isCurrent()) {
         if (firstError) {
-          setUploadError(firstError);
+          setUploadErrors((current) => withBanner(current, uploadTarget, firstError));
           // Drop any pending overlay entries that didn't make it — files
           // we already uploaded successfully are removed inside uploadOne.
           clearPendingMatching(() => true);
@@ -1068,13 +1124,12 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
         const stillRunning = activeUploadsRef.current > 0;
         setIsUploading(stillRunning);
-        if (!stillRunning) {
-          setUploadProgress(null);
-          // A progress notice has nothing left to report once no upload is in
-          // flight, and one left behind would sit there forever. The
-          // suggestion notice is a RESULT, and stays until dismissed.
-          setUploadNotice((current) => (current?.kind === 'progress' ? null : current));
-        }
+        if (!stillRunning) setUploadProgress(null);
+        // A progress notice has nothing left to report once this tree has no
+        // upload in flight, and one left behind would sit there forever. The
+        // suggestion notice is a RESULT, and stays until dismissed. Scoped to
+        // THIS tree so a drop settling in one never blanks another's news.
+        if (remainingHere === 0) clearProgressNotice(uploadTarget);
 
         // One final refresh to reconcile the server tree with whatever
         // committed, then clear pending overlay entries whose real
@@ -1098,7 +1153,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }, [
     workspaceId, refreshFileTree, bumpFs,
     addPending, removePending, clearPendingMatching,
-    resolveSuggestionRouting, authUser,
+    resolveSuggestionRouting, authUser, clearProgressNotice,
   ]);
 
   const deleteEntry = useCallback(async (relativePath: string) => {
@@ -1478,6 +1533,14 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     pendingDeletePathsRef.current = new Set();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPendingUploads(new Map());
+    // The banners go with them. An upload still routing when the user
+    // switches workspaces skips its own cleanup (`isCurrent()` is false by
+    // the time it settles, and rightly so — its result belongs to the branch
+    // it was dispatched from), so its "Adding …" notice would otherwise sit
+    // over the new tree forever, describing a drop into a branch the user has
+    // left. Same for an error banner about a file in the old branch.
+    setUploadNotices(EMPTY_NOTICES);
+    setUploadErrors(EMPTY_ERRORS);
   }, [workspaceId]);
 
   const bus = useEventBus();
@@ -1641,8 +1704,8 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     setHasUnsavedFileChanges,
     setActiveTabContent,
     fsRevision,
-    uploadError,
-    uploadNotice,
+    uploadErrors,
+    uploadNotices,
     clearUploadNotice,
     isUploading,
     uploadProgress,
@@ -1673,7 +1736,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   }), [
     workspaceId, kbDirName, fileTree, bootstrapError, workspaceBranch, retryBootstrap, openTabs, activeTab, dirtyTabFilenames,
     openFilePath, openFileContent, openFileSavedContent, hasUnsavedFileChanges, pendingFileContent,
-    setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadError, uploadNotice, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
+    setHasUnsavedFileChanges, setActiveTabContent, fsRevision, uploadErrors, uploadNotices, clearUploadNotice, isUploading, uploadProgress, pendingUploads, refreshFileTree, bumpFs,
     addTab, closeTab, activateTab, reorderTab, closeAllTabs, hydrateTabs,
     createFile, createDirectory, unzipHere, uploadFiles, dispatchUpload, clearUploadError,
     deleteEntry, moveEntry, saveFile, reloadTabFromDisk,

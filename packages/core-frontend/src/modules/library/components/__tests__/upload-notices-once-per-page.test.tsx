@@ -13,6 +13,7 @@ vi.mock('../../../../lib/api', () => ({ authFetch: vi.fn() }));
 import { PluginsTree, SkillsTree } from '../SkillsTree';
 import {
   WorkspaceContext,
+  libraryUploadTarget,
   type UploadError,
   type UploadNotice,
   type WorkspaceContextValue,
@@ -75,9 +76,12 @@ function renderSidebar(over: Partial<WorkspaceContextValue>) {
   );
 }
 
+/** The two trees name themselves through the same helper the trees use. */
+const SKILLS = libraryUploadTarget('Skills');
+const PLUGINS = libraryUploadTarget('Plugins');
+
 const SUGGESTION: UploadNotice = {
   kind: 'suggestion',
-  target: 'library:Skills',
   message:
     "You can't write to that folder, so the upload became a suggestion: "
     + 'it is now a change request for the folder’s owners to review.',
@@ -86,7 +90,7 @@ const SUGGESTION: UploadNotice = {
 const REFUSAL: UploadError = {
   filename: 'report.pdf',
   reason: 'You do not have permission to write to Skills/house-writing-standards',
-  target: 'library:Skills',
+  status: 403,
 };
 
 describe('the Library sidebar shows one upload banner, in the tree that took the drop', () => {
@@ -96,7 +100,7 @@ describe('the Library sidebar shows one upload banner, in the tree that took the
   });
 
   it('renders the suggestion notice once, inside the Skills tree', () => {
-    renderSidebar({ uploadNotice: SUGGESTION });
+    renderSidebar({ uploadNotices: new Map([[SKILLS, SUGGESTION]]) });
     const notices = screen.getAllByTestId('upload-notice');
     expect(notices).toHaveLength(1);
     expect(within(screen.getByTestId('skills-tree')).getByTestId('upload-notice')).toBe(notices[0]);
@@ -104,7 +108,7 @@ describe('the Library sidebar shows one upload banner, in the tree that took the
   });
 
   it('renders the error banner once, inside the Skills tree, reason and all', () => {
-    renderSidebar({ uploadError: REFUSAL });
+    renderSidebar({ uploadErrors: new Map([[SKILLS, REFUSAL]]) });
     const alerts = screen.getAllByRole('alert');
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toHaveTextContent("Couldn't add report.pdf");
@@ -113,8 +117,26 @@ describe('the Library sidebar shows one upload banner, in the tree that took the
     expect(within(screen.getByTestId('plugins-tree')).queryByRole('alert')).toBeNull();
   });
 
-  it('puts a Plugins drop s banner in the Plugins tree instead', () => {
-    renderSidebar({ uploadNotice: { ...SUGGESTION, target: 'library:Plugins' } });
+  // Two drops in flight at once, one per tree. Over a single shared notice
+  // the second drop's dispatch replaced the first's and the first to settle
+  // cleared the second's — either way one of the two uploads went silent,
+  // which is the failure this page exists to prevent.
+  it('shows both trees their own drop when two are in flight at once', () => {
+    renderSidebar({
+      uploadNotices: new Map([
+        [SKILLS, { kind: 'progress', message: 'Adding report.pdf to Skills…' } as UploadNotice],
+        [PLUGINS, SUGGESTION],
+      ]),
+    });
+    expect(screen.getAllByTestId('upload-notice')).toHaveLength(2);
+    expect(within(screen.getByTestId('skills-tree')).getByTestId('upload-notice'))
+      .toHaveTextContent('Adding report.pdf to Skills');
+    expect(within(screen.getByTestId('plugins-tree')).getByTestId('upload-notice'))
+      .toHaveTextContent('became a suggestion');
+  });
+
+  it('puts a Plugins drop’s banner in the Plugins tree instead', () => {
+    renderSidebar({ uploadNotices: new Map([[PLUGINS, SUGGESTION]]) });
     expect(screen.getAllByTestId('upload-notice')).toHaveLength(1);
     expect(within(screen.getByTestId('plugins-tree')).getByTestId('upload-notice')).toBeDefined();
     expect(within(screen.getByTestId('skills-tree')).queryByTestId('upload-notice')).toBeNull();

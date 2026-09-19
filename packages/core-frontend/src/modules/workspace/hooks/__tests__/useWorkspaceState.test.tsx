@@ -7,8 +7,8 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 const apiMocks = vi.hoisted(() => {
   class FakeWorkspaceApiError extends Error {
     status: number;
-    constructor(status: number) {
-      super(`HTTP ${status}`);
+    constructor(status: number, message?: string) {
+      super(message ?? `HTTP ${status}`);
       this.status = status;
       this.name = 'WorkspaceApiError';
     }
@@ -46,8 +46,27 @@ import type { ReactNode } from 'react';
 import { AuthContext } from '../../../auth/state/auth.context';
 import { PR_STALE_EVENT, SUGGESTIONS_OPTIMISTIC_EVENT } from '../../../../core/events';
 import { useWorkspaceState } from '../useWorkspaceState';
+import {
+  KNOWLEDGE_UPLOAD_TARGET,
+  libraryUploadTarget,
+  type UploadError,
+  type UploadNotice,
+} from '../../state/workspace.context';
 import { FILE_TRACE_STORAGE_KEY } from '../../utils/file-trace';
 const WorkspaceApiError = apiMocks.WorkspaceApiError;
+
+/**
+ * The upload banners are keyed by the tree that took the drop, so every
+ * assertion about one names its tree. `KNOWLEDGE_UPLOAD_TARGET` is what a
+ * `dispatchUpload` with no target of its own lands under.
+ */
+interface UploadBanners {
+  uploadNotices: ReadonlyMap<string, UploadNotice>;
+  uploadErrors: ReadonlyMap<string, UploadError>;
+}
+const noticeIn = (s: UploadBanners, target = KNOWLEDGE_UPLOAD_TARGET) => s.uploadNotices.get(target) ?? null;
+const errorIn = (s: UploadBanners, target = KNOWLEDGE_UPLOAD_TARGET) => s.uploadErrors.get(target) ?? null;
+
 
 const WORKSPACE_FIXTURE = {
   workspace: {
@@ -697,9 +716,9 @@ describe('dispatchUpload: suggestion routing', () => {
       const detail = (onAnnounce.mock.calls[0][0] as CustomEvent).detail;
       expect(detail.number).toBe(12);
       expect(detail.touchedNodePaths).toContain('KnowledgeBase/Ops/note.md');
-      expect(result.current.uploadNotice?.message).toMatch(/became a suggestion/);
-      expect(result.current.uploadNotice?.kind).toBe('suggestion');
-      expect(result.current.uploadError).toBeNull();
+      expect(noticeIn(result.current)?.message).toMatch(/became a suggestion/);
+      expect(noticeIn(result.current)?.kind).toBe('suggestion');
+      expect(errorIn(result.current)).toBeNull();
     } finally {
       window.removeEventListener(PR_STALE_EVENT, onStale);
       window.removeEventListener(SUGGESTIONS_OPTIMISTIC_EVENT, onAnnounce);
@@ -728,7 +747,7 @@ describe('dispatchUpload: suggestion routing', () => {
       { defer: false },
     );
     expect(proposeMocks.ensureKnowledgeSuggestionWorkspace).not.toHaveBeenCalled();
-    expect(result.current.uploadNotice).toBeNull();
+    expect(noticeIn(result.current)).toBeNull();
   });
 
   it('never routes on a draft branch, even without write access', async () => {
@@ -789,7 +808,7 @@ describe('dispatchUpload: the drop is never silent', () => {
   };
 
   /** The Library's Skills tree — the surface the report came from. */
-  const SKILLS_TREE = 'library:Skills';
+  const SKILLS_TREE = libraryUploadTarget('Skills');
   const SKILLS_FOLDER = 'knowledge-base/Skills/house-writing-standards';
 
   const SUGGESTION_TARGET = {
@@ -888,9 +907,8 @@ describe('dispatchUpload: the drop is never silent', () => {
     // branch's tree when it is — so the notice is the only thing there is.
     expect(apiMocks.uploadFile).not.toHaveBeenCalled();
     expect(result.current.isUploading).toBe(true);
-    expect(result.current.uploadNotice).toEqual({
+    expect(noticeIn(result.current, SKILLS_TREE)).toEqual({
       kind: 'progress',
-      target: SKILLS_TREE,
       message: 'Adding report.pdf to house-writing-standards…',
     });
 
@@ -900,12 +918,12 @@ describe('dispatchUpload: the drop is never silent', () => {
     });
 
     // The result replaces it — in the same tree, once.
-    expect(result.current.uploadNotice).toEqual({
+    expect(result.current.uploadNotices.size).toBe(1);
+    expect(noticeIn(result.current, SKILLS_TREE)).toEqual({
       kind: 'suggestion',
-      target: SKILLS_TREE,
       message: expect.stringContaining('became a suggestion'),
     });
-    expect(result.current.uploadError).toBeNull();
+    expect(errorIn(result.current, SKILLS_TREE)).toBeNull();
     expect(result.current.isUploading).toBe(false);
   });
 
@@ -927,8 +945,8 @@ describe('dispatchUpload: the drop is never silent', () => {
 
     // First: the branch has to be made and the request opened.
     await upload('first.pdf');
-    expect(result.current.uploadNotice?.kind).toBe('suggestion');
-    expect(result.current.uploadNotice?.target).toBe(SKILLS_TREE);
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('suggestion');
+    expect(result.current.uploadNotices.size).toBe(1);
 
     // Second: the request is already there, so nothing is created.
     proposeMocks.ensureKnowledgeSuggestionWorkspace.mockResolvedValue({
@@ -936,8 +954,147 @@ describe('dispatchUpload: the drop is never silent', () => {
       existingCr: CHANGE_REQUEST,
     });
     await upload('second.pdf');
-    expect(result.current.uploadNotice?.kind).toBe('suggestion');
-    expect(result.current.uploadNotice?.target).toBe(SKILLS_TREE);
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('suggestion');
+    expect(result.current.uploadNotices.size).toBe(1);
+  });
+
+  // Two drops in flight at once. The notices are per-TREE and the progress
+  // one is retired per-tree too, because over a single shared slot the drop
+  // that settled first pulled the other's notice off the screen — and a
+  // suggestion-routed upload has nothing else to show, so that drop went
+  // silent, which is the whole failure this feature exists to prevent.
+  it('keeps a second drop\u2019s notice when the first settles', async () => {
+    accessApiMock.fetchFileAccess.mockImplementation(async (_ws: string, path: string) => ({
+      // The Knowledge drop may write (ordinary upload, settles at once); the
+      // Skills drop may not, so it goes off to the routing round-trip.
+      canWrite: !path.startsWith('Skills/'),
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    }));
+    let releaseRouting: (target: typeof SUGGESTION_TARGET) => void = () => {};
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReturnValue(
+      new Promise((resolve) => { releaseRouting = resolve; }),
+    );
+    const result = await mountProtected();
+
+    // The slow one first: dropped into Skills, still waiting on its branch.
+    let skillsDrop: Promise<void> | undefined;
+    await act(async () => {
+      skillsDrop = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'report.pdf')] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+      await Promise.resolve();
+    });
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('progress');
+
+    // And an ordinary drop into Knowledge, which runs to completion.
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['y'], 'note.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+
+    // Knowledge has its rows and no notice; Skills is still waiting, and is
+    // still saying so.
+    expect(noticeIn(result.current)).toBeNull();
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('progress');
+
+    await act(async () => {
+      releaseRouting(SUGGESTION_TARGET);
+      await skillsDrop;
+    });
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('suggestion');
+  });
+
+  // Same tree, two drops: the first to finish must not retire the notice the
+  // second is still relying on.
+  it('keeps the notice up while a sibling drop into the same tree is still running', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    // The second drop's ACL answer is held, so it is still in its pre-UI
+    // window when the first drop settles.
+    let releaseSecondAcl: () => void = () => {};
+    const result = await mountProtected();
+
+    const first = result.current.dispatchUpload(
+      { kind: 'files', files: [new File(['x'], 'one.md')] },
+      'knowledge-base/KnowledgeBase/Ops',
+    );
+    accessApiMock.fetchFileAccess.mockReturnValue(new Promise((resolve) => {
+      releaseSecondAcl = () => resolve({
+        canWrite: true,
+        eligible: { roles: [], users: [] },
+        owners: { roles: [], users: [] },
+      });
+    }));
+    let second: Promise<void> | undefined;
+    await act(async () => {
+      second = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['y'], 'two.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+      await first;
+    });
+
+    // The first is done. The second has drawn nothing yet — its notice is
+    // all it has, and it is still there.
+    expect(noticeIn(result.current)?.kind).toBe('progress');
+
+    await act(async () => {
+      releaseSecondAcl();
+      await second;
+    });
+    expect(noticeIn(result.current)).toBeNull();
+  });
+
+  // A drop still routing when the user changes branch never runs its own
+  // cleanup — its result belongs to the branch it was dispatched from. Left
+  // alone, its "Adding …" sat over the new tree forever.
+  it('drops the banners of a branch the user has left', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    let releaseRouting: (target: typeof SUGGESTION_TARGET) => void = () => {};
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReturnValue(
+      new Promise((resolve) => { releaseRouting = resolve; }),
+    );
+    const result = await mountProtected();
+
+    let dropped: Promise<void> | undefined;
+    await act(async () => {
+      dropped = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'report.pdf')] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+      await Promise.resolve();
+    });
+    expect(noticeIn(result.current, SKILLS_TREE)?.kind).toBe('progress');
+
+    // Off to another branch while the routing is still open.
+    apiMocks.getOrCreateWorkspace.mockResolvedValue({
+      ...PROTECTED_FIXTURE,
+      workspace: { ...PROTECTED_FIXTURE.workspace, id: 'alice%2Fdraft' },
+    });
+    act(() => { result.current.setPersistenceBranch('alice/draft'); });
+    await waitFor(() => expect(result.current.workspaceId).toBe('alice%2Fdraft'));
+    expect(result.current.uploadNotices.size).toBe(0);
+
+    // And the stale upload settling later does not put it back.
+    await act(async () => {
+      releaseRouting(SUGGESTION_TARGET);
+      await dropped;
+    });
+    expect(result.current.uploadNotices.size).toBe(0);
+    expect(result.current.uploadErrors.size).toBe(0);
   });
 
   it('hands an ordinary upload over to its rows, which survive the refresh', async () => {
@@ -947,35 +1104,47 @@ describe('dispatchUpload: the drop is never silent', () => {
       owners: { roles: [], users: [] },
     });
     const uploadedPath = 'knowledge-base/KnowledgeBase/Ops/note.md';
-    // What the server's tree looks like once the commit has landed — the
-    // refresh at the end of the dispatch reads this.
-    apiMocks.listFiles.mockResolvedValue({
+    /** The server's tree, with the uploaded file in it or without. */
+    const serverTree = (withNote: boolean) => ({
       name: '.',
       relativePath: '.',
-      type: 'directory',
+      type: 'directory' as const,
       children: [{
         name: 'knowledge-base',
         relativePath: 'knowledge-base',
-        type: 'directory',
+        type: 'directory' as const,
         children: [{
           name: 'KnowledgeBase',
           relativePath: 'knowledge-base/KnowledgeBase',
-          type: 'directory',
+          type: 'directory' as const,
           children: [{
             name: 'Ops',
             relativePath: 'knowledge-base/KnowledgeBase/Ops',
-            type: 'directory',
-            children: [{ name: 'note.md', relativePath: uploadedPath, type: 'file' }],
+            type: 'directory' as const,
+            children: withNote
+              ? [{ name: 'note.md', relativePath: uploadedPath, type: 'file' as const }]
+              : [],
           }],
         }],
       }],
     });
+    // The commit is what puts the file on the server, so every read BEFORE it
+    // answers without the file. Staggered deliberately: with the finished tree
+    // mocked from the start, the bootstrap fetch alone would satisfy "the row
+    // is there" and the test would pass with the post-upload refresh deleted —
+    // which is the regression it exists to catch.
+    let committed = false;
+    apiMocks.listFiles.mockImplementation(async () => serverTree(committed));
     // Hold the upload open so the mid-flight state is observable.
     let releaseUpload: () => void = () => {};
     apiMocks.uploadFile.mockReturnValue(new Promise<void>((resolve) => {
-      releaseUpload = () => resolve();
+      releaseUpload = () => { committed = true; resolve(); };
     }));
     const result = await mountProtected();
+    // Nothing has been uploaded yet, so nothing in the tree on screen is the
+    // file — anything asserting otherwise later had to be put there by the
+    // upload.
+    expect(pathsIn(result.current.fileTree)).not.toContain(uploadedPath);
 
     let dispatched: Promise<void> | undefined;
     act(() => {
@@ -988,7 +1157,10 @@ describe('dispatchUpload: the drop is never silent', () => {
     // The optimistic row is in the tree within the frame — and because it is,
     // the progress notice steps aside rather than sitting over it.
     await waitFor(() => expect(result.current.pendingUploads.has(uploadedPath)).toBe(true));
-    await waitFor(() => expect(result.current.uploadNotice).toBeNull());
+    await waitFor(() => expect(noticeIn(result.current)).toBeNull());
+    // Mid-flight the server still has no such file: the row on screen is the
+    // optimistic one, and nothing else.
+    expect(pathsIn(result.current.fileTree)).not.toContain(uploadedPath);
 
     await act(async () => {
       releaseUpload();
@@ -998,8 +1170,8 @@ describe('dispatchUpload: the drop is never silent', () => {
     // The real row arrives and the optimistic one is retired — no reload.
     await waitFor(() => expect(pathsIn(result.current.fileTree)).toContain(uploadedPath));
     await waitFor(() => expect(result.current.pendingUploads.has(uploadedPath)).toBe(false));
-    expect(result.current.uploadNotice).toBeNull();
-    expect(result.current.uploadError).toBeNull();
+    expect(noticeIn(result.current)).toBeNull();
+    expect(errorIn(result.current)).toBeNull();
   });
 
   it('names the file, not its workspace path, and stamps the tree that asked', async () => {
@@ -1009,7 +1181,9 @@ describe('dispatchUpload: the drop is never silent', () => {
       owners: { roles: [], users: [] },
     });
     const reason = 'You do not have permission to write to Knowledge/Legal';
-    apiMocks.uploadFile.mockRejectedValue(new Error(reason));
+    // The refusal as it arrives: the backend's words AND the status the
+    // banner's next step is chosen from.
+    apiMocks.uploadFile.mockRejectedValue(new WorkspaceApiError(403, reason));
     const result = await mountProtected();
 
     await act(async () => {
@@ -1022,13 +1196,15 @@ describe('dispatchUpload: the drop is never silent', () => {
 
     // "Couldn't add knowledge-base/K…" was the whole of the reported banner:
     // a path long enough that the reason never made it onto the screen.
-    expect(result.current.uploadError).toEqual({
+    expect(errorIn(result.current, SKILLS_TREE)).toEqual({
       filename: 'quarterly-report.pdf',
       reason,
-      target: SKILLS_TREE,
+      status: 403,
     });
+    // In THAT tree and no other — the Knowledge explorer never saw this drop.
+    expect(result.current.uploadErrors.size).toBe(1);
     // And the in-progress notice does not outlive the upload it described.
-    expect(result.current.uploadNotice).toBeNull();
+    expect(noticeIn(result.current, SKILLS_TREE)).toBeNull();
   });
 });
 

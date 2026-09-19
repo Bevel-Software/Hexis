@@ -15,13 +15,30 @@ export type UploadTarget = string;
 /** The tree the Knowledge explorer is, and the default for any other caller. */
 export const KNOWLEDGE_UPLOAD_TARGET: UploadTarget = 'knowledge';
 
+/**
+ * The name of one of the Library sidebar's trees (`Skills/`, `Plugins/`).
+ * The `library:` prefix is a protocol between the tree that renders the
+ * banners and the dispatch that stamps them, so it is spelled once, here,
+ * rather than re-typed by every tree and every test: a tree that spelled it
+ * differently would draw no banners at all, which is the silent upload this
+ * whole module exists to prevent.
+ */
+export function libraryUploadTarget(dir: string): UploadTarget {
+  return `library:${dir}`;
+}
+
 export interface UploadError {
   /** The file's NAME — what the user dropped, not its full workspace path. */
   filename: string;
   /** The server's own words, shown in full rather than behind a tooltip. */
   reason: string;
-  /** The tree that received the drop — see {@link UploadTarget}. */
-  target: UploadTarget;
+  /**
+   * HTTP status of the refusal, when it came from one — the discriminator
+   * `uploadErrorNextStep` uses to pick what to tell the user to do. Absent
+   * for failures that never reached a response (network, the folder walker),
+   * which get the generic next step.
+   */
+  status?: number;
 }
 
 /**
@@ -39,7 +56,6 @@ export interface UploadError {
 export interface UploadNotice {
   kind: 'progress' | 'suggestion';
   message: string;
-  target: UploadTarget;
 }
 
 /**
@@ -184,20 +200,26 @@ export interface WorkspaceContextValue {
    */
   fsRevision: number;
   /**
-   * Most recent upload error, surfaced inline in the file explorer for both
-   * the toolbar button and drag-drop. Cleared on the next successful dispatch
-   * or via `clearUploadError`.
+   * The last upload error in each tree, keyed by the tree that received the
+   * drop — see {@link UploadTarget}. Surfaced inline in that tree for both
+   * the toolbar button and drag-drop. A tree's entry is replaced on its next
+   * dispatch, or removed via `clearUploadError`. Keyed rather than a single
+   * slot because two of these trees share one sidebar: with one slot, a drop
+   * into `Plugins/` wiped the banner `Skills/` was still showing.
    */
-  uploadError: UploadError | null;
+  uploadErrors: ReadonlyMap<UploadTarget, UploadError>;
   /**
-   * Non-error news about the last upload: that it is under way, or that it
-   * went to the caller's suggestions branch because they cannot write the
+   * Non-error news about the last upload in each tree, keyed the same way as
+   * {@link WorkspaceContextValue.uploadErrors}: that it is under way, or that
+   * it went to the caller's suggestions branch because they cannot write the
    * target folder and the files are now a change request rather than tree
    * content. Without this the outcome is indistinguishable from a silently
-   * failed upload: nothing appears where the user dropped the files.
+   * failed upload: nothing appears where the user dropped the files. Keyed,
+   * so one tree's drop settling never blanks the news another tree's drop is
+   * still waiting on.
    */
-  uploadNotice: UploadNotice | null;
-  clearUploadNotice: () => void;
+  uploadNotices: ReadonlyMap<UploadTarget, UploadNotice>;
+  clearUploadNotice: (target: UploadTarget) => void;
   /** True while a `dispatchUpload` call is in flight; gates the toolbar button. */
   isUploading: boolean;
   /**
@@ -280,7 +302,7 @@ export interface WorkspaceContextValue {
   uploadFiles: (files: File[], targetDirectory: string) => Promise<void>;
   /**
    * UI-facing entry point for uploads from drag-drop and file/folder pickers.
-   * Captures errors into `uploadError`, toggles `isUploading`, drives
+   * Captures errors into `uploadErrors`, toggles `isUploading`, drives
    * `pendingUploads` for optimistic rendering, and (for `kind: 'items'`)
    * lazily walks dropped FileSystemEntries so uploads start before
    * enumeration finishes. Preserves empty subdirectories from folder drops
@@ -296,7 +318,7 @@ export interface WorkspaceContextValue {
      */
     uploadTarget?: UploadTarget,
   ) => Promise<void>;
-  clearUploadError: () => void;
+  clearUploadError: (target: UploadTarget) => void;
   /**
    * Delete this branch's copy of a file or folder. Resolves `false` when
    * nothing was deleted because the user kept their unsaved tabs.

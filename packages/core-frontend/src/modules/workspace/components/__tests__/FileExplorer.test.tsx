@@ -98,9 +98,10 @@ interface RenderOptions {
   dispatchUpload?: ReturnType<typeof vi.fn>;
   clearUploadError?: ReturnType<typeof vi.fn>;
   isUploading?: boolean;
-  /** `target` defaults to the Knowledge explorer's — the tree under test. */
-  uploadError?: (Omit<UploadError, 'target'> & { target?: UploadTarget }) | null;
-  uploadNotice?: (Omit<UploadNotice, 'target'> & { target?: UploadTarget }) | null;
+  /** Which tree the banner belongs to — the Knowledge explorer by default. */
+  uploadTarget?: UploadTarget;
+  uploadError?: UploadError | null;
+  uploadNotice?: UploadNotice | null;
   clearUploadNotice?: ReturnType<typeof vi.fn>;
   fileTree?: FileTreeEntry | null;
   createFile?: ReturnType<typeof vi.fn>;
@@ -131,14 +132,11 @@ function renderExplorer(opts: RenderOptions = {}) {
   const moveEntry = opts.moveEntry ?? vi.fn().mockResolvedValue(undefined);
   // Distinguish "caller wants null tree" from "caller didn't pass anything".
   const fileTree = 'fileTree' in opts ? opts.fileTree ?? null : EMPTY_TREE;
+  const bannerTarget = opts.uploadTarget ?? KNOWLEDGE_UPLOAD_TARGET;
   const workspace: WorkspaceContextValue = makeWorkspaceFixture({
     fileTree,
-    uploadError: opts.uploadError
-      ? { target: KNOWLEDGE_UPLOAD_TARGET, ...opts.uploadError }
-      : null,
-    uploadNotice: opts.uploadNotice
-      ? { target: KNOWLEDGE_UPLOAD_TARGET, ...opts.uploadNotice }
-      : null,
+    uploadErrors: opts.uploadError ? new Map([[bannerTarget, opts.uploadError]]) : new Map(),
+    uploadNotices: opts.uploadNotice ? new Map([[bannerTarget, opts.uploadNotice]]) : new Map(),
     clearUploadNotice: opts.clearUploadNotice ?? (() => {}),
     isUploading: opts.isUploading ?? false,
     openFilePath: opts.openFilePath ?? null,
@@ -358,20 +356,24 @@ describe('FileExplorer toolbar', () => {
     expect(alert.querySelector('.whitespace-pre-wrap')).not.toBeNull();
   });
 
+  // The next step comes from the STATUS, so the backend can reword its
+  // refusals — as it has — without the banner's advice going wrong. The
+  // reasons here are deliberately not the ones the old wording-matcher knew.
   it('ends the error banner with what to do about it', () => {
     renderExplorer({
       uploadError: {
         filename: 'brief.docx',
-        reason: 'You don\u2019t have permission to write to Knowledge/Legal',
+        reason: 'Knowledge/Legal is owned by the Legal group; writing needs the Legal role',
+        status: 403,
       },
     });
     expect(screen.getByRole('alert')).toHaveTextContent('Try another folder or ask its owner.');
     cleanup();
 
     renderExplorer({
-      uploadError: { filename: 'huge.bin', reason: 'File exceeds 52428800 byte limit' },
+      uploadError: { filename: 'huge.bin', reason: 'File exceeds 52428800 byte limit', status: 413 },
     });
-    expect(screen.getByRole('alert')).toHaveTextContent('Files up to 50 MB');
+    expect(screen.getByRole('alert')).toHaveTextContent('try a smaller one');
     cleanup();
 
     renderExplorer({ uploadError: { filename: 'note.md', reason: 'Upstream is unreachable' } });
@@ -382,8 +384,9 @@ describe('FileExplorer toolbar', () => {
   // Skills tree must not paint its banner over the Knowledge explorer.
   it('ignores banners stamped with another tree', () => {
     renderExplorer({
-      uploadError: { filename: 'note.md', reason: 'nope', target: 'library:Skills' },
-      uploadNotice: { kind: 'suggestion', message: 'became a suggestion', target: 'library:Skills' },
+      uploadTarget: 'library:Skills',
+      uploadError: { filename: 'note.md', reason: 'nope' },
+      uploadNotice: { kind: 'suggestion', message: 'became a suggestion' },
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByTestId('upload-notice')).not.toBeInTheDocument();

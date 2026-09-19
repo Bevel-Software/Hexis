@@ -108,7 +108,7 @@ describe('a suggestion-routed upload shows up where it was dropped', () => {
     vi.restoreAllMocks();
   });
 
-  it('draws the proposed row from the upload s own announcement, before any refetch', async () => {
+  it("draws the proposed row from the upload's own announcement, before any refetch", async () => {
     const { result } = renderHook(() => useMergedWorkspaceTree(), { wrapper });
     await waitFor(() => expect(api.listMyChangeRequests).toHaveBeenCalled());
     expect(pathsIn(result.current.tree)).not.toContain(ROW);
