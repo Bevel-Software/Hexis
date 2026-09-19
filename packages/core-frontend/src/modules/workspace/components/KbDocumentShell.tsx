@@ -5,6 +5,7 @@ import {
   DOCUMENT_COLUMN_WIDE,
   documentGutters,
 } from '../../../shared/theme/measure';
+import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
 
 /**
  * The Knowledge surface's document column — the prototype's `.wrap.kb`.
@@ -117,7 +118,8 @@ export function KbDocumentShell({
           className={cn(
             DOCUMENT_COLUMN_WIDE,
             documentGutters(roomy),
-            'grid grid-cols-1 items-start gap-11 pt-3',
+            'grid grid-cols-1 items-start gap-11',
+            HEADER_COLUMN_TOP,
             'max-[900px]:gap-[26px] min-[901px]:grid-cols-[minmax(0,620px)_296px]',
           )}
         >
@@ -127,11 +129,16 @@ export function KbDocumentShell({
           </aside>
         </div>
       ) : (
-        // `pt-3` is 12px — Knowledge's own top padding, NOT the app-wide 34px.
+        // `HEADER_COLUMN_TOP` is 12px — the offset every column that opens
+        // on a header band shares, Knowledge's own value promoted to a token.
         // The top bar already separates the column from the window, so the
         // page's own padding only has to keep the tabs off the bar
-        // (`.wrap.kb`, proto:695-699). Do not "fix" this to 34px.
-        <div className={cn(DOCUMENT_COLUMN, documentGutters(roomy), 'pt-3')}>{children}</div>
+        // (`.wrap.kb`, proto:695-699). The Library opened on 34px until
+        // this ticket, and 34 against 12 is what put the two surfaces' title
+        // bars on different lines. Do not "fix" this back to 34px.
+        <div className={cn(DOCUMENT_COLUMN, documentGutters(roomy), HEADER_COLUMN_TOP)}>
+          {children}
+        </div>
       )}
     </div>
   );

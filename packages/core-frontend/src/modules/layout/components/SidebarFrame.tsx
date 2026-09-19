@@ -13,6 +13,7 @@ import {
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { NARROW_QUERY } from '../breakpoints';
 import { useModalLayer } from '../../../shared/components/useModalLayer';
+import { HEADER_BAND, HEADER_COLUMN_TOP, SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 
 /**
  * The `aria-controls` target for the top bar's toggle, which renders in a
@@ -277,15 +278,38 @@ export function SidebarFrame({
         }}
       >
         {/* proto:104 — `padding:16px 14px 18px`, and an explicit width so the
-            column does not reflow while the frame animates to zero. */}
+            column does not reflow while the frame animates to zero.
+
+            The 16px TOP is now the SHARED offset: it used to be half of the
+            sidebar header row's height, with the slot's own content supplying
+            the rest, and a height nobody could name is a height the page
+            beside it could not match. `HEADER_COLUMN_TOP` is the same 12px
+            the page column opens on, and the band below is the same height —
+            which is what puts the two rows on one line. */}
         <div
-          className="flex h-full flex-col px-3.5 pt-4 pb-[18px]"
+          className={cn('flex h-full flex-col px-3.5 pb-[18px]', HEADER_COLUMN_TOP)}
           style={{
             width: narrow ? SIDEBAR_DRAWER_WIDTH : width,
             maxWidth: narrow ? SIDEBAR_DRAWER_MAX_WIDTH : undefined,
           }}
         >
-          {header}
+          {/* The sidebar's header row, on the shared band — the left half of
+              the seam under the toolbar; the page's title bar is the right
+              half.
+
+              Keyed on whether the surface DECLARED a header, not on whether
+              that header drew anything. Knowledge and the Library both pass
+              the connect-your-agent pill, which renders nothing once
+              onboarding is done; if the row went with it, finishing setup
+              would pull the nav up by the band's height and leave the page's
+              title bar aligned to nothing. Settings passes no header at all
+              and gets no band, because it has no title bar on the other side
+              of the seam to hold a line with. */}
+          {header !== undefined && (
+            <div data-testid={SIDEBAR_HEADER_TESTID} className={cn(HEADER_BAND, 'w-full')}>
+              {header}
+            </div>
+          )}
           {children}
           {footer}
         </div>

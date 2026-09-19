@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { Badge, Button, Surface } from '../../../shared/components';
 import { pathForPluginsIndex } from '../routes/library-paths';
 import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
@@ -89,8 +91,15 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
         </span>
       </nav>
 
-      <div className="mt-1.5 flex items-center gap-2.5">
-        <h1 className="text-display font-semibold">{plugin.displayName || plugin.name}</h1>
+      {/* The same band every other page title bar is on, so a plugin you
+          cannot open still lines its heading up with the nav beside it. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-2.5')}>
+        <h1
+          className="min-w-0 truncate text-display font-semibold"
+          title={plugin.displayName || plugin.name}
+        >
+          {plugin.displayName || plugin.name}
+        </h1>
         <Badge tone="outline" size="sm">
           <LockGlyph className="size-3 shrink-0" />
           Locked

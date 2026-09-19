@@ -11,6 +11,8 @@ import { EmptySkillsNudge, PluginBreadcrumb, PluginItemSections, PageNote,
   RemoveLibraryItemDialog,
 } from './plugin-page-parts';
 import { PageActions } from './PageActions';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { PersonalAddDialog } from './PersonalAddDialog';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { copyToClipboard } from '../utils/clipboard';
@@ -86,14 +88,17 @@ export function PersonalPluginPage() {
     <div className="pb-14">
       <PluginBreadcrumb name={name} />
 
-      {/* The same title row every plugin page has. The description line that
+      {/* The same title row every plugin page has — the shared header band,
+          the height the sidebar's header row is. The description line that
           used to sit under it is gone: "Only you see this" is what the page's
           own name already says, and a subtitle explaining a heading is the
           heading admitting it did not work (proto: the personal list carries
           no lede). */}
-      <div className="flex items-start justify-between gap-4">
-        <h1 className="mt-1.5 text-display font-semibold">{name}</h1>
-        <div className="mt-1.5">
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
+        <h1 className="min-w-0 truncate text-display font-semibold" title={name}>
+          {name}
+        </h1>
+        <div className="flex-none">
           <PageActions
             onAdd={() => setAddOpen(true)}
             onCopyLink={() => copyToClipboard(window.location.href)}

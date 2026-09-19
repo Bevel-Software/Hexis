@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_BRANCH, type FileTreeEntry } from '@bevel-software/platform-shared';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Banner, Button } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { attentionOf, useLibrary, type LibraryItem } from '../state/library-data';
 import { useLibraryToast } from '../state/toast.context';
 import { isInPlugin, withLinkHealth } from '../utils/status';
@@ -290,18 +292,15 @@ export function PluginPage() {
       {/* Three actions, beside the title, for everyone (proto:3012-3025).
           Share stays un-gated: for a non-writer the dialog renders read-only,
           which is exactly what "who is this shared with?" should answer. */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="mt-1.5 text-display font-semibold">{label}</h1>
-          {/* Where it lives — the folder is no longer the name, so it is
-              said beneath it, the way a file path sits under a document title. */}
-          {primaryFolder && (
-            <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
-              {primaryFolder}
-            </p>
-          )}
-        </div>
-        <div className="mt-1.5 flex items-center gap-1">
+      {/* On the shared band, the same height as the sidebar's header row. The
+          hand-tuned `mt-1.5` that used to nudge the heading and the actions
+          into agreement with each other is gone with it — the band centres
+          both, and it is the only thing deciding how tall this row is. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'justify-between gap-4')}>
+        <h1 className="min-w-0 truncate text-display font-semibold" title={label}>
+          {label}
+        </h1>
+        <div className="flex flex-none items-center gap-1">
           <ManifestButton kbDirName={kbDirName} folder={folderBelowRoot} canWrite={summary?.canWrite === true} />
           <PageActions
             onShare={primaryFolder ? () => setManageFolder(primaryFolder) : undefined}
@@ -325,6 +324,16 @@ export function PluginPage() {
           />
         </div>
       </div>
+      {/* Where it lives — the folder is no longer the name, so it is said
+          beneath the title bar, the way a file path sits under a document
+          title. Below the band rather than inside it: a second line in the
+          row would make the row taller than the band it shares with the
+          sidebar. */}
+      {primaryFolder && (
+        <p className="mt-0.5 truncate font-mono text-meta text-ink-faint" title={primaryFolder}>
+          {primaryFolder}
+        </p>
+      )}
 
       {/* Somebody is waiting on the person reading this. Rendered only for a
           plugin manager (canWrite) — every member can see the CRs elsewhere,

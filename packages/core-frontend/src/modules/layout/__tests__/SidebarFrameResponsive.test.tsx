@@ -5,6 +5,7 @@ import {
   SIDEBAR_DRAWER_WIDTH,
   SidebarFrame,
 } from '../components/SidebarFrame';
+import { SIDEBAR_HEADER_TESTID } from '../../../shared/theme/header';
 import {
   SIDEBAR_DEFAULT_WIDTH,
   setSidebarCollapsed,
@@ -72,8 +73,14 @@ describe('SidebarFrame: slots', () => {
     const dock = screen.getByText('dock');
     expect(aside).toContainElement(pill);
     expect(aside).toContainElement(dock);
-    // One column: the three slots are siblings, not each in a wrapper of its own.
-    expect(pill.parentElement).toBe(row.parentElement);
+    // One column: the three slots are siblings, not each in a wrapper of its
+    // own. The header's is the shared header band — the row that has to be
+    // the same height as the page's title bar beside it — so the pill sits
+    // inside that one wrapper, and the band is what lines up with the
+    // children and the footer.
+    const band = screen.getByTestId(SIDEBAR_HEADER_TESTID);
+    expect(band).toContainElement(pill);
+    expect(band.parentElement).toBe(row.parentElement);
     expect(row.parentElement).toBe(dock.parentElement);
     expect(pill.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(row.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

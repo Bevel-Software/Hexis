@@ -1,0 +1,11 @@
+---
+'@bevel-software/platform-core-frontend': patch
+---
+
+The page title bar now lines up with the sidebar header row beside it. The two rows sit side by side under the toolbar and each used to arrive at its own height by accident: the sidebar frame's column padding plus whatever its header slot happened to be tall, against a page column's top padding plus an `<h1>`'s line box. On the Library the two answers were about 20px apart, and the seam between them is the first thing anyone sees below the toolbar.
+
+Both rows are now one band: `--spacing-header` in the design tokens, spent by a single `HEADER_BAND` class in `shared/theme/header.ts`, with the contents centred in it so a 13px nav row and a 26px title share a line. The column offset above the band is shared too — the Library used to open on 34px where Knowledge opened on 12px, and that difference was the other half of the seam. Every page title bar goes through the band: the file page, the skill page, the tool page, the plugin, personal and locked plugin pages, and the Library's own galleries. None of them keeps a height, a top margin or a vertical padding of its own, and the per-page nudges that used to stand in for one (`mt-1.5` on two plugin headings) are gone.
+
+Three details moved to make a title bar one row rather than as tall as its contents. Page titles truncate instead of wrapping, and carry the full name in a `title`. The count under a gallery heading, the folder path under a plugin name and a tool's description now read below the band instead of inside it, which is where they already looked like they were. And the sidebar's header row is rendered whether or not anything fills it, so finishing onboarding — which retires the connect-your-agent pill — no longer pulls the nav up out of line with the page.
+
+Two tests hold it. One reads the sources: the token is declared once, `HEADER_BAND` is what spends it, every header row comes through it, and none of those rows sets a height, a top margin or a vertical padding of its own. The other measures: with the real token value read out of `tokens.css` and the rule Tailwind compiles it into, the sidebar's header row and the page's title bar render to the same height at 1280, 1440 and 1920px, while the sidebar is collapsed and reopened, across a resize, and with an empty header slot.

@@ -14,6 +14,7 @@ import {
 import { cn } from '../../../lib/utils';
 import { Badge, Button, IconButton, MenuItem, MenuPanel } from '../../../shared/components';
 import { useDismissableMenu } from '../../../shared/components';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { rootAnchoredPath } from '../utils/pasteLink';
 
 /**
@@ -215,7 +216,17 @@ export function KbPageHeader({
     !writeActionInPane && canWrite === false && !isReviewingPending && activeTab === 'content';
 
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-3">
+    // The shared header band: the same height as the sidebar's header row,
+    // from the same token, so the two rows under the toolbar read as one
+    // line. It used to be `flex-wrap` with no height at all — the row was as
+    // tall as whatever landed in it, which is why it could never agree with
+    // the sidebar. Wrapping is gone with the height: the title truncates
+    // instead (below), because a title bar that becomes two rows has already
+    // broken the seam this band exists to hold.
+    <div
+      data-testid={PAGE_HEADER_TESTID}
+      className={cn(HEADER_BAND, 'mb-2 w-full gap-3')}
+    >
       {/* `tabIndex={-1}` keeps the heading out of the tab order while letting
           `.focus()` land on it — the standard way to hand focus to a region
           after a view swap. No focus ring: this is a programmatic landing
@@ -223,7 +234,10 @@ export function KbPageHeader({
       <h1
         ref={titleRef}
         tabIndex={-1}
-        className="min-w-0 text-display font-semibold text-ink focus:outline-none"
+        // `title` because `truncate` hides the rest of a long file name, and
+        // a heading you cannot finish reading needs somewhere to say it.
+        title={titleOf(path)}
+        className="min-w-0 truncate text-display font-semibold text-ink focus:outline-none"
       >
         {titleOf(path)}
       </h1>
