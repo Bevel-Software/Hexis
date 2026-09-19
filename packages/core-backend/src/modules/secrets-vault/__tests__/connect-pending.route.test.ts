@@ -39,7 +39,12 @@ const secretsVault = {
     keys.map((key) => ({
       key,
       adminConfigured: false,
+      adminKind: null,
       userConfigured: key === 'weather_API_KEY', // one set, the other not
+      // The kind the row is really stored as — the vault reports it, and
+      // `/connect/pending` only calls a variable configured when the row backs
+      // the shape the manual declares. These are plain keys, so: static.
+      userKind: key === 'weather_API_KEY' ? ('static' as const) : null,
     })),
   list: async () => [
     {
@@ -170,7 +175,9 @@ describe('GET /api/connect/pending — the workspace tier', () => {
             keys.map((key) => ({
               key,
               adminConfigured: opts.adminConfigured ?? false,
+              adminKind: opts.adminConfigured ? ('static' as const) : null,
               userConfigured: false,
+              userKind: null,
             })),
           list: async () => [],
         } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'],
@@ -201,7 +208,11 @@ describe('GET /api/connect/pending — the workspace tier', () => {
       const s = app.listen(0, () => resolve(s));
     });
     const port = (httpServer.address() as { port: number }).port;
-    return (await (await fetch(`http://127.0.0.1:${port}/api/connect/pending`)).json()) as PendingBody;
+    const res = await fetch(`http://127.0.0.1:${port}/api/connect/pending`);
+    // An error body parses as JSON too, and `body.tools` would then be undefined
+    // — a confusing crash where the tests below mean to read a verdict.
+    expect(res.status).toBe(200);
+    return (await res.json()) as PendingBody;
   }
 
   it('flags an unset workspace key the caller cannot write', async () => {
@@ -236,7 +247,7 @@ describe('GET /api/connect/pending — readability', () => {
    * of addition that could leak a name — the item is listed for the benefit of
    * people who cannot act on it — so the gate is asserted from both sides.
    */
-  async function rawFor(email: string): Promise<string> {
+  async function listingFor(email: string): Promise<PendingBody> {
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -249,7 +260,13 @@ describe('GET /api/connect/pending — readability', () => {
       createSecretsVaultRoutes({
         secretsVault: {
           statusFor: async (_u: string, keys: string[]) =>
-            keys.map((key) => ({ key, adminConfigured: false, userConfigured: false })),
+            keys.map((key) => ({
+              key,
+              adminConfigured: false,
+              adminKind: null,
+              userConfigured: false,
+              userKind: null,
+            })),
           list: async () => [],
         } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'],
         toolManualService: {
@@ -284,21 +301,34 @@ describe('GET /api/connect/pending — readability', () => {
       const s = app.listen(0, () => resolve(s));
     });
     const port = (httpServer.address() as { port: number }).port;
-    return await (await fetch(`http://127.0.0.1:${port}/api/connect/pending`)).text();
+    const res = await fetch(`http://127.0.0.1:${port}/api/connect/pending`);
+    // Asserted here, once, for every caller of this helper: a 500 body would
+    // otherwise sail through the assertions below as "the tool is not listed",
+    // which is the one wrong answer that looks like the right one.
+    expect(res.status).toBe(200);
+    return (await res.json()) as PendingBody;
   }
 
   it('never names a tool the caller cannot read, in any state', async () => {
-    const raw = await rawFor('a@x.com');
-    expect(raw).toContain('weather'); // the readable one is listed…
-    expect(raw).not.toContain('blackbox'); // …and the withheld one is not named at all
+    const body = await listingFor('a@x.com');
+    // The parsed listing, not the raw text: `expect(raw).not.toContain(…)` also
+    // passes when `tools` moved, emptied or errored, and the contract under test
+    // is what the client reads off the payload.
+    expect(body.tools.map((t) => t.slug)).toEqual(['weather']);
   });
 
   it('lists it, owner-only, for somebody who can read it', async () => {
     // The previous test would also pass if the route had simply dropped every
     // owner-only item; this is what says it did not.
-    const raw = await rawFor('owner@x.com');
-    expect(raw).toContain('blackbox');
-    expect(raw).toContain('"ownerOnly":true');
+    const body = await listingFor('owner@x.com');
+    const blackbox = body.tools.find((t) => t.slug === 'blackbox');
+    expect(blackbox).toBeDefined();
+    expect(blackbox!.variables).toEqual([
+      expect.objectContaining({ name: 'ORG_TOKEN', scope: 'admin', ownerOnly: true }),
+    ]);
+    // …and `ownerOnly` is a verdict, not a constant: the readable tool this
+    // caller CAN act on is listed in the same payload without it.
+    expect(body.tools.find((t) => t.slug === 'weather')!.variables[0].ownerOnly).toBe(false);
   });
 });
 
@@ -334,7 +364,9 @@ describe('GET /api/connect/pending — OAuth scope coverage', () => {
         keys.map((key) => ({
           key,
           adminConfigured: false,
+          adminKind: null,
           userConfigured: true,
+          userKind: 'oauth' as const,
           userAuthorized: true,
           grantedScopes,
         })),
@@ -420,7 +452,14 @@ describe('GET /api/connect/pending — tool sign-ins are not double-listed as st
     } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'];
     const vault = {
       statusFor: async (_u: string, keys: string[]) =>
-        keys.map((key) => ({ key, adminConfigured: true, userConfigured: true, userAuthorized: true })),
+        keys.map((key) => ({
+          key,
+          adminConfigured: true,
+          adminKind: 'oauth' as const, // the provider registration, as the flow needs it
+          userConfigured: true,
+          userKind: 'oauth' as const,
+          userAuthorized: true,
+        })),
       list: async () => [
         // The provisioned per-user row for the TOOL sign-in — must be excluded.
         { id: 's-tool', key: 'notion_MCP_OAUTH', kind: 'oauth' as const, label: 'notion sign-in', authorized: true, createdAt: new Date(), updatedAt: new Date() },
@@ -462,5 +501,133 @@ describe('GET /api/connect/pending — tool sign-ins are not double-listed as st
 
     expect(body.toolOAuth.map((o) => o.key)).toEqual(['notion_MCP_OAUTH']);
     expect(body.oauth.map((o) => o.id)).toEqual(['s-own']);
+  });
+});
+
+describe('GET /api/connect/pending — a row of the wrong KIND is not "set up"', () => {
+  /**
+   * A `.tool` can be edited to turn a plain shared key into an OAuth variable,
+   * or back, and the row set for the previous shape outlives the edit. The two
+   * are not interchangeable — `beginToolOAuthByKey` refuses a `static` shared
+   * row outright — so "a row exists" must not be reported as "configured", or
+   * the page offers an Authorize that cannot open and a key that nobody set
+   * disappears from the list of what is missing.
+   */
+  type Status = {
+    key: string;
+    adminConfigured: boolean;
+    adminKind: 'static' | 'oauth' | null;
+    userConfigured: boolean;
+    userKind: 'static' | 'oauth' | null;
+  };
+
+  async function pendingWith(opts: {
+    variables: unknown[];
+    status: (key: string) => Status;
+  }): Promise<{
+    tools: { slug: string; variables: { name: string; configured: boolean }[] }[];
+    toolOAuth: { varName: string; ownerConfigured: boolean; ownerOnly: boolean }[];
+  }> {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      req.userId = 'u1';
+      req.userEmail = 'a@x.com';
+      next();
+    });
+    app.use(
+      '/api',
+      createSecretsVaultRoutes({
+        secretsVault: {
+          statusFor: async (_u: string, keys: string[]) => keys.map(opts.status),
+          list: async () => [],
+        } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['secretsVault'],
+        toolManualService: {
+          listAccessible: async () => [
+            {
+              slug: 'google',
+              name: 'google',
+              path: 'Tools/google.tool',
+              type: 'inline' as const,
+              variables: opts.variables,
+            },
+          ],
+        } as unknown as Parameters<typeof createSecretsVaultRoutes>[0]['toolManualService'],
+        accessControl,
+        connectionProbe: {
+          probe: async () => ({ status: 'unverifiable' as const, detail: null, checkedAt: new Date() }),
+        },
+        stateSecret: 'test-secret',
+        publicBackendUrl: 'http://localhost:3000',
+        publicFrontendUrl: 'http://localhost:5173',
+      }),
+    );
+    httpServer = await new Promise<HttpServer>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const port = (httpServer.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/api/connect/pending`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as Awaited<ReturnType<typeof pendingWith>>;
+  }
+
+  const oauthVar = [
+    {
+      name: 'GOOGLE_TOKEN',
+      scope: 'user' as const,
+      label: 'Google',
+      oauth: {
+        authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+        tokenUrl: 'https://oauth2.googleapis.com/token',
+        clientId: 'cid',
+      },
+    },
+  ];
+
+  it('does not call an OAuth var registered when the shared row is a leftover static key', async () => {
+    const body = await pendingWith({
+      variables: oauthVar,
+      status: (key) => ({
+        key,
+        adminConfigured: true, // a row is there…
+        adminKind: 'static', // …but it is the key from before this var was OAuth
+        userConfigured: false,
+        userKind: null,
+      }),
+    });
+    const signIn = body.toolOAuth.find((o) => o.varName === 'GOOGLE_TOKEN')!;
+    // No consent screen exists behind that row, so the page must show the
+    // owner's job, not an Authorize the flow would reject.
+    expect(signIn.ownerConfigured).toBe(false);
+    expect(signIn.ownerOnly).toBe(true); // this caller cannot write the `.tool`
+  });
+
+  it('calls it registered when the shared row is the OAuth one the flow reads', async () => {
+    const body = await pendingWith({
+      variables: oauthVar,
+      status: (key) => ({
+        key,
+        adminConfigured: true,
+        adminKind: 'oauth',
+        userConfigured: false,
+        userKind: null,
+      }),
+    });
+    expect(body.toolOAuth.find((o) => o.varName === 'GOOGLE_TOKEN')!.ownerConfigured).toBe(true);
+  });
+
+  it('does not call a plain key configured when the caller’s row is a leftover OAuth one', async () => {
+    const body = await pendingWith({
+      variables: [{ name: 'API_KEY', scope: 'user' as const, label: null }],
+      status: (key) => ({
+        key,
+        adminConfigured: false,
+        adminKind: null,
+        userConfigured: true, // a row is there…
+        userKind: 'oauth', // …holding a token set, where this var wants a value
+      }),
+    });
+    const apiKey = body.tools.find((t) => t.slug === 'google')!.variables[0];
+    expect(apiKey.configured).toBe(false);
   });
 });

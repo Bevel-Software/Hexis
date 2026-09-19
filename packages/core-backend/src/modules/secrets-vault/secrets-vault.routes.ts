@@ -10,6 +10,7 @@ import {
   SecretOAuthError,
   scopesCovered,
   missingScopes,
+  configuredAs,
   type ISecretsVaultService,
 } from './secrets-vault.contract.js';
 import type { IToolManualService, ToolManualSummary, ToolVariable } from '../tool-manuals/tool-manuals.contract.js';
@@ -301,11 +302,15 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
                   key,
                   scope: v.scope,
                   // "Is there a value this caller's agent would resolve?" — the
-                  // workspace's for an `admin` var, the caller's own for a `user` one.
+                  // workspace's for an `admin` var, the caller's own for a `user`
+                  // one. A row of the WRONG KIND does not count: this var is not
+                  // oauth, so an `oauth` row left behind by an earlier `.tool`
+                  // edit holds a token set where `resolve` wants a value, and
+                  // calling that configured hides the key nobody has set.
                   configured:
                     v.scope === 'admin'
-                      ? (st?.adminConfigured ?? false)
-                      : (st?.userConfigured ?? false),
+                      ? configuredAs('static', st?.adminConfigured, st?.adminKind)
+                      : configuredAs('static', st?.userConfigured, st?.userKind),
                   ownerOnly: v.scope === 'admin' && !canWrite,
                 };
               })
@@ -334,8 +339,11 @@ export function createSecretsVaultRoutes(deps: SecretsVaultRoutesDeps): express.
               authorized && !scopesCovered(v.oauth?.scopes, st?.grantedScopes);
             // On an oauth var the ADMIN row is the provider registration — the
             // client secret — without which nobody's Authorize can work. It is a
-            // workspace value like any other, so it carries the same flag.
-            const ownerConfigured = st?.adminConfigured ?? false;
+            // workspace value like any other, so it carries the same flag. It
+            // must be an OAUTH row: `beginToolOAuthByKey` refuses a static one,
+            // so a shared key left over from before this var was made OAuth
+            // would otherwise light up Authorize with nothing behind it.
+            const ownerConfigured = configuredAs('oauth', st?.adminConfigured, st?.adminKind);
             return {
               slug: m.slug,
               varName: v.name,

@@ -63,18 +63,32 @@ export function signInNeedsSetup(o: ConnectToolOAuth): boolean {
 }
 
 /**
- * The page's outstanding count: distinct TOOLS that need something, plus the
- * standalone sign-ins that do.
+ * The page's outstanding count: distinct INTEGRATIONS that need something.
  *
  * Distinct by slug across both sections — a tool with an unfinished sign-in and
- * an unset key is one integration in the banner and must be one here. The
- * standalone sign-ins are added on top: they are registered on the Secrets page
- * rather than declared by a tool, so no plugin banner counts them, but they are
- * genuinely outstanding for the reader and there is only one number on the page.
+ * an unset key is one integration in the banner and must be one here.
+ *
+ * Standalone sign-ins are deliberately NOT in this number. They are registered
+ * on the Secrets page rather than declared by a `.tool`, so no plugin banner has
+ * ever counted one, and this number exists to equal a banner's. Adding them
+ * would reintroduce the disagreement from the other side: a reader with one
+ * unauthorized personal secret would see a page claiming five where the plugin
+ * said four. They are still work, and still listed — see `standaloneOutstanding`.
  */
 export function outstandingCount(pending: ConnectPending): number {
   const slugs = new Set<string>();
   for (const t of pending.tools) if (toolNeedsSetup(t)) slugs.add(t.slug);
   for (const o of pending.toolOAuth) if (signInNeedsSetup(o)) slugs.add(o.slug);
-  return slugs.size + pending.oauth.filter((o) => !o.authorized).length;
+  return slugs.size;
+}
+
+/**
+ * Standalone sign-ins still waiting on the reader — kept apart from the
+ * integration count precisely because nothing else counts them, and folded back
+ * in only where the page asks "is there anything left at all?" (the zero-state
+ * banner). A page that said "everything is set up" over a row saying
+ * "Needs sign-in" would be lying about the row right under it.
+ */
+export function standaloneOutstanding(pending: ConnectPending): number {
+  return pending.oauth.filter((o) => !o.authorized).length;
 }

@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import type { ConnectPending, ConnectTool, ConnectToolOAuth } from '../../services/connect.api';
 import type { ToolSecrets, ToolVarStatus } from '../../services/tool-secrets.api';
-import { outstandingCount } from '../../utils/connect-status';
+import { outstandingCount, standaloneOutstanding } from '../../utils/connect-status';
 import { ConnectToolsPage } from '../ConnectToolsPage';
 import { attentionOf, type LibraryItem } from '../../../library/state/library-data';
 import { toolStatus } from '../../../library/utils/status';
@@ -85,8 +85,24 @@ const CATALOG: ToolSecrets[] = [
   }),
 ];
 
-/** A tool the caller may not read is not in the catalog at all — see below. */
+/**
+ * A tool in the catalog that only `owner@x.com` may READ. It is here, not
+ * omitted, because "the page never names it" is only worth asserting if there
+ * was something to name: `pendingFor` prunes it the way the server does, from a
+ * catalog that really contains it.
+ */
 const SECRET_TOOL = 'blackbox';
+const FULL_CATALOG: ToolSecrets[] = [
+  ...CATALOG,
+  tool({
+    slug: SECRET_TOOL,
+    variables: [v({ name: 'ORG_TOKEN', key: 'blackbox_ORG_TOKEN', scope: 'admin' })],
+  }),
+];
+
+/** Who may read what, as the workspace's access rules would answer it. */
+const READABLE_BY = (email: string) => (t: ToolSecrets) =>
+  t.slug !== SECRET_TOOL || email === 'owner@x.com';
 
 /** What the Library holds, and what the plugin banner counts off it. */
 function libraryItems(catalog: ToolSecrets[]): LibraryItem[] {
@@ -105,12 +121,21 @@ function libraryItems(catalog: ToolSecrets[]): LibraryItem[] {
 
 /**
  * What `GET /api/connect/pending` returns for the same catalog — the server's
- * rules, restated: workspace values that are already set are dropped (nobody's
- * outstanding work), one the caller cannot write is `ownerOnly`, and oauth vars
- * move to the sign-in list.
+ * rules, restated: the listing is built from what the caller may READ (the route
+ * lists `listAccessible`, never the whole catalog), workspace values that are
+ * already set are dropped (nobody's outstanding work), one the caller cannot
+ * write is `ownerOnly`, and oauth vars move to the sign-in list.
+ *
+ * `canRead` is a parameter rather than a pre-filtered fixture so the readability
+ * rule is something this function DOES to a catalog that contains the withheld
+ * tool. Handed a catalog it may all read, it lists all of it.
  */
-function pendingFor(catalog: ToolSecrets[]): ConnectPending {
-  const tools: ConnectTool[] = catalog
+function pendingFor(
+  catalog: ToolSecrets[],
+  canRead: (t: ToolSecrets) => boolean = () => true,
+): ConnectPending {
+  const readable = catalog.filter(canRead);
+  const tools: ConnectTool[] = readable
     .map((t) => ({
       slug: t.slug,
       name: t.name,
@@ -130,7 +155,7 @@ function pendingFor(catalog: ToolSecrets[]): ConnectPending {
         .filter((x) => x.scope !== 'admin' || !x.configured),
     }))
     .filter((t) => t.variables.length > 0);
-  const toolOAuth: ConnectToolOAuth[] = catalog.flatMap((t) =>
+  const toolOAuth: ConnectToolOAuth[] = readable.flatMap((t) =>
     t.variables
       .filter((x) => x.oauth)
       .map((x) => ({
@@ -168,7 +193,13 @@ async function rowFor(name: string): Promise<HTMLElement> {
 beforeEach(() => {
   window.history.replaceState(null, '', '/connect');
   sessionStorage.clear();
-  connectMock.getConnectPending.mockReset().mockResolvedValue(pendingFor(CATALOG));
+  // The page is always handed what the server would build FOR THIS READER:
+  // the full catalog, pruned by their read grant. It comes out equal to
+  // `pendingFor(CATALOG)` — that is the point, and it is now a result rather
+  // than a fixture.
+  connectMock.getConnectPending
+    .mockReset()
+    .mockResolvedValue(pendingFor(FULL_CATALOG, READABLE_BY('a@x.com')));
   connectMock.getMcpOAuthRequest.mockReset();
   varsMock.setUserVar.mockReset().mockResolvedValue(undefined);
   varsMock.setAdminVar.mockReset().mockResolvedValue(undefined);
@@ -192,6 +223,8 @@ describe('the Connect page counts what the plugin banner counted', () => {
     renderPage();
 
     const clay = await rowFor('clay');
+    const listedBefore = screen.getAllByRole('link', { name: /^Open / }).map((l) => l.textContent);
+
     fireEvent.click(
       within(clay).getByRole('checkbox', {
         name: 'Skip this tool (removes your saved keys and sign-ins for it)',
@@ -199,8 +232,14 @@ describe('the Connect page counts what the plugin banner counted', () => {
     );
 
     expect(await screen.findByText('Skipped by you')).toBeInTheDocument();
-    // The banner's four, still on the page.
-    expect(outstandingCount(pendingFor(CATALOG))).toBe(4);
+    // Skipping is a client-side decision, so the assertion has to be about what
+    // the PAGE did with it: nothing left the list. `clay` is still one of the
+    // four the banner counted — dropping a skipped row is exactly how a page
+    // reached from "4 need setup" came to show two.
+    expect(screen.getAllByRole('link', { name: /^Open / }).map((l) => l.textContent)).toEqual(
+      listedBefore,
+    );
+    expect(screen.getByRole('link', { name: 'Open clay' })).toBeInTheDocument();
   });
 
   it('counts a tool once even when it owes both a sign-in and a key', () => {
@@ -217,6 +256,20 @@ describe('the Connect page counts what the plugin banner counted', () => {
 
     expect(total - brokenLinks - warnings).toBe(1);
     expect(outstandingCount(pendingFor(catalog))).toBe(1);
+  });
+
+  it('does not count a standalone sign-in — no banner ever did', () => {
+    // Secrets registered on the Secrets page are not declared by any `.tool`,
+    // so no plugin counts them. Adding them here would break the agreement from
+    // the other side: five on a page reached from a banner saying four.
+    const withPersonal: ConnectPending = {
+      ...pendingFor(CATALOG),
+      oauth: [{ id: 's1', key: 'MY_TOKEN', label: 'Mine', authorized: false }],
+    };
+
+    expect(outstandingCount(withPersonal)).toBe(4);
+    // Still work, still listed — just counted apart from the integrations.
+    expect(standaloneOutstanding(withPersonal)).toBe(1);
   });
 });
 
@@ -246,6 +299,32 @@ describe('the Connect page says why, when the reader cannot act', () => {
     // Nothing to save and nothing to opt out of: it was never the reader's.
     expect(within(sf).queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(within(sf).queryByRole('checkbox')).not.toBeInTheDocument();
+    // Nothing on the card is theirs, so the whole card is grey.
+    expect(sf.className).toContain('opacity-60');
+  });
+
+  it('leaves the reader’s own field bright on a card that also owes an owner’s key', async () => {
+    // Both at once: a personal key they can replace and a workspace value they
+    // cannot set. Greying the card for the second fades out the first, and a
+    // faded input reads as "not yours" about the one thing here that is.
+    const mixed = [
+      tool({
+        slug: 'zendesk',
+        variables: [
+          v({ name: 'API_KEY', key: 'zendesk_API_KEY', userConfigured: true }),
+          v({ name: 'ORG_TOKEN', key: 'zendesk_ORG_TOKEN', scope: 'admin' }),
+        ],
+      }),
+    ];
+    connectMock.getConnectPending.mockResolvedValue(pendingFor(mixed));
+    renderPage();
+    const zendesk = await rowFor('zendesk');
+
+    // The owner's line is still greyed and still names the variable…
+    expect(within(zendesk).getAllByText('Needs an owner to set ORG_TOKEN').length).toBeGreaterThan(0);
+    // …on its own row, without taking the reader's field down with it.
+    expect(zendesk.className).not.toContain('opacity-60');
+    expect(within(zendesk).getByPlaceholderText('Replace…')).toBeInTheDocument();
   });
 
   it('gives the OWNER the ordinary row, with the key field', async () => {
@@ -306,13 +385,23 @@ describe('the Connect page says why, when the reader cannot act', () => {
   });
 
   it('never names a tool the reader cannot read', async () => {
-    // The server builds the listing from the tools the caller may read, so the
-    // unreadable one is absent — not greyed, not counted, not named.
+    // `blackbox` IS in the catalog, needs a workspace key, and would be listed
+    // owner-only for anyone who could read it — so its absence below is the
+    // read grant doing work, not a fixture that forgot to mention it. Both
+    // projections come from the same catalog and differ only in who is asking.
+    const forReader = pendingFor(FULL_CATALOG, READABLE_BY('a@x.com'));
+    const forOwner = pendingFor(FULL_CATALOG, READABLE_BY('owner@x.com'));
+    expect(forOwner.tools.map((t) => t.slug)).toContain(SECRET_TOOL);
+    expect(forReader.tools.map((t) => t.slug)).not.toContain(SECRET_TOOL);
+    // It is a countable integration for the person who can see it — which is
+    // what makes "absent" mean withheld, rather than simply nothing to show.
+    expect(outstandingCount(forOwner)).toBe(outstandingCount(forReader) + 1);
+
+    connectMock.getConnectPending.mockResolvedValue(forReader);
     renderPage();
     await rowFor('apollo');
 
     expect(screen.queryByText(SECRET_TOOL)).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: `Open ${SECRET_TOOL}` })).not.toBeInTheDocument();
-    expect(outstandingCount(pendingFor(CATALOG))).toBe(4);
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
@@ -16,7 +16,12 @@ import {
   type ConnectOAuth,
   type ConnectToolOAuth,
 } from '../services/connect.api';
-import { isActionable, outstandingCount, ownerReason } from '../utils/connect-status';
+import {
+  isActionable,
+  outstandingCount,
+  ownerReason,
+  standaloneOutstanding,
+} from '../utils/connect-status';
 
 /**
  * Persisted copy of the external-agent authorization state (`?oauth=<state>`).
@@ -83,18 +88,37 @@ export function ConnectToolsPage() {
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [wiping, setWiping] = useState<Set<string>>(new Set());
 
+  /**
+   * Refetches in flight, newest first. Saving a key refreshes, and so does the
+   * mount, the Refresh button and every wipe — so two are routinely open at
+   * once, and the network does not promise to answer them in order. An older
+   * answer landing last would repaint the page with the state from BEFORE the
+   * save: the client-secret form the owner just filled in, back and empty.
+   *
+   * A counter rather than an AbortController because the loser here is not the
+   * request, it is the assignment: the stale round-trip may finish, it may not
+   * be the one that sets `tools`.
+   */
+  const latestRefresh = useRef(0);
+
   const refresh = useCallback(async () => {
+    const ticket = ++latestRefresh.current;
+    const isCurrent = () => latestRefresh.current === ticket;
     setLoading(true);
     try {
-      const pending = await getConnectPending();
-      setTools(pending.tools);
-      setOauth(pending.oauth);
-      setToolOAuth(pending.toolOAuth);
+      const listing = await getConnectPending();
+      if (!isCurrent()) return;
+      setTools(listing.tools);
+      setOauth(listing.oauth);
+      setToolOAuth(listing.toolOAuth);
       setError(null);
     } catch (err) {
+      if (!isCurrent()) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      // Only the newest refetch owns the spinner too — an overtaken one
+      // clearing it would say "loaded" while the current fetch is still out.
+      if (isCurrent()) setLoading(false);
     }
   }, []);
 
@@ -248,7 +272,11 @@ export function ConnectToolsPage() {
   // reader cannot act on. See `outstandingCount`: this number exists to equal
   // the plugin banner's, and the rules that make it do so are written down
   // beside the rule the banner itself uses.
-  const outstanding = outstandingCount({ tools, oauth, toolOAuth });
+  // …and the standalone sign-ins on top of it, only for the "anything left?"
+  // question the zero-state banner asks. No banner counts those, so they stay
+  // out of the number that has to match one.
+  const listing = { tools, oauth, toolOAuth };
+  const outstanding = outstandingCount(listing) + standaloneOutstanding(listing);
   const nothingToDo =
     !loading && tools.length === 0 && oauth.length === 0 && toolOAuth.length === 0;
 
@@ -488,6 +516,14 @@ export function ConnectToolsPage() {
                     const on = actionable.length === 0 || isOn(id);
                     const unset = actionable.filter((v) => !v.configured).length;
                     const ownerVar = tool.variables.find((v) => v.ownerOnly);
+                    // Grey the CARD only when nothing on it is the reader's to
+                    // do: they took the tool out, or every variable left on it
+                    // belongs to an owner. A tool that owes a workspace value
+                    // AND offers the reader a field of their own keeps its
+                    // normal weight — the owner's line is already greyed on its
+                    // own row (see `KeyRow`), and dimming the card around it
+                    // would fade out an input that works right now.
+                    const dim = !on || actionable.length === 0;
                     const state = !on
                       ? ('skipped' as const)
                       : unset > 0
@@ -502,14 +538,14 @@ export function ConnectToolsPage() {
                         radius="xl"
                         elevation="card"
                         padded
-                        className={cn((!on || state === 'owner-only') && 'opacity-60')}
+                        className={cn(dim && 'opacity-60')}
                       >
                         <ConnectRowHead
                           slug={tool.slug}
                           name={tool.name}
                           label={tool.name}
                           on={on}
-                          dim={!on || state === 'owner-only'}
+                          dim={dim}
                           busy={wiping.has(id)}
                           state={state}
                           reason={state === 'owner-only' && ownerVar ? ownerReason(ownerVar.name) : undefined}
