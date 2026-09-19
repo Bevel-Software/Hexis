@@ -32,7 +32,21 @@ describe('KbDocumentShell', () => {
       </KbDocumentShell>,
     );
     const band = screen.getByText('The title bar');
+    const content = screen.getByText('Everything else the page renders');
+
+    // IN the column, not above it. "First" on its own is satisfied by a band
+    // hoisted into a wrapper of its own — which is the regression that
+    // reaches the seam, because a wrapper outside the column does not carry
+    // the column's `HEADER_COLUMN_TOP` and can put anything underneath it.
+    // Tying the band to the content is what makes the next two lines mean
+    // "opens the column" rather than "opens something".
+    expect(band.parentElement).toBe(content.parentElement);
     expect(band.previousElementSibling).toBeNull();
+    expect(band.nextElementSibling).toBe(content);
+
+    // And the column is inside the shell's own scrolling box in every
+    // variant, so nothing can render between the two.
+    expect(screen.getByTestId('kb-document-shell')).toContainElement(band);
   });
 
   it('renders children inside a centred, measured column', () => {
