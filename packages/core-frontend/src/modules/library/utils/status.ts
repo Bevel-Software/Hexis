@@ -1,5 +1,5 @@
 import { skillUnderRoot } from '@bevel-software/platform-shared';
-import { formatRelativeTime } from '../../../lib/utils';
+import { probeWords } from '../../secrets-vault/probe/probe-verdict';
 import type { ProbeVerdict, ToolSecrets, ToolVarStatus } from '../../secrets-vault/services/tool-secrets.api';
 
 /**
@@ -42,14 +42,6 @@ export interface AttentionStatus {
    */
   hint?: string;
 }
-
-/**
- * Stored, and PROVEN to work by a real call.
- *
- * Reachable ONLY from a passing probe verdict. Nothing derived from what is
- * merely stored may return this — that inference is the entire bug.
- */
-const OK: AttentionStatus = { state: 'ok', text: 'Connected' };
 
 /**
  * In place, and untested — all a STORED value can ever support.
@@ -100,10 +92,17 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
  * The word for a tool that is fully SET UP, decided by whether the credential
  * has actually been tested.
  *
- * Three outcomes, and the reason there are three: `Connected` is a claim we can
- * back — something called the provider and it answered. `Key saved` is the
- * narrower claim we can back when nothing tested it: a value is stored, and
- * that is genuinely all we know. `Not working` is the provider's own verdict.
+ * Four outcomes, and the reason there are four: `Connected` is a claim we can
+ * back — something called the provider and it answered. `Not working` is the
+ * provider's own verdict. `Unverified` is what a probe that reached no verdict
+ * leaves behind — most often a manual that defines no health check, so there
+ * is nothing to call. `Key saved` is the narrower claim for a tool NOTHING has
+ * probed at all: a value is stored, and that is genuinely all we know.
+ *
+ * The first three are `probeWords`, shared verbatim with the Connect page and
+ * the vault, which probe after their own saves now. The fourth is this
+ * module's alone, because it is the one a list of cards can reach — no verdict
+ * was ever asked for there.
  *
  * `Key saved` stays GREEN. It is a complete, true statement about a tool that
  * needs nothing from anybody, and painting it amber would put a permanent
@@ -115,18 +114,16 @@ function varStatus(v: ToolVarStatus, canWrite: boolean): AttentionStatus {
  * lie in a component whose entire job is to stop telling small lies.
  */
 function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): AttentionStatus {
-  if (verdict?.status === 'ok') {
-    // The app's one relative-time formatter, not a local dialect of it. A
-    // verdict with no usable timestamp still just happened — it cannot outlive
-    // the component holding it — so "just now" is the honest fallback.
-    return { ...OK, hint: `Checked ${formatRelativeTime(verdict.checkedAt) || 'just now'}.` };
-  }
-  if (verdict?.status === 'failed') {
-    return {
-      state: 'err',
-      text: 'Not working',
-      hint: verdict.detail ?? 'The provider rejected this credential.',
-    };
+  // A verdict exists: the probe's own vocabulary wins outright, and it is the
+  // SAME vocabulary the Connect page and the vault render — `probeWords` is
+  // the single place those sentences are written, so one provider rejection
+  // cannot come out as two different complaints depending on where the key was
+  // typed. `Unverified` included: a manual with no health check has nothing to
+  // prove "Key saved" with either, and saying the narrower true thing is the
+  // rule this module is built on.
+  if (verdict) {
+    const { tone, text, hint } = probeWords(verdict);
+    return { state: tone, text, hint };
   }
   // The word has to match what the user actually did. A tool with no variables
   // asked nothing of them, so "Key saved" would name a key that does not exist;
@@ -138,7 +135,7 @@ function healthStatus(tool: ToolSecrets, verdict?: ProbeVerdict | null): Attenti
   return {
     state: 'ok',
     text,
-    hint: verdict?.detail ?? "Not verified — this tool hasn't been tested yet.",
+    hint: "Not verified — this tool hasn't been tested yet.",
   };
 }
 

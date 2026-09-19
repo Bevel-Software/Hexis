@@ -500,6 +500,169 @@ describe('ToolConnectionSection', () => {
   });
 
   /**
+   * The same three answers, reached the way a person actually reaches them:
+   * by SAVING a key, not by pressing Test.
+   *
+   * The Test button is the deliberate act of someone who already suspects
+   * something. The save is the moment that matters — the key is still in the
+   * clipboard, the person is still here, and a wrong one costs a retype
+   * instead of a debugging session next Tuesday. This surface has probed on
+   * save for a while; these tests exist so it keeps doing it while the
+   * lifecycle moves into `useSavedKeyProbe`, shared now with the Connect page
+   * and the vault.
+   */
+  describe('after a save', () => {
+    /** Already connected, so replacing the key leaves the health line up. */
+    const replaceable = () =>
+      tool({
+        canWrite: true,
+        variables: [
+          {
+            name: 'API_KEY',
+            scope: 'admin',
+            label: null,
+            key: 'github_API_KEY',
+            adminConfigured: true,
+            userConfigured: false,
+          },
+        ],
+      });
+
+    /** Type a new value into the row's editor and save it. */
+    const saveKey = (secret = 'k') => {
+      fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+      fireEvent.change(screen.getByLabelText('Value for API_KEY'), { target: { value: secret } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    };
+
+    it('shows the quiet connected state when the provider accepts the key', async () => {
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'ok',
+        detail: null,
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(replaceable());
+
+      saveKey();
+
+      await waitFor(() => expect(screen.getByTestId('tool-health')).toHaveTextContent('Connected'));
+      // Quiet means quiet: a working tool needs nobody, so nothing shouts.
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it("shows the provider's own status text when it rejects the key", async () => {
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'failed',
+        detail: '401 Unauthorized: bad credentials',
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(replaceable());
+
+      saveKey();
+
+      await waitFor(() =>
+        expect(screen.getByTestId('tool-health-failed')).toHaveTextContent(
+          '401 Unauthorized: bad credentials',
+        ),
+      );
+    });
+
+    it('says Unverified, and why, when the manual defines no health check', async () => {
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'unverifiable',
+        detail: "This tool doesn't offer a way to test its connection.",
+        checkedAt: new Date().toISOString(),
+      });
+      renderSection(replaceable());
+
+      saveKey();
+
+      // Not "Key saved": a probe RAN. Saying only what was stored would report
+      // the wrong event — the question was put to the provider and came back
+      // unanswerable, which is a different thing to not having asked.
+      await waitFor(() =>
+        expect(screen.getByTestId('tool-health')).toHaveTextContent('Unverified'),
+      );
+      // And the reason is on the page, not only in a tooltip: a title attribute
+      // is unreachable on a touch screen and to a screen reader, so a word that
+      // hides its reason there has only moved the question.
+      expect(screen.getByTestId('tool-health-unverified')).toHaveTextContent(
+        "This tool doesn't offer a way to test its connection.",
+      );
+      // Nothing needs a person, so nothing is raised.
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('stores the value first: a probe that never answers never blocks the save', async () => {
+      // The store is held OPEN, so the order is observable rather than merely
+      // plausible. Asserting only that both happened would pass just as well
+      // if the probe ran first — and a probe that runs before the store
+      // completes asks the provider about the key being replaced, which is the
+      // confident stale answer this whole feature exists to remove.
+      let releaseStore = () => {};
+      let stored = false;
+      vi.mocked(setAdminVar).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStore = () => {
+              stored = true;
+              resolve();
+            };
+          }),
+      );
+      vi.mocked(checkToolConnection).mockReturnValue(new Promise<ProbeVerdict>(() => {}));
+      renderSection(replaceable());
+
+      saveKey();
+
+      // While the write is in flight: nothing has been asked of the provider,
+      // and the editor is still open because the save has not landed.
+      await waitFor(() => expect(setAdminVar).toHaveBeenCalledTimes(1));
+      expect(checkToolConnection).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('Value for API_KEY')).toBeInTheDocument();
+
+      // Inside `act`, like the definition-edit race test above: resolving the
+      // held promise runs the save handler's continuation — `close`,
+      // `onChanged`, `onSaved` — and every one of those is a React state
+      // update. Outside an act window they warn and, worse for an ORDERING
+      // test, the assertions below could read a render that has not flushed.
+      await act(async () => {
+        releaseStore();
+      });
+
+      // Only now, and the editor closes with the value gone from the DOM while
+      // the probe is still hanging — the save is complete on its own terms.
+      await waitFor(() => expect(checkToolConnection).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(screen.queryByLabelText('Value for API_KEY')).toBeNull());
+      expect(stored).toBe(true);
+    });
+
+    it('never repeats the submitted secret, whatever the probe says', async () => {
+      const secret = 'sk-live-DO-NOT-ECHO-4242';
+      vi.mocked(setAdminVar).mockResolvedValue(undefined);
+      // The worst case for a leak: a rejection whose detail quotes the request
+      // back. The server composes `detail` from the provider's status line, and
+      // nothing on this side ever joins the value to it.
+      vi.mocked(checkToolConnection).mockResolvedValue({
+        status: 'failed',
+        detail: 'The API key you supplied was rejected.',
+        checkedAt: new Date().toISOString(),
+      });
+      const { container } = renderSection(replaceable());
+
+      saveKey(secret);
+
+      await waitFor(() => expect(screen.getByTestId('tool-health-failed')).toBeInTheDocument());
+      expect(container.textContent).not.toContain(secret);
+      // Nor left sitting in the write-only field for the next person at the desk.
+      expect(container.innerHTML).not.toContain(secret);
+    });
+  });
+
+  /**
    * What this section owes the REST of the app.
    *
    * The stale-status bug never showed here: a save re-probes, so the page the

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Badge, Banner, Button, Surface, TextField } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
@@ -6,6 +6,8 @@ import { LIBRARY_ROOT, pathForTool } from '../../library/routes/library-paths';
 import { ToolLogo } from '../../library/components/ToolLogo';
 import { startOAuth } from '../services/secrets.api';
 import { setUserVar, deleteUserVar } from '../services/tool-secrets.api';
+import { SavedKeyProbeResult } from '../probe/SavedKeyProbeResult';
+import { useSavedKeyProbe, type SavedKeyProbe } from '../probe/useSavedKeyProbe';
 import { announceToolCredentialsChanged } from '../../../core/events';
 import {
   getConnectPending,
@@ -41,19 +43,25 @@ const MCP_OAUTH_STATE_KEY = 'mcp-oauth-state';
  *    sends the browser back to the agent.
  *
  * DESIGN: this page speaks the Library's vocabulary, because it is the other
- * half of the same job. Every state reads what is STORED — `Signed in`,
- * `Key saved` — or `Needs …` (never a third phrasing; `Connected` is
- * reserved for the tool page, whose probe actually earns the word), nothing
- * that needs a person is grey, and a tool is
+ * half of the same job. Every ROW state reads what is STORED — `Signed in`,
+ * `Key saved` — or `Needs …`, nothing that needs a person is grey, and a tool is
  * identified by its mark before its name — the same `ToolLogo` the gallery
  * cards use. It went through the design system wholesale: no raw palette, no
  * off-scale type, no ad-hoc bordered `div`s pretending to be Surfaces.
+ *
+ * `Connected` appears in exactly one place here, and only after a real call:
+ * the probe each key row runs on its own save (`SavedKeyProbeResult`). This
+ * page used to store a key and say nothing, so a mistyped one sat here looking
+ * identical to a working one — the badge said `Key saved`, which was true, and
+ * nothing anywhere said the provider had refused it.
  */
 export function ConnectToolsPage() {
   const [tools, setTools] = useState<ConnectTool[]>([]);
   const [oauth, setOauth] = useState<ConnectOAuth[]>([]);
   const [toolOAuth, setToolOAuth] = useState<ConnectToolOAuth[]>([]);
   const [loading, setLoading] = useState(true);
+  /** A refetch is in flight over a list that is already on screen. */
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Agent-connect mode: the signed authorization state + who is asking.
@@ -65,18 +73,45 @@ export function ConnectToolsPage() {
   const [included, setIncluded] = useState<Set<string>>(new Set());
   const [wiping, setWiping] = useState<Set<string>>(new Set());
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Which load is allowed to publish. Saving two rows in quick succession
+   * starts two refetches, and the first can answer last: its list still says
+   * the second key is unset, so the row that was just saved flips back to
+   * `Needs a key` and stays there. The same newest-wins rule the probe itself
+   * follows, for the same reason — a late answer describing an earlier state
+   * is worse than no answer.
+   */
+  const loadSeq = useRef(0);
+
+  /**
+   * @param quiet keep the list on screen while it refetches.
+   *
+   * The loud refresh drops the page to "Loading…", which UNMOUNTS every row —
+   * and a row holds the verdict of the probe its own save just started. That
+   * state is the only copy (nothing persists a verdict), so a loud refetch
+   * after a save throws away the very answer the save was waiting for. Same
+   * fix `useToolPage` made for the tool page, for the same reason.
+   */
+  const refresh = useCallback(async (quiet = false) => {
+    const mine = ++loadSeq.current;
+    if (!quiet) setLoading(true);
+    setRefreshing(true);
     try {
       const pending = await getConnectPending();
+      if (loadSeq.current !== mine) return;
       setTools(pending.tools);
       setOauth(pending.oauth);
       setToolOAuth(pending.toolOAuth);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Inside the guard too: an older load failing after a newer one
+      // succeeded would raise an alert about a request nobody is waiting on.
+      if (loadSeq.current === mine) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (loadSeq.current === mine) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -256,7 +291,18 @@ export function ConnectToolsPage() {
           {'‹ Skills & tools'}
         </Link>
         <h1 className="text-strong font-semibold text-ink">Connect your tools</h1>
-        <Button variant="quiet" size="sm" className="ml-auto" onClick={() => void refresh()}>
+        {/* Quiet, like the refetch a save triggers. A loud one drops the page
+            to "Loading…", which unmounts the row holding the verdict of the
+            probe its own save just started — and that state is the only copy
+            of it. Disabling is the feedback instead: the list a spinner would
+            replace is already on screen. */}
+        <Button
+          variant="quiet"
+          size="sm"
+          className="ml-auto"
+          disabled={loading || refreshing}
+          onClick={() => void refresh(true)}
+        >
           Refresh
         </Button>
       </header>
@@ -437,22 +483,17 @@ export function ConnectToolsPage() {
                           }
                         />
                         {on && (
-                          <ul className="mt-3 flex flex-col gap-2">
-                            {tool.variables.map((v) => (
-                              <KeyRow
-                                key={v.key}
-                                slug={tool.slug}
-                                name={v.name}
-                                label={v.label}
-                                configured={v.configured}
-                                onSaved={() => {
-                                  announceToolCredentialsChanged();
-                                  void refresh();
-                                }}
-                                onError={setError}
-                              />
-                            ))}
-                          </ul>
+                          <ToolKeyList
+                            tool={tool}
+                            onSaved={() => {
+                              announceToolCredentialsChanged();
+                              // Quiet: a row is about to show what the provider
+                              // makes of the key it just saved, and a loud
+                              // refetch would unmount it first.
+                              void refresh(true);
+                            }}
+                            onError={setError}
+                          />
                         )}
                       </Surface>
                     );
@@ -484,12 +525,13 @@ function Section({ title, children }: { title: string; children: React.ReactNode
  * what is wrong. "skipped" is the one non-status here: it is a choice you made,
  * not a state of the tool, so it stays grey.
  *
- * Note what is NOT here: `Connected`. This page knows only what is STORED, and
- * the one word that asserts a working connection is reserved for a probe that
- * actually called the provider — which only the tool page does. Two states
- * rather than one, because "signed in" and "key saved" describe two different
- * things the reader did, and telling someone a key was saved when they signed
- * in is a small lie of exactly the kind this vocabulary exists to stop.
+ * Note what is NOT here: `Connected`. A ROW knows only what is STORED, and the
+ * one word that asserts a working connection belongs to a probe that actually
+ * called the provider — which is the line underneath the row, not the badge on
+ * it. Two states rather than one, because "signed in" and "key saved" describe
+ * two different things the reader did, and telling someone a key was saved
+ * when they signed in is a small lie of exactly the kind this vocabulary
+ * exists to stop.
  */
 const ROW_STATE: Record<
   'signed-in' | 'key-saved' | 'needs-signin' | 'needs-reauth' | 'needs-key' | 'skipped',
@@ -573,11 +615,48 @@ function IncludeToggle({
   );
 }
 
+/**
+ * One tool's per-user keys, and the ONE probe they share.
+ *
+ * Tool-level, not row-level, because that is what a probe actually is: a
+ * single call carrying the tool's whole credential set. Two rows probing
+ * independently would each keep their own `Connected`, and the first would go
+ * on claiming it after the second changed the very keys it was testing.
+ */
+function ToolKeyList({
+  tool,
+  onSaved,
+  onError,
+}: {
+  tool: ConnectTool;
+  onSaved: () => void;
+  onError: (m: string) => void;
+}) {
+  const probe = useSavedKeyProbe(tool.slug);
+  return (
+    <ul className="mt-3 flex flex-col gap-2">
+      {tool.variables.map((v) => (
+        <KeyRow
+          key={v.key}
+          slug={tool.slug}
+          name={v.name}
+          label={v.label}
+          configured={v.configured}
+          probe={probe}
+          onSaved={onSaved}
+          onError={onError}
+        />
+      ))}
+    </ul>
+  );
+}
+
 function KeyRow({
   slug,
   name,
   label,
   configured,
+  probe,
   onSaved,
   onError,
 }: {
@@ -585,6 +664,8 @@ function KeyRow({
   name: string;
   label: string | null;
   configured: boolean;
+  /** Shared with this tool's other rows; it answers for whichever saved last. */
+  probe: SavedKeyProbe;
   onSaved: () => void;
   onError: (m: string) => void;
 }) {
@@ -596,42 +677,58 @@ function KeyRow({
     setBusy(true);
     try {
       await setUserVar(slug, name, value.trim());
+      // The value is STORED before anything is probed, and the field is
+      // cleared before anything is probed. Nothing below can fail the save or
+      // hold it open — the probe is a question asked after the fact, and it is
+      // allowed to hang, fail, or not exist at all.
       setValue('');
       onSaved();
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err));
+      return;
     } finally {
       setBusy(false);
     }
+    // Outside the try, and deliberately not awaited: a save that landed is a
+    // save that landed, and a probe's trouble is never reported as the save's.
+    // Naming the variable moves the shared answer onto THIS row.
+    probe.probeSaved(name);
   };
 
   return (
-    <li className="flex items-center gap-2.5">
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="truncate text-detail text-ink-muted">{label || name}</span>
-        <Badge tone={configured ? 'ok' : 'wait'} size="xs" className="shrink-0">
-          {configured ? 'Set' : 'Needs a key'}
-        </Badge>
+    <li className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="truncate text-detail text-ink-muted">{label || name}</span>
+          <Badge tone={configured ? 'ok' : 'wait'} size="xs" className="shrink-0">
+            {configured ? 'Set' : 'Needs a key'}
+          </Badge>
+        </div>
+        {/* Write-only. The stored value is never fetched, rendered or logged —
+            the field starts empty even for a configured key, and saving replaces
+            rather than reveals. */}
+        <TextField
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={configured ? 'Replace…' : 'Enter value'}
+          aria-label={`${label || name} value`}
+          className="w-44"
+        />
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={busy || !value.trim()}
+          onClick={() => void save()}
+        >
+          Save
+        </Button>
       </div>
-      {/* Write-only. The stored value is never fetched, rendered or logged —
-          the field starts empty even for a configured key, and saving replaces
-          rather than reveals. */}
-      <TextField
-        type="password"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder={configured ? 'Replace…' : 'Enter value'}
-        aria-label={`${label || name} value`}
-        className="w-44"
-      />
-      <Button
-        variant="primary"
-        size="sm"
-        disabled={busy || !value.trim()}
-        onClick={() => void save()}
-      >
-        Save
-      </Button>
+      {/* What the provider made of the key that was just typed here — the
+          whole reason this page no longer accepts a wrong key in silence.
+          Only on the row that asked: the answer is the tool's, and the newest
+          save is the only place it is still current. */}
+      {probe.subject === name && <SavedKeyProbeResult probe={probe} />}
     </li>
   );
 }
