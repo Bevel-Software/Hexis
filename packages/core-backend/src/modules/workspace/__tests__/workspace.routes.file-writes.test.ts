@@ -42,6 +42,10 @@ interface Harness {
   planForCreate: ReturnType<typeof vi.fn>;
   seedWrites: string[];
   lockedPaths: string[];
+  /** Paths released with a discard (reset to HEAD) after a failed op. */
+  discardedPaths: string[];
+  /** Paths released leaving disk and queue alone after a failed op. */
+  untouchedPaths: string[];
   /** The paths turns were taken on, so the third coordinator is checked too. */
   turnPaths: string[];
   /** What happened, in order, so the critical section can be asserted. */
@@ -50,6 +54,8 @@ interface Harness {
 
 async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
   const lockedPaths: string[] = [];
+  const discardedPaths: string[] = [];
+  const untouchedPaths: string[] = [];
   const seedWrites: string[] = [];
   const order: string[] = [];
   const readFileMock = vi.fn(async () => 'CONTENT');
@@ -112,7 +118,12 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       return { acquired: true, lock: { holderUserId: USER_ID, holderName: 'Alice' } };
     }),
     releaseLock: vi.fn(async () => null),
-    releaseLockNoCommit: vi.fn(async () => undefined),
+    releaseLockNoCommit: vi.fn(async (_w: string, _b: string, p: string) => {
+      discardedPaths.push(p);
+    }),
+    releaseLockUntouched: vi.fn(async (_w: string, _b: string, p: string) => {
+      untouchedPaths.push(p);
+    }),
   } as unknown as IWorkflowService;
 
   const authService = { getUserById: vi.fn(async () => USER) } as unknown as AuthService;
@@ -158,6 +169,8 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
     planForCreate,
     seedWrites,
     lockedPaths,
+    discardedPaths,
+    untouchedPaths,
     turnPaths,
     order,
   };
@@ -431,6 +444,51 @@ describe('the mutating verbs share one file identity', () => {
       kind: 'entry-exists',
       entryKind: 'file',
     });
+  });
+
+  /**
+   * The refusal must not cost a bystander their file.
+   *
+   * Two moves racing onto one free name end with the winner's file landed and
+   * its commit still queued — commits run out of band in the pending-commits
+   * worker — and the loser then holding the very same destination lock, being
+   * told the name is taken. A discarding release resets that PATH to HEAD, not
+   * "the loser's changes", so it would delete the winner's landed file while
+   * reporting the loser's 409. Nothing the refusal does writes, so the lock
+   * releases untouched instead: disk and queue exactly as they were.
+   */
+  it('PATCH releases both locks UNTOUCHED when the destination is taken, discarding nothing', async () => {
+    h = await makeHarness();
+    h.moveEntryMock.mockRejectedValueOnce(new EntryExistsError('file', `${KB}/Sales/Notes.md`));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/Sales/Report.docx`, newPath: `${KB}/Sales/Notes.md` }),
+    });
+
+    expect(res.status).toBe(409);
+    // The destination is the one that matters — it is where the winner's file
+    // is — but the source was not written either, so neither is reset.
+    expect(h.discardedPaths).toEqual([]);
+    expect(h.untouchedPaths.sort()).toEqual([`${KB}/Sales/Notes.md`, `${KB}/Sales/Report.docx`]);
+  });
+
+  it('PATCH still DISCARDS when the move failed for a reason that may have written', async () => {
+    // The fail-closed side: an unrecognised failure keeps the reset, so a
+    // half-written path cannot be published by the next release on it.
+    h = await makeHarness();
+    h.moveEntryMock.mockRejectedValueOnce(new Error('EIO: disk fell over mid-rename'));
+
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/file`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ oldPath: `${KB}/Sales/Report.docx`, newPath: `${KB}/Sales/Notes.md` }),
+    });
+
+    expect(res.status).toBe(500);
+    expect(h.untouchedPaths).toEqual([]);
+    expect(h.discardedPaths.sort()).toEqual([`${KB}/Sales/Notes.md`, `${KB}/Sales/Report.docx`]);
   });
 
   it('PATCH refuses a non-string path in the body', async () => {

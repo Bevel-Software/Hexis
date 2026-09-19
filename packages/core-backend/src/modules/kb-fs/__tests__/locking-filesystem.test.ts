@@ -1239,6 +1239,35 @@ describe('LockingFilesystem — a destination that is taken is refused, never re
     expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('taken');
   });
 
+  /**
+   * The refusal must not cost a bystander their file. The destination of a
+   * lost race holds the WINNER's just-landed move, whose commit is still
+   * queued (the worker publishes it out of band). A discarding release resets
+   * that path to HEAD — it cannot know the dirty bytes are not the loser's —
+   * so unwinding the loser that way deletes the winner's file. The refusal
+   * writes nothing (the no-clobber call fails without creating anything), so
+   * every lock it unwinds releases untouched.
+   */
+  it('releases UNTOUCHED when the destination is taken, so a lost race cannot eat the winner', async () => {
+    const workflow = makeWorkflow();
+    const layer = new LockingFilesystem(
+      { basePath: root, contained: true },
+      { workflow, workspaceId: 'ws-feat', branch: 'feat', user: USER, kbDirName: KB },
+    );
+    await fs.writeFile(onDisk(TAKEN), 'the winner of the race');
+
+    await expect(layer.moveFile(SOURCE, TAKEN)).rejects.toMatchObject({ name: 'DestinationTakenError' });
+
+    // Both ends of the move: the destination is the one holding the winner's
+    // bytes, and the source was not written either.
+    for (const p of [SOURCE, TAKEN]) {
+      expect(workflow.releaseLockUntouched, p).toHaveBeenCalledWith('ws-feat', 'feat', p, USER);
+    }
+    expect(workflow.releaseLockNoCommit).not.toHaveBeenCalled();
+    expect(workflow.releaseLock).not.toHaveBeenCalled();
+    expect(await fs.readFile(onDisk(TAKEN), 'utf-8')).toBe('the winner of the race');
+  });
+
   it.skipIf(process.platform === 'win32')('answers the clash sentence when a DANGLING link holds the name', async () => {
     // A link to nothing still owns the directory entry, so the exclusive
     // create fails — and an existence probe that follows links would say the

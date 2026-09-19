@@ -51,7 +51,7 @@ import type { AuthUser, Change, IWorkflowService } from '@bevel-software/platfor
 import { PushNeedsAgentResolutionError } from '../../shared/domain-errors.js';
 import type { FileChangeNotifier } from './file-change-notifier.js';
 import { isAbsence } from '../../shared/fs.contract.js';
-import { lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
+import { DestinationTakenError, lstatOrNull, renameNoReplace, takenError } from '../../shared/rename-no-replace.js';
 import { assertInsideRepo } from './repo-path.js';
 import { GitGuardedFilesystem } from './git-guarded-filesystem.js';
 import type { CreationGrantPlan, ICreatorAccess } from '../access-model/creator.js';
@@ -875,11 +875,18 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       // before the throw doesn't accidentally land as a committed change
       // (the normal `releaseLock` would `commitFile` whatever's on disk
       // for `inputPath`, including the partial state). A check refusal wrote
-      // nothing, so it releases untouched instead. Best-effort: a failure to
-      // release here surfaces in logs but doesn't override the original op
-      // error the caller actually cares about.
+      // nothing, so it releases untouched instead — and so does a move or
+      // copy refused because the destination is taken: its no-clobber call
+      // (`link`, `mkdir`, `open` with `O_EXCL`) fails without creating
+      // anything. That one matters beyond tidiness. The discard resets the
+      // PATH rather than this call's changes, so on the destination of a lost
+      // race — where the winner's move has landed and its commit is still
+      // queued — discarding would throw the winner's file away on the way to
+      // reporting the loser's refusal. Best-effort: a failure to release here
+      // surfaces in logs but doesn't override the original op error the
+      // caller actually cares about.
       try {
-        if (err instanceof CheckRefusal) {
+        if (err instanceof CheckRefusal || err instanceof DestinationTakenError) {
           await workflow.releaseLockUntouched(workspaceId, branch, inputPath, user);
         } else {
           await workflow.releaseLockNoCommit(workspaceId, branch, inputPath, user);
