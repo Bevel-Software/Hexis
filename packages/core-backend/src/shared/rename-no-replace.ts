@@ -111,9 +111,15 @@ export async function inspectDestination(
  * means the filesystem handed us the source itself, whatever spelling was
  * asked for; two means two names, and the move is a clash.
  *
- * Paths in different folders are two entries by definition. `oldAbsolute ===
- * newAbsolute` is the degenerate self-move, which no directory read can
- * decide (one spelling, one entry) and which is trivially the source itself.
+ * Paths in different folders are two entries by definition — but "different
+ * folder" is itself a question for the filesystem and not for the strings: the
+ * same volume that folds `notes.md` into `Notes.md` folds `Sales` into
+ * `sales`, so `Sales/notes.md` → `sales/Notes.md` is one folder, one entry and
+ * one rename. The parents are compared by identity for that reason.
+ *
+ * `oldAbsolute === newAbsolute` is the degenerate self-move, which no
+ * directory read can decide (one spelling, one entry) and which is trivially
+ * the source itself.
  */
 async function isSelfRename(
   oldAbsolute: string,
@@ -123,9 +129,9 @@ async function isSelfRename(
 ): Promise<boolean> {
   if (source.dev !== destination.dev || source.ino !== destination.ino) return false;
   if (oldAbsolute === newAbsolute) return true;
-  const folder = path.dirname(oldAbsolute);
-  if (folder !== path.dirname(newAbsolute)) return false;
   if (!foldsTogether(oldAbsolute, newAbsolute)) return false;
+  const folder = path.dirname(oldAbsolute);
+  if (!(await sameFolder(folder, path.dirname(newAbsolute)))) return false;
   let entries: string[];
   try {
     entries = await fs.readdir(folder);
@@ -137,6 +143,19 @@ async function isSelfRename(
   }
   const listed = new Set(entries);
   return !(listed.has(path.basename(oldAbsolute)) && listed.has(path.basename(newAbsolute)));
+}
+
+/**
+ * Whether two directory paths are the one directory. String equality first,
+ * because that is the answer almost every time and costs nothing; otherwise
+ * the filesystem decides, so a volume that folds `Sales` and `sales` is not
+ * read as two folders.
+ */
+async function sameFolder(a: string, b: string): Promise<boolean> {
+  if (a === b) return true;
+  const [statA, statB] = await Promise.all([lstatOrNull(a), lstatOrNull(b)]);
+  if (statA === null || statB === null) return false;
+  return statA.dev === statB.dev && statA.ino === statB.ino;
 }
 
 /** The two paths are one name on a case-insensitive filesystem. */

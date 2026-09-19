@@ -258,6 +258,31 @@ describe('renameNoReplace', () => {
     expect(await read('Notes.md')).toBe('# Notes\n');
   });
 
+  it('reads a re-cased PARENT as the same folder, not as a move between two', async () => {
+    // The volume that folds `notes.md` into `Notes.md` folds `Sales` into
+    // `sales` too, so `Sales/notes.md` → `sales/Notes.md` is one folder and
+    // one entry — the rename it looks like. Comparing the parent strings would
+    // call it a move between folders and refuse it.
+    await fs.mkdir(at('Sales'));
+    await fs.writeFile(at('Sales/notes.md'), '# Notes\n');
+    const folded = await foldsCase();
+
+    expect(await inspectDestination(at('Sales/notes.md'), at('sales/Notes.md'))).toEqual(
+      // Folded: the destination opens the source's own file, through a parent
+      // that is the same folder. Otherwise `sales/` is simply not there.
+      { state: folded ? 'self' : 'free' },
+    );
+
+    // And a genuine move between two DIFFERENT folders of one file is still a
+    // clash, whatever the two names look like.
+    await fs.mkdir(at('Archive'));
+    await fs.link(at('Sales/notes.md'), at('Archive/notes.md'));
+    expect(await inspectDestination(at('Sales/notes.md'), at('Archive/notes.md'))).toEqual({
+      state: 'taken',
+      kind: 'file',
+    });
+  });
+
   it('treats a move onto itself as the no-op it is', async () => {
     await fs.writeFile(at('note.md'), 'note');
 
