@@ -723,10 +723,16 @@ export function ManageAccessDialog({
         .then((res) => {
           setSuggest(res);
           learnAccounts(res.people ?? []);
-          // Only a build that SAYS it reports accounts turns "not in the
-          // answer" into "no account". Without this flag the answer is silent
-          // on the question, so the address stays unjudged and unlabelled.
-          if (res.accountsKnown) noteLookedUp(q.toLowerCase());
+          // Only an answer that SAYS it rules on accounts turns "not in the
+          // answer" into "no account". Without that the answer is silent on
+          // the question, so the address stays unjudged and unlabelled.
+          //
+          // `peopleWithheld` is checked here too, not just trusted to have
+          // already made `accountsKnown` false: a withheld list names nobody
+          // by design (the harvesting guard), so reading it as "nobody has an
+          // account" would label every address at once. Either flag alone is
+          // enough to say nothing.
+          if (res.accountsKnown && !res.peopleWithheld) noteLookedUp(q.toLowerCase());
         })
         .catch(() => setSuggest(null));
     }, 200);

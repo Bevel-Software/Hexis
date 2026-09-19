@@ -1,6 +1,7 @@
 import express from 'express';
 import { inArray } from 'drizzle-orm';
 import { logger } from '../../shared/logging.js';
+import { printable } from '../../shared/printable.js';
 
 // The audit lines this file writes have always carried their own tags —
 // `access.grant`, `access.revoke` and their sub-cases — so each keeps it.
@@ -421,6 +422,10 @@ export function createAccessRoutes(
 
     const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().toLowerCase();
     const CAP = 15;
+    // The harvesting guard, named once: it decides both that people are not
+    // returned and that this answer says nothing about accounts. The two must
+    // never disagree — a withheld list is not evidence that nobody has one.
+    const peopleWithheld = q.length < 2;
     try {
       // Independent lookups batched in ONE Promise.all: the default-branch
       // principals (cached model), the branch-local KB people (cached model),
@@ -428,7 +433,7 @@ export function createAccessRoutes(
       const [{ roles, groups, plugins }, { people: kbPeople }, userRows] = await Promise.all([
         defaultBranchPrincipals(),
         accessControl.kbPrincipals(req.params.id),
-        q.length >= 2 ? db.select().from(users) : Promise.resolve([]),
+        peopleWithheld ? Promise.resolve([]) : db.select().from(users),
       ]);
 
       const matchedRoles = roles
@@ -453,7 +458,7 @@ export function createAccessRoutes(
         .slice(0, CAP);
 
       let people: { name: string; email: string; hasAccount: boolean }[] = [];
-      if (q.length >= 2) {
+      if (!peopleWithheld) {
         // Union the KB-canonical people with the login-only users table.
         const byEmail = new Map<string, { name: string; email: string }>();
         for (const p of kbPeople) byEmail.set(p.email.toLowerCase(), p);
@@ -493,14 +498,19 @@ export function createAccessRoutes(
         // deprecated alias of `roles` below.
         pluginPrincipals: matchedPlugins,
         people,
-        peopleWithheld: q.length < 2,
-        // This build ANSWERS the account question: every person above carries
-        // `hasAccount`, and an email absent from `people` is absent because no
-        // account exists for it — not because the build had nothing to say.
-        // The dialog labels a free-typed chip only on this evidence, so an
-        // older server (no such field) and a failed lookup (no response at
-        // all) both leave the address unjudged instead of labelled by guess.
-        accountsKnown: true,
+        peopleWithheld,
+        // THIS ANSWER rules on accounts — not "this build can": every person
+        // above carries `hasAccount`, and an email absent from `people` is
+        // absent because no account exists for it. The dialog labels a
+        // free-typed chip only on this evidence.
+        //
+        // It is therefore false whenever people were WITHHELD: under two
+        // characters the harvesting guard returns nobody, and an empty list
+        // there means "not asked", which is not the same fact at all. An
+        // older server (no such field) and a failed lookup (no response) are
+        // the other two ways to say nothing — all three leave the address
+        // unjudged rather than labelled on a guess.
+        accountsKnown: !peopleWithheld,
         // DEPRECATED alias of `roles` — the shipped share dialog still reads
         // `plugins`. Kept populated for ONE release; remove in 0.2.0 together
         // with the dialog's rename to `roles`.
@@ -671,10 +681,14 @@ export function createAccessRoutes(
     try {
       view = labelAccountHolders(resolved, await accountsAmong(emailsInView(resolved)));
     } catch (err) {
+      // Every piece of this line is caller-controlled — the workspace id and
+      // path come off the request, and the driver's message can carry back
+      // text from the query. `printable` quotes each as one token, the same
+      // rule the rest of the backend's logs follow.
       logger('access.view.accounts').warn(
-        `users lookup failed for ws=${workspaceId} path=${repoRelTarget}; hasAccount omitted: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `users lookup failed for ws=${printable(workspaceId)} path=${printable(repoRelTarget)}; hasAccount omitted: ${printable(
+          err instanceof Error ? err.message : String(err),
+        )}`,
       );
     }
 

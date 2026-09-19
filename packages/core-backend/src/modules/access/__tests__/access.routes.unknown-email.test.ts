@@ -311,12 +311,25 @@ describe('a grant to an email with no account', () => {
         await fetch(
           `${h!.baseUrl}/api/workspace/${encodeURIComponent(WS)}/access/suggest?q=${encodeURIComponent(q)}`,
         )
-      ).json()) as { people: { email: string; hasAccount: boolean }[] };
+      ).json()) as {
+        people: { email: string; hasAccount: boolean }[];
+        peopleWithheld: boolean;
+        accountsKnown: boolean;
+      };
 
     // One character — people are withheld below two (the harvesting guard),
     // and that is unchanged by this ticket.
-    expect((await suggest('a')).people).toEqual([]);
+    const short = await suggest('a');
+    expect(short.people).toEqual([]);
+    // And a withheld answer must not pass itself off as a complete account
+    // answer: it names nobody BY DESIGN, so reading its empty list as "nobody
+    // has an account" would label every address at once. The two flags agree.
+    expect(short.peopleWithheld).toBe(true);
+    expect(short.accountsKnown).toBe(false);
 
+    // A real query rules on accounts, and says so.
+    expect((await suggest('alice')).accountsKnown).toBe(true);
+    expect((await suggest('alice')).peopleWithheld).toBe(false);
     expect((await suggest('alice')).people).toEqual([
       expect.objectContaining({ email: KNOWN.email, hasAccount: true }),
     ]);

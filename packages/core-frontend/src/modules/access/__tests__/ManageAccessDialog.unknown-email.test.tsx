@@ -235,6 +235,29 @@ describe('ManageAccessDialog: an email with no account is labelled, not refused'
     );
   });
 
+  it('an answer that WITHHELD people labels nobody, however it flags itself', async () => {
+    const user = userEvent.setup();
+    // The harvesting guard returns nobody by design. Its empty list is not
+    // evidence that nobody has an account — read that way it would label
+    // every address at once — so the dialog refuses it even when the answer
+    // also claims to rule on accounts, which a correct server never does.
+    api.suggestPrincipals.mockResolvedValue({
+      roles: [],
+      groups: [],
+      people: [],
+      peopleWithheld: true,
+      accountsKnown: true,
+    });
+    render(<ManageAccessDialog entry={ENTRY} onClose={() => {}} />);
+
+    const input = await screen.findByPlaceholderText('Add people, groups, roles or plugins…');
+    await user.type(input, UNKNOWN.email);
+    await waitFor(() => expect(api.suggestPrincipals).toHaveBeenCalled());
+    await user.keyboard('{Enter}');
+
+    expect(within(chipFor(UNKNOWN.name)).queryByText(NOTE)).toBeNull();
+  });
+
   it('a direct-grant ROW for an unknown email carries the note beside the name', async () => {
     api.fetchFileAccess.mockResolvedValue(
       viewWith([

@@ -213,13 +213,17 @@ export interface SuggestResponse {
   /** True when the query was too short to return people (roles/groups still shown). */
   peopleWithheld?: boolean;
   /**
-   * True when this build ANSWERS the account question — every person above
-   * carries {@link AccessUser.hasAccount}, and an address missing from
-   * `people` is missing because no account exists for it.
+   * True when THIS ANSWER rules on accounts — every person above carries
+   * {@link AccessUser.hasAccount}, and an address missing from `people` is
+   * missing because no account exists for it.
    *
-   * Absent means the server said nothing on the subject (an older build), and
-   * a failed request says nothing either. The dialog labels a free-typed chip
-   * "hasn't signed in yet" only on this evidence, so silence never becomes an
+   * It describes the answer, not the build, and so is false whenever
+   * `peopleWithheld` is true: a query too short to return anybody says
+   * nothing about whether anybody has an account. Absent means the server
+   * said nothing on the subject at all (an older build), and a failed request
+   * says nothing either. The dialog labels a free-typed chip "hasn't signed
+   * in yet" only on this evidence — and checks `peopleWithheld` alongside it,
+   * so the two can never be read apart — so silence never becomes an
    * accusation that an address is wrong.
    */
   accountsKnown?: boolean;
