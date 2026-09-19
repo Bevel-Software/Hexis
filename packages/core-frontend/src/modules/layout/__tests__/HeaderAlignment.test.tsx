@@ -34,6 +34,7 @@ import {
   toggleSidebar,
 } from '../state/sidebar';
 import { KbPageHeader } from '../../workspace/components/KbPageHeader';
+import { KbDocumentShell } from '../../workspace/components/KbDocumentShell';
 import {
   HEADER_BAND,
   HEADER_COLUMN_TOP,
@@ -178,40 +179,84 @@ beforeEach(() => {
   setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
 });
 
+/**
+ * Both sides of the seam, each in the frame that owns it.
+ *
+ * The page header goes through `KbDocumentShell`, not straight into the
+ * document. That is not ceremony: the header rendered bare is exactly what
+ * this file used to assert, and it is why a 54px misalignment on the file
+ * page reached staging. A bare header has no column above it, so it cannot
+ * be anything but the first row — the test could not see the tab strip that
+ * was pushing it down, because in the test the tab strip did not exist.
+ *
+ * `children` is a stand-in for that tab strip: something the page renders
+ * inside the column BESIDE the title bar. If the band ever stops opening the
+ * column, this is where it shows.
+ */
 function renderSeam() {
   return render(
     <>
       <SidebarFrame label="File explorer" header={<div>Connect your agent</div>}>
         <nav>tree</nav>
       </SidebarFrame>
-      <KbPageHeader
-        path="Knowledge/Onboarding.md"
-        canWrite
-        editMode={false}
-        entering={false}
-        proposeMode={false}
-        proposalBusy={false}
-        onPropose={() => {}}
-        onSendProposal={() => {}}
-        onDiscardProposal={() => {}}
-        lockedBy={null}
-        historyAvailable
-        isDirty={false}
-        waitingOnAgentUpdate={false}
-        isReviewingPending={false}
-        activeTab="content"
-        onEdit={() => {}}
-        onDone={() => {}}
-        onOpenHistory={() => {}}
-        onShare={() => {}}
-        onCopyLink={async () => true}
-      />
+      <KbDocumentShell header={<PageHeader />}>
+        <div role="tablist" aria-label="Open files">
+          <span>Onboarding.md</span>
+        </div>
+        <p>The document</p>
+      </KbDocumentShell>
     </>,
+  );
+}
+
+function PageHeader() {
+  return (
+    <KbPageHeader
+      path="Knowledge/Onboarding.md"
+      canWrite
+      editMode={false}
+      entering={false}
+      proposeMode={false}
+      proposalBusy={false}
+      onPropose={() => {}}
+      onSendProposal={() => {}}
+      onDiscardProposal={() => {}}
+      lockedBy={null}
+      historyAvailable
+      isDirty={false}
+      waitingOnAgentUpdate={false}
+      isReviewingPending={false}
+      activeTab="content"
+      onEdit={() => {}}
+      onDone={() => {}}
+      onOpenHistory={() => {}}
+      onShare={() => {}}
+      onCopyLink={async () => true}
+    />
   );
 }
 
 const heightOf = (testId: string) =>
   window.getComputedStyle(screen.getByTestId(testId)).height;
+
+/** The column a band opens — the element the band is the first row of. */
+const columnOf = (testId: string) => screen.getByTestId(testId).parentElement!;
+
+/**
+ * Everything drawn above a band inside its own column.
+ *
+ * Zero is the contract. Anything here is vertical space between the column's
+ * top edge and the band's, which moves the band down by exactly that much and
+ * breaks the seam however precisely the two heights agree.
+ */
+function drawnAbove(testId: string): Element[] {
+  const band = screen.getByTestId(testId);
+  const siblings: Element[] = [];
+  for (let node = band.previousElementSibling; node; node = node.previousElementSibling) {
+    siblings.push(node);
+  }
+  return siblings;
+}
 
 describe('the sidebar header row and the page title bar', () => {
   it.each(WIDTHS)('are the same height at %ipx wide', (width) => {
@@ -281,5 +326,76 @@ describe('the sidebar header row and the page title bar', () => {
       </SidebarFrame>,
     );
     expect(screen.queryByTestId(SIDEBAR_HEADER_TESTID)).toBeNull();
+  });
+});
+
+/**
+ * The other half of AC1, and the half that reached staging: the two bands
+ * have to START at the same place, not merely be the same height.
+ *
+ * These assertions are STRUCTURAL, and deliberately so. happy-dom has no
+ * layout engine — `getBoundingClientRect` answers an all-zero rect for every
+ * element — so a top edge is not a thing this suite can measure, and a test
+ * that pretended to would compare 0 with 0 and pass through anything. What
+ * IS checkable is the two facts that together fix the top edge: each column
+ * opens on the same offset, and the band is the first thing in it. Break
+ * either and the seam moves; hold both and it cannot.
+ *
+ * A real browser measured the consequence: Staging Testing put the sidebar
+ * band and the library band at y=61 and the file page's at y=115.13, because
+ * the file page held the second fact and nothing checked it.
+ */
+describe('the two bands open at the same offset', () => {
+  it('each opens the column it is in — nothing is drawn above either', () => {
+    renderSeam();
+    expect(drawnAbove(SIDEBAR_HEADER_TESTID)).toEqual([]);
+    expect(drawnAbove(PAGE_HEADER_TESTID)).toEqual([]);
+  });
+
+  it('the page column holds what used to sit above the band, below it', () => {
+    renderSeam();
+    const band = screen.getByTestId(PAGE_HEADER_TESTID);
+    const tabs = screen.getByRole('tablist', { name: 'Open files' });
+    // Same column — the tab strip did not move out of the measure, it moved
+    // under the title (proto:700-705 keeps one column; this changes the order
+    // inside it).
+    expect(tabs.parentElement).toBe(band.parentElement);
+    expect(band.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('both columns open on the one shared offset', () => {
+    renderSeam();
+    // Not "both contain pt-3": both contain the SAME constant, read from the
+    // module the app renders, so a change to it moves this test with it.
+    for (const testId of [SIDEBAR_HEADER_TESTID, PAGE_HEADER_TESTID]) {
+      expect(columnOf(testId).className.split(/\s+/)).toContain(HEADER_COLUMN_TOP);
+    }
+  });
+
+  it('a full-bleed page opens on that offset too', () => {
+    // The variant a PDF, an image or a spreadsheet gets. It gives up the
+    // measure and the gutters — it used to give up the offset with them, and
+    // its title bar sat a column-offset higher than the sidebar's row.
+    render(
+      <KbDocumentShell variant="full-bleed" header={<PageHeader />}>
+        <iframe title="A PDF" />
+      </KbDocumentShell>,
+    );
+    expect(drawnAbove(PAGE_HEADER_TESTID)).toEqual([]);
+    expect(columnOf(PAGE_HEADER_TESTID).className.split(/\s+/)).toContain(HEADER_COLUMN_TOP);
+  });
+
+  it('a page with a rail opens on it as well', () => {
+    render(
+      <KbDocumentShell header={<PageHeader />} rail={<p>About this file</p>}>
+        <p>The document</p>
+      </KbDocumentShell>,
+    );
+    expect(drawnAbove(PAGE_HEADER_TESTID)).toEqual([]);
+    // Here the offset is on the grid the article sits in, so the band's own
+    // parent is the article and the offset is one level up.
+    const article = columnOf(PAGE_HEADER_TESTID);
+    expect(article.tagName).toBe('ARTICLE');
+    expect(article.parentElement!.className.split(/\s+/)).toContain(HEADER_COLUMN_TOP);
   });
 });

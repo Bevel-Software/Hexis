@@ -19,6 +19,7 @@ import { HEADER_COLUMN_TOP } from '../../../shared/theme/header';
  * The tab strip mounts INSIDE it, not above it. That is the prototype's own
  * rule (proto:700-705): one column holds tabs, title and text at the same
  * width, so they share an edge and the page reads as a single centred block.
+ * It mounts inside it BELOW the title bar, though — see `header`.
  */
 export interface KbDocumentShellProps {
   /** Widens the column and opens the second track for the rail. */
@@ -66,6 +67,24 @@ export interface KbDocumentShellProps {
    * as "complementary" — so the rail names itself and hands the id over.
    */
   railLabelledBy?: string;
+  /**
+   * The page's title bar — and the FIRST row of this column, in every
+   * variant, on `HEADER_COLUMN_TOP`.
+   *
+   * A SLOT rather than the caller's first child, for the same reason
+   * `SidebarFrame` owns the row on the other side of the seam: the band's top
+   * edge is the seam, so "the title bar opens the column" is a rule the frame
+   * has to hold, not a JSX order a caller has to remember. It was a JSX order
+   * once, and `FileViewer` put `<EditorTabs />` above it — a 36px tab strip
+   * plus its 18px gap, so the file page's title bar rendered 54px below the
+   * sidebar header row it was supposed to line up with, at every width,
+   * whatever the two heights agreed on. Staging caught that; nothing in the
+   * suite did, because no test rendered the header in its real page.
+   *
+   * Passing nothing is a page with no title bar (the change-request and
+   * review surfaces): the column simply opens on its children.
+   */
+  header?: ReactNode;
   children: ReactNode;
 }
 
@@ -75,6 +94,7 @@ export function KbDocumentShell({
   roomy = false,
   scrollRef,
   railLabelledBy,
+  header,
   children,
 }: KbDocumentShellProps) {
   return (
@@ -98,7 +118,20 @@ export function KbDocumentShell({
         // widening a measure there is none of, and scrolls on its own so a
         // long link list cannot stretch the iframe.
         <div className="flex h-full min-h-0 w-full">
-          <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">{children}</div>
+          {/* `HEADER_COLUMN_TOP` here too. Full-bleed gives up the measure and
+              the gutters, but NOT the seam: this column used to open straight
+              onto its renderer, so a PDF's title bar sat 12px HIGHER than the
+              sidebar's header row — the prose column's bug in the opposite
+              direction. The offset rides the column the band is already in
+              rather than a wrapper of its own, so the chain of definite
+              heights above is untouched; border-box means the renderer below
+              simply gets 12px less of it. */}
+          <div
+            className={cn('flex h-full min-h-0 min-w-0 flex-1 flex-col', HEADER_COLUMN_TOP)}
+          >
+            {header}
+            {children}
+          </div>
           {rail && (
             <aside
               aria-labelledby={railLabelledBy}
@@ -123,7 +156,10 @@ export function KbDocumentShell({
             'max-[900px]:gap-[26px] min-[901px]:grid-cols-[minmax(0,620px)_296px]',
           )}
         >
-          <article className="min-w-0">{children}</article>
+          <article className="min-w-0">
+            {header}
+            {children}
+          </article>
           <aside aria-labelledby={railLabelledBy} className="min-w-0">
             {rail}
           </aside>
@@ -137,6 +173,7 @@ export function KbDocumentShell({
         // this ticket, and 34 against 12 is what put the two surfaces' title
         // bars on different lines. Do not "fix" this back to 34px.
         <div className={cn(DOCUMENT_COLUMN, documentGutters(roomy), HEADER_COLUMN_TOP)}>
+          {header}
           {children}
         </div>
       )}
