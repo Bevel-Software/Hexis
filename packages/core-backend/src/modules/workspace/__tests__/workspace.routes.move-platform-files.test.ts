@@ -224,42 +224,66 @@ describe('a platform file stays in its folder', () => {
     h.canRestorePlatformFile.mockResolvedValue(false);
     const res = await move(h, from, to);
     expect(h.canRestorePlatformFile).toHaveBeenCalledWith(WORKSPACE_ID, USER.email, name);
-    if (name === 'access.md' || name === '.bevelignore') {
-      // Read wherever they sit, so the misplaced copy is a platform file too
-      // and the refusal is the sentence.
-      expect(res.status).toBe(409);
-      expect(res.body.error).toBe(`${name} is a platform file and stays in its folder.`);
-      expect(h.moveEntry).not.toHaveBeenCalled();
-    } else {
-      // A nested `roles.yaml` / `AGENTS.md` is ordinary content, so nothing
-      // here refuses moving it. What the non-admin does not get is the CLAIM:
-      // the move faces the destination's own rules like any other, which in
-      // the repository this feature is about is the deny that started it.
-      expect(res.status).toBe(200);
-      for (const call of h.acquireLock.mock.calls) {
-        expect((call[4] as { platformRestore?: unknown })?.platformRestore).toBeUndefined();
-      }
-    }
+    expect(res.status).toBe(409);
+    // Two sentences, because two different things are wrong. `access.md` and
+    // `.bevelignore` are read wherever they sit, so the misplaced copy is
+    // itself a platform file and the refusal is about MOVING one. A nested
+    // `roles.yaml` / `AGENTS.md` is ordinary content, so nothing is being
+    // moved out of place — what is refused is the file the destination would
+    // BECOME, which is the root's own `roles.yaml`, written by someone the
+    // access module just said may not restore it.
+    expect(res.body.error).toBe(
+      name === 'access.md' || name === '.bevelignore'
+        ? `${name} is a platform file and stays in its folder.`
+        : `${name} is a platform file name; a move cannot create a platform file.`,
+    );
+    expect(h.moveEntry).not.toHaveBeenCalled();
+    expect(h.acquireLock).not.toHaveBeenCalled();
   });
 
-  it('nothing lands ON a platform file that is already there, restore or not', async () => {
-    // `moveEntry` is a rename: without this the destination's rules would be
-    // replaced by whatever was dragged onto them, and the rule above — which
-    // reads only the SOURCE — would have nothing to say about it.
+  it('an ordinary file cannot BECOME a platform file, at a free destination or an occupied one', async () => {
+    // `moveEntry` is a rename, so this is the only thing standing between a
+    // note and the rules of the folder it is renamed into. Nothing on the
+    // SOURCE side has anything to say about it: `Sales/deal.md` is content.
+    const created = await move(h, `${KB}/Sales/deal.md`, `${KB}/access.md`);
+    expect(created.status).toBe(409);
+    expect(created.body.error).toBe('access.md is a platform file name; a move cannot create a platform file.');
+
+    const renamedInPlace = await move(h, `${KB}/Sales/deal.md`, `${KB}/Sales/access.md`);
+    expect(renamedInPlace.status).toBe(409);
+    expect(renamedInPlace.body.error).toBe('access.md is a platform file name; a move cannot create a platform file.');
+
+    // The same answer with the file already there — the destination is a
+    // platform path either way, and the restore is the only move that lands
+    // on one.
+    await fs.mkdir(path.join(h.workspaceDir, KB), { recursive: true });
+    await fs.writeFile(path.join(h.workspaceDir, KB, '.bevelignore'), '*.tmp\n');
+    const onto = await move(h, `${KB}/Sales/deal.md`, `${KB}/.bevelignore`);
+    expect(onto.status).toBe(409);
+    expect(onto.body.error).toBe('.bevelignore is a platform file name; a move cannot create a platform file.');
+
+    expect(h.moveEntry).not.toHaveBeenCalled();
+    expect(h.acquireLock).not.toHaveBeenCalled();
+  });
+
+  it('a destination that fills up after the access check is caught under the lock', async () => {
+    // The access module answers on the disk it saw: `canRestorePlatformFile`
+    // said yes because the root had no `access.md` when it looked. Here it
+    // says yes and the file IS there — the state a racing writer leaves — and
+    // the move refuses rather than renaming over the rules it came to bring
+    // back. Both locks are held by then, so this is the last place the answer
+    // can change.
+    h.canRestorePlatformFile.mockResolvedValue(true);
     await fs.mkdir(path.join(h.workspaceDir, KB), { recursive: true });
     await fs.writeFile(path.join(h.workspaceDir, KB, 'access.md'), '---\nread: everyone\n---\n');
 
-    const ordinary = await move(h, `${KB}/Sales/deal.md`, `${KB}/access.md`);
-    expect(ordinary.status).toBe(409);
-    expect(ordinary.body.error).toBe('access.md is a platform file and stays in its folder.');
+    const res = await move(h, `${KB}/Misplaced/access.md`, `${KB}/access.md`);
 
-    // Not even the rescue: a root that HAS its access.md is not missing one.
-    h.canRestorePlatformFile.mockResolvedValue(true);
-    const restore = await move(h, `${KB}/Misplaced/access.md`, `${KB}/access.md`);
-    expect(restore.status).toBe(409);
-    expect(restore.body.error).toBe('access.md is a platform file and stays in its folder.');
-
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('access.md is a platform file and stays in its folder.');
     expect(h.moveEntry).not.toHaveBeenCalled();
+    // It got as far as the locks — that is the point of the second look.
+    expect(h.acquireLock).toHaveBeenCalled();
   });
 
   it('a restore must keep the name: a misplaced access.md may not arrive as something else', async () => {

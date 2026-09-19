@@ -2410,6 +2410,31 @@ describe('FileExplorer: platform files stay put', () => {
       );
     });
 
+    it('a drop that means the top level lands in the clone, not beside it', async () => {
+      // The restore the root-only names need: a drop on the tree's own root
+      // row, which resolves to no folder. Sent bare, that move would put
+      // `.bevelignore` BESIDE the clone — out of the repository, where nothing
+      // reads it and git never sees it again — so it resolves to the clone's
+      // root instead. (The split explorer draws the clone's roots and its
+      // loose files but no row for the clone itself, so there the repository
+      // root is reached from the API and the agent's tool, not by dragging.)
+      const { moveEntry } = renderExplorer({ fileTree: MISPLACED, isAdmin: true });
+      await act(async () => {
+        fireEvent.drop(screen.getByRole('button', { name: '.' }), {
+          dataTransfer: {
+            getData: (t: string) => (t === DRAG_MIME ? `${KB}/Misplaced/.bevelignore` : ''),
+            files: [],
+          },
+        });
+      });
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toHaveTextContent('to the top level');
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(`${KB}/Misplaced/.bevelignore`, `${KB}/.bevelignore`);
+    });
+
     it("the root's own copy still cannot be dragged, admin or not", () => {
       renderExplorer({ fileTree: MISPLACED, isAdmin: true });
       expect(row('access.md')).toHaveAttribute('draggable', 'false');

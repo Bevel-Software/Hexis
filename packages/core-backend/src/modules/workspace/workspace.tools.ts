@@ -44,6 +44,7 @@ import {
   isPlatformFile,
   isPlatformFolder,
   isProtectedBranch,
+  platformFileCreationRefusal,
   platformFileRefusal,
   platformFolderRefusal,
 } from '@bevel-software/platform-shared';
@@ -1858,7 +1859,7 @@ export function registerWorkspaceTools(
         : isGitMetadata(destOnDisk)
           ? destManaged
           : kind === 'file'
-            ? `${destOnDisk.slice(destOnDisk.lastIndexOf('/') + 1)} is a platform file name; a move cannot create a platform file.`
+            ? platformFileCreationRefusal(destOnDisk)
             : `"${destOnDisk}" is a platform folder; a move cannot create one.`;
       const managedWhy = srcManaged ?? createsManaged;
       const managed = managedWhy !== undefined;

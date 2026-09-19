@@ -107,9 +107,26 @@ describe('moveWarnings', () => {
         destinationLabel: 'Legal',
         kbDirName: KB,
         canWrite: false,
+        isAdmin: true,
       }),
     ).toEqual([
       "You can't write to Legal, but putting access.md back where the platform reads it is allowed for an Admin.",
     ]);
+  });
+
+  it('promises a non-admin nothing: the exception is not theirs to use', () => {
+    // A nested `roles.yaml` is ordinary content, so anyone can drag one at
+    // the root — and for anyone but an admin the destination's refusal is
+    // exactly what happens.
+    expect(
+      moveWarnings({
+        sourcePath: `${KB}/KnowledgeBase/Misplaced/roles.yaml`,
+        targetDir: KB,
+        destinationLabel: 'the top level',
+        kbDirName: KB,
+        canWrite: false,
+        isAdmin: false,
+      }),
+    ).toEqual(["You can't write to the top level — the move will be refused."]);
   });
 });

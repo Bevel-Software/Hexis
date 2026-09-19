@@ -1002,9 +1002,23 @@ export function FileTreeNode({
       // Internal move (reorder)
       const sourcePath = e.dataTransfer.getData(DRAG_MIME);
       if (sourcePath) {
-        const targetDir = entry.type === 'directory'
+        const droppedOn = entry.type === 'directory'
           ? (isRoot ? '' : entry.relativePath)
           : '';
+        // "The top level" is the top of the tree the dragged row lives in —
+        // the KB clone's own root — not the workspace folder the clone sits
+        // in. The explorer draws the clone's roots (Knowledge, Data, …) and
+        // its loose files, never a row for the clone itself, so a drop that
+        // resolves to no folder is how the clone's root is reached at all:
+        // it is where an admin drops a misplaced `roles.yaml` to put it back.
+        // Left bare, that move would send the file to `roles.yaml` BESIDE the
+        // clone — out of the repository, where nothing reads it and git never
+        // sees it again.
+        const kbPrefix = kbDirName ? `${kbDirName}/` : null;
+        const targetDir =
+          droppedOn === '' && kbPrefix !== null && sourcePath.startsWith(kbPrefix)
+            ? kbDirName!
+            : droppedOn;
         const name = sourcePath.split('/').pop()!;
         const newPath = targetDir ? `${targetDir}/${name}` : name;
         // Skip no-op or nesting a directory inside itself
@@ -1030,7 +1044,9 @@ export function FileTreeNode({
           kind: 'move',
           sourcePath,
           targetDir,
-          destinationLabel: targetDir ? entry.name : 'the top level',
+          // Named after the row that was dropped on, so a drop that resolved
+          // to the clone's root still reads as "the top level".
+          destinationLabel: droppedOn ? entry.name : 'the top level',
           returnFocusTo: () => rowForPath(sourcePath),
           // The row it was dropped on stays put; the source row moves away.
           focusAfterRun: () => rowForPath(entry.relativePath),
@@ -1468,6 +1484,12 @@ export function TreeChrome({
 }) {
   const openChangeRequests = useOpenChangeRequests();
   const { workspaceId, kbDirName } = useWorkspace();
+  // The move dialog's denied-destination warning reads this: the one move a
+  // denied destination still takes is an admin's platform-file restore, and
+  // for anyone else the refusal it predicts is the right prediction. Read
+  // through the context so a tree drawn without an `AdminProvider` still
+  // draws — see `FileTreeNode`.
+  const isAdmin = useContext(AdminContext)?.isAdmin ?? false;
   /**
    * A clicked suggestion row opens the SHARED change-request dialog on the
    * request the path belongs to, AT that file — the row is a link to the
@@ -1696,7 +1718,7 @@ export function TreeChrome({
           request={confirmRequest}
           warnings={
             confirmRequest.kind === 'move'
-              ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
+              ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable, isAdmin })
               : []
           }
           proposals={folderProposals}

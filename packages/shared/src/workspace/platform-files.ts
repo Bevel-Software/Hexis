@@ -56,6 +56,18 @@ export function platformFileRefusal(pathOrName: string): string {
 }
 
 /**
+ * The sentence a move is refused with when the DESTINATION would be a platform
+ * file — a note renamed to `access.md`, or dragged onto the one that is there.
+ * The other refusal keeps a platform file where the platform reads it; this one
+ * keeps everything else from becoming one, which a rename on disk would
+ * otherwise do silently: the folder would come back governed by rules nobody
+ * wrote as rules.
+ */
+export function platformFileCreationRefusal(pathOrName: string): string {
+  return `${baseName(pathOrName)} is a platform file name; a move cannot create a platform file.`;
+}
+
+/**
  * Whether `repoRelativeDir` is a folder the platform owns rather than content:
  * the repository root itself, or one of its reserved top-level folders
  * (`KnowledgeBase/`, `Skills/`, `Plugins/`, `Data/`, …). Deleting or moving

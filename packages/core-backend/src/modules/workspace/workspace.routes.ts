@@ -15,6 +15,7 @@ import {
   folderPlaceholderPath,
   isPlatformFile,
   isPlatformRestoreShape,
+  platformFileCreationRefusal,
   platformFileRefusal,
   reservedRootDirNames,
 } from '@bevel-software/platform-shared';
@@ -1004,36 +1005,26 @@ export function createWorkspaceRoutes(
       // decides who may make it, and whether the disk agrees.
       const oldRel = toKbRelative(oldPath, kbDirName);
       const newRel = toKbRelative(newPath, kbDirName);
-      // Nothing lands ON a platform file. `moveEntry` is a plain rename, so
-      // an ordinary file moved onto `access.md` would replace the folder's
-      // rules with content — the very loss this route refuses — while the
-      // rule above, which reads only the SOURCE, says nothing about it. A
-      // destination that already holds the file is also not a place one is
-      // missing from, so this is not the restore either.
-      if (newRel !== null && isPlatformFile(newRel)) {
-        const workspaceDir = await workspaceService.getWorkspacePath(id);
-        const absoluteNew = path.resolve(workspaceDir, newPath);
-        assertWithinDirectory(absoluteNew, workspaceDir);
-        const occupied = await fs.stat(absoluteNew).then(
-          () => true,
-          (err: unknown) => {
-            // Genuine absence is the only "free"; anything else is unknown,
-            // and unknown must not clear the way onto a platform file.
-            if (isAbsence(err)) return false;
-            return true;
-          },
-        );
-        if (occupied) {
-          res.status(409).json({ error: platformFileRefusal(newRel) });
-          return;
-        }
-      }
       let platformRestore = false;
       if (oldRel !== null && newRel !== null && isPlatformRestoreShape(oldRel, newRel)) {
         platformRestore = await accessControl.canRestorePlatformFile(id, user.email, newRel);
       }
+      // A platform file stays where the platform reads it …
       if (oldRel !== null && isPlatformFile(oldRel) && !platformRestore) {
         res.status(409).json({ error: platformFileRefusal(oldRel) });
+        return;
+      }
+      // … and nothing else becomes one. `moveEntry` is a plain rename, so
+      // without this a note renamed to `access.md` would come back as the
+      // folder's rules, and a note dragged ONTO the root's `access.md` would
+      // replace the rules that are there — neither of which the rule above,
+      // which reads only the SOURCE, says anything about. The agent's move
+      // tool has refused both since it shipped; this is the same sentence,
+      // from the same place. Only the restore lands on a platform path, and
+      // only where the file is missing (`canRestorePlatformFile` checked the
+      // disk; the destination lock below checks it again, under the lock).
+      if (newRel !== null && isPlatformFile(newRel) && !platformRestore) {
+        res.status(409).json({ error: platformFileCreationRefusal(newRel) });
         return;
       }
       // Move = rename on disk + commit on both sides. We lock-and-release
@@ -1063,18 +1054,37 @@ export function createWorkspaceRoutes(
       const restoreAt = (p: string) => ({
         platformRestore: platformRestore && p === newPath ? { source: oldPath } : undefined,
       });
+      // The restore was authorised against a destination that was missing when
+      // the access module looked. Both locks are in hand by the time this runs,
+      // so nothing else can take that path from under the rename — but between
+      // the two a writer still could, and a restore that lands on a platform
+      // file replaces the rules it came to bring back. So the last thing the
+      // move does before renaming is look again, inside the window it holds.
+      const move = async () => {
+        if (platformRestore) {
+          const workspaceDir = await workspaceService.getWorkspacePath(id);
+          const absoluteNew = path.resolve(workspaceDir, newPath);
+          assertWithinDirectory(absoluteNew, workspaceDir);
+          const taken = await fs.stat(absoluteNew).then(
+            () => true,
+            // Genuine absence is the only "free": anything else is not an
+            // answer, and an unanswered question does not clear the way onto
+            // a platform file.
+            (err: unknown) => !isAbsence(err),
+          );
+          if (taken) {
+            const err: Error & { status?: number } = new Error(platformFileRefusal(newPath));
+            err.status = 409;
+            throw err;
+          }
+        }
+        return workspaceService.moveEntry(id, oldPath, newPath);
+      };
       await withLock(
         id,
         user,
         firstLock,
-        () =>
-          withLock(
-            id,
-            user,
-            secondLock,
-            () => workspaceService.moveEntry(id, oldPath, newPath),
-            restoreAt(secondLock),
-          ),
+        () => withLock(id, user, secondLock, move, restoreAt(secondLock)),
         restoreAt(firstLock),
       );
       // Moving the last entry out leaves its folder in place, like a delete.

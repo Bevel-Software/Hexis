@@ -130,18 +130,25 @@ export function moveWarnings(opts: {
   destinationLabel: string;
   kbDirName: string | null;
   canWrite: boolean | null;
+  /**
+   * Whether the person making the move is an admin. Only the restore line
+   * reads it, and it must: a nested `roles.yaml` is ordinary content, so
+   * ANYONE can drag one at the root, and telling a non-admin their move is
+   * "allowed for an Admin" would promise them what the server will refuse.
+   */
+  isAdmin?: boolean;
 }): string[] {
   const name = opts.sourcePath.split('/').pop() ?? opts.sourcePath;
   const warnings: string[] = [];
   if (opts.canWrite === false) {
     // A restore is the one move allowed past a destination that refuses the
-    // write, so saying it will be refused would be a wrong prediction — and
-    // this dialog only ever sees a platform file when the row let the drag
-    // start, which is an admin dragging a misplaced copy back.
+    // write, so for the admin who may make it "the move will be refused" is
+    // the wrong prediction. For everyone else it is the right one.
     const destination = opts.targetDir ? `${opts.targetDir}/${name}` : name;
     const from = repoRelative(opts.sourcePath, opts.kbDirName);
     const to = repoRelative(destination, opts.kbDirName);
-    const restore = from !== null && to !== null && isPlatformRestoreShape(from, to);
+    const restore =
+      opts.isAdmin === true && from !== null && to !== null && isPlatformRestoreShape(from, to);
     warnings.push(
       restore
         ? `You can't write to ${opts.destinationLabel}, but putting ${name} back where the platform reads it is allowed for an Admin.`
