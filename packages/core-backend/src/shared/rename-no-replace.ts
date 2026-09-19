@@ -117,9 +117,10 @@ export async function inspectDestination(
  * `sales`, so `Sales/notes.md` → `sales/Notes.md` is one folder, one entry and
  * one rename. The parents are compared by identity for that reason.
  *
- * `oldAbsolute === newAbsolute` is the degenerate self-move, which no
- * directory read can decide (one spelling, one entry) and which is trivially
- * the source itself.
+ * Two cases never reach the listing at all, because there are no two
+ * spellings in them to count: `oldAbsolute === newAbsolute`, and the pair
+ * whose basenames are identical and whose only difference is the parent's
+ * spelling. Both are one entry by construction.
  */
 async function isSelfRename(
   oldAbsolute: string,
@@ -132,6 +133,11 @@ async function isSelfRename(
   if (!foldsTogether(oldAbsolute, newAbsolute)) return false;
   const folder = path.dirname(oldAbsolute);
   if (!(await sameFolder(folder, path.dirname(newAbsolute)))) return false;
+  // One folder and one NAME: only the parent's spelling changed
+  // (`Sales/notes.md` → `sales/notes.md`), so there is nothing for the listing
+  // to count — asking it whether two identical basenames are both present
+  // would answer yes and read the entry as a clash with itself.
+  if (path.basename(oldAbsolute) === path.basename(newAbsolute)) return true;
   let entries: string[];
   try {
     entries = await fs.readdir(folder);

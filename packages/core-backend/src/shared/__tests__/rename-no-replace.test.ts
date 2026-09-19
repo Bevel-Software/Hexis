@@ -273,6 +273,18 @@ describe('renameNoReplace', () => {
       { state: folded ? 'self' : 'free' },
     );
 
+    // The parent's case alone, with the file's name untouched: one folder and
+    // one name, so there are no two spellings for the folder listing to count
+    // — and counting them anyway would find the single name twice and call
+    // the entry a clash with itself.
+    expect(await inspectDestination(at('Sales/notes.md'), at('sales/notes.md'))).toEqual(
+      { state: folded ? 'self' : 'free' },
+    );
+    if (folded) {
+      await renameNoReplace(at('Sales/notes.md'), at('sales/notes.md'), 'sales/notes.md');
+      expect(await read('sales/notes.md')).toBe('# Notes\n');
+    }
+
     // And a genuine move between two DIFFERENT folders of one file is still a
     // clash, whatever the two names look like.
     await fs.mkdir(at('Archive'));
