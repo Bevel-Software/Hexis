@@ -69,64 +69,111 @@ function appCss() {
   return compiler;
 }
 
+/** One style rule: its selector, its own declarations, and the at-rules around it. */
+type Rule = { selector: string; declarations: string; within: string[] };
+
 /**
- * The body of `@layer <name> { … }`, brace-matched rather than regexed.
+ * Every style rule in the compiled stylesheet, brace-matched.
  *
- * Throws when the layer is absent. A missing utilities layer means this parser
- * no longer understands Tailwind's output (a version bump that renames or
- * reformats it), and degrading to "no declarations" would report the chip as
- * broken — or pass an absence assertion vacuously — while the chip is fine.
- * The helper exists to keep assertions honest, so it fails as itself.
+ * Text becomes a selector only where it precedes a `{` and is not an at-rule
+ * prelude; a `;` or `}` ends whatever was being read. So a declaration value
+ * (`--spacing: .25rem`, `transition: .15s`) can never be picked up as one —
+ * the dotted tokens inside theme variables and values are never selectors
+ * here, which is what makes "Tailwind emitted a selector for this class" an
+ * answerable question rather than "this name occurs after a dot somewhere".
  */
-function layerBody(css: string, name: string): string {
-  const open = css.indexOf(`@layer ${name} {`);
-  if (open < 0) {
+function* eachRule(css: string): Generator<Rule> {
+  const within: string[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < css.length) {
+    const character = css[i];
+    if (character === '{') {
+      const prelude = css.slice(start, i).trim();
+      if (prelude.startsWith('@')) {
+        within.push(prelude);
+        start = ++i;
+        continue;
+      }
+      let depth = 0;
+      let end = i;
+      while (end < css.length) {
+        if (css[end] === '{') depth++;
+        else if (css[end] === '}' && --depth === 0) break;
+        end++;
+      }
+      // Only the rule's own declarations: anything nested belongs to its own rule.
+      const body = css.slice(i + 1, end);
+      const nested = body.indexOf('{');
+      yield {
+        selector: prelude,
+        declarations: nested < 0 ? body : body.slice(0, body.lastIndexOf(';', nested) + 1),
+        within: [...within],
+      };
+      i = end + 1;
+      start = i;
+    } else if (character === '}') {
+      within.pop();
+      start = ++i;
+    } else if (character === ';') {
+      start = ++i;
+    } else {
+      i++;
+    }
+  }
+}
+
+/** The class names a selector targets, unescaped: `.hover\:x:hover` → `hover:x`. */
+function classNamesIn(selector: string): string[] {
+  return [...selector.matchAll(/\.((?:\\.|[^{},\s:>~+[.])+)/g)].map(([, name]) =>
+    name.replace(/\\(.)/g, '$1'),
+  );
+}
+
+/** Whether a rule sits inside `@layer utilities`. */
+function inUtilities(rule: Rule): boolean {
+  return rule.within.some((at) => /^@layer\s+utilities\b/.test(at));
+}
+
+/**
+ * The unconditional declarations of each bare `.class` rule in the utilities
+ * layer.
+ *
+ * Throws when the layer holds no rule at all. A missing utilities layer means
+ * this parser no longer understands Tailwind's output (a version bump that
+ * renames or reformats it), and degrading to "no declarations" would report
+ * the chip as broken — or pass an absence assertion vacuously — while the chip
+ * is fine. The helper exists to keep assertions honest, so it fails as itself.
+ */
+function utilityDeclarations(rules: Rule[]): Map<string, Declarations> {
+  const byClass = new Map<string, Declarations>();
+  let sawUtilitiesLayer = false;
+  for (const rule of rules) {
+    if (!inUtilities(rule)) continue;
+    sawUtilitiesLayer = true;
+    for (const raw of rule.selector.split(',')) {
+      const selector = raw.trim();
+      const [className, ...rest] = classNamesIn(selector);
+      // A bare class and nothing else: `.truncate`, not `.a:hover`, `.a.b`, `.a .b`.
+      if (className === undefined || rest.length) continue;
+      if (selector.replace(/\\(.)/g, '$1') !== `.${className}`) continue;
+      const declarations: Declarations = { ...byClass.get(className) };
+      for (const declaration of rule.declarations.split(';')) {
+        const colon = declaration.indexOf(':');
+        if (colon < 0) continue;
+        declarations[declaration.slice(0, colon).trim()] = declaration.slice(colon + 1).trim();
+      }
+      byClass.set(className, declarations);
+    }
+  }
+  if (!sawUtilitiesLayer) {
     throw new Error(
-      `No \`@layer ${name}\` in the compiled stylesheet: ${APP_STYLESHEET} no longer emits ` +
-        `the layer this parser reads, so no element's declarations can be resolved. This is a ` +
-        `fault in the test helper (most likely a Tailwind upgrade), not in the component.`,
+      `No \`@layer utilities\` rule in the compiled stylesheet: ${APP_STYLESHEET} no longer ` +
+        `emits the layer this parser reads, so no element's declarations can be resolved. This ` +
+        `is a fault in the test helper (most likely a Tailwind upgrade), not in the component.`,
     );
   }
-  let depth = 0;
-  for (let i = css.indexOf('{', open); i < css.length; i++) {
-    if (css[i] === '{') depth++;
-    else if (css[i] === '}' && --depth === 0) return css.slice(css.indexOf('{', open) + 1, i);
-  }
-  throw new Error(`\`@layer ${name}\` in the compiled stylesheet is never closed.`);
-}
-
-/** Every plain `.class { … }` rule in the utilities layer, class name unescaped. */
-function parseUtilities(css: string): Map<string, Declarations> {
-  const rules = new Map<string, Declarations>();
-  for (const [, selector, body] of layerBody(css, 'utilities').matchAll(
-    /\.((?:\\.|[^{},\s])+)\s*\{([^{}]*)\}/g,
-  )) {
-    const className = selector.replace(/\\(.)/g, '$1');
-    // Variants (`hover:…:hover`) and combinators are not a bare class: skip.
-    if (/[:>~+]/.test(className)) continue;
-    const declarations: Declarations = { ...rules.get(className) };
-    for (const declaration of body.split(';')) {
-      const colon = declaration.indexOf(':');
-      if (colon < 0) continue;
-      declarations[declaration.slice(0, colon).trim()] = declaration.slice(colon + 1).trim();
-    }
-    rules.set(className, declarations);
-  }
-  return rules;
-}
-
-/**
- * Every class name Tailwind emitted a selector for, anywhere in the output —
- * including the varianted ones (`.hover\:text-danger:hover`) and rules outside
- * the utilities layer. Used to tell "this class is styled, just not
- * unconditionally" apart from "Tailwind produced nothing for this class".
- */
-function styledClassNames(css: string): Set<string> {
-  const names = new Set<string>();
-  for (const [, selector] of css.matchAll(/\.((?:\\.|[^{},\s:>~+[])+)/g)) {
-    names.add(selector.replace(/\\(.)/g, '$1'));
-  }
-  return names;
+  return byClass;
 }
 
 /**
@@ -136,20 +183,20 @@ function styledClassNames(css: string): Set<string> {
  * and meaningless for a property two of its classes both set — read it for the
  * former only.
  *
- * A class Tailwind emitted nothing at all for is a purged, renamed or
- * misspelled utility, and throws rather than quietly contributing nothing. A
- * class that is only styled under a variant (`hover:text-danger`) contributes
- * nothing here by design — a rule that applies on hover is not a declaration
- * the element has — but it is known to exist, so it is not confused with a
- * utility that has gone missing.
+ * A class Tailwind emitted no selector for is a purged, renamed or misspelled
+ * utility, and throws rather than quietly contributing nothing. A class that is
+ * only styled under a variant (`hover:text-danger`) contributes nothing here by
+ * design — a rule that applies on hover is not a declaration the element has —
+ * but it is known to exist, so it is not confused with a utility that has gone
+ * missing. That check runs first, so an element whose classes are all unknown
+ * is reported as such rather than as a missing utilities layer.
  */
 export async function declarationsOf(element: Element): Promise<Declarations> {
   const classNames = element.className.split(/\s+/).filter(Boolean);
-  const css = (await appCss()).build(classNames);
-  const rules = parseUtilities(css);
-  const styled = styledClassNames(css);
+  const rules = [...eachRule((await appCss()).build(classNames))];
+  const styled = new Set(rules.flatMap((rule) => classNamesIn(rule.selector)));
 
-  const missing = classNames.filter((c) => !rules.has(c) && !styled.has(c));
+  const missing = classNames.filter((c) => !styled.has(c));
   if (missing.length) {
     throw new Error(
       `Tailwind emitted no CSS for ${missing.map((c) => `\`${c}\``).join(', ')} on <${element.tagName.toLowerCase()}>. ` +
@@ -157,5 +204,7 @@ export async function declarationsOf(element: Element): Promise<Declarations> {
         `class list says it is.`,
     );
   }
-  return Object.assign({}, ...classNames.map((c) => rules.get(c) ?? {})) as Declarations;
+
+  const byClass = utilityDeclarations(rules);
+  return Object.assign({}, ...classNames.map((c) => byClass.get(c) ?? {})) as Declarations;
 }
