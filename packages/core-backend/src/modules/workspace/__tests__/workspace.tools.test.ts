@@ -83,6 +83,13 @@ let writePolicy: RoutineWritePolicyService;
 let focusedBranch: string | undefined;
 /** The registry the tools were mounted into, so a test can inspect their defs. */
 let toolRegistry: ToolRegistry;
+/**
+ * Another writer getting to a path in the window the real `LockingFilesystem`
+ * closes: the stand-ins below run it where that filesystem would be acquiring
+ * the lock — after the tool's preflight, before the under-lock `check`. Fires
+ * ONCE (it clears itself), so a test's later writes are ordinary ones.
+ */
+let raceHook: (() => Promise<void>) | null = null;
 
 async function start(
   scope: 'read' | 'write' = 'write',
@@ -90,6 +97,7 @@ async function start(
   /** The signed-in caller's address — only the branch-naming tests vary it. */
   userEmail = 'e@x',
 ): Promise<string> {
+  raceHook = null;
   tempDir = await mkdtemp(join(tmpdir(), 'ws-tools-'));
   docCacheDir = await mkdtemp(join(tmpdir(), 'ws-doc-cache-'));
   fs = new LocalFilesystem({ basePath: tempDir, contained: true });
@@ -102,12 +110,38 @@ async function start(
   // batch's own all-or-none behaviour is asserted where it lives, in
   // `locking-filesystem.test.ts` ("a DELETE batch whose later lock is
   // contended deletes nothing").
+  // Both stand-ins honour the caller's under-lock `check` the way the real
+  // filesystem does — run it with the paths "locked" (here: just before any
+  // byte lands), let a refusal through untouched, and in the batch case write
+  // only what the check keeps. That is what makes the outcome the tools report
+  // a verdict about the state they actually wrote over.
+  const runRaceHook = async (): Promise<void> => {
+    const hook = raceHook;
+    raceHook = null;
+    if (hook) await hook();
+  };
+  const plainWriteFile = fs.writeFile.bind(fs);
+  (fs as unknown as Record<string, unknown>).writeFile = async (
+    path: string,
+    content: string,
+    options?: unknown,
+    check?: () => Promise<void>,
+  ) => {
+    await runRaceHook();
+    await check?.();
+    return plainWriteFile(path, content, options as never);
+  };
   (fs as unknown as Record<string, unknown>).writeFiles = async (
     writes: { path: string; content: string }[],
     _summary: string,
     deletes: string[] = [],
+    check?: (
+      pending: readonly { path: string; content: string }[],
+    ) => Promise<{ path: string; content: string }[]>,
   ) => {
-    for (const w of writes) await fs.writeFile(w.path, w.content);
+    await runRaceHook();
+    const landing = check ? await check(writes) : writes;
+    for (const w of landing) await plainWriteFile(w.path, w.content);
     for (const p of deletes) await fs.deleteFile(p);
   };
   await fs.writeFile('a.md', 'hello\nworld\n');
@@ -519,6 +553,258 @@ describe('workspace file primitives', () => {
     const base = await start('read');
     expect((await post(`${base}/api/agent/tools/write_file`, { path: 'c.md', content: 'x' })).status).toBe(403);
     expect((await post(`${base}/api/agent/tools/read_file`, { path: 'a.md' })).status).toBe(200);
+  });
+});
+
+/**
+ * `mode` on the two write tools. The default is `create`, so "write this
+ * content here" can no longer replace a page the agent never read: an
+ * existing path is refused, by name, with the one argument that would have
+ * made it a deliberate replacement. `write_files` answers for EVERY requested
+ * path, in the order it was given them, and a path it cannot write does not
+ * stop the ones it can.
+ */
+describe('write modes and per-path outcomes', () => {
+  const writeFile = (base: string, body: Record<string, unknown>) => post(`${base}/api/agent/tools/write_file`, body);
+  const writeFiles = (base: string, body: Record<string, unknown>) => post(`${base}/api/agent/tools/write_files`, body);
+  const onDisk = (p: string) => readFile(join(tempDir, p), 'utf8');
+  interface BatchAnswer { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] }
+
+  it('write_file with no mode creates a new file and says `created`', async () => {
+    const base = await start();
+    const res = await writeFile(base, { path: 'fresh.md', content: 'new page' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ path: 'fresh.md', bytes: 8, outcome: 'created' });
+    expect(await onDisk('fresh.md')).toBe('new page');
+  });
+
+  it('write_file with no mode refuses a path that exists, names it, says how to replace it, and leaves it alone', async () => {
+    const base = await start();
+    const res = await writeFile(base, { path: 'a.md', content: 'clobbered' });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string; path: string };
+    expect(body.code).toBe('exists');
+    expect(body.path).toBe('a.md');
+    expect(body.error).toContain('a.md');
+    expect(body.error).toContain('pass mode: overwrite to replace it');
+    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  it('write_file mode overwrite replaces and says `replaced`, and creates what is not there yet', async () => {
+    const base = await start();
+    const replaced = await writeFile(base, { path: 'a.md', content: 'replacement' });
+    expect(replaced.status).toBe(409); // …without the mode.
+    const res = await writeFile(base, { path: 'a.md', content: 'replacement', mode: 'overwrite' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ path: 'a.md', outcome: 'replaced' });
+    expect(await onDisk('a.md')).toBe('replacement');
+    // `overwrite` on a path with nothing at it is still a create, and says so.
+    const created = await writeFile(base, { path: 'not-there.md', content: 'x', mode: 'overwrite' });
+    expect(await created.json()).toMatchObject({ outcome: 'created' });
+  });
+
+  it('write_file mode update rewrites an existing file and refuses a missing one with `missing`', async () => {
+    const base = await start();
+    const updated = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ path: 'a.md', outcome: 'updated' });
+    expect(await onDisk('a.md')).toBe('second draft');
+
+    const missing = await writeFile(base, { path: 'nowhere.md', content: 'x', mode: 'update' });
+    expect(missing.status).toBe(404);
+    const body = (await missing.json()) as { error: string; code: string; path: string };
+    expect(body.code).toBe('missing');
+    expect(body.path).toBe('nowhere.md');
+    expect(body.error).toContain('nowhere.md');
+    await expect(onDisk('nowhere.md')).rejects.toThrow();
+  });
+
+  it('write_files answers for every requested path in input order, writes the rest, and counts only what landed', async () => {
+    const base = await start();
+    const res = await writeFiles(base, {
+      files: [
+        { path: 'one.md', content: 'first' },
+        { path: 'a.md', content: 'clobbered' }, // already there
+        { path: 'two.md', content: 'second' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as BatchAnswer;
+    expect(body.count).toBe(2);
+    expect(body.files.map((f) => f.path)).toEqual(['one.md', 'a.md', 'two.md']);
+    expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+    expect(body.files[1].error).toBe('exists');
+    expect(body.files[1].message).toContain('pass mode: overwrite to replace it');
+    // The two it could write landed; the one it refused is untouched.
+    expect(await onDisk('one.md')).toBe('first');
+    expect(await onDisk('two.md')).toBe('second');
+    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  it('write_files takes the same three modes', async () => {
+    const base = await start();
+    const overwritten = (await (await writeFiles(base, {
+      mode: 'overwrite',
+      files: [{ path: 'a.md', content: 'replaced text' }, { path: 'brand-new.md', content: 'new' }],
+    })).json()) as BatchAnswer;
+    expect(overwritten.count).toBe(2);
+    expect(overwritten.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
+    expect(await onDisk('a.md')).toBe('replaced text');
+
+    const updated = (await (await writeFiles(base, {
+      mode: 'update',
+      files: [{ path: 'a.md', content: 'again' }, { path: 'never-written.md', content: 'x' }],
+    })).json()) as BatchAnswer;
+    expect(updated.count).toBe(1);
+    expect(updated.files.map((f) => f.outcome)).toEqual(['updated', 'refused']);
+    expect(updated.files[1].error).toBe('missing');
+    await expect(onDisk('never-written.md')).rejects.toThrow();
+  });
+
+  it('write_files refuses a second create for a path an earlier entry in the SAME batch already claims', async () => {
+    const base = await start();
+    const body = (await (await writeFiles(base, {
+      files: [{ path: 'dup.md', content: 'first' }, { path: 'dup.md', content: 'second' }],
+    })).json()) as BatchAnswer;
+    expect(body.count).toBe(1);
+    expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused']);
+    expect(body.files[1].error).toBe('exists');
+    expect(await onDisk('dup.md')).toBe('first');
+  });
+
+  it('an empty batch is still an answer with both fields', async () => {
+    const base = await start();
+    expect(await (await writeFiles(base, { files: [] })).json()).toEqual({ count: 0, files: [] });
+  });
+
+  it('a mode that is not one of the three is refused, not read as the nearest one', async () => {
+    const base = await start();
+    for (const res of [
+      await writeFile(base, { path: 'a.md', content: 'x', mode: 'replace' }),
+      await writeFiles(base, { files: [{ path: 'a.md', content: 'x' }], mode: 'replace' }),
+    ]) {
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe('bad_mode');
+      expect(body.error).toContain('`create`, `overwrite`, `update`');
+    }
+    expect(await onDisk('a.md')).toBe('hello\nworld\n');
+  });
+
+  /**
+   * The mode is a promise about the state the write lands on, so it has to be
+   * judged over a state no one else can move — i.e. with the path's lock held,
+   * not at a preflight anybody may invalidate before the bytes land. These
+   * four drive that window directly: `raceHook` is the other writer, running
+   * exactly where the real filesystem acquires the lock.
+   */
+  describe('the mode is judged over the state the write actually lands on', () => {
+    it('write_file create refuses a path another writer created after the preflight, and keeps their file', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('contested.md', 'theirs\n'); };
+      const res = await writeFile(base, { path: 'contested.md', content: 'mine' });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { code: string; path: string; error: string };
+      expect(body.code).toBe('exists');
+      expect(body.path).toBe('contested.md');
+      expect(body.error).toContain('pass mode: overwrite to replace it');
+      // The point of the whole feature: their bytes are still there.
+      expect(await onDisk('contested.md')).toBe('theirs\n');
+    });
+
+    it('write_file update refuses a path another writer deleted after the preflight, and does not recreate it', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.deleteFile('a.md'); };
+      const res = await writeFile(base, { path: 'a.md', content: 'second draft', mode: 'update' });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toMatchObject({ code: 'missing', path: 'a.md' });
+      await expect(onDisk('a.md')).rejects.toThrow();
+    });
+
+    it('write_file overwrite reports `replaced`, not `created`, when the file appeared after the preflight', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('late.md', 'theirs\n'); };
+      const res = await writeFile(base, { path: 'late.md', content: 'mine', mode: 'overwrite' });
+      expect(res.status).toBe(200);
+      // The preflight saw nothing there and would have answered `created`.
+      expect(await res.json()).toMatchObject({ path: 'late.md', outcome: 'replaced' });
+      expect(await onDisk('late.md')).toBe('mine');
+    });
+
+    it('write_files drops only the path another writer took, lands the rest, and counts what landed', async () => {
+      const base = await start();
+      raceHook = async () => { await fs.writeFile('two.md', 'theirs\n'); };
+      const body = (await (await writeFiles(base, {
+        files: [
+          { path: 'one.md', content: 'first' },
+          { path: 'two.md', content: 'second' },
+          { path: 'three.md', content: 'third' },
+        ],
+      })).json()) as BatchAnswer;
+      expect(body.count).toBe(2);
+      expect(body.files.map((f) => f.path)).toEqual(['one.md', 'two.md', 'three.md']);
+      expect(body.files.map((f) => f.outcome)).toEqual(['created', 'refused', 'created']);
+      expect(body.files[1].error).toBe('exists');
+      expect(await onDisk('one.md')).toBe('first');
+      expect(await onDisk('three.md')).toBe('third');
+      expect(await onDisk('two.md')).toBe('theirs\n');
+    });
+  });
+
+  it('both descriptions state the default and all three modes, and `mode` is an input on each', async () => {
+    await start();
+    const tools = await toolRegistry.listInternal();
+    for (const name of ['write_file', 'write_files']) {
+      const def = tools.find((t) => t.name === name)!;
+      expect(def.description, name).toContain('DEFAULTS TO `create`');
+      for (const mode of ['`create`', '`overwrite`', '`update`']) {
+        expect(def.description, `${name} ${mode}`).toContain(mode);
+      }
+      const body = (def.inputs as { properties: { body: { properties: Record<string, { enum?: string[]; description?: string }> } } }).properties.body;
+      expect(body.properties.mode, name).toBeDefined();
+      expect(body.properties.mode.enum, name).toEqual(['create', 'overwrite', 'update']);
+      expect(body.properties.mode.description, name).toContain('default `create`');
+    }
+  });
+
+  /**
+   * The audited-caller case, as a KB fixture: a skill whose step rewrites a
+   * ticket card it has just read (the shape every delivery skill uses to
+   * append to a ticket's log). It keeps working because the rewrite says
+   * `mode: overwrite` — and the same step WITHOUT the mode is refused, which
+   * is exactly the signal the audit was for.
+   */
+  it('a skill that rewrites a ticket card it just read still works, because it passes mode: overwrite', async () => {
+    const base = await start();
+    const card = `${KB_DIR}/Data/Tickets/Ship-It.md`;
+    await fs.mkdir(`${KB_DIR}/Data/Tickets`, { recursive: true });
+    await fs.writeFile(card, '# Ship It\n\n# Log\n- filed\n');
+
+    const read = (await (await post(`${base}/api/agent/tools/read_file`, { path: card })).json()) as { content: string };
+    const updatedCard = `${read.content}- coding done\n`;
+
+    // The step as the skill writes it today, with no mode: refused, card intact.
+    const blind = await writeFile(base, { path: card, content: updatedCard });
+    expect(blind.status).toBe(409);
+    expect(await onDisk(card)).toBe('# Ship It\n\n# Log\n- filed\n');
+
+    // The audited step, saying what it means: the rewrite lands.
+    const audited = await writeFile(base, { path: card, content: updatedCard, mode: 'overwrite' });
+    expect(audited.status).toBe(200);
+    expect(await audited.json()).toMatchObject({ path: card, outcome: 'replaced' });
+    expect(await onDisk(card)).toBe('# Ship It\n\n# Log\n- filed\n- coding done\n');
+
+    // …and the same step through the batch tool, which the skills use to land
+    // a card and its transcript in ONE commit.
+    const both = (await (await writeFiles(base, {
+      mode: 'overwrite',
+      files: [
+        { path: card, content: `${updatedCard}- local testing done\n` },
+        { path: `${KB_DIR}/Data/Tickets/Ship-It/transcripts/02-coding.md`, content: '# transcript\n' },
+      ],
+    })).json()) as BatchAnswer;
+    expect(both.count).toBe(2);
+    expect(both.files.map((f) => f.outcome)).toEqual(['replaced', 'created']);
   });
 });
 
@@ -1102,8 +1388,6 @@ describe('office documents and PDFs', () => {
       ['write_file', { path: 'slides.odp', content: 'plain text' }],
       ['edit_file', { path: 'deck.pptx', old_string: 'Original', new_string: 'Changed' }],
       ['edit_file', { path: 'numbers.ods', old_string: 'a', new_string: 'b' }],
-      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.xlsx', content: 'nope' }] }],
-      ['write_files', { files: [{ path: 'ok.md', content: 'fine' }, { path: 'sheet.ods', content: 'nope' }] }],
     ] as const) {
       const res = await post(`${base}/api/agent/tools/${tool}`, body);
       expect(res.status, tool).toBe(415);
@@ -1111,8 +1395,23 @@ describe('office documents and PDFs', () => {
       expect(error, tool).toContain('EXTRACTED text');
       expect(error, tool).toContain('uploading a new version');
     }
-    // The batch was refused atomically — the innocent .md was not written either.
-    expect((await post(`${base}/api/agent/tools/read_file`, { path: 'ok.md' })).status).not.toBe(200);
+    // In a BATCH the same refusal is per path: the document is refused with the
+    // same explanation, and the innocent .md beside it is still written.
+    for (const doc of ['sheet.xlsx', 'sheet.ods']) {
+      const res = await post(`${base}/api/agent/tools/write_files`, {
+        files: [{ path: `ok-${doc}.md`, content: 'fine' }, { path: doc, content: 'nope' }],
+      });
+      expect(res.status, doc).toBe(200);
+      const body = (await res.json()) as { count: number; files: { path: string; outcome: string; error?: string; message?: string }[] };
+      expect(body.count, doc).toBe(1);
+      expect(body.files.map((f) => f.path), doc).toEqual([`ok-${doc}.md`, doc]);
+      expect(body.files[0], doc).toMatchObject({ outcome: 'created' });
+      expect(body.files[1], doc).toMatchObject({ outcome: 'refused', error: 'binary_not_writable' });
+      expect(body.files[1].message, doc).toContain('EXTRACTED text');
+      expect(body.files[1].message, doc).toContain('uploading a new version');
+      expect(await readContent(base, `ok-${doc}.md`)).toBe('fine');
+      expect((await post(`${base}/api/agent/tools/file_stat`, { path: doc })).status, doc).not.toBe(200);
+    }
     // And the pptx is untouched: reading it still extracts the original text.
     expect(await readContent(base, 'deck.pptx')).toContain('Original');
   });
@@ -1175,6 +1474,15 @@ describe('office documents and PDFs', () => {
       expect(body.error, label).toContain('upload');
       expect(body.error, label).toContain('copy_file / move_file');
     };
+    /** The same refusal, as `write_files` reports it: per path, inside a 200. */
+    const expectBatchRefusal = async (res: Response, fileKind: string, label: string) => {
+      expect(res.status, label).toBe(200);
+      const body = (await res.json()) as { count: number; files: { outcome: string; error?: string; message?: string }[] };
+      expect(body.count, label).toBe(0);
+      expect(body.files[0].outcome, label).toBe('refused');
+      expect(body.files[0].error, label).toBe('binary_not_writable');
+      expect(body.files[0].message, label).toContain(`this file's kind is ${fileKind};`);
+    };
 
     it('file_stat reports contentMode text | document | binary', async () => {
       const base = await start();
@@ -1233,8 +1541,9 @@ describe('office documents and PDFs', () => {
       };
       const files = await seed();
       for (const f of files) {
-        const write = await post(`${base}/api/agent/tools/write_file`, { path: f.path, content: 'plain text' });
-        const batch = await post(`${base}/api/agent/tools/write_files`, { files: [{ path: f.path, content: 'plain text' }] });
+        // Every seeded file already exists, so the write says it means to replace it.
+        const write = await post(`${base}/api/agent/tools/write_file`, { path: f.path, content: 'plain text', mode: 'overwrite' });
+        const batch = await post(`${base}/api/agent/tools/write_files`, { files: [{ path: f.path, content: 'plain text' }], mode: 'overwrite' });
         const edit = await post(`${base}/api/agent/tools/edit_file`, { path: f.path, old_string: 'a', new_string: 'b' });
         if (f.kind === null) {
           expect(write.status, f.path).toBe(200);
@@ -1245,7 +1554,7 @@ describe('office documents and PDFs', () => {
           continue;
         }
         await expectRefusal(write, f.kind, `write_file ${f.path}`);
-        await expectRefusal(batch, f.kind, `write_files ${f.path}`);
+        await expectBatchRefusal(batch, f.kind, `write_files ${f.path}`);
         await expectRefusal(edit, f.kind, `edit_file ${f.path}`);
         expect((await onDisk(f.path)).equals(f.bytes), f.path).toBe(true);
       }
@@ -2551,8 +2860,10 @@ describe('a write refused for permissions says whether and how to propose it', (
   };
 
   const CALLS: Array<[string, Record<string, unknown>]> = [
-    ['write_file', { branch: TARGET, path: DENIED, content: SECRET_CONTENT }],
-    ['write_files', { branch: TARGET, files: [{ path: DENIED, content: SECRET_CONTENT }] }],
+    // The denied path already exists, so the writes say they mean to replace
+    // it: the mode gate is not what these tests are about.
+    ['write_file', { branch: TARGET, path: DENIED, content: SECRET_CONTENT, mode: 'overwrite' }],
+    ['write_files', { branch: TARGET, files: [{ path: DENIED, content: SECRET_CONTENT }], mode: 'overwrite' }],
     ['edit_file', { branch: TARGET, path: DENIED, old_string: 'old', new_string: SECRET_CONTENT }],
     ['move_file', { branch: TARGET, src: DENIED, dest: `${KB_DIR}/Sales/moved.md` }],
     ['delete_file', { branch: TARGET, path: DENIED }],

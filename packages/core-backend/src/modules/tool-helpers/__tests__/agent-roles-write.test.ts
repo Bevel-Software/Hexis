@@ -117,7 +117,7 @@ afterEach(async () => {
 describe('agent writes to roles.yaml never create a role', () => {
   it('write_file with a new role → 422 naming it, with the group redirect; nothing written', async () => {
     const base = await start();
-    await expectNewRoleRefused(await call(base, 'write_file', { path: ROLES, content: WITH_NEW_ROLE }), 'Project Phoenix');
+    await expectNewRoleRefused(await call(base, 'write_file', { path: ROLES, content: WITH_NEW_ROLE, mode: 'overwrite' }), 'Project Phoenix');
   });
 
   it('edit_file renaming a role → 422 for the created name', async () => {
@@ -129,6 +129,9 @@ describe('agent writes to roles.yaml never create a role', () => {
   it('write_files carrying a new role → 422, and the batch lands nothing', async () => {
     const base = await start();
     const res = await call(base, 'write_files', {
+      // roles.yaml exists, so the batch says it means to replace it — what the
+      // guard refuses is the new role in the content, not the overwrite.
+      mode: 'overwrite',
       files: [
         { path: `${KB}/KnowledgeBase/note.md`, content: 'hello' },
         { path: ROLES, content: WITH_NEW_ROLE },

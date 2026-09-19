@@ -141,10 +141,21 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     this.lockContext = lockContext;
   }
 
+  /**
+   * `check` is the CALLER's under-lock judgement: it runs once the path's lock
+   * is held and before a byte lands — the same slot `validateWrite` uses,
+   * opened up so a caller whose verdict depends on what the path CURRENTLY
+   * holds (the write tools' `mode` gate: does this path exist?) reads a state
+   * nobody else can move. Judged before the lock instead, such a verdict is a
+   * guess: a human editor saving between the stat and the write would have its
+   * file replaced by a `create` that then reported `created`. Throwing refuses
+   * the write and releases the lock untouched; the caller gets what it threw.
+   */
   override async writeFile(
     inputPath: string,
     content: FileContent,
     options?: WriteOptions,
+    check?: () => void | Promise<void>,
   ): Promise<void> {
     await this.assertNotGitInternals(inputPath);
     this.assertInsideRepo(inputPath);
@@ -166,7 +177,13 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     return this.withLock(
       inputPath,
       () => super.writeFile(inputPath, toWrite, options),
-      validate && (async () => validate(inputPath, toWrite)),
+      (check || validate) &&
+        (async () => {
+          // The caller's verdict first: it decides whether this write happens
+          // at all, so the content validator only judges bytes that will land.
+          await check?.();
+          await validate?.(inputPath, toWrite);
+        }),
     );
   }
 
@@ -272,11 +289,25 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * `writes[].path` is workspace-relative (like `writeFile`). We do the disk
    * write here; `commitChanges` only stages + commits what's on disk (the git
    * layer never writes content).
+   *
+   * `check` is the batch counterpart of `writeFile`'s: it runs once EVERY
+   * path's lock is held and before any byte lands, is handed this batch's
+   * writes in the order it was given them, and returns the subset that may
+   * still land (the same objects — the creator-grant transform has already
+   * been applied to their content). It is where a per-path verdict that
+   * depends on what a path currently holds belongs, because only here is that
+   * state one no other writer can move. A write it drops is never written: its
+   * path releases untouched, stays out of the commit's scope, and takes its
+   * creator-grant seed with it when no surviving write still wants one. A
+   * `check` that THROWS refuses the whole batch, untouched.
    */
   async writeFiles(
     writes: { path: string; content: FileContent }[],
     summary: string,
     deletes: string[] = [],
+    check?: (
+      writes: readonly { path: string; content: FileContent }[],
+    ) => Promise<{ path: string; content: FileContent }[]>,
   ): Promise<Change | null> {
     const { workflow, workspaceId, branch, user } = this.lockContext;
     // Fail the whole batch before any plan, validator or lock: one stray path
@@ -292,11 +323,16 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // caller explicitly writes in this batch is skipped — the caller's bytes
     // win.
     const seeds = new Map<string, (current: string) => string>();
+    // Which of the caller's writes asked for each seed. A seed exists only to
+    // make the files below it visible to their creator, so one whose every
+    // origin `check` drops has nothing left to make visible and is dropped too.
+    const seedOrigins = new Map<string, string[]>();
     const grantedWrites: { path: string; content: FileContent }[] = [];
     for (const w of writes) {
       const plan = await this.planCreate(w.path, 'file');
       if (plan?.kind === 'seed-access-md' && !writes.some((x) => x.path === plan.wsRelPath)) {
         seeds.set(plan.wsRelPath, plan.apply);
+        seedOrigins.set(plan.wsRelPath, [...(seedOrigins.get(plan.wsRelPath) ?? []), w.path]);
       }
       grantedWrites.push(
         plan?.kind === 'frontmatter' && typeof w.content === 'string'
@@ -401,6 +437,29 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       }
     }
 
+    // The caller's own under-lock judgement (see the doc above): with every
+    // lock held, it decides which writes may still land. Nothing is on disk
+    // yet, so both a dropped write and an outright refusal leave every locked
+    // path exactly as it was.
+    if (check) {
+      try {
+        writes = await check(writes);
+      } catch (err) {
+        await releaseAll(() => 'untouched');
+        throw err;
+      }
+      for (const [seedPath, origins] of seedOrigins) {
+        if (!origins.some((o) => writes.some((w) => w.path === o))) seeds.delete(seedPath);
+      }
+      if (writes.length === 0 && deletes.length === 0) {
+        // Every write dropped and nothing to delete: no bytes, so no commit
+        // either. An unscoped one here would sweep in whatever another save
+        // left dirty on the paths we merely locked.
+        await releaseAll(() => 'untouched');
+        return null;
+      }
+    }
+
     // Creator-grant seed locks are BEST-EFFORT, single attempt, acquired
     // after the caller's paths: a contended access.md must drop that seed
     // (with a warning), never fail or stall the batch the caller asked for.
@@ -422,7 +481,10 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     // we know whether the seed write happens, and scoping the commit to a
     // merely-locked path would sweep in another save's still-queued dirty
     // bytes on that path under this batch's author/summary.
-    const touched = [...paths];
+    // Normally every locked caller path; after a `check` drop, only the
+    // survivors — a path this batch does not write must stay out of the
+    // commit's scope, or the commit sweeps in another save's queued bytes.
+    const touched = [...new Set([...writes.map((w) => w.path), ...deletes])].sort();
     // Seeds whose bytes LANDED, with the pre-image read under their lock:
     // if the batch's commit then fails, these must be rolled back to that
     // pre-image (not to HEAD — the pre-image may be a prior save's queued
