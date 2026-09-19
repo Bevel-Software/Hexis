@@ -64,7 +64,12 @@ describe('workspace tools — a branch that cannot be opened', () => {
   let docCacheDir = '';
 
   afterEach(async () => {
-    if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
+    if (httpServer) {
+      // Drop the pooled keep-alive sockets first, or close() waits out the
+      // 5s keepAliveTimeout on every test in this file.
+      httpServer.closeAllConnections();
+      await new Promise<void>((r) => httpServer!.close(() => r()));
+    }
     httpServer = undefined;
     workspaces = null;
     for (const dir of [root, spillRoot, docCacheDir]) {

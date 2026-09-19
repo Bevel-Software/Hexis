@@ -73,6 +73,10 @@ describe('GET /api/workspace — a branch that cannot be opened', () => {
   afterEach(async () => {
     if (server) {
       const s = server;
+      // fetch's pooled keep-alive socket keeps the server open until the 5s
+      // keepAliveTimeout fires; drop the idle connections so teardown is
+      // immediate instead of costing five seconds a test.
+      s.closeAllConnections();
       await new Promise<void>((resolve, reject) => s.close((err) => (err ? reject(err) : resolve())));
     }
     server = null;
