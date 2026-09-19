@@ -213,7 +213,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     // The worst case the redaction exists for: a literal token pasted into the
     // file, on the very line the parser chokes on. `yaml` quotes that line back
     // in its message — so what the listing reports must not be that message.
-    const token = 'sk-live-51H8ffGGnotarealkeybutlooksLikeOne';
+    const token = 'pasted-credential-0000-not-a-real-key';
     await write(
       'broken.tool',
       `---\nid: broken\ntype: http\nurl: https://api.example.com/x\nheaders:\n  Authorization: "Bearer ${token}\n---\n`,
@@ -222,7 +222,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     const invalid = await invalidOf(svc(), 'user@x.eu');
     expect(invalid).toHaveLength(1);
     expect(invalid[0].reason).not.toContain(token);
-    expect(invalid[0].reason).not.toContain('sk-live');
+    expect(invalid[0].reason).not.toContain('pasted-credential');
     // Still useful: it says where to look.
     expect(invalid[0].reason).toMatch(/line \d+, column \d+/);
   });
@@ -364,10 +364,10 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
   describe('the reason never carries what the file wrote', () => {
     // The redaction that matters is the one that cannot be applied afterwards.
     // `redactSecret` knows this process's env tokens and the shape of a URL; it
-    // cannot know that `sk-live-…` pasted into `id:` is a credential. So the
+    // cannot know that a token an author pasted into `id:` is a credential. So the
     // rule is upstream: a refusal names the FIELD and the RULE, never the
     // value — and these are the fields an author can write anything into.
-    const token = 'sk-live-51H8ffGGnotarealkeybutlooksLikeOne';
+    const token = 'pasted-credential-0000-not-a-real-key';
 
     test.each([
       ['id', `---\nid: ${token}\ntype: http\nurl: https://api.example.com/x\n---\n`],
@@ -386,7 +386,7 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
       const invalid = await invalidOf(svc(), 'user@x.eu');
       expect(invalid).toHaveLength(1);
       expect(invalid[0].reason).not.toContain(token);
-      expect(invalid[0].reason).not.toContain('sk-live');
+      expect(invalid[0].reason).not.toContain('pasted-credential');
       // Still actionable: the file is named by `path`, and the reason says
       // which field broke which rule.
       expect(invalid[0].path).toBe('Plugins/broken.tool');
@@ -404,6 +404,91 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
       const invalid = await invalidOf(svc(), 'user@x.eu');
       expect(invalid[0].reason).toContain('variables[1].name');
       expect(invalid[0].reason).not.toContain(token);
+    });
+
+    /**
+     * The harder half, and the reason the rule is "repeats NOTHING the file
+     * said" rather than "does not repeat rejected values".
+     *
+     * A token spelled with underscores is a legal identifier: it passes
+     * `[A-Za-z0-9_]+`, so it becomes a usable `name` — and it used to be quoted
+     * back by every message downstream of that check (an invalid `scope`, a
+     * malformed `oauth`, a duplicate). Passing a grammar test makes a string
+     * legal, not repeatable. The same goes for a manual `name`, a header key,
+     * and a namespace: each is author text, transformed at most.
+     */
+    const idToken = 'PASTED_CREDENTIAL_0000_not_a_real_key';
+    const CLI_TOOL = {
+      name: 'x',
+      description: 'runs a command',
+      inputs: { type: 'object', properties: {} },
+      outputs: { type: 'object', properties: {} },
+      tool_call_template: { call_template_type: 'cli', command_name: 'ls' },
+    };
+
+    test.each([
+      [
+        'a variable that IS a legal identifier, with a bad scope',
+        `---\nname: broken\ntype: http\nurl: https://api.example.com/x\nvariables:\n  - name: ${idToken}\n    scope: nonsense\n---\n`,
+        'variables[0].scope',
+      ],
+      [
+        'a legal-identifier variable whose oauth is not an object',
+        `---\nname: broken\ntype: http\nurl: https://api.example.com/x\nvariables:\n  - name: ${idToken}\n    scope: user\n    oauth: "yes"\n---\n`,
+        'variables[0].oauth',
+      ],
+      [
+        'a legal-identifier variable declared twice',
+        `---\nname: broken\ntype: http\nurl: https://api.example.com/x\nvariables:\n  - name: ${idToken}\n  - name: ${idToken}\n---\n`,
+        'variables[1].name',
+      ],
+      [
+        'a manual name that is a token, in a file referencing a reserved variable',
+        `---\nname: ${idToken}\ntype: http\nurl: "https://api.example.com/\${API_URL}"\n---\n`,
+        'API_URL',
+      ],
+      [
+        'a manual name that is a token, on a shell tool declared remote',
+        JSON.stringify({ name: idToken, type: 'inline', remote: true, tools: [CLI_TOOL] }),
+        'cli',
+      ],
+      [
+        'a header key that is a token, with a non-string value',
+        JSON.stringify({
+          name: 'broken',
+          type: 'http',
+          url: 'https://api.example.com/x',
+          headers: { [idToken]: 1234 },
+          healthCheck: { url: 'https://api.example.com/ping' },
+        }),
+        'entry 1 of 1',
+      ],
+    ])('%s is refused without repeating it', async (_case, content, located) => {
+      await write('broken.tool', content);
+
+      const invalid = await invalidOf(svc(), 'user@x.eu');
+      expect(invalid).toHaveLength(1);
+      expect(invalid[0].path).toBe('Plugins/broken.tool');
+      expect(invalid[0].reason).not.toContain(idToken);
+      expect(invalid[0].reason).not.toContain('PASTED_CREDENTIAL');
+      // The fault is still located — by a field name we chose or an ordinal.
+      expect(invalid[0].reason).toContain(located);
+      expect((await svc().listAccessible('user@x.eu')).map((m) => m.name).sort()).toEqual(['billing', 'weather']);
+    });
+
+    test('a namespace collision names neither manual nor the namespace they share', async () => {
+      // Both sanitize to one manual name, so one of the pair is refused — and
+      // the name they collided on is as much the author's text as any other.
+      await write('a.tool', JSON.stringify({ name: `${idToken}-1`, type: 'http', url: 'https://a.example/u' }));
+      await write('b.tool', JSON.stringify({ name: `${idToken} 1`, type: 'http', url: 'https://b.example/u' }));
+
+      const invalid = await invalidOf(svc(), 'user@x.eu');
+      expect(invalid).toHaveLength(1);
+      expect(invalid[0].reason).not.toContain(idToken);
+      expect(invalid[0].reason).not.toContain('PASTED_CREDENTIAL');
+      // Sanitization strips the underscores, so check the stripped spelling too.
+      expect(invalid[0].reason.toLowerCase()).not.toContain('pastedcredential');
+      expect(invalid[0].reason).toContain('namespace');
     });
   });
 
@@ -474,9 +559,19 @@ describe('a malformed `.tool` is isolated, named, and forgotten the moment it is
     service.invalidate();
     await write('added.tool', JSON.stringify({ name: 'added', type: 'http', url: 'https://c.example/u' }));
     const second = await service.listAccessibleCatalog('user@x.eu');
-    await first;
 
     expect(walks).toBe(2);
     expect(second.tools.map((m) => m.name).sort()).toEqual(['added', 'billing', 'weather']);
+
+    // …and the stale scan is still out there. When it lands it must not POISON
+    // what the fresh one cached — the failure `TtlCache`'s generation token
+    // exists to prevent, and one this test would sleep through if it stopped at
+    // the assertions above. So: settle it, then read again with no invalidate
+    // and no clock advance. A third walk would mean the cache was emptied; the
+    // pre-merge catalog coming back would mean it was overwritten.
+    await first;
+    const third = await service.listAccessibleCatalog('user@x.eu');
+    expect(walks).toBe(2);
+    expect(third.tools.map((m) => m.name).sort()).toEqual(['added', 'billing', 'weather']);
   });
 });

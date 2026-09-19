@@ -90,12 +90,18 @@ const RESERVED_TOOL_NAMESPACES = [INTERNAL_MANUAL_NAME, EXTERNAL_KB_MANUAL_NAME]
  * every boundary that classifies references.
  */
 
-/** Throw if any string in the `.tool` document references a reserved variable. */
-function assertNoReservedVariableRefs(doc: unknown, name: string): void {
+/**
+ * Throw if any string in the `.tool` document references a reserved variable.
+ *
+ * `ref` is named because it is OURS — one of `RESERVED_VARIABLE_NAMES`, matched
+ * from a fixed list rather than copied out of the file. That is the line every
+ * refusal here holds: see {@link describeManualFault}.
+ */
+function assertNoReservedVariableRefs(doc: unknown): void {
   const ref = findReservedVariableRef(doc);
   if (ref !== null) {
     throw new Error(
-      `\`.tool\` "${name}" references the reserved variable "${ref}" — ` +
+      `this \`.tool\` references the reserved variable "${ref}" — ` +
         'API_URL and CONNECTION_KEY (bare or namespaced, e.g. `<namespace>_CONNECTION_KEY`) ' +
         'are seeded by the platform for its own manuals and may not appear anywhere in a `.tool`.',
     );
@@ -115,20 +121,32 @@ const MAX_REASON_LENGTH = 300;
  * log — the `reason` of an {@link InvalidToolManual}.
  *
  * This is the LAST of two defences, not the only one. The first is upstream and
- * structural: the normalizer's own refusals name the FIELD and the RULE and
- * never quote the rejected VALUE (`tool \`id\` must be lowercase snake_case`,
- * not `tool id "<what was written>" must be…`). It has to be that way round —
- * no scrub can recognise an arbitrary author-chosen string as a credential, so
- * a message that interpolates one cannot be made safe after the fact. What
- * remains for this function is the text the process does NOT author: the YAML
- * parser's, which quotes the file at its fault.
+ * structural, and it is the one that carries the guarantee:
+ *
+ *   A REASON REPEATS NOTHING THE FILE SAID.
+ *
+ * Every refusal this module writes locates the fault — a field name we chose
+ * (`` `id` ``, `` `healthCheck.url` ``), an ordinal (`` `variables[2].scope` ``,
+ * `` `headers` entry 3 of 4 ``) — and states the rule. It never interpolates
+ * what was written there, and that includes text which passed a check: a name
+ * matching `[A-Za-z0-9_]+` is a legal identifier, not a string we may repeat,
+ * and a token spelled with underscores matches it. The only author-derived
+ * strings named anywhere are ones matched against a FIXED list of ours (a
+ * reserved variable, a reserved namespace), where saying which one was hit
+ * teaches nothing the platform did not already publish.
+ *
+ * It has to be that way round — no scrub can recognise an arbitrary
+ * author-chosen string as a credential, so a message that interpolates one
+ * cannot be made safe after the fact. What remains for this function is the
+ * text the process does NOT author: the YAML parser's, which quotes the file at
+ * its fault.
  *
  * Two things happen here, and both are about NOT echoing the file back.
  *
  * 1. A `YAMLParseError`'s `message` ends with a SOURCE SNIPPET: the offending
  *    lines, verbatim, under a caret. A `.tool` is content an author may have
- *    pasted a literal token into (`Authorization: Bearer sk-live-…`), and the
- *    line that fails to parse is exactly as likely to be that one as any other.
+ *    pasted a literal token into (`Authorization: Bearer <a real key>`), and
+ *    the line that fails to parse is as likely to be that one as any other.
  *    So only the message's first line survives — the parser's own prose — and
  *    the location is re-stated from `linePos`, which is numbers, not text.
  * 2. Everything is then run through `redactSecret` and capped. The normalizer's
@@ -922,15 +940,19 @@ export class ToolManualService implements IToolManualService {
     // cannot contain a hyphen, but an mcp.json server name can, so the pair is
     // reachable — and the consequence is that two manuals share one set of
     // vault keys, with either able to resolve the other's secrets.
-    const manuals = dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m, ns) =>
+    const manuals = dedupeById(parsed, (m) => utcpNamespacePrefix(m.name), (m) =>
       // A collision drops a manual from every surface just as surely as a parse
       // error does, so it is reported the same way rather than only reaching a
       // log that nobody browsing the catalog can see.
       invalid.push({
         path: m.path,
+        // Neither the manual's name nor the namespace it resolved to is
+        // repeated: both are the author's text put through a transform, and a
+        // reason carries none of it (see `describeManualFault`). `path` says
+        // which file, and the rule says what to look for in it.
         reason:
-          `manual "${m.name}" resolves to the secret-variable namespace "${ns}", which another ` +
-          'manual already uses. Names differing only in `-` vs `_` share one namespace — rename one of them.',
+          'this manual resolves to a secret-variable namespace another manual already uses. ' +
+          'Names differing only in `-` vs `_` share one namespace — rename one of them.',
       }),
     );
     // Sorted so the refused set is a stable VALUE: the change-detecting log
@@ -1067,14 +1089,15 @@ export function normalizeToolManual(
   // code-mode client (internal token, connector creds, KB bearer).
   if (RESERVED_TOOL_NAMESPACES.includes(name.toLowerCase())) {
     throw new Error(
-      `tool namespace "${name}" is reserved for a built-in manual — choose a different \`id\`/\`name\` ` +
-        "(a `.tool` sharing a built-in namespace could read that manual's seeded credentials).",
+      'the tool namespace this file resolves to is reserved for a built-in manual — ' +
+        "choose a different `id`/`name` (a `.tool` sharing a built-in namespace could read " +
+        "that manual's seeded credentials).",
     );
   }
 
   // Any `.tool` content — url, headers, inline tool templates, notes — may not
   // reference the platform-seeded variables.
-  assertNoReservedVariableRefs(obj, name);
+  assertNoReservedVariableRefs(obj);
 
   // The non-stdio constituent of the union, by name: `.tool` parsing can
   // never produce a spawn spec, and the stdio side pins `remote: false`,
@@ -1109,7 +1132,7 @@ export function normalizeToolManual(
   if (containsCliCallTemplate(obj)) {
     if (obj.remote === true) {
       throw new Error(
-        `\`.tool\` "${name}" declares \`remote: true\` but contains a \`cli\` call template — ` +
+        'this `.tool` declares `remote: true` but contains a `cli` call template — ' +
           'shell tools execute only in a local runtime (drop `remote: true`, or the `cli` template).',
       );
     }
@@ -1144,7 +1167,7 @@ export function normalizeToolManual(
     // Local-only (`remote: false`) `.tool`s are never fetched server-side, so
     // are exempt.
     if (descriptor.remote !== false) {
-      assertSafeManualFetchUrl(url, `\`.tool\` "${name}" url`);
+      assertSafeManualFetchUrl(url, '`url`');
     }
     if (obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)) {
       descriptor.headers = obj.headers as Record<string, string>;
@@ -1170,7 +1193,7 @@ export function normalizeToolManual(
     type !== 'inline' && obj.headers && typeof obj.headers === 'object' && !Array.isArray(obj.headers)
       ? (obj.headers as Record<string, string>)
       : undefined;
-  const healthCheck = normalizeHealthCheck(obj.healthCheck, name, descriptor.remote, declaredHeaders);
+  const healthCheck = normalizeHealthCheck(obj.healthCheck, descriptor.remote, declaredHeaders);
   if (healthCheck) descriptor.healthCheck = healthCheck;
 
   return descriptor;
@@ -1236,7 +1259,6 @@ function assertSafeManualFetchUrl(url: string, label: string): void {
  */
 function normalizeHealthCheck(
   raw: unknown,
-  manualName: string,
   remote: boolean | undefined,
   manualHeaders: Record<string, string> | undefined,
 ): ToolHealthCheck | undefined {
@@ -1246,7 +1268,7 @@ function normalizeHealthCheck(
   const url = typeof e.url === 'string' ? e.url.trim() : '';
   if (!url) throw new Error('`healthCheck` must have a `url`');
   if (remote !== false) {
-    assertSafeManualFetchUrl(url, `\`.tool\` "${manualName}" healthCheck.url`);
+    assertSafeManualFetchUrl(url, '`healthCheck.url`');
   }
   const check: ToolHealthCheck = { url };
   if (e.method !== undefined) {
@@ -1279,9 +1301,18 @@ function normalizeHealthCheck(
  * what it is: a mistake in the `.tool` file.
  */
 function assertStringHeaders(headers: Record<string, unknown>, label: string): Record<string, string> {
-  for (const [k, v] of Object.entries(headers)) {
+  // Located by POSITION, not by its key. A header name is text the author
+  // wrote, and a refusal reason carries none of that — see
+  // {@link describeManualFault}. The `.tool` has a handful of headers and the
+  // reader is looking at the file, so an ordinal finds the line as surely as
+  // the name would.
+  const entries = Object.entries(headers);
+  for (const [i, [, v]] of entries.entries()) {
     if (typeof v !== 'string') {
-      throw new Error(`\`${label}.${k}\` must be a string (quote it if it looks like a number)`);
+      throw new Error(
+        `\`${label}\` entry ${i + 1} of ${entries.length} must have a string value ` +
+          '(quote it if it looks like a number)',
+      );
     }
   }
   return headers as Record<string, string>;
@@ -1303,29 +1334,35 @@ function normalizeVariables(raw: unknown): ToolVariable[] {
     }
     const e = entry as Record<string, unknown>;
     const name = typeof e.name === 'string' ? e.name.trim() : '';
+    // EVERY refusal in this block is located by `variables[i]`, never by the
+    // name the entry declared — passing `[A-Za-z0-9_]+` makes a string a legal
+    // identifier, not a string this process may repeat. A token spelled with
+    // underscores passes that test, and the field an author mis-pastes a token
+    // into is not one we get to choose. See {@link describeManualFault}.
+    const at = `\`variables[${i}]`;
     if (!/^[A-Za-z0-9_]+$/.test(name)) {
-      // Located by INDEX, not by quoting what was written: until it passes this
-      // test the `name` is arbitrary author text, and the messages below may
-      // quote it only because it has. (See the `id` refusal for why a reason
-      // never carries a rejected value.)
-      throw new Error(`\`variables[${i}].name\` must match [A-Za-z0-9_]+`);
+      throw new Error(`${at}.name\` must match [A-Za-z0-9_]+`);
     }
     if (RESERVED_VARIABLE_NAMES.includes(name)) {
-      throw new Error(`variable name "${name}" is reserved for platform seeding and may not be declared by a \`.tool\``);
+      // `name` is one of OURS here — matched against a fixed list — so saying
+      // which reserved name was taken repeats nothing the file taught us.
+      throw new Error(
+        `${at}.name\` is "${name}", which is reserved for platform seeding and may not be declared by a \`.tool\``,
+      );
     }
-    if (seen.has(name)) throw new Error(`duplicate variable "${name}"`);
+    if (seen.has(name)) throw new Error(`${at}.name\` duplicates an earlier entry's`);
     seen.add(name);
     const rawScope = typeof e.scope === 'string' ? e.scope.toLowerCase().trim() : '';
     if (rawScope && rawScope !== 'admin' && rawScope !== 'user') {
-      throw new Error(`variable "${name}" has an invalid \`scope\` (expected admin|user)`);
+      throw new Error(`${at}.scope\` is invalid (expected admin|user)`);
     }
     const scope: ToolVariableScope = rawScope === 'user' ? 'user' : 'admin';
     const label = typeof e.label === 'string' && e.label.trim() ? e.label.trim() : undefined;
-    const oauth = normalizeVariableOAuth(name, e.oauth);
+    const oauth = normalizeVariableOAuth(at, e.oauth);
     // OAuth is inherently per-caller — each user signs in for their own token. An
     // admin-shared OAuth token would leak one user's token to all callers.
     if (oauth && scope !== 'user') {
-      throw new Error(`variable "${name}" with oauth must be scope:user`);
+      throw new Error(`${at}\` has \`oauth\`, so its \`scope\` must be \`user\``);
     }
     return {
       name,
@@ -1353,54 +1390,60 @@ function isProbeableMcpServer(m: ToolManualDescriptor): boolean {
  * `.tool` author can't aim a sign-in/token exchange at an internal host. Both
  * URLs are REQUIRED here: a `.tool` (http/inline) has no server whose OAuth
  * metadata could fill them in — that convenience belongs to mcp.json servers.
+ *
+ * `at` is the entry's position — `` `variables[2] `` with its opening backtick,
+ * each message closing it after the field — rather than the variable's name.
+ * Same rule as everywhere else a refusal is written: the reason locates the
+ * fault in the file without repeating anything the file said. See
+ * {@link describeManualFault}.
  */
-function normalizeVariableOAuth(name: string, raw: unknown): ToolVariableOAuth | undefined {
+function normalizeVariableOAuth(at: string, raw: unknown): ToolVariableOAuth | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error(`variable "${name}" oauth must be an object`);
+    throw new Error(`${at}.oauth\` must be an object`);
   }
   const o = raw as Record<string, unknown>;
   // Confidential OAuth material is provisioned only through the protected
   // client-secret route; reject it here so a plaintext `.tool` can't smuggle one in.
   for (const forbidden of ['clientSecret', 'client_secret', 'secret']) {
     if (o[forbidden] !== undefined) {
-      throw new Error(`variable "${name}" oauth.${forbidden} must be set through the protected client-secret route`);
+      throw new Error(`${at}.oauth.${forbidden}\` must be set through the protected client-secret route`);
     }
   }
   const safeUrl = (v: unknown, field: string): string => {
     const s = typeof v === 'string' ? v.trim() : '';
     try {
-      assertSafeFetchUrl(s, { requireHttps: true, label: `${name} oauth.${field}` });
+      assertSafeFetchUrl(s, { requireHttps: true, label: `${at}.oauth.${field}\`` });
     } catch (err) {
-      throw new Error(err instanceof Error ? err.message : `variable "${name}" oauth.${field} invalid`);
+      throw new Error(err instanceof Error ? err.message : `${at}.oauth.${field}\` is invalid`);
     }
     return s;
   };
   const authorizationUrl = safeUrl(o.authorizationUrl, 'authorizationUrl');
   const tokenUrl = safeUrl(o.tokenUrl, 'tokenUrl');
   const clientId = typeof o.clientId === 'string' && o.clientId.trim() ? o.clientId.trim() : '';
-  if (!clientId) throw new Error(`variable "${name}" oauth.clientId is required`);
+  if (!clientId) throw new Error(`${at}.oauth.clientId\` is required`);
   let scopes: string[] | undefined;
   if (o.scopes !== undefined) {
     if (!Array.isArray(o.scopes) || !o.scopes.every((s) => typeof s === 'string')) {
-      throw new Error(`variable "${name}" oauth.scopes must be string[]`);
+      throw new Error(`${at}.oauth.scopes\` must be string[]`);
     }
     scopes = o.scopes as string[];
   }
   let authParams: Record<string, string> | undefined;
   if (o.authParams !== undefined) {
     if (typeof o.authParams !== 'object' || Array.isArray(o.authParams)) {
-      throw new Error(`variable "${name}" oauth.authParams must be an object of string values`);
+      throw new Error(`${at}.oauth.authParams\` must be an object of string values`);
     }
     const entries = Object.entries(o.authParams as Record<string, unknown>);
     if (!entries.every(([, v]) => typeof v === 'string')) {
-      throw new Error(`variable "${name}" oauth.authParams values must be strings`);
+      throw new Error(`${at}.oauth.authParams\` values must be strings`);
     }
     authParams = Object.fromEntries(entries) as Record<string, string>;
   }
   // PKCE is on unless the file says `false`; only the opt-out is ever stored.
   if (o.pkce !== undefined && typeof o.pkce !== 'boolean') {
-    throw new Error(`variable "${name}" oauth.pkce must be a boolean`);
+    throw new Error(`${at}.oauth.pkce\` must be a boolean`);
   }
   // Never fetched (it rides as a request param), but it names the remote
   // server — same https/SSRF bar as the endpoints.
