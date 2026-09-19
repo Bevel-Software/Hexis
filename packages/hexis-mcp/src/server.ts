@@ -445,17 +445,27 @@ export async function createHexisMcpServer(
   let closed = false;
   let remoteManualRegistered = false;
   /**
-   * Whether the remote manual is believed to be registered on the live client
-   * RIGHT NOW — distinct from `remoteManualRegistered`, which records that
-   * discovery got as far as registering it once and never goes back to false.
+   * Whether the remote manual may still be registered on the live client RIGHT
+   * NOW — distinct from `remoteManualRegistered`, which records that discovery
+   * got as far as registering it once and never goes back to false.
    *
-   * The catalog refresh retries a failed re-registration on the next poll, and
+   * The catalog refresh retries a failed re-registration on its next poll, and
    * that retry must not open by deregistering a manual that is not there: the
    * client answers with a throw, which would put one "deregistering … failed"
    * line in the operator's log every three seconds for as long as the
    * deployment stays unwell — burying the one line that says what is wrong.
+   *
+   * FALSE means "known absent", and only a deregistration that SUCCEEDED (or a
+   * registration that failed, which registers nothing) may say so. A
+   * deregistration that THREW leaves the registry entry's fate unknown, and
+   * unknown is kept here as live: re-registering over an entry that is still
+   * there is the failure this flag exists to avoid, so the next attempt tries
+   * the cleanup again rather than assuming it happened. The log line for a
+   * failing cleanup is throttled instead — see `deregisterFailing`.
    */
   let remoteManualLive = false;
+  /** One line per cleanup-failure streak, for the same reason as the watch's. */
+  let deregisterFailing = false;
   let inflightCalls = 0;
   /** The one re-registration allowed at a time: a credential swap or a recovery. */
   let reregisterInProgress: Promise<void> | null = null;
@@ -507,6 +517,33 @@ export async function createHexisMcpServer(
     reregisterInProgress = published;
     return run;
   };
+  /**
+   * Drop the remote manual's registration before it is re-made, and report what
+   * is known afterwards. `false` ⇒ the entry is gone (or was never there);
+   * `true` ⇒ it may still be registered, so the caller's next attempt must try
+   * this again. Shared by the credential swap and the catalog refresh, which
+   * must not disagree about what a failed cleanup means.
+   */
+  const deregisterRemoteManual = async (live: CodeModeUtcpClient, why: string): Promise<boolean> => {
+    if (!remoteManualLive) return false;
+    try {
+      // Closes the manual's MCP sessions and drops its repository entries.
+      await live.deregisterManual(REMOTE_MANUAL_NAME);
+      remoteManualLive = false;
+      deregisterFailing = false;
+      return false;
+    } catch (err) {
+      if (!deregisterFailing) {
+        deregisterFailing = true;
+        console.error(
+          `[hexis-mcp] deregistering the remote manual ${why} failed: ${printable(err instanceof Error ? err.message : String(err))} ` +
+            'Leaving it registered and trying the cleanup again on the next attempt.',
+        );
+      }
+      return true;
+    }
+  };
+
   const swapRemoteCredential = async (token: string): Promise<void> => {
     // The manual is registered only once discovery got that far, so the guard
     // also keeps this closure off a client that does not exist yet.
@@ -520,17 +557,11 @@ export async function createHexisMcpServer(
       // fails like any call racing a dying session would.
       const deadline = Date.now() + 15_000;
       while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
-      if (remoteManualLive) {
-        try {
-          // Closes the manual's MCP sessions and drops its repository entries.
-          await live.deregisterManual(REMOTE_MANUAL_NAME);
-        } catch (err) {
-          console.error(
-            `[hexis-mcp] deregistering the remote manual for the credential swap failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        remoteManualLive = false;
-      }
+      // A cleanup that did not come off leaves the old registration in place;
+      // registering a second manual under the same name over it is worse than
+      // running one more request on the old credential, which the next renewal
+      // (or a recovery) will try again.
+      if (await deregisterRemoteManual(live, 'for the credential swap')) return;
       const result = await registerManual(live, remoteManualTemplate(mcpUrl, token));
       if (!result.ok) {
         console.error(
@@ -577,10 +608,9 @@ export async function createHexisMcpServer(
    * listing them is the honest answer — rebuilding the local half here would
    * mean killing and re-spawning children mid-session on a poll, and
    * suppressing the notification would cost every REMOTE change its refresh
-   * because a local server happened to move in the same commit.
-   * Everything the deployment serves —
-   * every `.tool`, every remote `mcp.json` entry, and the KB tools themselves —
-   * arrives through the remote manual and is covered here.
+   * because a local server happened to move in the same commit. Everything the
+   * deployment serves — every `.tool`, every remote `mcp.json` entry, and the
+   * KB tools themselves — arrives through the remote manual and is covered here.
    *
    * BOTH notifications fire on any change, because one fingerprint covers both
    * catalogs: a `.tool` commit re-lists prompts that did not move, and a
@@ -596,15 +626,12 @@ export async function createHexisMcpServer(
       if (!live) return false; // discovery failed and released it while we queued
       const deadline = Date.now() + 15_000;
       while (inflightCalls - callsParkedForReregister > 0 && Date.now() < deadline) await sleep(50);
-      if (remoteManualLive) {
-        try {
-          await live.deregisterManual(REMOTE_MANUAL_NAME);
-        } catch (err) {
-          console.error(
-            `[hexis-mcp] deregistering the remote manual to pick up a catalog change failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        remoteManualLive = false;
+      // THROWN on a cleanup that did not come off, not pressed through: the
+      // change stays owed, so the watch attempts the whole thing again on its
+      // next poll — cleanup included — rather than registering a second manual
+      // under a name the client may still hold.
+      if (await deregisterRemoteManual(live, 'to pick up a catalog change')) {
+        throw new Error('the remote manual could not be deregistered; it may still be registered');
       }
       // The credential is read NOW, not captured: a renewal may have landed
       // between this poll and the gate, exactly as it may around a recovery.
