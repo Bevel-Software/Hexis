@@ -36,9 +36,15 @@ import {
   AGENTS_DIR,
   PIPELINES_DIR,
 } from '@bevel-software/platform-shared';
-import { useWorkspace, type UploadInput } from '../state/workspace.context';
+import {
+  KNOWLEDGE_UPLOAD_TARGET,
+  useWorkspace,
+  type UploadInput,
+  type UploadTarget,
+} from '../state/workspace.context';
 import { rootAnchoredPath } from '../utils/pasteLink';
 import { findKbRoot, KB_ROOT_DIRS, pathExistsInTree, treeHasVisibleEntries } from '../utils/fileTree';
+import { uploadErrorNextStep } from '../utils/uploadError';
 import { useMergedWorkspaceTree } from '../hooks/useMergedWorkspaceTree';
 import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequestDialog';
 import { PR_STALE_EVENT, SUGGESTIONS_RETRACTED_EVENT } from '../../../core/events';
@@ -241,6 +247,19 @@ export interface TreeMenuItem {
   onSelect(): void;
 }
 const TreeNavContext = createContext<TreeNav>({ activePath: null, open: () => {} });
+
+/**
+ * Which tree this is, for the upload banners — see `UploadTarget`. Every drop
+ * inside a `TreeChrome` carries it into `dispatchUpload`, and the
+ * `UploadNotices` inside the same chrome renders only the banners that come
+ * back with it. One page can hold two of these trees (the Library sidebar
+ * holds `Skills/` and `Plugins/`); before they were told apart, one drop
+ * painted its notice in both.
+ */
+const UploadTargetContext = createContext<UploadTarget>(KNOWLEDGE_UPLOAD_TARGET);
+
+/** The tree the surrounding `TreeChrome` is, for a drop or a banner. */
+const useUploadTarget = () => useContext(UploadTargetContext);
 
 /**
  * Ask before a delete or a move — see `TreeActionConfirm`. `TreeChrome` holds
@@ -748,6 +767,9 @@ export function FileTreeNode({
   const { createFile, createDirectory, dispatchUpload, isUploading, moveEntry, workspaceId, pendingUploads } = useWorkspace();
   const nav = useTreeNav();
   const confirm = useTreeConfirm();
+  // Which tree this row belongs to, so an upload's banners land here and not
+  // in the other tree on the same page.
+  const uploadTarget = useUploadTarget();
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
@@ -841,16 +863,16 @@ export function FileTreeNode({
       // the drop handlers always did. Only a batch with something to ask
       // about waits for an answer.
       if (invisible.length === 0) {
-        void dispatchUpload(input, targetDir);
+        void dispatchUpload(input, targetDir, uploadTarget);
         return;
       }
       void (async () => {
         if (await unreadableCreateGate(targetDir, invisible)) {
-          await dispatchUpload(input, targetDir);
+          await dispatchUpload(input, targetDir, uploadTarget);
         }
       })();
     },
-    [unreadableCreateGate, dispatchUpload],
+    [unreadableCreateGate, dispatchUpload, uploadTarget],
   );
 
   // Resetting `value` after dispatch lets users re-select the same file and
@@ -1409,11 +1431,18 @@ export function TreeChrome({
   nav,
   suggestionOnlyPaths,
   pinned,
+  uploadTarget = KNOWLEDGE_UPLOAD_TARGET,
   children,
 }: {
   nav: TreeNav;
   suggestionOnlyPaths: ReadonlyMap<string, number>;
   pinned?: PinnedController;
+  /**
+   * Which tree this is, for the upload banners — see `UploadTarget`. Two
+   * trees on one page (the Library sidebar's `Skills/` and `Plugins/`) must
+   * name themselves differently, or one drop's notice appears in both.
+   */
+  uploadTarget?: UploadTarget;
   children: ReactNode;
 }) {
   const openChangeRequests = useOpenChangeRequests();
@@ -1624,6 +1653,7 @@ export function TreeChrome({
       <TreeConfirmContext.Provider value={askConfirm}>
       <UnreadableCreateContext.Provider value={unreadableCreateGate}>
       <TreeNavContext.Provider value={nav}>
+      <UploadTargetContext.Provider value={uploadTarget}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
       <ManageAccessContext.Provider value={openAccess}>
       <SuggestionsContext.Provider value={suggestionsController}>
@@ -1631,6 +1661,7 @@ export function TreeChrome({
       </SuggestionsContext.Provider>
       </ManageAccessContext.Provider>
       </PinnedContext.Provider>
+      </UploadTargetContext.Provider>
       </TreeNavContext.Provider>
       </UnreadableCreateContext.Provider>
       </TreeConfirmContext.Provider>
@@ -1765,23 +1796,36 @@ function useCanWriteFolder(workspacePath: string | null): boolean {
 }
 
 /**
- * The upload banners: the last upload's error, or the one non-error notice
- * (it landed on the suggestions branch). Rendered by every tree that can
- * upload, because the state is the workspace's and a drop into a tree with no
- * banner would fail — or succeed elsewhere — in silence.
+ * The upload banners for THIS tree: the last upload's error, or its one
+ * non-error notice (the upload is under way, or it landed on the suggestions
+ * branch). Every tree that can upload renders a pair, because the state is
+ * the workspace's and a drop into a tree with no banner would fail — or
+ * succeed elsewhere — in silence. Each pair shows only the banners stamped
+ * with its own `uploadTarget`, which is what keeps one drop from painting
+ * the same notice in both of the Library sidebar's trees.
+ *
+ * The error says everything in the banner, on as many lines as it takes:
+ * the file's name, the server's reason in full, and what to do next. It used
+ * to be one `truncate`d line with the reason in a `title` — a tooltip nobody
+ * on a touch device could open, over text that had already cut the reason off.
  */
 export function UploadNotices() {
   const { uploadError, clearUploadError, uploadNotice, clearUploadNotice } = useWorkspace();
+  const target = useUploadTarget();
+  const error = uploadError?.target === target ? uploadError : null;
+  const notice = uploadNotice?.target === target ? uploadNotice : null;
   return (
     <>
-      {uploadError && (
+      {error && (
         <div
           role="alert"
           className="flex items-start gap-1 px-2 py-1 text-xs text-danger bg-danger-soft border-b border-danger/30 shrink-0"
         >
-          <span className="flex-1 truncate" title={uploadError.reason}>
-            Couldn't add {uploadError.filename}: {uploadError.reason}
-          </span>
+          <div className="flex-1 min-w-0 space-y-0.5 whitespace-pre-wrap break-words">
+            <div className="font-medium">Couldn't add {error.filename}</div>
+            <div>{error.reason}</div>
+            <div className="text-ink-muted">{uploadErrorNextStep(error.reason)}</div>
+          </div>
           <IconButton
             size={18}
             tone="danger"
@@ -1793,25 +1837,29 @@ export function UploadNotices() {
           </IconButton>
         </div>
       )}
-      {/* Not an error: the upload LANDED, on the suggestions branch. Saying
-          so is load-bearing — nothing appears in the tree where the user
-          dropped the files, and silence there reads as a failed upload. */}
-      {uploadNotice && (
+      {/* Either "this is happening" or "it LANDED, on the suggestions
+          branch". Both are load-bearing: a suggestion-routed upload puts
+          nothing in the tree where the user dropped the files, and silence
+          there reads as a failed upload. */}
+      {notice && (
         <div
           role="status"
+          data-testid="upload-notice"
           className="flex items-start gap-1 px-2 py-1 text-xs text-ink bg-wait-soft border-b border-line shrink-0"
         >
-          <span className="flex-1" title={uploadNotice}>
-            {uploadNotice}
-          </span>
-          <IconButton
-            size={18}
-            title="Dismiss"
-            aria-label="Dismiss upload notice"
-            onClick={clearUploadNotice}
-          >
-            <X size={12} />
-          </IconButton>
+          <span className="flex-1 min-w-0 whitespace-pre-wrap break-words">{notice.message}</span>
+          {/* Nothing to dismiss about an upload still running — it clears
+              itself the moment it has a result to show instead. */}
+          {notice.kind !== 'progress' && (
+            <IconButton
+              size={18}
+              title="Dismiss"
+              aria-label="Dismiss upload notice"
+              onClick={clearUploadNotice}
+            >
+              <X size={12} />
+            </IconButton>
+          )}
         </div>
       )}
     </>
@@ -1960,11 +2008,12 @@ export function FileExplorer() {
       if (e.dataTransfer.getData(DRAG_MIME)) return;
       const entries = e.dataTransfer.items ? snapshotEntries(e.dataTransfer.items) : [];
       if (entries.length > 0) {
-        dispatchUpload({ kind: 'items', entries }, '');
+        // Outside the `TreeChrome` below, so this one names the tree itself.
+        dispatchUpload({ kind: 'items', entries }, '', KNOWLEDGE_UPLOAD_TARGET);
         return;
       }
       const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) dispatchUpload({ kind: 'files', files }, '');
+      if (files.length > 0) dispatchUpload({ kind: 'files', files }, '', KNOWLEDGE_UPLOAD_TARGET);
     },
     [dispatchUpload],
   );

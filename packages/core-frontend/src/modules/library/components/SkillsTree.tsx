@@ -96,7 +96,11 @@ export function RootFolderTree({
   if (!root) return null;
 
   return (
-    <TreeChrome nav={nav} suggestionOnlyPaths={suggestionOnlyPaths}>
+    // The two Library trees sit in ONE sidebar over ONE piece of upload
+    // state: each names itself so a drop's banners appear in the tree that
+    // took the drop, and only there. Before that, dropping into `Skills/`
+    // painted the same notice above `Skills/` AND above `Plugins/`.
+    <TreeChrome nav={nav} suggestionOnlyPaths={suggestionOnlyPaths} uploadTarget={`library:${dir}`}>
       {/* A right-click that lands between the tree's rows is the tree's, not
           the nav's behind it: with nothing wired for the gap the browser's
           own menu is the honest answer, as in Knowledge. The rows stop their

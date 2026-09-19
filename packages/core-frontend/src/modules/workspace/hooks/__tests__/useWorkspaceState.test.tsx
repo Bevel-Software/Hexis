@@ -697,7 +697,8 @@ describe('dispatchUpload: suggestion routing', () => {
       const detail = (onAnnounce.mock.calls[0][0] as CustomEvent).detail;
       expect(detail.number).toBe(12);
       expect(detail.touchedNodePaths).toContain('KnowledgeBase/Ops/note.md');
-      expect(result.current.uploadNotice).toMatch(/became a suggestion/);
+      expect(result.current.uploadNotice?.message).toMatch(/became a suggestion/);
+      expect(result.current.uploadNotice?.kind).toBe('suggestion');
       expect(result.current.uploadError).toBeNull();
     } finally {
       window.removeEventListener(PR_STALE_EVENT, onStale);
@@ -752,6 +753,282 @@ describe('dispatchUpload: suggestion routing', () => {
       file,
       { defer: false },
     );
+  });
+});
+
+/**
+ * The reported silence: "first upload to Skills, nothing happened; second one
+ * showed the message". Reproduced from the code path, because the difference
+ * between the two uploads is entirely in how long the FIRST one takes to
+ * learn where the bytes go.
+ *
+ * Every scrap of feedback used to wait on `resolveSuggestionRouting`, and the
+ * first suggestion of a session is the one time that answer is slow: the
+ * server creates the caller's personal branch and clones a workspace for it
+ * before `ensureKnowledgeSuggestionWorkspace` resolves, and only then is the
+ * change request opened. A suggestion-routed upload also draws no optimistic
+ * rows, deliberately — the files never land on the branch being viewed — so
+ * for the whole of that wait the tree showed nothing whatsoever: no spinner,
+ * no row, no banner. The SECOND upload finds the branch, the workspace and
+ * the open request all there and answers at once, which is the whole of the
+ * difference the user saw.
+ *
+ * The fix is to say something on the first tick, in the tree that took the
+ * drop. These tests pin that, and pin that the result still replaces it.
+ */
+describe('dispatchUpload: the drop is never silent', () => {
+  const PROTECTED_FIXTURE = {
+    workspace: {
+      id: 'target-company-state',
+      name: 'Workspace',
+      absolutePath: '/tmp/ws',
+      createdAt: '2026-04-20T00:00:00.000Z',
+      kbDirName: 'knowledge-base',
+    },
+    fileTree: { name: '.', relativePath: '.', type: 'directory' as const, children: [] },
+  };
+
+  /** The Library's Skills tree — the surface the report came from. */
+  const SKILLS_TREE = 'library:Skills';
+  const SKILLS_FOLDER = 'knowledge-base/Skills/house-writing-standards';
+
+  const SUGGESTION_TARGET = {
+    branch: 'suggestions/reader/knowledge',
+    workspaceId: 'suggestions%2Freader%2Fknowledge',
+    kbDirName: 'knowledge-base',
+    existingCr: null,
+  };
+
+  const CHANGE_REQUEST = {
+    number: 12,
+    title: 'Changes from Rae Reader. Knowledge',
+    branch: 'suggestions/reader/knowledge',
+    base: 'target-company-state',
+    state: 'open',
+    createdAt: '2026-09-17T00:00:00.000Z',
+    touchedNodePaths: [],
+    author: { login: 'user-x' },
+    review: { approvals: 0, changesRequested: 0, pendingLogins: [] },
+    url: '',
+  };
+
+  function wrapper({ children }: { children: ReactNode }) {
+    return (
+      <AuthContext.Provider
+        value={{
+          user: { id: 'u1', email: 'bo@example.com', name: 'Bo Business' },
+          token: 't',
+          isLoading: false,
+          login: async () => {},
+          logout: () => {},
+        }}
+      >
+        {children}
+      </AuthContext.Provider>
+    );
+  }
+
+  /** Every relativePath in a server tree, for "did the row arrive?". */
+  function pathsIn(node: { relativePath: string; children?: unknown[] } | null): string[] {
+    if (!node) return [];
+    const out = [node.relativePath];
+    for (const child of (node.children ?? []) as { relativePath: string; children?: unknown[] }[]) {
+      out.push(...pathsIn(child));
+    }
+    return out;
+  }
+
+  beforeEach(() => {
+    apiMocks.getOrCreateWorkspace.mockReset().mockResolvedValue(PROTECTED_FIXTURE);
+    apiMocks.listFiles.mockReset().mockResolvedValue(PROTECTED_FIXTURE.fileTree);
+    apiMocks.uploadFile.mockReset().mockResolvedValue(undefined);
+    accessApiMock.fetchFileAccess.mockReset();
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReset().mockResolvedValue(SUGGESTION_TARGET);
+    proposeMocks.ensureKnowledgeChangeRequest.mockReset().mockResolvedValue(CHANGE_REQUEST);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    localStorage.clear();
+  });
+
+  async function mountProtected() {
+    const { result } = renderHook(() => useWorkspaceState(), { wrapper });
+    await waitFor(() => expect(result.current.workspaceId).toBe('target-company-state'));
+    return result;
+  }
+
+  it('reports the drop before the suggestion routing has answered', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    // The FIRST suggestion of a session: the branch and its workspace clone do
+    // not exist yet, so this is the call that takes seconds. Held open here so
+    // the assertions land inside the window the user was staring at.
+    let releaseRouting: (target: typeof SUGGESTION_TARGET) => void = () => {};
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockReturnValue(
+      new Promise((resolve) => { releaseRouting = resolve; }),
+    );
+    const result = await mountProtected();
+
+    const file = new File(['hello'], 'report.pdf', { type: 'application/pdf' });
+    let dispatched: Promise<void> | undefined;
+    await act(async () => {
+      dispatched = result.current.dispatchUpload(
+        { kind: 'files', files: [file] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+      await Promise.resolve();
+    });
+
+    // Nothing has been uploaded yet, and nothing is going to appear in this
+    // branch's tree when it is — so the notice is the only thing there is.
+    expect(apiMocks.uploadFile).not.toHaveBeenCalled();
+    expect(result.current.isUploading).toBe(true);
+    expect(result.current.uploadNotice).toEqual({
+      kind: 'progress',
+      target: SKILLS_TREE,
+      message: 'Adding report.pdf to house-writing-standards…',
+    });
+
+    await act(async () => {
+      releaseRouting(SUGGESTION_TARGET);
+      await dispatched;
+    });
+
+    // The result replaces it — in the same tree, once.
+    expect(result.current.uploadNotice).toEqual({
+      kind: 'suggestion',
+      target: SKILLS_TREE,
+      message: expect.stringContaining('became a suggestion'),
+    });
+    expect(result.current.uploadError).toBeNull();
+    expect(result.current.isUploading).toBe(false);
+  });
+
+  it('says so on the FIRST suggestion as reliably as on a repeat', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: false,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const result = await mountProtected();
+    const upload = (name: string) =>
+      act(async () => {
+        await result.current.dispatchUpload(
+          { kind: 'files', files: [new File(['x'], name)] },
+          SKILLS_FOLDER,
+          SKILLS_TREE,
+        );
+      });
+
+    // First: the branch has to be made and the request opened.
+    await upload('first.pdf');
+    expect(result.current.uploadNotice?.kind).toBe('suggestion');
+    expect(result.current.uploadNotice?.target).toBe(SKILLS_TREE);
+
+    // Second: the request is already there, so nothing is created.
+    proposeMocks.ensureKnowledgeSuggestionWorkspace.mockResolvedValue({
+      ...SUGGESTION_TARGET,
+      existingCr: CHANGE_REQUEST,
+    });
+    await upload('second.pdf');
+    expect(result.current.uploadNotice?.kind).toBe('suggestion');
+    expect(result.current.uploadNotice?.target).toBe(SKILLS_TREE);
+  });
+
+  it('hands an ordinary upload over to its rows, which survive the refresh', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const uploadedPath = 'knowledge-base/KnowledgeBase/Ops/note.md';
+    // What the server's tree looks like once the commit has landed — the
+    // refresh at the end of the dispatch reads this.
+    apiMocks.listFiles.mockResolvedValue({
+      name: '.',
+      relativePath: '.',
+      type: 'directory',
+      children: [{
+        name: 'knowledge-base',
+        relativePath: 'knowledge-base',
+        type: 'directory',
+        children: [{
+          name: 'KnowledgeBase',
+          relativePath: 'knowledge-base/KnowledgeBase',
+          type: 'directory',
+          children: [{
+            name: 'Ops',
+            relativePath: 'knowledge-base/KnowledgeBase/Ops',
+            type: 'directory',
+            children: [{ name: 'note.md', relativePath: uploadedPath, type: 'file' }],
+          }],
+        }],
+      }],
+    });
+    // Hold the upload open so the mid-flight state is observable.
+    let releaseUpload: () => void = () => {};
+    apiMocks.uploadFile.mockReturnValue(new Promise<void>((resolve) => {
+      releaseUpload = () => resolve();
+    }));
+    const result = await mountProtected();
+
+    let dispatched: Promise<void> | undefined;
+    act(() => {
+      dispatched = result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['hi'], 'note.md')] },
+        'knowledge-base/KnowledgeBase/Ops',
+      );
+    });
+
+    // The optimistic row is in the tree within the frame — and because it is,
+    // the progress notice steps aside rather than sitting over it.
+    await waitFor(() => expect(result.current.pendingUploads.has(uploadedPath)).toBe(true));
+    await waitFor(() => expect(result.current.uploadNotice).toBeNull());
+
+    await act(async () => {
+      releaseUpload();
+      await dispatched;
+    });
+
+    // The real row arrives and the optimistic one is retired — no reload.
+    await waitFor(() => expect(pathsIn(result.current.fileTree)).toContain(uploadedPath));
+    await waitFor(() => expect(result.current.pendingUploads.has(uploadedPath)).toBe(false));
+    expect(result.current.uploadNotice).toBeNull();
+    expect(result.current.uploadError).toBeNull();
+  });
+
+  it('names the file, not its workspace path, and stamps the tree that asked', async () => {
+    accessApiMock.fetchFileAccess.mockResolvedValue({
+      canWrite: true,
+      eligible: { roles: [], users: [] },
+      owners: { roles: [], users: [] },
+    });
+    const reason = 'You do not have permission to write to Knowledge/Legal';
+    apiMocks.uploadFile.mockRejectedValue(new Error(reason));
+    const result = await mountProtected();
+
+    await act(async () => {
+      await result.current.dispatchUpload(
+        { kind: 'files', files: [new File(['x'], 'quarterly-report.pdf')] },
+        SKILLS_FOLDER,
+        SKILLS_TREE,
+      );
+    });
+
+    // "Couldn't add knowledge-base/K…" was the whole of the reported banner:
+    // a path long enough that the reason never made it onto the screen.
+    expect(result.current.uploadError).toEqual({
+      filename: 'quarterly-report.pdf',
+      reason,
+      target: SKILLS_TREE,
+    });
+    // And the in-progress notice does not outlive the upload it described.
+    expect(result.current.uploadNotice).toBeNull();
   });
 });
 

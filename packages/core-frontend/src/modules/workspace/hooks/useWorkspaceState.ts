@@ -15,8 +15,11 @@ import type {
   PendingEntry,
   UploadError,
   UploadInput,
+  UploadNotice,
+  UploadTarget,
   WorkspaceContextValue,
 } from '../state/workspace.context';
+import { KNOWLEDGE_UPLOAD_TARGET } from '../state/workspace.context';
 import {
   getOrCreateWorkspace,
   listFiles,
@@ -110,6 +113,35 @@ function collectPaths(root: FileTreeEntry): Set<string> {
   return out;
 }
 
+/** The last segment of a workspace path — what the user calls the file. */
+function fileNameOf(path: string): string {
+  const name = path.split('/').filter(Boolean).pop();
+  return name ?? path;
+}
+
+/**
+ * What the progress notice calls this drop: one file by name, several by
+ * count, and the folder it is going into. Read off the INPUT rather than the
+ * walk, because the walk has not started yet — saying something on the first
+ * tick is the whole point.
+ */
+function describeUpload(input: UploadInput, targetDirectory: string): string {
+  let what: string;
+  if (input.kind === 'files') {
+    what = input.files.length === 1 ? input.files[0]!.name : `${input.files.length} files`;
+  } else if (input.kind === 'paths') {
+    what = input.items.length === 1
+      ? fileNameOf(input.items[0]!.relativePath)
+      : `${input.items.length} files`;
+  } else {
+    what = input.entries.length === 1
+      ? input.entries[0]!.name || 'the dropped item'
+      : `${input.entries.length} items`;
+  }
+  const where = targetDirectory ? fileNameOf(targetDirectory) : null;
+  return where ? `${what} to ${where}` : what;
+}
+
 interface UseWorkspaceStateReturn extends WorkspaceContextValue {
   setPersistenceBranch: (branch: string | null) => void;
   deleteWorkspace: () => Promise<void>;
@@ -138,7 +170,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   const [openTabs, setOpenTabs] = useState<OpenTab[]>([]);
   const [activeTabPath, setActiveTabPath] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<UploadError | null>(null);
-  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   // Who is signed in — the suggestion-routed upload needs an author for the
   // branch name and the change request. Read nullable (not `useAuth`, which
@@ -720,8 +752,42 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
   );
 
   const activeUploadsRef = useRef(0);
-  const dispatchUpload = useCallback(async (input: UploadInput, targetDirectory: string) => {
+  const dispatchUpload = useCallback(async (
+    input: UploadInput,
+    targetDirectory: string,
+    uploadTarget: UploadTarget = KNOWLEDGE_UPLOAD_TARGET,
+  ) => {
     if (!workspaceId) return;
+
+    // Pin the workspace at dispatch time. A folder upload can take seconds;
+    // if the user switches branches mid-flight, the trailing state
+    // mutations (setUploadError / setIsUploading / setFileTree via
+    // refreshFileTree / clearPendingMatching) would clobber the new
+    // branch's UI with old-branch results. `isCurrent()` gates every
+    // post-await mutation; the workspaceId reset effect above already
+    // clears the optimistic refs the moment the switch happens.
+    const dispatchWorkspaceId = workspaceId;
+    const isCurrent = () => workspaceIdRef.current === dispatchWorkspaceId;
+
+    // ── Say something on the FIRST tick ──
+    // Everything below this point can take seconds, and the first
+    // suggestion-routed upload of a session takes the longest of all: the ACL
+    // read, then a branch created on the server and a workspace cloned for
+    // it, then the change request opened. None of that draws a row — a
+    // suggestion-routed upload deliberately has no optimistic overlay — so
+    // until this notice existed the user dropped a file and watched nothing
+    // whatsoever happen, which is indistinguishable from a dead drop target.
+    // The SECOND upload finds the branch, the workspace and the request all
+    // there and answers at once, which is why the report was "the first
+    // showed nothing, the second showed the notice".
+    setUploadError(null);
+    setUploadNotice({
+      kind: 'progress',
+      target: uploadTarget,
+      message: `Adding ${describeUpload(input, targetDirectory)}…`,
+    });
+    activeUploadsRef.current += 1;
+    setIsUploading(true);
 
     // ── Suggestion routing ──
     // An upload into a KB folder the caller may NOT write neither fails nor
@@ -737,6 +803,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     } catch (err) {
       console.warn('[workspace] suggestion routing check failed:', err);
     }
+    // An ordinary upload says what it is doing with ROWS — the optimistic
+    // overlay below puts them in the tree within the frame. The progress
+    // notice was only covering the wait for this answer, so it goes now
+    // rather than flashing over the rows for the length of the upload.
+    if (!suggestion && isCurrent()) {
+      setUploadNotice((current) => (current?.kind === 'progress' ? null : current));
+    }
     const uploadWorkspaceId = suggestion?.workspaceId ?? workspaceId;
     // No optimistic tree overlay for a suggestion-routed upload: the files
     // will never appear in THIS branch's tree — they surface as suggestion
@@ -746,20 +819,6 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const suggestionPrefix = suggestion ? `${suggestion.kbDirName}/` : null;
     /** Repo-relative paths of the files that LANDED on the suggestions branch. */
     const suggestedRepoPaths: string[] = [];
-    // Pin the workspace at dispatch time. A folder upload can take seconds;
-    // if the user switches branches mid-flight, the trailing state
-    // mutations (setUploadError / setIsUploading / setFileTree via
-    // refreshFileTree / clearPendingMatching) would clobber the new
-    // branch's UI with old-branch results. `isCurrent()` gates every
-    // post-await mutation; the workspaceId reset effect above already
-    // clears the optimistic refs the moment the switch happens.
-    const dispatchWorkspaceId = workspaceId;
-    const isCurrent = () => workspaceIdRef.current === dispatchWorkspaceId;
-
-    setUploadError(null);
-    setUploadNotice(null);
-    activeUploadsRef.current += 1;
-    setIsUploading(true);
 
     // Batch mode collapses N per-file pushes into one end-of-burst push
     // via `POST /flush` — mirrors the recursive folder-delete batch.
@@ -789,7 +848,7 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     let uploaded = 0;
     let total: number | null = null;
     let abort = false;
-    let firstError: { filename: string; reason: string } | null = null;
+    let firstError: UploadError | null = null;
     // Tracks whether any deferred `createDirectory` (empty-dir preservation)
     // commits landed. Without this, a folder drop containing only empty
     // subdirectories would skip `flushBatch` (`uploaded === 0`) and leave
@@ -803,7 +862,10 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
     const recordError = (filename: string, err: unknown) => {
       if (firstError) return;
       const reason = err instanceof Error ? err.message : 'Upload failed';
-      firstError = { filename, reason };
+      // The NAME, not the workspace path: the banner's first line is what the
+      // user dropped. A path is what produced "Couldn't add knowledge-base/K…"
+      // — a line so long the reason behind it never fitted on screen.
+      firstError = { filename: fileNameOf(filename), reason, target: uploadTarget };
       abort = true;
     };
 
@@ -972,10 +1034,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
           }
           window.dispatchEvent(new Event(PR_STALE_EVENT));
           if (isCurrent()) {
-            setUploadNotice(
-              "You can't write to that folder, so the upload became a suggestion: " +
+            setUploadNotice({
+              kind: 'suggestion',
+              target: uploadTarget,
+              message:
+                "You can't write to that folder, so the upload became a suggestion: " +
                 'it is now a change request for the folder’s owners to review.',
-            );
+            });
           }
         } catch (err) {
           recordError('change request', err);
@@ -1003,7 +1068,13 @@ export function useWorkspaceState(): UseWorkspaceStateReturn {
 
         const stillRunning = activeUploadsRef.current > 0;
         setIsUploading(stillRunning);
-        if (!stillRunning) setUploadProgress(null);
+        if (!stillRunning) {
+          setUploadProgress(null);
+          // A progress notice has nothing left to report once no upload is in
+          // flight, and one left behind would sit there forever. The
+          // suggestion notice is a RESULT, and stays until dismissed.
+          setUploadNotice((current) => (current?.kind === 'progress' ? null : current));
+        }
 
         // One final refresh to reconcile the server tree with whatever
         // committed, then clear pending overlay entries whose real
