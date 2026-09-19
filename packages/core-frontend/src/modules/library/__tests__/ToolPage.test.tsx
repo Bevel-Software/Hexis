@@ -60,6 +60,7 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { NAME_MIN_WIDTH } from '../components/NameWithBadges';
 import { TOOL_CREDENTIALS_STALE_EVENT } from '../../../core/events';
 
 const GITHUB: ToolSecrets = {
@@ -185,6 +186,23 @@ describe('ToolPage: frame', () => {
     expect(screen.queryByText(/Tool · /)).toBeNull();
     expect(await screen.findByText('Runs LinkedIn outreach campaigns.')).toBeInTheDocument();
     expect(screen.getByText('Managed by the Admins.')).toBeInTheDocument();
+  });
+
+  it('holds a long tool name to a readable width, and says the rest on hover', async () => {
+    // The card's rule, on the page header. The way back and the mark are both
+    // fixed widths, so without a floor the one thing the page is named after
+    // is the only thing on the band that gives way — a deep plugin label in
+    // the back link used to leave the title an ellipsis and a letter.
+    const long = 'disposable-weather-lookup-for-the-northern-hemisphere-v2beta';
+    secretsMock.listToolSecrets.mockResolvedValue([{ ...GITHUB, name: long }]);
+    toolsMock.getToolDetail.mockResolvedValue({ ...DETAIL, name: long });
+    renderPage();
+
+    // Whole in the DOM, so a screen reader reads all of it; whole in `title`,
+    // so the reader who only has the ellipsis can finish it.
+    const title = await screen.findByRole('heading', { name: long, level: 1 });
+    expect(title).toHaveAttribute('title', long);
+    expect(title.className).toContain(NAME_MIN_WIDTH);
   });
 
   it('shows no kicker for a legacy ungrouped path either', async () => {

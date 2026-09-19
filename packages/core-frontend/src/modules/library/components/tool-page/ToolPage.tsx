@@ -16,6 +16,7 @@ import type { ToolCapability } from '../../services/tools.api';
 import type { LibrarySkillSummary } from '../../services/library.api';
 import { ToolConnectionSection } from './ToolConnectionSection';
 import { ToolLogo } from '../ToolLogo';
+import { NameWithBadges } from '../NameWithBadges';
 
 /**
  * One tool, as a page.
@@ -153,10 +154,31 @@ export function ToolPage({
             to hold a line with.) */}
         <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
           <div className={HEADER_BAND_LEAD}>{backLink}</div>
-          <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="flex-none" />
-          <h1 className="min-w-0 truncate text-display font-semibold text-ink" title={tool.name}>
-            {tool.name}
-          </h1>
+          {/* The mark and the title through `NameWithBadges`, so the page
+              header keeps the same floor under its name that a card and a
+              plugin row do — the way back is a fixed width, and without a
+              floor a long plugin label in it crushes the tool's name to an
+              ellipsis and a letter.
+
+              This header carries no badges, so what it takes from the shared
+              component is the floor and the `title`, not the wrap — and the
+              wrap is the half that could not work here anyway: the band is
+              ONE row tall by contract (`HEADER_BAND`), so a second line of
+              anything would hang out of it. A badge on this header is a
+              decision about the band, not a prop to pass.
+
+              Which is why `overflow-hidden`, exactly as on the plugin page:
+              with nowhere to wrap to, a group that could only grow would push
+              its title across the way back instead of truncating. Clipped,
+              the title gives way first and the way back stays clickable. */}
+          <NameWithBadges
+            as="h1"
+            className="min-w-0 flex-1 overflow-hidden"
+            gap="gap-4"
+            leading={<ToolLogo slug={tool.slug} name={tool.name} size="lg" />}
+            name={tool.name}
+            nameClassName="text-display font-semibold text-ink"
+          />
         </div>
         {page.detail?.description && (
           <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">

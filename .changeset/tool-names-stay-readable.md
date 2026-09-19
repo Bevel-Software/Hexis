@@ -1,0 +1,13 @@
+---
+'@bevel-software/platform-core-frontend': patch
+---
+
+A card's name now keeps a readable width and its badges wrap under it when the row runs short. The report was a tool card reading "di…": the name was `truncate` and the badges beside it (`MCP server`, `Linked`, `Owner`, `Deprecated`) were `shrink-0`, so the whole of a 236px card's shortfall came out of the one part of it anybody was reading, and four pills that each said less than the word they had crowded out kept every pixel they asked for.
+
+The name now has a floor of 12 characters while anything shares its line, and the badges break onto a second line rather than take it. Below that floor nothing changes: the name still truncates with an ellipsis, still carries its full self in `title`, and is still in the DOM whole, so a screen reader reads all of it either way. A wide card is the card it always was — name and badges on one line. Which badges appear is untouched; the only thing that moves is where they sit when there is no room.
+
+One component, `NameWithBadges`, is what all three surfaces spend: the library card, the plugin index row and the tool page header. The plugin row gains a `title` it did not have — it used to pass its label through as a bare string, so a plugin whose name the row had to truncate had nowhere to finish saying it — and the tool page header gains the same floor under its `<h1>`, where a deep plugin label in the back link beside it used to leave the title an ellipsis and a letter.
+
+The layout is a flat wrapping row on purpose, and the component says why: an intermediate group around the mark and the name reads better and does not work, because that group's automatic minimum size is the full width of a `whitespace-nowrap` name, so it refuses to shrink and the name never truncates at all — while the usual cure for that, `min-w-0`, throws the floor away in the same breath. Flat, the floor sits on the name itself and there is no wrapper left to lie about it.
+
+jsdom has no layout, so the tests pin the contract the layout is made of rather than pixels: the floor, the `flex-1` that makes flexbox measure the name AT the floor when it picks a line break, the `flex-wrap` that gives the badges somewhere to break to, and the `shrink-0 max-w-full` that moves the badge group as a unit without letting it out of the row. Remove any one and the card says "di…" again. The three awkward names are covered — a 60-character name on a card, on a row and on the page header; a missing name, which opens no empty tooltip; and two tools of the same name in different plugins, which stay separately addressable and keep their own foot notes.

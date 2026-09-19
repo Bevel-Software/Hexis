@@ -2,6 +2,7 @@ import { ExternalLink, Users } from 'lucide-react';
 import { Badge, Surface } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { ItemMenuFrame } from './ItemActionsMenu';
+import { NameWithBadges } from './NameWithBadges';
 import { StatusDot } from './StatusDot';
 import { ToolLogo } from './ToolLogo';
 import type { AttentionStatus, GemState } from '../utils/status';
@@ -146,6 +147,58 @@ export function LibraryCard({
       ? status
       : null;
 
+  /**
+   * The chips that qualify the name — as an ARRAY, not a fragment.
+   *
+   * `NameWithBadges` gives the name its minimum width only while something is
+   * actually competing with it for the row, and a fragment of five falsy
+   * branches is indistinguishable from a fragment of five pills. An array can
+   * be counted. Which badges appear is untouched: these are the same five
+   * conditions, in the same order, that this row has always rendered.
+   */
+  const badges = [
+    kind === 'integration' && flavor ? (
+      <Badge key="flavor" tone="outline" size="xs" className="shrink-0 uppercase">
+        {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
+      </Badge>
+    ) : null,
+    pending ? (
+      <Badge key="pending" tone="wait" size="xs" className="shrink-0 uppercase">
+        In review
+      </Badge>
+    ) : null,
+    owned && !pending ? (
+      <Badge key="owner" tone="outline" size="xs" className="shrink-0 uppercase">
+        Owner
+      </Badge>
+    ) : null,
+    /* The card is on a plugin's page and the item lives somewhere else. The
+       Owner pill's exact dress, because it makes the same kind of statement —
+       a fact about the item's standing, not a problem — and the skill's own
+       page already spells LINKED this way.
+
+       The pill alone would say "not here" without saying where, and "where" is
+       the whole reason the reader is puzzled: the Advanced tree shows the disk,
+       so a linked skill is not under the plugin's folder there, and the tooltip
+       is what reconciles the two views. */
+    linkedHome ? (
+      <Badge
+        key="linked"
+        tone="outline"
+        size="xs"
+        className="shrink-0 uppercase"
+        title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
+      >
+        Linked
+      </Badge>
+    ) : null,
+    lifecycle === 'deprecated' || lifecycle === 'retired' ? (
+      <Badge key="lifecycle" tone="wait" size="xs" className="shrink-0 uppercase">
+        {lifecycle === 'retired' ? 'Retired' : 'Deprecated'}
+      </Badge>
+    ) : null,
+  ].filter((badge) => badge !== null);
+
   const card = (
     <Surface
       as="button"
@@ -167,52 +220,18 @@ export function LibraryCard({
       )}
       onClick={onOpen}
     >
-      <span className="flex items-center gap-2">
-        {/* Only tools carry a mark. A skill has no brand to recognise — its
-            name IS the thing — and a monogram beside every skill would add a
-            column of coloured squares that distinguish nothing. */}
-        {kind === 'integration' && <ToolLogo slug={id} name={name} />}
-        <span className="truncate text-lede font-semibold text-ink">{name}</span>
-        {kind === 'integration' && flavor && (
-          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-            {flavor === 'mcp' ? 'MCP server' : 'UTCP manual'}
-          </Badge>
-        )}
-        {pending && (
-          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
-            In review
-          </Badge>
-        )}
-        {owned && !pending && (
-          <Badge tone="outline" size="xs" className="shrink-0 uppercase">
-            Owner
-          </Badge>
-        )}
-        {/* The card is on a plugin's page and the item lives somewhere else.
-            The Owner pill's exact dress, because it makes the same kind of
-            statement — a fact about the item's standing, not a problem — and
-            the skill's own page already spells LINKED this way.
-
-            The pill alone would say "not here" without saying where, and
-            "where" is the whole reason the reader is puzzled: the Advanced
-            tree shows the disk, so a linked skill is not under the plugin's
-            folder there, and the tooltip is what reconciles the two views. */}
-        {linkedHome && (
-          <Badge
-            tone="outline"
-            size="xs"
-            className="shrink-0 uppercase"
-            title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
-          >
-            Linked
-          </Badge>
-        )}
-        {(lifecycle === 'deprecated' || lifecycle === 'retired') && (
-          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
-            {lifecycle === 'retired' ? 'Retired' : 'Deprecated'}
-          </Badge>
-        )}
-      </span>
+      {/* Only tools carry a mark. A skill has no brand to recognise — its
+          name IS the thing — and a monogram beside every skill would add a
+          column of coloured squares that distinguish nothing. It goes in as
+          the row's `leading` rather than as a sibling of it, because a mark
+          counts as company: a name with a logo beside it is being squeezed
+          the same way a name with a badge beside it is. */}
+      <NameWithBadges
+        leading={kind === 'integration' && <ToolLogo slug={id} name={name} />}
+        name={name}
+        nameClassName="text-lede font-semibold text-ink"
+        badges={badges.length > 0 ? badges : undefined}
+      />
 
       {description && (
         <span className="line-clamp-2 text-detail text-ink-muted">{description}</span>
