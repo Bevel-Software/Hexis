@@ -3,6 +3,7 @@ import { ChevronRight, Check, X, Clock } from 'lucide-react';
 import type { PullRequestSummary } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
 import { Badge } from '../../../shared/components';
+import { SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
 import { listPullRequestsForMe } from '../services/pr.api';
 import { friendlyGitError } from '../services/error-messages';
 import { useGit } from '../state/git.context';
@@ -10,6 +11,15 @@ import { ChangeRequestDialog } from '../../change-requests/components/ChangeRequ
 import { PR_STALE_EVENT, PR_STALE_FALLBACK_MS } from '../../../core/events';
 
 const POLL_INTERVAL_MS = PR_STALE_FALLBACK_MS;
+
+/**
+ * A request's own inset: the sidebar's 10px row inset, plus the 12px caret
+ * slot and its 7px gap from the header above. A request starts under the word
+ * "Change", the way a file in the tree starts under its folder's name — which
+ * only reads as an indent if the header itself is on the grid, so the two
+ * numbers below are the header's and must move with it.
+ */
+const REQUEST_INSET = 'pl-[29px] pr-2.5';
 
 export function PullRequestsForMe() {
   const git = useGit();
@@ -156,7 +166,14 @@ export function PullRequestsForMe() {
     // one hairline, a disclosure header with an amber count, and rows in the
     // same two type sizes the tree above and the Library nav use, so the whole
     // sidebar is one typographic system rather than three.
-    <div className="flex max-h-60 shrink-0 flex-col border-t border-line px-2">
+    //
+    // The hairline and the space above it are the FRAME's now
+    // (`SIDEBAR_FOOTER_SLOT`): this dock shares the footer with the Library's
+    // setup reminder, and a dock that drew its own rule put a second one
+    // directly under the reminder's. What is left here is the dock, and it
+    // sits flush in the column so its rows can take the sidebar's row inset
+    // exactly as the tree rows above do.
+    <div className="flex max-h-60 shrink-0 flex-col">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -165,7 +182,10 @@ export function PullRequestsForMe() {
         // SCOPE in words, because this queue is deliberately narrower than the
         // dots in the tree — it is the requests that are yours to act on.
         aria-label="Change requests for you"
-        className="flex items-center gap-[7px] px-1.5 pt-2.5 pb-2 text-label uppercase text-ink-faint transition-colors hover:text-ink"
+        className={cn(
+          'flex items-center gap-[7px] pt-2.5 pb-2 text-label uppercase text-ink-faint transition-colors hover:text-ink',
+          SIDEBAR_ROW_INSET,
+        )}
       >
         <span className="flex w-3 flex-none items-center justify-center">
           <ChevronRight
@@ -173,9 +193,13 @@ export function PullRequestsForMe() {
             className={cn('transition-transform duration-150', expanded && 'rotate-90')}
           />
         </span>
-        <span className="flex-1 text-left">Change requests</span>
+        {/* `min-w-0` + `truncate`, so the count keeps its place. A flex item's
+            automatic minimum is its own content, so at 180px — the narrowest
+            the sidebar goes — the label refused to give way and pushed the
+            badge past the right edge of the row instead. */}
+        <span className="min-w-0 flex-1 truncate text-left">Change requests</span>
         {prs.length > 0 && (
-          <Badge tone="wait" size="xs">
+          <Badge tone="wait" size="xs" className="flex-none">
             {prs.length}
           </Badge>
         )}
@@ -183,7 +207,9 @@ export function PullRequestsForMe() {
 
       {expanded && (
         <div className="flex flex-col gap-px overflow-y-auto pb-1.5">
-          {error && <div className="pl-[25px] pr-1.5 py-2 text-meta text-danger">{error}</div>}
+          {error && (
+            <div className={cn('py-2 text-meta text-danger', REQUEST_INSET)}>{error}</div>
+          )}
           {!error &&
             prs.map((pr) => <PrRow key={pr.number} pr={pr} onOpen={() => setOpenCr(pr)} />)}
         </div>
@@ -228,7 +254,10 @@ function PrRow({ pr, onOpen }: { pr: PullRequestSummary; onOpen(): void }) {
           onOpen();
         }
       }}
-      className="group block cursor-pointer rounded-sm pl-[25px] pr-[7px] py-1.5 transition-colors hover:bg-hover"
+      className={cn(
+        'group block cursor-pointer rounded-sm py-1.5 transition-colors hover:bg-hover',
+        REQUEST_INSET,
+      )}
       title={pr.title}
     >
       <div className="flex min-w-0 gap-1.5 text-ui text-ink-muted group-hover:text-ink">

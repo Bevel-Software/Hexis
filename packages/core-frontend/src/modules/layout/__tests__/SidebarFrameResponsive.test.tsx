@@ -72,11 +72,44 @@ describe('SidebarFrame: slots', () => {
     const dock = screen.getByText('dock');
     expect(aside).toContainElement(pill);
     expect(aside).toContainElement(dock);
-    // One column: the three slots are siblings, not each in a wrapper of its own.
+    // One column: the header and the contents are siblings in it, and so is
+    // the footer GROUP — the one slot with a wrapper, because it is the one
+    // slot that holds more than one row and has to space them.
     expect(pill.parentElement).toBe(row.parentElement);
-    expect(row.parentElement).toBe(dock.parentElement);
+    const group = dock.parentElement as HTMLElement;
+    expect(group).toHaveAttribute('data-sidebar-footer');
+    expect(group.parentElement).toBe(row.parentElement);
     expect(pill.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(row.compareDocumentPosition(dock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('mounts no footer group for a surface that passes no footer', () => {
+    const { container } = render(
+      <SidebarFrame label="Settings">
+        <button type="button">General</button>
+      </SidebarFrame>,
+    );
+    expect(container.querySelector('[data-sidebar-footer]')).toBeNull();
+  });
+
+  /**
+   * Both footer rows decide for themselves whether they have anything to say,
+   * and on the ordinary day neither does. The group cannot learn that from
+   * React — an element that renders null is still an element — so it is read
+   * off the DOM, and `empty:hidden` is what turns "no children" into no rule
+   * and no space. Without it every sidebar in the app carries a stray
+   * hairline and 16px of dead air at the bottom.
+   */
+  it('hides the footer group, rule and all, once its rows render nothing', () => {
+    const Nothing = () => null;
+    const { container } = render(
+      <SidebarFrame label="Library plugins" footer={<Nothing />}>
+        <button type="button">Engineering</button>
+      </SidebarFrame>,
+    );
+    const group = container.querySelector('[data-sidebar-footer]') as HTMLElement;
+    expect(group).toBeEmptyDOMElement();
+    expect(group).toHaveClass('empty:hidden');
   });
 });
 
