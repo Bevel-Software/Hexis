@@ -17,6 +17,8 @@ import type {
   GrantPrincipal,
   GrantSource,
   GrantSources,
+  PathHolders,
+  ProspectiveHolders,
   ResolvedPrincipal,
 } from './access-control.interface.js';
 import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
@@ -24,6 +26,7 @@ import { PLUGINS_DIR, PLUGIN_MANIFEST_FILE, isPersonalPluginDir,
   platformRestoreDestination,
 } from '@bevel-software/platform-shared';
 import { AccessConfigError, AccessUnreadableError } from '../access-model/access-errors.js';
+import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import { synthesizePluginPrincipals } from '../access-model/plugin-principals.js';
 import {
   GROUPS_YAML,
@@ -1461,6 +1464,52 @@ export class AccessControlService implements IAccessControl {
     const model = await this.loadModel(workspaceId);
     const own = await this.readOwnEntries(await this.repoDir(workspaceId), relativePath);
     return eligibleHoldersResolved(model, 'download', relativePath, own);
+  }
+
+  /**
+   * The read and write holders of one file at its current path and at a path
+   * it has not moved to yet (see the interface).
+   *
+   * A move changes nothing about the file's own frontmatter — that travels
+   * with the bytes — and everything about the folder chain above it. So the
+   * hypothetical side is the ordinary resolution with the destination path
+   * substituted: the same model, the same own-entries (read from the SOURCE,
+   * since nothing sits at the destination to read), resolved against the
+   * destination's ancestors. One model load and one file read serve all four
+   * lookups.
+   */
+  async prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders> {
+    const model = await this.loadModel(workspaceId);
+    const repoDir = await this.repoDir(workspaceId);
+    // A FILE question only. A folder carries its own `access.md` — which moves
+    // with it and governs everything under it — so resolving it as a file
+    // would read frontmatter it does not have and omit the rules it does,
+    // naming principals that are not the ones a folder move changes. Refuse
+    // rather than answer the wrong question convincingly.
+    //
+    // Only absence is an answer here (see `isAbsence`): a probe that failed on
+    // permissions or I/O does not say "this is a file", and folding it into
+    // one would let the very case above through on an unreadable source.
+    const fromStat = await fs.stat(path.join(repoDir, fromPath)).catch((err: unknown) => {
+      if (isAbsence(err)) return null;
+      throw err;
+    });
+    if (fromStat?.isDirectory()) {
+      throw new WorkflowDomainError(
+        'prospective access answers for a file, not a folder',
+        400,
+      );
+    }
+    const own = await this.readOwnEntries(repoDir, fromPath);
+    const holdersAt = (relativePath: string): PathHolders => ({
+      read: eligibleHoldersResolved(model, 'read', relativePath, own),
+      write: eligibleHoldersResolved(model, 'write', relativePath, own),
+    });
+    return { before: holdersAt(fromPath), after: holdersAt(toPath) };
   }
 
   async eligibleWriterEmails(

@@ -1860,6 +1860,7 @@ describe('FileExplorer right-click: the viewport stub cleans up after itself', (
 // follows the destination, plus whatever else about it is worth knowing.
 describe('FileExplorer: delete and move ask first', () => {
   const DRAG_MIME = 'application/x-workspace-path';
+  const DRAG_KIND_MIME = 'application/x-workspace-kind';
   const KB = 'knowledge-base';
   const TREE: FileTreeEntry = {
     name: '.',
@@ -1903,9 +1904,51 @@ describe('FileExplorer: delete and move ask first', () => {
   };
   const CONTRACT = `${KB}/KnowledgeBase/Legal/contract.pdf`;
 
+  /** One side of the prospective-access answer. */
+  type Side = { read?: unknown[]; write?: unknown[] };
+  const group = (name: string) => ({ kind: 'group', name });
+  const person = (name: string, email: string) => ({ kind: 'person', name, email });
+
+  /**
+   * Answer the move dialog's access lookup with these before/after holders,
+   * and everything else (the destination-writable preflight) with a writable
+   * verdict — the warnings suite covers that one on its own.
+   */
+  function answerAccess(before: Side, after: Side, opts: { canWrite?: boolean } = {}) {
+    const side = (s: Side) => ({ read: s.read ?? [], write: s.write ?? [] });
+    mockAuthFetch.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes('/access/prospective')) {
+        return { ok: true, json: async () => ({ before: side(before), after: side(after) }) };
+      }
+      if (u.includes('/access?')) {
+        return { ok: true, json: async () => ({ canWrite: opts.canWrite ?? true }) };
+      }
+      // Anything else is another case's call, left unanswered as it was
+      // before the move dialog asked about access at all.
+      return undefined;
+    });
+  }
+
+  /** The move dialog once its access lookup has landed. */
+  async function openMoveDialog(rowName: string, sourcePath: string) {
+    await dropOn(rowName, sourcePath);
+    await waitFor(() =>
+      expect(
+        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+      ).toBe(true),
+    );
+    // Let the answer render.
+    await act(async () => {});
+    return screen.getByRole('dialog');
+  }
+
   beforeEach(() => {
     cleanup();
     mockAuthFetch.mockReset();
+    // Most cases are not about the access change; default to one that found
+    // nothing so the dialog settles instead of sitting on its fallback note.
+    answerAccess({}, {});
   });
   // The branch model is module-global; put back what the shared test setup
   // applied, so a case that protects `main` does not leak into the next suite.
@@ -1921,10 +1964,14 @@ describe('FileExplorer: delete and move ask first', () => {
     fireEvent.click(screen.getByText('Legal'));
   }
 
-  async function dropOn(rowName: string, sourcePath: string) {
+  async function dropOn(rowName: string, sourcePath: string, kind: 'file' | 'directory' = 'file') {
     await act(async () => {
       fireEvent.drop(screen.getByText(rowName), {
-        dataTransfer: { getData: (t: string) => (t === DRAG_MIME ? sourcePath : ''), files: [] },
+        dataTransfer: {
+          getData: (t: string) =>
+            t === DRAG_MIME ? sourcePath : t === DRAG_KIND_MIME ? kind : '',
+          files: [],
+        },
       });
     });
   }
@@ -1970,13 +2017,10 @@ describe('FileExplorer: delete and move ask first', () => {
   });
 
   describe('move', () => {
-    it('states that access follows the destination, and moves on Confirm', async () => {
+    it('says nobody loses or gains access when the lookup finds no change, and moves on Confirm', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });
-      await dropOn('Sales', CONTRACT);
-      const dialog = screen.getByRole('dialog');
-      expect(dialog).toHaveTextContent(
-        "Move contract.pdf to Sales? Access to it will follow Sales' rules from now on.",
-      );
+      const dialog = await openMoveDialog('Sales', CONTRACT);
+      expect(dialog).toHaveTextContent("Move contract.pdf to Sales? Nobody's access changes.");
       // A move between two folders of the same root, on a draft: nothing else to say.
       expect(screen.queryAllByRole('note')).toHaveLength(0);
       expect(moveEntry).not.toHaveBeenCalled();
@@ -1986,22 +2030,18 @@ describe('FileExplorer: delete and move ask first', () => {
       expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
     });
 
-    it("uses 's for a destination that does not end in s", async () => {
-      renderExplorer({ fileTree: TREE });
-      openLegal();
-      await dropOn('Old', CONTRACT);
-      expect(screen.getByRole('dialog')).toHaveTextContent("Access to it will follow Old's rules from now on.");
-    });
-
     it('sends nothing on Cancel', async () => {
       const { moveEntry } = renderExplorer({ fileTree: TREE });
-      await dropOn('Sales', CONTRACT);
+      await openMoveDialog('Sales', CONTRACT);
       await act(async () => {
         fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       });
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(moveEntry).not.toHaveBeenCalled();
-      expect(mockAuthFetch).not.toHaveBeenCalled();
+      // The lookup describes the move; it never performs any part of it.
+      expect(
+        mockAuthFetch.mock.calls.every((c) => String(c[0]).includes('/access')),
+      ).toBe(true);
     });
 
     it('drops an open confirmation when the workspace changes under it', async () => {
@@ -2045,7 +2085,7 @@ describe('FileExplorer: delete and move ask first', () => {
 
     it('warns when the move crosses from one root into another', async () => {
       renderExplorer({ fileTree: TREE });
-      await dropOn('Data', CONTRACT);
+      await openMoveDialog('Data', CONTRACT);
       expect(screen.getByRole('note')).toHaveTextContent(
         'This moves it out of KnowledgeBase/ into Data/ — the two roots are handled differently.',
       );
@@ -2053,25 +2093,344 @@ describe('FileExplorer: delete and move ask first', () => {
 
     it('warns that a move into a folder the caller cannot write will be refused', async () => {
       configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
-      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: false }) });
+      answerAccess({}, {}, { canWrite: false });
       renderExplorer({ fileTree: TREE, workspaceId: 'main' });
       await dropOn('Sales', CONTRACT);
       expect(await screen.findByRole('note')).toHaveTextContent(
         "You can't write to Sales — the move will be refused.",
       );
       // The lookup is the folder's, repo-relative — what the access route resolves.
-      expect(String(mockAuthFetch.mock.calls[0][0])).toContain(
+      const writable = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access?'));
+      expect(writable).toContain(
         `/api/workspace/main/access?path=${encodeURIComponent('KnowledgeBase/Sales')}&kind=folder`,
       );
     });
 
     it('adds no refusal warning when the caller can write the destination', async () => {
       configureBranchModel({ defaultBranch: 'main', protectedBranches: ['main'] });
-      mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ canWrite: true }) });
       renderExplorer({ fileTree: TREE, workspaceId: 'main' });
-      await dropOn('Sales', CONTRACT);
-      await waitFor(() => expect(mockAuthFetch).toHaveBeenCalled());
+      await openMoveDialog('Sales', CONTRACT);
       expect(screen.queryAllByRole('note')).toHaveLength(0);
+    });
+  });
+
+  /**
+   * A rename or a drop onto a name that is taken is refused by the server —
+   * nothing is overwritten — and the sentence it sends ("A file named X
+   * already exists in Y.") is what the sidebar shows, where the action was.
+   * Neither refusal goes through `window.alert`, and neither moves a row.
+   */
+  describe('a destination that is already taken', () => {
+    const TAKEN = 'A file named nda.md already exists in Legal.';
+
+    async function startRename(rowName: string) {
+      fireEvent.contextMenu(screen.getByText(rowName));
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: /Rename/i }));
+      });
+      return screen.getByRole('textbox') as HTMLInputElement;
+    }
+
+    async function typeAndSubmit(input: HTMLInputElement, name: string) {
+      await act(async () => {
+        fireEvent.change(input, { target: { value: name } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+      });
+    }
+
+    it('shows the refusal in the rename box and keeps the box open on the name that was typed', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const moveEntry = vi.fn().mockRejectedValue(new Error(TAKEN));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        const input = await startRename('contract.pdf');
+        await typeAndSubmit(input, 'nda.md');
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+        expect(screen.getByTestId('rename-error')).toHaveTextContent(TAKEN);
+        // Still open, still holding what was typed: the name is there to fix.
+        expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+        expect(alertSpy).not.toHaveBeenCalled();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('sends the rename once more after the name is changed, and closes the box when it lands', async () => {
+      const moveEntry = vi.fn()
+        .mockRejectedValueOnce(new Error(TAKEN))
+        .mockResolvedValueOnce(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(screen.getByTestId('rename-error')).toBeInTheDocument();
+
+      // Editing clears the refusal — the new name has not been refused.
+      await act(async () => {
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: 'deal.pdf' } });
+      });
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+      });
+      expect(moveEntry).toHaveBeenLastCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/deal.pdf`);
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('ignores edits made while the rename is in flight, so the answer lands on the name it was about', async () => {
+      // A name typed while the request is out would be thrown away by the row
+      // unmounting on success, and a refusal coming back would appear under a
+      // name it was never about. The box is frozen for that window instead.
+      let land: (() => void) | undefined;
+      const moveEntry = vi.fn().mockImplementation(
+        () => new Promise<void>((resolve) => { land = resolve; }),
+      );
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      const inFlight = screen.getByRole('textbox') as HTMLInputElement;
+      expect(inFlight).toHaveAttribute('readonly');
+      await act(async () => {
+        fireEvent.change(inFlight, { target: { value: 'something-else.md' } });
+        fireEvent.keyDown(inFlight, { key: 'Enter' });
+      });
+      // Neither the edit nor the second Enter took: one request, one name.
+      expect(screen.getByRole('textbox')).toHaveValue('nda.md');
+      expect(moveEntry).toHaveBeenCalledTimes(1);
+
+      await act(async () => { land?.(); });
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/nda.md`);
+    });
+
+    it('an ordinary rename closes the box and moves the file, as before', async () => {
+      const moveEntry = vi.fn().mockResolvedValue(undefined);
+      renderExplorer({ fileTree: TREE, moveEntry });
+      openLegal();
+
+      const input = await startRename('contract.pdf');
+      await typeAndSubmit(input, 'agreement.pdf');
+
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Legal/agreement.pdf`);
+      expect(screen.queryByTestId('rename-error')).not.toBeInTheDocument();
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    });
+
+    it('a refused drop says so under the row and leaves both entries where they were', async () => {
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+      try {
+        const clash = 'A file named contract.pdf already exists in Sales.';
+        const moveEntry = vi.fn().mockRejectedValue(new Error(clash));
+        renderExplorer({ fileTree: TREE, moveEntry });
+        openLegal();
+
+        await dropOn('Sales', CONTRACT);
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+        });
+
+        expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+        const notice = screen.getByTestId('tree-move-error');
+        expect(notice).toHaveTextContent(clash);
+        expect(notice).toHaveAttribute('role', 'alert');
+        expect(alertSpy).not.toHaveBeenCalled();
+        // The dragged row and the row it was dropped on both stayed.
+        expect(screen.getByText('contract.pdf')).toBeInTheDocument();
+        expect(screen.getByText('Sales')).toBeInTheDocument();
+
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Dismiss move error' }));
+        });
+        expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+      } finally {
+        alertSpy.mockRestore();
+      }
+    });
+
+    it('a drop that lands says nothing', async () => {
+      renderExplorer({ fileTree: TREE });
+      openLegal();
+
+      await dropOn('Sales', CONTRACT);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+
+      expect(screen.queryByTestId('tree-move-error')).not.toBeInTheDocument();
+    });
+  });
+
+  // The move warning this replaced said only that access would follow the
+  // destination's rules. A tester read that and could not tell what it meant
+  // for anyone, so the dialog now names who loses and who gains — by the
+  // group, role or person the grant names, never expanded into members.
+  describe('move: who loses and who gains access', () => {
+    it('names the group that loses access and the one that gains it', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering')], write: [group('Engineering')] },
+        { read: [group('Product')] },
+      );
+      const dialog = await openMoveDialog('Sales', CONTRACT);
+
+      expect(dialog).toHaveTextContent('Move contract.pdf to Sales?');
+      expect(dialog).not.toHaveTextContent("Nobody's access changes.");
+      expect(screen.getByText('Will lose access:')).toBeInTheDocument();
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
+      expect(screen.getByText('Engineering: can no longer edit')).toBeInTheDocument();
+      expect(screen.getByText('Will gain access:')).toBeInTheDocument();
+      expect(screen.getByText('Product: can open')).toBeInTheDocument();
+    });
+
+    it('shows only the lose block when nobody gains', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ write: [group('Engineering')] }, {});
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Engineering: can no longer edit')).toBeInTheDocument();
+      expect(screen.queryByText('Will gain access:')).not.toBeInTheDocument();
+    });
+
+    it('shows only the gain block when nobody loses', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({}, { read: [group('Product')] });
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Product: can open')).toBeInTheDocument();
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+    });
+
+    it('names a directly granted person, not the group they might be in', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ read: [person('Ali Raza', 'ali@bevel.software')] }, {});
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Ali Raza: can no longer open')).toBeInTheDocument();
+    });
+
+    it('shows six lines and folds the rest into "and N more"', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ read: Array.from({ length: 9 }, (_, i) => group(`Team ${i + 1}`)) }, {});
+      await openMoveDialog('Sales', CONTRACT);
+
+      expect(screen.getByText('Team 6: can no longer open')).toBeInTheDocument();
+      expect(screen.queryByText('Team 7: can no longer open')).not.toBeInTheDocument();
+      expect(screen.getByText('and 3 more')).toBeInTheDocument();
+    });
+
+    it('asks the destination FOLDER, repo-relative, for the file being moved', async () => {
+      renderExplorer({ fileTree: TREE, workspaceId: 'main' });
+      await openMoveDialog('Sales', CONTRACT);
+
+      const url = mockAuthFetch.mock.calls
+        .map((c) => String(c[0]))
+        .find((u) => u.includes('/access/prospective'))!;
+      expect(url).toContain('/api/workspace/main/access/prospective');
+      expect(url).toContain(`from=${encodeURIComponent('KnowledgeBase/Legal/contract.pdf')}`);
+      expect(url).toContain(`toDir=${encodeURIComponent('KnowledgeBase/Sales')}`);
+    });
+
+    it('falls back to the one-sentence form, with a note, when the lookup fails — and Move stays enabled', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      mockAuthFetch.mockImplementation(async (url: string) => {
+        if (String(url).includes('/access/prospective')) throw new Error('network down');
+        return { ok: true, json: async () => ({ canWrite: true }) };
+      });
+      // The lookup is still made; it just never answers usefully.
+      const dialog = await openMoveDialog('Sales', CONTRACT);
+
+      expect(dialog).toHaveTextContent(
+        "Move contract.pdf to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      expect(screen.getByRole('note')).toHaveTextContent("Couldn't work out the access change.");
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+
+      const move = screen.getByRole('button', { name: 'Move' });
+      expect(move).toBeEnabled();
+      await act(async () => {
+        fireEvent.click(move);
+      });
+      expect(moveEntry).toHaveBeenCalledWith(CONTRACT, `${KB}/KnowledgeBase/Sales/contract.pdf`);
+    });
+
+    it('leaves Move enabled while the lookup is still out', async () => {
+      renderExplorer({ fileTree: TREE });
+      mockAuthFetch.mockImplementation(async (url: string) =>
+        String(url).includes('/access/prospective')
+          ? new Promise(() => {}) // never settles — the two-second budget is the caller's
+          : { ok: true, json: async () => ({ canWrite: true }) },
+      );
+      await dropOn('Sales', CONTRACT);
+
+      expect(screen.getByRole('button', { name: 'Move' })).toBeEnabled();
+      expect(screen.getByRole('dialog')).toHaveTextContent('Move contract.pdf to Sales?');
+      expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+
+    it('names a group and a role that share a name as two separate lines', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess(
+        { read: [group('Engineering'), { kind: 'role', name: 'Engineering' }] },
+        {},
+      );
+      await openMoveDialog('Sales', CONTRACT);
+
+      // Two principals whose lines READ the same are still two principals; the
+      // block shows both rather than collapsing them into one.
+      expect(screen.getAllByText('Engineering: can no longer open')).toHaveLength(2);
+    });
+
+    it('asks nothing about a folder being dragged, and says only what it always said', async () => {
+      const { moveEntry } = renderExplorer({ fileTree: TREE });
+      // A folder's access is its own access.md plus every file under it — not
+      // the question this lookup answers, so it is not asked.
+      await dropOn('Sales', `${KB}/KnowledgeBase/Legal/Old`, 'directory');
+
+      const dialog = screen.getByRole('dialog');
+      expect(dialog).toHaveTextContent(
+        "Move Old to Sales? Access to it will follow Sales' rules from now on.",
+      );
+      expect(screen.queryByText('Will lose access:')).not.toBeInTheDocument();
+      expect(screen.queryByText("Couldn't work out the access change.")).not.toBeInTheDocument();
+      expect(
+        mockAuthFetch.mock.calls.some((c) => String(c[0]).includes('/access/prospective')),
+      ).toBe(false);
+
+      // And it is still an ordinary move.
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      });
+      expect(moveEntry).toHaveBeenCalledWith(
+        `${KB}/KnowledgeBase/Legal/Old`,
+        `${KB}/KnowledgeBase/Sales/Old`,
+      );
+    });
+
+    it('never decorates the next move with the last one’s answer', async () => {
+      renderExplorer({ fileTree: TREE });
+      answerAccess({ read: [group('Engineering')] }, {});
+      await openMoveDialog('Sales', CONTRACT);
+      expect(screen.getByText('Engineering: can no longer open')).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      });
+      answerAccess({}, { read: [group('Product')] });
+      await openMoveDialog('Data', CONTRACT);
+
+      expect(screen.queryByText('Engineering: can no longer open')).not.toBeInTheDocument();
+      expect(screen.getByText('Product: can open')).toBeInTheDocument();
     });
   });
 

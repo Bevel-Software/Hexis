@@ -5,6 +5,13 @@ import {
   platformFileRefusal,
   type FileTreeEntry,
 } from '@bevel-software/platform-shared';
+import {
+  parsePluginPrincipalToken,
+  pluginPrincipalLabel,
+  type AccessPrincipalRef,
+  type PathPrincipals,
+  type ProspectiveAccess,
+} from '../../access/api';
 import { KB_ROOT_DIRS } from './fileTree';
 
 // What the tree's delete and move confirmations say — see
@@ -109,8 +116,141 @@ export function folderRequestLine(request: {
   return `#${request.number} “${request.title}”${by ? ` ${by}` : ''} (${n} proposed ${n === 1 ? 'file' : 'files'})`;
 }
 
+/**
+ * The move question on its own. The dialog follows it with what the access
+ * lookup found: the lose and gain blocks, "Nobody's access changes.", or —
+ * when the lookup could not answer — {@link moveSentence}'s older sentence
+ * and a note saying so.
+ */
+export function moveQuestion(name: string, destination: string): string {
+  return `Move ${name} to ${destination}?`;
+}
+
+/**
+ * The move question with the one sentence it used to carry alone. Still what
+ * the dialog says when the access change is not known: a tester read this as
+ * unclear, which is why the blocks exist, but it is honest where a list of
+ * names would be a guess.
+ */
 export function moveSentence(name: string, destination: string): string {
-  return `Move ${name} to ${destination}? Access to it will follow ${possessive(destination)} rules from now on.`;
+  return `${moveQuestion(name, destination)} Access to it will follow ${possessive(destination)} rules from now on.`;
+}
+
+/** What the dialog reads when the lookup answered and found no change. */
+export const NO_ACCESS_CHANGE = "Nobody's access changes.";
+
+/** What the dialog reads when the lookup failed or ran out of its two seconds. */
+export const ACCESS_CHANGE_UNKNOWN = "Couldn't work out the access change.";
+
+/**
+ * The whole budget for the access lookup. Past it the dialog stops claiming to
+ * know: a confirmation the user is staring at may not wait on a resolver.
+ */
+export const ACCESS_LOOKUP_TIMEOUT_MS = 2000;
+
+/** Lines past this many are folded into "and N more". */
+const ACCESS_BLOCK_CAP = 6;
+
+/** The two verbs the move compares, in the order their lines are listed. */
+const ACCESS_VERBS = ['read', 'write'] as const;
+
+/** How each verb reads to someone who is not thinking about access grammar. */
+const VERB_WORD: Record<(typeof ACCESS_VERBS)[number], string> = {
+  read: 'open',
+  write: 'edit',
+};
+
+/**
+ * A principal as the Manage access dialog names it — the same spelling in both
+ * places, so the confirmation and the sheet never describe one grant two ways.
+ * A plugin principal's raw `plugin/<Name>/<verb>` token becomes "GTM ·
+ * readers"; the built-in `everyone` role becomes "Everyone".
+ */
+export function principalLabel(principal: AccessPrincipalRef): string {
+  if (principal.kind === 'plugin') {
+    const parsed = parsePluginPrincipalToken(principal.name);
+    return parsed ? pluginPrincipalLabel(parsed.plugin, parsed.verb) : principal.name;
+  }
+  if (principal.kind === 'role' && principal.name.trim().toLowerCase() === 'everyone') {
+    return 'Everyone';
+  }
+  // A person granted directly, with no display name on record, is still
+  // someone: their email names them better than a blank line does.
+  if (principal.kind === 'person') return principal.name || (principal.email ?? '');
+  return principal.name;
+}
+
+/**
+ * One principal's identity across the two sides of the move. People are the
+ * same person at the same address whatever name each side carries; a
+ * collective is the same principal at the same name and kind — a group and a
+ * role sharing a name are two principals, as everywhere else in access.
+ */
+function principalKey(principal: AccessPrincipalRef): string {
+  return principal.kind === 'person'
+    ? `person:${(principal.email ?? principal.name).toLowerCase()}`
+    : `${principal.kind}:${principal.name.toLowerCase()}`;
+}
+
+/** The lose and gain blocks of one move, each already capped. */
+export interface AccessChange {
+  lose: string[];
+  gain: string[];
+}
+
+/** Six lines, then "and N more" for the rest. */
+function capped(lines: string[]): string[] {
+  if (lines.length <= ACCESS_BLOCK_CAP) return lines;
+  return [...lines.slice(0, ACCESS_BLOCK_CAP), `and ${lines.length - ACCESS_BLOCK_CAP} more`];
+}
+
+/**
+ * Who loses and who gains access in one move: per verb, the principals
+ * present before and absent after, and absent before and present after.
+ *
+ * Lines are grouped by principal in the order the lists name them — the
+ * resolver's order, collectives before directly granted people — and within a
+ * principal, opening before editing. A principal that loses one verb and
+ * gains another appears in both blocks, which is what happened.
+ */
+export function accessChangeLines(before: PathPrincipals, after: PathPrincipals): AccessChange {
+  const lose: string[] = [];
+  const gain: string[] = [];
+  // First-seen order over every list, so a principal's lines sit together
+  // wherever the verb that introduced it came from.
+  const order: AccessPrincipalRef[] = [];
+  const seen = new Set<string>();
+  for (const side of [before, after]) {
+    for (const verb of ACCESS_VERBS) {
+      for (const principal of side[verb]) {
+        const key = principalKey(principal);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        order.push(principal);
+      }
+    }
+  }
+  const keysOf = (list: AccessPrincipalRef[]) => new Set(list.map(principalKey));
+  const sides = {
+    before: { read: keysOf(before.read), write: keysOf(before.write) },
+    after: { read: keysOf(after.read), write: keysOf(after.write) },
+  };
+  for (const principal of order) {
+    const key = principalKey(principal);
+    const label = principalLabel(principal);
+    for (const verb of ACCESS_VERBS) {
+      const had = sides.before[verb].has(key);
+      const has = sides.after[verb].has(key);
+      if (had && !has) lose.push(`${label}: can no longer ${VERB_WORD[verb]}`);
+      if (!had && has) gain.push(`${label}: can ${VERB_WORD[verb]}`);
+    }
+  }
+  return { lose: capped(lose), gain: capped(gain) };
+}
+
+/** {@link accessChangeLines} over a whole prospective-access answer. */
+export function accessChangeOf(access: ProspectiveAccess): AccessChange {
+  return accessChangeLines(access.before, access.after);
 }
 
 /**

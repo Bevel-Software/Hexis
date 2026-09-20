@@ -47,12 +47,15 @@ import {
   platformFileCreationRefusal,
   platformFileRefusal,
   platformFolderRefusal,
+  entryExistsMessage,
+  type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
+import { DestinationTakenError, inspectDestination } from '../../shared/rename-no-replace.js';
 
 const log = logger('workspace-tools');
 
@@ -867,21 +870,53 @@ export function registerWorkspaceTools(
   };
 
   /**
-   * Whether `dest` names something other than `src` already on disk. Judged by
-   * file identity, not by spelling: a case-only rename finds its own source at
-   * `dest` on a case-insensitive disk (no collision), while on a case-sensitive
-   * disk `Deal.md` beside `deal.md` is a different file (a collision).
+   * What is already at `dest` — `file` or `folder` — or null when the name is
+   * free. The kind is what the refusal names, so the sentence says "A folder
+   * named …" of a folder.
+   *
+   * With `src`, the one case that is not a clash is the destination BEING the
+   * source — `deal.md` → `Deal.md` on a case-insensitive disk, where the two
+   * spellings are one entry. `inspectDestination` decides that, by the same
+   * reading the move itself uses, so the preflight and the move cannot answer
+   * differently: one inode is not enough (two hard links are one inode under
+   * two names a user sees separately), the parent has to list one entry for
+   * the two spellings. Without `src` — a copy, which creates a second entry
+   * rather than moving the first — anything at `dest` is a clash, the source's
+   * own alternate spelling included.
    */
-  const collides = async (root: string, src: string, dest: string): Promise<boolean> => {
+  const existingAt = async (
+    root: string,
+    dest: string,
+    src?: string,
+  ): Promise<ExistingEntryKind | null> => {
+    if (src !== undefined) {
+      const verdict = await inspectDestination(join(root, src), join(root, dest));
+      return verdict.state === 'taken' ? verdict.kind : null;
+    }
     let destStat: import('node:fs').Stats;
     try {
       destStat = await nodeFs.lstat(join(root, dest));
     } catch (err) {
-      if (isAbsence(err)) return false;
+      if (isAbsence(err)) return null;
       throw err;
     }
-    const srcStat = await nodeFs.lstat(join(root, src));
-    return srcStat.dev !== destStat.dev || srcStat.ino !== destStat.ino;
+    return destStat.isDirectory() ? 'folder' : 'file';
+  };
+
+  /**
+   * Run a move or a copy and answer a lost race the way the look before it
+   * would have: 409 with the one sentence. The filesystem refuses a taken
+   * destination atomically (see `shared/rename-no-replace.ts`), which is what
+   * makes the refusal true even when the name is claimed after the look; this
+   * only carries that refusal out as a tool error rather than a 500.
+   */
+  const asEntryExists = async <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (err) {
+      if (err instanceof DestinationTakenError) throw new ToolError(err.message, 409);
+      throw err;
+    }
   };
 
   const kindOf = async (fs: LocalFilesystem, path: string): Promise<'file' | 'folder' | null> => {
@@ -2060,11 +2095,32 @@ export function registerWorkspaceTools(
       const descendants = srcFiles.filter((f) => !isFolderPlaceholder(f)).length;
       // Neither end may be the platform's own: a move neither takes a platform
       // item away nor makes one (a note renamed to `access.md` would start
-      // governing its folder).
-      const destOnDisk = await onDiskSpelling(root, dest);
-      const destManaged = managedReason(destOnDisk, kind);
+      // governing its folder). The source end is judged here; the destination
+      // end waits for the write verdict below, because reading it at all is
+      // what the caller has to have earned.
       const srcManaged = managedReason(await onDiskSpelling(root, src), kind);
-      const collision = srcManaged === undefined && (await collides(root, src, dest));
+      // A folder move deletes every file under `src` and creates it again under
+      // `dest`, so every one of them is judged at both paths — a file its own
+      // rules deny you is not carried off because its folder is writable. The
+      // lock gate locks only the two folder paths, so this is the check.
+      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
+      // The write verdict comes FIRST, before anything that looks at the
+      // destination. "A file named Notes.md already exists in Sales." is a
+      // fact about a folder, and on a protected branch a caller who may not
+      // write there must not learn it from a refusal — answering existence
+      // first would make this tool an existence oracle for folders whose
+      // contents the caller cannot otherwise see. A source the platform owns
+      // is refused on the source alone and needs no destination at all.
+      const blocked = srcManaged !== undefined
+        ? []
+        : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
+      const mayReadDestination = blocked.length === 0;
+      const destOnDisk = mayReadDestination ? await onDiskSpelling(root, dest) : dest;
+      const destManaged = mayReadDestination ? managedReason(destOnDisk, kind) : undefined;
+      const occupiedBy = srcManaged === undefined && mayReadDestination
+        ? await existingAt(root, dest, src)
+        : null;
+      const collision = occupiedBy !== null;
       // Checked after the collision: onto an existing platform file, "already
       // exists" is the plainer answer.
       const createsManaged = srcManaged !== undefined || collision || destManaged === undefined
@@ -2076,18 +2132,14 @@ export function registerWorkspaceTools(
             : `"${destOnDisk}" is a platform folder; a move cannot create one.`;
       const managedWhy = srcManaged ?? createsManaged;
       const managed = managedWhy !== undefined;
-      // A folder move deletes every file under `src` and creates it again under
-      // `dest`, so every one of them is judged at both paths — a file its own
-      // rules deny you is not carried off because its folder is writable. The
-      // lock gate locks only the two folder paths, so this is the check.
-      const destFiles = srcFiles.map((f) => dest + f.slice(src.length));
-      const blocked = managed || collision ? [] : await writeBlocked(branch, ctx, [src, dest, ...srcFiles, ...destFiles]);
-      const reason = collision
-        ? `"${dest}" already exists; a move never overwrites a file or merges into a folder.`
-        : managed
-          ? managedWhy
-          : blocked.length > 0
-            ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
+      // Same order as the checks above: the write refusal outranks every
+      // answer that had to look at the destination to be written.
+      const reason = managed
+        ? managedWhy
+        : blocked.length > 0
+          ? `You may not write ${blocked.length === 1 ? `"${blocked[0]}"` : `${blocked.length} of the paths, e.g. "${blocked[0]}"`}, so the move cannot run.`
+          : occupiedBy !== null
+            ? entryExistsMessage(occupiedBy, dest)
             : undefined;
       const impact = {
         src,
@@ -2101,8 +2153,8 @@ export function registerWorkspaceTools(
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
-      if (collision) throw new ToolError(reason!, 409);
       if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+      if (collision) throw new ToolError(reason!, 409);
       if (accessChanges && a.confirm !== true) {
         return {
           ...impact,
@@ -2111,7 +2163,11 @@ export function registerWorkspaceTools(
           message: `Nothing was moved: your access at "${dest}" differs from "${src}", so this move requires confirm: true.`,
         };
       }
-      await fs.moveFile(src, dest);
+      // The look above is what produces the sentence; the filesystem's own
+      // no-replace move is what guarantees it. A destination created between
+      // the two — by another agent, or by the sidebar, which moves without
+      // taking this lock — comes back here as a refusal, not an overwrite.
+      await asEntryExists(() => fs.moveFile(src, dest));
       // Moving the last file — or a whole folder — out leaves the folder it
       // came from in place, like a delete.
       await keepFolderOf(fs, ctx, branch, src, kbDirName);
@@ -2121,13 +2177,15 @@ export function registerWorkspaceTools(
 
   mount({
     name: 'copy_file',
-    description: 'Copy a workspace file to a new path. Committed + pushed as you.' + ONTOLOGY_BOUNDARY_NOTE,
+    description:
+      'Copy a workspace file to a new path. The destination must not exist — like a move, a copy never overwrites a file or a folder; to change what is in a file that already exists, write it. Committed + pushed as you.'
+      + ONTOLOGY_BOUNDARY_NOTE,
     inputs: {
       type: 'object',
       properties: {
         branch: BRANCH_INPUT,
         src: wsPath(kbDirName, 'Source path', false),
-        dest: wsPath(kbDirName, 'Destination path'),
+        dest: wsPath(kbDirName, 'Destination path — must not exist yet'),
         sessionId: SESSION_ID_INPUT,
       },
       required: ['branch', 'src', 'dest'],
@@ -2148,8 +2206,33 @@ export function registerWorkspaceTools(
       writePolicy.assertPathWritable(ctx.sessionId, a.dest as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.src as string);
       await assertOntologyWriteAllowed(sessionOntologyGate, ctx, a.dest as string);
-      await (await ctx.getFilesystem(a.branch as string)).copyFile(a.src as string, a.dest as string);
-      return { src: a.src, dest: a.dest, copied: true };
+      const branch = a.branch as string;
+      const src = a.src as string;
+      const dest = a.dest as string;
+      // A copy lands bytes at a name of its own, so it is refused by the same
+      // rule a move is: nothing already at `dest` is replaced. To put new
+      // content into a file that exists, write it.
+      //
+      // The same plain-path rule a move applies to both its ends, applied
+      // here because the look at the destination comes before the filesystem's
+      // own containment check: a path with a `..` segment must not reach
+      // `lstat` outside the workspace, even to be told a name is taken.
+      assertPlainPath(dest);
+      // The write verdict comes FIRST, for the reason `move_file` gives at
+      // length: "already exists" is a fact about the destination folder, and a
+      // caller who may not write there must not be told it. The lock gate
+      // refuses this copy anyway — but only after the copy had already
+      // answered, which is exactly the oracle.
+      const blockedDest = await writeBlocked(branch, ctx, [dest]);
+      if (blockedDest.length > 0) throw await writeRefusal(branch, blockedDest[0]);
+      const occupiedBy = await existingAt(await workspaceRoot(branch, ctx), dest);
+      if (occupiedBy !== null) throw new ToolError(entryExistsMessage(occupiedBy, dest), 409);
+      // The copy itself lands exclusively (`COPYFILE_EXCL`, under the
+      // destination's lock), so a name taken between the look and the landing
+      // is refused with the same sentence rather than overwritten.
+      const fs = await ctx.getFilesystem(branch);
+      await asEntryExists(() => fs.copyFile(src, dest));
+      return { src, dest, copied: true };
     },
   });
 
