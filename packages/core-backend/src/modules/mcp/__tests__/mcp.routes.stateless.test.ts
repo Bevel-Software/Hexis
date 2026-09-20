@@ -16,6 +16,14 @@ import { closeMountedRoutes, mountMcpRoutes } from './mcp-routes-harness.js';
  *   - GET and DELETE are retired with 405, never reaching the proxy;
  *   - a failure building the server is a JSON-RPC 500, not a hung request.
  *
+ * What is NOT here: that a manual committed between two requests reaches the
+ * second one. A stub service proves nothing about that — it would pass just as
+ * happily if `McpService` cached its tool surface across requests — so it is
+ * asserted against the real service, in `mcp.service.test.ts` ("a tool
+ * released between two requests is in the second request's answer"). What this
+ * file owes that property is the second point above: a server per request,
+ * closed with its response, so there is nothing left over to be stale.
+ *
  * The service is a stand-in whose `createRequestServer` returns a REAL SDK
  * `Server`, so what is asserted is the route driving a real stateless
  * transport, not a mock's idea of one.

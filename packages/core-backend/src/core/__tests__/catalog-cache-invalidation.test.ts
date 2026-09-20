@@ -3,6 +3,7 @@ import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { FileChangeNotifier } from '../../modules/kb-fs/file-change-notifier.js';
 import { WorkflowEventBus } from '../../modules/workflow/event-bus.js';
 import { registerCatalogCacheInvalidation } from '../catalog-cache-invalidation.js';
+import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 
 const KB_DIR = 'knowledge-base';
 
@@ -20,11 +21,13 @@ function setup() {
     { invalidate: vi.fn() },
     { invalidate: vi.fn() },
   ];
+  const accessControl = { invalidate: vi.fn() };
   const off = registerCatalogCacheInvalidation({
     eventBus,
     fileChangeNotifier,
     kbDirName: KB_DIR,
     catalogs,
+    accessControl,
   });
   /** How many times EVERY catalog was dropped — they are only ever dropped together. */
   const drops = () => {
@@ -32,7 +35,7 @@ function setup() {
     expect(new Set(counts).size).toBe(1);
     return counts[0];
   };
-  return { eventBus, fileChangeNotifier, drops, off };
+  return { eventBus, fileChangeNotifier, drops, off, accessControl };
 }
 
 describe('registerCatalogCacheInvalidation', () => {
@@ -43,6 +46,56 @@ describe('registerCatalogCacheInvalidation', () => {
         workspaceId: 'ws',
         branch: DEFAULT_BRANCH,
         paths: [`${KB_DIR}/Plugins/Engineering/coding/SKILL.md`],
+        byUser: USER,
+      });
+      expect(drops()).toBe(1);
+    });
+
+    /**
+     * The four files a released catalog is MADE of. A commit touching any of
+     * them has to drop the caches at once — the agent tester's report was a
+     * valid `.tool` that stayed absent and uncallable until the connection was
+     * recreated, and each of these declares tools or skills the same way.
+     */
+    it.each([
+      ['a `.tool` manual', `${KB_DIR}/Plugins/Everyone/software.bevel.hexis/tools/serper.tool`],
+      ['an mcp.json', `${KB_DIR}/Plugins/Everyone/mcp.json`],
+      ['a plugin.json', `${KB_DIR}/Plugins/Everyone/plugin.json`],
+      ['a SKILL.md under a plugin', `${KB_DIR}/Plugins/Everyone/skills/rfi/SKILL.md`],
+      ['a SKILL.md under the shared root', `${KB_DIR}/Skills/Ops/rfi/SKILL.md`],
+    ])('drops the catalogs when a default-branch commit touches %s', (_what, path) => {
+      const { fileChangeNotifier, drops } = setup();
+      fileChangeNotifier.emit({ workspaceId: 'ws', branch: DEFAULT_BRANCH, paths: [path], byUser: USER });
+      expect(drops()).toBe(1);
+    });
+
+    /**
+     * A REMOVAL is the same signal as an addition: the notifier reports the
+     * paths a commit touched, and a deleted manual is one of them. Without
+     * this the removed tool stays listed — and callable — for a full TTL.
+     */
+    it('drops them for a removal, which reaches here as the same touched path', () => {
+      const { fileChangeNotifier, drops } = setup();
+      fileChangeNotifier.emit({
+        workspaceId: 'ws',
+        branch: DEFAULT_BRANCH,
+        paths: [`${KB_DIR}/Plugins/Everyone/software.bevel.hexis/tools/retired.tool`],
+        byUser: USER,
+      });
+      expect(drops()).toBe(1);
+    });
+
+    /** One drop per commit, whichever of its paths qualified. */
+    it('drops them once for a batch that touches several catalog files', () => {
+      const { fileChangeNotifier, drops } = setup();
+      fileChangeNotifier.emit({
+        workspaceId: 'ws',
+        branch: DEFAULT_BRANCH,
+        paths: [
+          `${KB_DIR}/KnowledgeBase/Note.md`,
+          `${KB_DIR}/Plugins/Everyone/mcp.json`,
+          `${KB_DIR}/Plugins/Everyone/plugin.json`,
+        ],
         byUser: USER,
       });
       expect(drops()).toBe(1);
@@ -128,6 +181,33 @@ describe('registerCatalogCacheInvalidation', () => {
       });
       expect(drops()).toBe(0);
     });
+  });
+
+  /**
+   * The read gate goes with them. Every catalog here is ACL-filtered, and a
+   * skill's or a manual's own `read:` frontmatter lives in the very file the
+   * commit rewrote — but the batch gate memoizes those own-entry rules per
+   * workspace for five minutes. A fresh catalog resolved through a stale gate
+   * is the pair disagreeing: a revoked skill still loadable by name, a
+   * just-granted one still missing from the listing, for the rest of the memo.
+   */
+  it('drops the access gate for the default workspace with them', () => {
+    const { fileChangeNotifier, eventBus, drops, accessControl } = setup();
+    fileChangeNotifier.emit({
+      workspaceId: 'ws',
+      branch: DEFAULT_BRANCH,
+      paths: [`${KB_DIR}/Skills/Ops/rfi/SKILL.md`],
+      byUser: USER,
+    });
+    expect(drops()).toBe(1);
+    expect(accessControl.invalidate).toHaveBeenCalledExactlyOnceWith(workspaceIdForBranch(DEFAULT_BRANCH));
+
+    eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws', branch: DEFAULT_BRANCH });
+    expect(accessControl.invalidate).toHaveBeenCalledTimes(2);
+
+    // And not for a branch these catalogs never read.
+    eventBus.emit({ kind: 'fs-tree-changed', workspaceId: 'ws2', branch: 'agent/draft' });
+    expect(accessControl.invalidate).toHaveBeenCalledTimes(2);
   });
 
   it('detaches every subscription on unsubscribe', () => {
