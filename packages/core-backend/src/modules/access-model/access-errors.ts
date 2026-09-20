@@ -16,6 +16,14 @@ export interface AccessDeniedDetails {
    * and the message names the unreadable place instead.
    */
   unreadable?: string;
+  /**
+   * What `path` is, when the refuser knows: a folder a move or delete was
+   * judged on, or a file. Read by the tools' `write-denied` mapping to ask
+   * the read gate the right question about proposing the change on a draft —
+   * a folder directly under a root is proposable where a file there is not.
+   * Absent means file.
+   */
+  targetKind?: 'file' | 'dir';
 }
 
 /** How the read-before-write refusal names the unreadable place. */

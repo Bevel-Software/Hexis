@@ -129,8 +129,11 @@ export async function writeDenial(
   const workspaceId = workspaceIdForBranch(input.branch);
   let mayChange: boolean;
   try {
+    // The refuser says what the path is when it knows (a folder a move or
+    // delete was judged on); a file otherwise. The gate's new-folder exception
+    // turns on exactly that.
     mayChange = changeGate
-      ? (await changeGate.judge(workspaceId, input.userEmail, `${kbDirName}/${rel}`, 'file')).allowed
+      ? (await changeGate.judge(workspaceId, input.userEmail, `${kbDirName}/${rel}`, err.access.targetKind ?? 'file')).allowed
       : await accessControl.canRead(workspaceId, input.userEmail, rel);
   } catch {
     // Fail closed: offering a route the caller may not take is worse than none.

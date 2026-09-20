@@ -814,7 +814,12 @@ export function registerWorkspaceTools(
    * found are the same answer in the same shape, and there is one place that
    * decides what that shape is.
    */
-  const writeRefusal = async (branch: string, path: string): Promise<AccessDeniedError> => {
+  const writeRefusal = async (
+    branch: string,
+    path: string,
+    /** What `path` is — a folder the move or delete was judged on, or a file. See `AccessDeniedDetails.targetKind`. */
+    targetKind: 'file' | 'dir' = 'file',
+  ): Promise<AccessDeniedError> => {
     const rel = toKbRelative(path, kbDirName);
     const eligible = rel === null
       ? null
@@ -823,6 +828,7 @@ export function registerWorkspaceTools(
       path,
       eligibleRoles: eligible?.roles ?? [],
       eligibleUsers: eligible?.users ?? [],
+      targetKind,
     });
   };
 
@@ -2036,7 +2042,7 @@ export function registerWorkspaceTools(
         const { files, content, managed, linked, blocked, impact } = await judge();
         if (managed !== undefined) throw new ToolError(managed, 400);
         if (linked !== undefined) throw new ToolError(linked, 400);
-        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+        if (blocked.length > 0) throw await writeRefusal(branch, blocked[0], blocked[0] === path ? 'dir' : 'file');
         if (content.length > 0 && a.confirm !== true) {
           return {
             ...impact,
@@ -2243,7 +2249,13 @@ export function registerWorkspaceTools(
       };
       if (a.dryRun === true) return { ...impact, dryRun: true, moved: false };
       if (managed) throw new ToolError(reason!, 400);
-      if (blocked.length > 0) throw await writeRefusal(branch, blocked[0]);
+      // A folder move is judged on its two folder paths and every file under
+      // them: a refusal on one of the folder paths says so, because a folder
+      // directly under a root is proposable where a file there is not.
+      if (blocked.length > 0) {
+        const folderPath = kind === 'folder' && (blocked[0] === src || blocked[0] === dest);
+        throw await writeRefusal(branch, blocked[0], folderPath ? 'dir' : 'file');
+      }
       if (collision) throw new ToolError(reason!, 409);
       if (accessChanges && a.confirm !== true) {
         return {
