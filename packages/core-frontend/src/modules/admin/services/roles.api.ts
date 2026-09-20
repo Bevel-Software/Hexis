@@ -12,6 +12,17 @@ export interface RoleRosterEntry {
   displayName: string;
   /** Individual members — emails only; group assignments live in `groups`. */
   members: string[];
+  /**
+   * Emails the SERVER CONFIGURATION makes members, whatever `roles.yaml` says
+   * — the deployment admins (`ADMIN_EMAIL`) on Admin, empty elsewhere. The
+   * page renders these first, badged and with no remove control, and refuses
+   * to add them as regular members. May overlap `members` (a seeded
+   * `roles.yaml` names the deployment admin too); render such an email once.
+   *
+   * Optional on the wire so a page served against an older backend degrades
+   * to today's behaviour instead of crashing on `undefined.map`.
+   */
+  fixedMembers?: string[];
   /** Canonical names of groups assigned to this role. */
   groups: string[];
   isAdmin: boolean;

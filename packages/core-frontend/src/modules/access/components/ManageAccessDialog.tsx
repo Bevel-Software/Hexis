@@ -40,6 +40,7 @@ import {
   asInheritedError,
   type AccessEligible,
   type AccessResponse,
+  type AccessUser,
   type DenialSources,
   type GrantVerb,
   type GrantSource,
@@ -168,6 +169,14 @@ interface PrincipalRow {
    */
   kind: 'user' | 'role' | 'group' | 'plugin';
   isYou: boolean;
+  /**
+   * For a person row: whether an account exists for the email yet. `false`
+   * earns the "hasn't signed in yet" note beside the name — the grant is
+   * real and unaffected either way. `undefined` means the server did not say
+   * (an older build), which is NOT the same as "no account" and shows
+   * nothing.
+   */
+  hasAccount?: boolean;
   /** The principal to send on grant / revoke. */
   principal: Principal;
   /** Per-verb origin of this row's access (from the resolver). */
@@ -307,6 +316,31 @@ const PRINCIPAL_KIND_HELP = {
   role: 'Roles: special app roles that give people extra abilities in the app. They are pre-defined; you can only add or remove people. Example: Admin, which opens the platform and user management screens.',
   plugin: 'Plugins: the readers, writers or owners of a plugin, whoever they are at the time.',
 } as const satisfies Record<Principal['kind'], string>;
+
+/**
+ * What a person with no account yet is called, beside their chip and beside
+ * their row. Granting ahead of a first sign-in is supported and stays
+ * supported — under single sign-on the account is created BY that sign-in —
+ * so this is a LABEL, never a warning and never a refusal: the grant saves
+ * exactly as any other. It is here so a mistyped address is visible, and it
+ * disappears on its own the first time that person signs in.
+ */
+const NO_ACCOUNT_NOTE = "hasn't signed in yet";
+const NO_ACCOUNT_HELP =
+  'No account for this email yet. The grant is saved and takes effect the moment they first sign in — if you did not expect this, check the spelling.';
+
+/** The note itself — muted and small, the same weight as a row's second line. */
+function NoAccountNote() {
+  return (
+    <span
+      className="shrink-0 whitespace-nowrap text-detail italic text-ink-faint"
+      title={NO_ACCOUNT_HELP}
+      aria-description={NO_ACCOUNT_HELP}
+    >
+      {NO_ACCOUNT_NOTE}
+    </span>
+  );
+}
 
 /**
  * A principal's row/chip identity. Kind is PART of it: a group and a role
@@ -678,7 +712,7 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
     }
     return row;
   };
-  const touchUser = (u: { name: string; email: string }): PrincipalRow => {
+  const touchUser = (u: AccessUser): PrincipalRow => {
     const key = `u:${u.email.toLowerCase()}`;
     let row = rows.get(key);
     if (!row) {
@@ -692,6 +726,9 @@ function buildRows(data: AccessResponse | null, myEmail: string): PrincipalRow[]
         sub: label.toLowerCase() === u.email.toLowerCase() ? undefined : u.email,
         kind: 'user',
         isYou: u.email.toLowerCase() === myEmail,
+        // Whoever names this person first wins — the lists are views of the
+        // same account, so the flag cannot differ between them.
+        hasAccount: u.hasAccount,
         principal: { kind: 'user', email: u.email, displayName: u.name || u.email },
         verbs: { owner: false, write: false, read: false, download: false },
         manage: 'direct',
@@ -886,6 +923,84 @@ export function ManageAccessDialog({
   // including the layering that lets the nested "Remove from parent?" modal
   // take Escape without also closing this one.
 
+  /**
+   * The LATEST thing the server said about each email — from a suggestion or
+   * from the loaded view, whichever spoke most recently. Not a set of
+   * positives: an answer that explicitly says `hasAccount: false` about
+   * someone previously reported as having an account (an account erased while
+   * this dialog is open) has to be able to take the claim back, which an
+   * accumulate-only set cannot do.
+   *
+   * It IS accumulated across answers rather than read off the current one, so
+   * an answer landing after a chip was added still corrects that chip.
+   *
+   * Version skew: a server that says nothing about a person it has named
+   * (`hasAccount === undefined`) is recorded as HAVING an account — silence is
+   * not a claim of absence, so an older build labels nobody.
+   */
+  const [accountStatus, setAccountStatus] = useState<ReadonlyMap<string, boolean>>(
+    () => new Map(),
+  );
+  const learnAccounts = useCallback((people: readonly AccessUser[]) => {
+    if (people.length === 0) return;
+    setAccountStatus((prev) => {
+      let next: Map<string, boolean> | null = null;
+      for (const p of people) {
+        const email = p.email.trim().toLowerCase();
+        if (!email) continue;
+        const has = p.hasAccount !== false;
+        if (prev.get(email) === has) continue;
+        next ??= new Map(prev);
+        next.set(email, has);
+      }
+      return next ?? prev;
+    });
+  }, []);
+
+  /**
+   * Addresses an account-aware suggest answer has actually RULED ON — the
+   * queries such an answer came back for, canonical. Absence from `people` is
+   * evidence of "no account" only for one of these: a lookup that failed, or
+   * one served by a build that does not report accounts, says nothing at all,
+   * and a chip must not be labelled on a guess in either case.
+   */
+  const [lookedUp, setLookedUp] = useState<ReadonlySet<string>>(() => new Set());
+  const noteLookedUp = useCallback((email: string) => {
+    setLookedUp((prev) => (prev.has(email) ? prev : new Set(prev).add(email)));
+  }, []);
+
+  /**
+   * Whether a CHIP earns the note. Two ways to know, and nothing else counts:
+   * the server said `hasAccount: false` about that address, or it answered a
+   * lookup of that exact address and did not name it — which, from a build
+   * that reports accounts, is the same fact stated by omission.
+   *
+   * Rows do NOT go through here — a row reads its own `hasAccount` straight
+   * from the view, which always names the person it is a row for.
+   */
+  const lacksAccount = useCallback(
+    (email: string): boolean => {
+      const key = email.trim().toLowerCase();
+      const status = accountStatus.get(key);
+      return status === undefined ? lookedUp.has(key) : !status;
+    },
+    [accountStatus, lookedUp],
+  );
+
+  // The loaded view is the other place accounts are named: someone already
+  // granted here and already signed in must not pick the note up when their
+  // address is typed again, and someone granted here who never signed in
+  // should carry it on the chip as well as on the row.
+  useEffect(() => {
+    if (!data) return;
+    learnAccounts([
+      ...data.eligible.users,
+      ...data.readers.users,
+      ...data.owners.users,
+      ...data.downloaders.users,
+    ]);
+  }, [data, learnAccounts]);
+
   // Debounced autocomplete. People are withheld server-side until q ≥ 2 chars.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -898,13 +1013,26 @@ export function ManageAccessDialog({
     }
     debounceRef.current = setTimeout(() => {
       suggestPrincipals(workspaceId, q)
-        .then(setSuggest)
+        .then((res) => {
+          setSuggest(res);
+          learnAccounts(res.people ?? []);
+          // Only an answer that SAYS it rules on accounts turns "not in the
+          // answer" into "no account". Without that the answer is silent on
+          // the question, so the address stays unjudged and unlabelled.
+          //
+          // `peopleWithheld` is checked here too, not just trusted to have
+          // already made `accountsKnown` false: a withheld list names nobody
+          // by design (the harvesting guard), so reading it as "nobody has an
+          // account" would label every address at once. Either flag alone is
+          // enough to say nothing.
+          if (res.accountsKnown && !res.peopleWithheld) noteLookedUp(q.toLowerCase());
+        })
         .catch(() => setSuggest(null));
     }, 200);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query, workspaceId, repoRelative]);
+  }, [query, workspaceId, repoRelative, learnAccounts, noteLookedUp]);
 
   const myEmail = user?.email?.toLowerCase() ?? '';
 
@@ -1434,6 +1562,10 @@ export function ManageAccessDialog({
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-ui font-medium text-ink">{p.label}</span>
             {p.isYou && <span className="shrink-0 text-ui text-ink-faint">(you)</span>}
+            {/* Granted, but nobody has signed in as this address yet. Beside
+                the name, where the chip put it before the grant was saved —
+                and gone by itself once they do sign in. */}
+            {p.kind === 'user' && p.hasAccount === false && <NoAccountNote />}
             {p.kind !== 'user' && (
               // The same chip vocabulary as the suggest menu's trailing tags:
               // a role is a capability, a group is an audience — badge which.
@@ -1611,6 +1743,11 @@ export function ManageAccessDialog({
                 <div className="flex w-full flex-wrap items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 focus-within:border-transparent focus-within:outline-2 focus-within:-outline-offset-1 focus-within:outline-accent">
                   {pickedChips.map((c) => {
                     const label = principalLabel(c);
+                    // Nobody has signed in as this address — say so, and grant
+                    // it anyway. Only an answer that ruled on this exact
+                    // address earns the note (see `lacksAccount`); until one
+                    // arrives the chip is simply unlabelled, never guessed at.
+                    const noAccount = c.kind === 'user' && lacksAccount(c.email);
                     return (
                       // `max-w-full` bounds the chip by the field it sits in, so a
                       // long email can never push its own border past the box;
@@ -1625,6 +1762,7 @@ export function ManageAccessDialog({
                         <span className="min-w-0 truncate" title={label}>
                           {label}
                         </span>
+                        {noAccount && <NoAccountNote />}
                         <button
                           type="button"
                           onClick={() => removeChip(c)}
