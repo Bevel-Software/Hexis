@@ -124,7 +124,7 @@ export interface PluginSummary {
 export interface PluginCatalogEntry {
   /** The plugin's identity — its manifest name. */
   name: string;
-  /** What a person sees it called — the manifest's `displayName`, else the folder name. */
+  /** What a person sees it called — the manifest's `displayName`, else its `name`. */
   displayName: string;
   folders: string[];
   /** The roots it links skills from — see `PluginSummary.linkedRoots`. */

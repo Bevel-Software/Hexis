@@ -196,21 +196,15 @@ describe('PluginLinksService', () => {
     await expect(svc.link(manager, 'gtm', '../etc')).rejects.toMatchObject({ status: 422, payload: { kind: 'bad-root' } });
   });
 
-  it('refuses a root that holds a retired skill anywhere beneath it — the grant would reach it', async () => {
+  it('links a root whose skills carry any frontmatter — a governance key is no longer a refusal', async () => {
     await write('Skills/Eng/access.md', '---\n---\nwrite:\n  - Mia <mia@x.io>\n');
     await write('Skills/Eng/old-deploy/SKILL.md', '---\ndescription: Gone.\nmetadata:\n  lifecycle: retired\n---\n');
     access.invalidate(wsId);
     skills.invalidate();
 
-    await expect(svc.link(manager, 'gtm', 'Skills/Eng')).rejects.toMatchObject({
-      status: 422,
-      payload: { kind: 'retired-skills', retired: ['Skills/Eng/old-deploy'] },
-    });
-    await expect(svc.link(manager, 'gtm', 'Skills/Eng/old-deploy')).rejects.toMatchObject({ status: 422 });
-    // The active skill on its own is fine.
-    await svc.link(manager, 'gtm', 'Skills/Eng/deploy');
-    expect(await read('Skills/Eng/deploy/access.md')).toContain('plugin/gtm/read');
-    expect(await access.canRead(wsId, member.email, 'Skills/Eng/old-deploy/SKILL.md')).toBe(false);
+    const result = await svc.link(manager, 'gtm', 'Skills/Eng');
+    expect(result.skills.sort()).toEqual(['Skills/Eng/deploy', 'Skills/Eng/old-deploy', 'Skills/Eng/rollback']);
+    expect(await access.canRead(wsId, member.email, 'Skills/Eng/old-deploy/SKILL.md')).toBe(true);
   });
 
   it('unlink removes the entry and revokes the tokens when the actor may edit the skill', async () => {

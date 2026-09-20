@@ -53,15 +53,9 @@ export function SharedViaPlugins({
       ),
     [data.pluginSummaries],
   );
-  // A retired skill is never shared onward — the link API refuses it, so the
-  // chooser offers nothing rather than a list of refusals.
-  const retired = useMemo(
-    () => data.items.some((i) => i.kind === 'skill' && i.id === skillName && i.lifecycle === 'retired'),
-    [data.items, skillName],
-  );
   const addable = useMemo(
-    () => (retired ? [] : [...managed].filter((name) => !memberships.some((m) => m.name === name)).sort()),
-    [managed, memberships, retired],
+    () => [...managed].filter((name) => !memberships.some((m) => m.name === name)).sort(),
+    [managed, memberships],
   );
 
   async function run(label: string, op: () => Promise<unknown>, done: string) {

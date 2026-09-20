@@ -1,5 +1,6 @@
 import { useState, type MouseEvent, type ReactNode } from 'react';
 import { cn } from '../../../lib/utils';
+import { SIDEBAR_ROW_INSET } from '../../layout/components/SidebarFrame';
 import type { LibraryFilter } from '../utils/status';
 
 /**
@@ -45,10 +46,6 @@ export interface PluginsSidebarProps {
    * people's problem, and the count is not the news.
    */
   teams: { name: string; count: number; urgent: number }[];
-  /** Integrations across the catalog that need setup — the amber count. */
-  attentionCount: number;
-  /** Send the user to the Connect page to finish those. */
-  onFinishSetup(): void;
   /** Start a new plugin. The layout owns the dialog; this is only the intent. */
   onCreatePlugin(): void;
   /**
@@ -116,6 +113,13 @@ export interface PluginsSidebarProps {
  * collapse animation, the drag handle — belongs to `SidebarFrame`, which
  * Knowledge's file tree renders inside too. That is the whole reason the two
  * navs cannot drift: there is one of them, holding a different list.
+ *
+ * The bottom of the sidebar is not this component's either. The setup
+ * reminder that used to close it — "2 integrations need setup. Finish now" —
+ * is a FOOTER ROW now (`IntegrationsSetupReminder`), which the layout passes
+ * into the frame's `footer` slot beside the change-request dock. A nav that
+ * also placed the last row in the column was the reason those two rows
+ * disagreed about where the left edge is.
  */
 export function PluginsSidebar({
   filter,
@@ -123,8 +127,6 @@ export function PluginsSidebar({
   ownedCount,
   ownedAttention,
   teams,
-  attentionCount,
-  onFinishSetup,
   onCreatePlugin,
   canCreatePlugin = false,
   onContextMenu,
@@ -139,7 +141,10 @@ export function PluginsSidebar({
 
   const rowClass = (selected: boolean) =>
     cn(
-      'flex items-center justify-between gap-2 rounded-sm px-2.5 py-1.5 text-ui transition-colors',
+      'flex items-center justify-between gap-2 rounded-sm py-1.5 text-ui transition-colors',
+      // The sidebar's row grid, from the frame that owns it — the same inset
+      // the footer rows below the tree take.
+      SIDEBAR_ROW_INSET,
       selected ? 'bg-hover font-semibold text-ink' : 'text-ink-muted hover:bg-hover hover:text-ink',
     );
 
@@ -253,117 +258,108 @@ export function PluginsSidebar({
   );
 
   return (
-    <>
-      <nav
-        aria-label="Library navigation"
-        className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto"
-        // The nav's empty space is a target too — Knowledge's tree gives its
-        // ROOT row a menu holding the create verbs, and this is where the
-        // Library's equivalent click lands. Rows stop the event before it
-        // reaches here, so this only ever fires on the gaps between them.
-        onContextMenu={(e) => openMenu(e, null, 'Library', null)}
-      >
-        {/* The two lenses on the whole catalog, unlabelled and first:
-            Everything is where the Library opens, and a destination the
-            whole surface hangs off does not sit inside a category. */}
-        {row('Everything', { kind: 'all' }, 0)}
-        {/* Amber is a summons, not a total. It shows how many of your own
-            items need something FROM YOU; when none do, the slot falls back
-            to the plain count of what you own, in grey. A permanent amber 26
-            beside "Owned by me" trained the eye to ignore the one colour on
-            this page that is supposed to mean "look here". */}
-        {row(
-          'Owned by me',
-          { kind: 'owned' },
-          ownedAttention > 0 ? ownedAttention : ownedCount,
-          ownedAttention > 0 ? 'pending' : 'count',
-        )}
-
-        {/* The switch — a segmented control as quiet as the rows, on the
-            nav's own hover tint, the chosen half lifted onto the surface. */}
-        <div
-          role="tablist"
-          aria-label="Sidebar view"
-          className="mt-4 mb-2 flex gap-0.5 rounded-md bg-hover p-0.5"
-          onKeyDown={onTablistKeyDown}
-          // The switch is a control, not empty nav space: a right-click on it
-          // is nobody's to answer, so it must not reach the nav behind it.
-          onContextMenu={(e) => e.stopPropagation()}
-        >
-          {tab('teams', 'Groups')}
-          {tab('advanced', 'Advanced')}
-        </div>
-
-        {/* Both panels stay MOUNTED and the inactive one is hidden, not
-            dropped: a tab's `aria-controls` always names a panel that exists,
-            and the trees keep what a person opened in them (expanded folders,
-            a rename in progress) across a switch and back. */}
-        <div
-          role="tabpanel"
-          id="library-view-teams"
-          aria-labelledby="library-view-tab-teams"
-          hidden={view !== 'teams'}
-          className="flex flex-col gap-px"
-        >
-          {/* Groups only: your own space is not a group — it is reached from
-              its row on Everything and its folder in the Plugins tree. */}
-          {teams.map(({ name, count, urgent }) =>
-            // Orange wins the count slot: members locked out of a skill outrank
-            // how much the team can use, which is not the news.
-            row(
-              name,
-              { kind: 'team', group: name },
-              urgent > 0 ? urgent : count,
-              urgent > 0 ? 'urgent' : 'count',
-            ),
-          )}
-        </div>
-        <div
-          role="tabpanel"
-          id="library-view-advanced"
-          aria-labelledby="library-view-tab-advanced"
-          hidden={view !== 'advanced'}
-          className="flex flex-col gap-px"
-        >
-            {/* The usual ways to a new plugin are a right-click — on the nav's
-                empty space, or on a folder in the Plugins tree — and a person
-                with no plugins yet is exactly the person who has not learned
-                either. While the workspace holds no plugins AT ALL, the way to
-                the first one is said in words, as a row above the trees.
-                Words only, no chalk arrow: the `Skills/` and `Plugins/` roots
-                render directly beneath this row even when both are empty, so
-                there is no empty space for an arrow to come from — it drew
-                across the two root rows. (The empty plugin page keeps its
-                arrow; it has the room.) Administrators only: on an untouched
-                workspace the first plugin is theirs to make, and telling
-                everyone else to make it points them at a decision that is not
-                theirs. (Everything says the same in its plugin band, for
-                whoever never opens this view.) */}
-            {canCreatePlugin && (
-              <button
-                type="button"
-                onClick={onCreatePlugin}
-                className="flex items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink"
-              >
-                <span aria-hidden="true">+</span>
-                <span className="truncate">Create a plugin</span>
-              </button>
-            )}
-            {skillsTree}
-            {pluginsTree}
-        </div>
-      </nav>
-
-      {attentionCount > 0 && (
-        <button
-          type="button"
-          onClick={onFinishSetup}
-          className="mt-2 rounded-sm border-t border-line px-2.5 pt-3.5 text-left text-meta text-ink-faint hover:text-ink"
-        >
-          {attentionCount} {attentionCount === 1 ? 'integration needs' : 'integrations need'} setup. Finish now
-        </button>
+    <nav
+      aria-label="Library navigation"
+      className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto"
+      // The nav's empty space is a target too — Knowledge's tree gives its
+      // ROOT row a menu holding the create verbs, and this is where the
+      // Library's equivalent click lands. Rows stop the event before it
+      // reaches here, so this only ever fires on the gaps between them.
+      onContextMenu={(e) => openMenu(e, null, 'Library', null)}
+    >
+      {/* The two lenses on the whole catalog, unlabelled and first:
+          Everything is where the Library opens, and a destination the
+          whole surface hangs off does not sit inside a category. */}
+      {row('Everything', { kind: 'all' }, 0)}
+      {/* Amber is a summons, not a total. It shows how many of your own
+          items need something FROM YOU; when none do, the slot falls back
+          to the plain count of what you own, in grey. A permanent amber 26
+          beside "Owned by me" trained the eye to ignore the one colour on
+          this page that is supposed to mean "look here". */}
+      {row(
+        'Owned by me',
+        { kind: 'owned' },
+        ownedAttention > 0 ? ownedAttention : ownedCount,
+        ownedAttention > 0 ? 'pending' : 'count',
       )}
-    </>
+
+      {/* The switch — a segmented control as quiet as the rows, on the
+          nav's own hover tint, the chosen half lifted onto the surface. */}
+      <div
+        role="tablist"
+        aria-label="Sidebar view"
+        className="mt-4 mb-2 flex gap-0.5 rounded-md bg-hover p-0.5"
+        onKeyDown={onTablistKeyDown}
+        // The switch is a control, not empty nav space: a right-click on it
+        // is nobody's to answer, so it must not reach the nav behind it.
+        onContextMenu={(e) => e.stopPropagation()}
+      >
+        {tab('teams', 'Groups')}
+        {tab('advanced', 'Advanced')}
+      </div>
+
+      {/* Both panels stay MOUNTED and the inactive one is hidden, not
+          dropped: a tab's `aria-controls` always names a panel that exists,
+          and the trees keep what a person opened in them (expanded folders,
+          a rename in progress) across a switch and back. */}
+      <div
+        role="tabpanel"
+        id="library-view-teams"
+        aria-labelledby="library-view-tab-teams"
+        hidden={view !== 'teams'}
+        className="flex flex-col gap-px"
+      >
+        {/* Groups only: your own space is not a group — it is reached from
+            its row on Everything and its folder in the Plugins tree. */}
+        {teams.map(({ name, count, urgent }) =>
+          // Orange wins the count slot: members locked out of a skill outrank
+          // how much the team can use, which is not the news.
+          row(
+            name,
+            { kind: 'team', group: name },
+            urgent > 0 ? urgent : count,
+            urgent > 0 ? 'urgent' : 'count',
+          ),
+        )}
+      </div>
+      <div
+        role="tabpanel"
+        id="library-view-advanced"
+        aria-labelledby="library-view-tab-advanced"
+        hidden={view !== 'advanced'}
+        className="flex flex-col gap-px"
+      >
+        {/* The usual ways to a new plugin are a right-click — on the nav's
+            empty space, or on a folder in the Plugins tree — and a person
+            with no plugins yet is exactly the person who has not learned
+            either. While the workspace holds no plugins AT ALL, the way to
+            the first one is said in words, as a row above the trees.
+            Words only, no chalk arrow: the `Skills/` and `Plugins/` roots
+            render directly beneath this row even when both are empty, so
+            there is no empty space for an arrow to come from — it drew
+            across the two root rows. (The empty plugin page keeps its
+            arrow; it has the room.) Administrators only: on an untouched
+            workspace the first plugin is theirs to make, and telling
+            everyone else to make it points them at a decision that is not
+            theirs. (Everything says the same in its plugin band, for
+            whoever never opens this view.) */}
+        {canCreatePlugin && (
+          <button
+            type="button"
+            onClick={onCreatePlugin}
+            className={cn(
+              'flex items-center gap-2 rounded-sm py-1.5 text-left text-ui text-ink-faint transition-colors hover:bg-hover hover:text-ink',
+              SIDEBAR_ROW_INSET,
+            )}
+          >
+            <span aria-hidden="true">+</span>
+            <span className="truncate">Create a plugin</span>
+          </button>
+        )}
+        {skillsTree}
+        {pluginsTree}
+      </div>
+    </nav>
   );
 }
 
@@ -411,7 +407,9 @@ export function SectionLabel({
   actions?: ReactNode;
 }) {
   return (
-    <div className={cn('group/label flex items-center gap-1 px-2.5 pb-1.5', spaced && 'pt-5')}>
+    <div
+      className={cn('group/label flex items-center gap-1 pb-1.5', SIDEBAR_ROW_INSET, spaced && 'pt-5')}
+    >
       <span className="text-label uppercase text-ink-faint">{children}</span>
       {actions && (
         <span className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/label:opacity-100">
