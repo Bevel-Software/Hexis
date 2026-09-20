@@ -590,3 +590,117 @@ describe('roster referencedBy under group shadowing', () => {
     ]);
   });
 });
+
+/**
+ * The deployment admin (`ADMIN_EMAIL`) on the Admin role. The resolver admits
+ * that address ahead of `roles.yaml` (`isAdminEmail` checks `deploymentOwners`
+ * first), so the roster must SAY so — the bug this covers is a page that never
+ * showed the account, leaving "remove yourself from Admin" looking like it
+ * should work.
+ */
+describe('Admin fixed members — the deployment admin', () => {
+  const OWNER = 'owner@bevel.software';
+  let root: string;
+  let repo: string;
+  let ws: WorkspaceService;
+  let workflow: ReturnType<typeof stubWorkflow>;
+
+  /** Service whose configured deployment admins are `admins`. */
+  function serviceWith(admins: readonly string[]): RolesAdminService {
+    return new RolesAdminService(
+      ws,
+      workflow.svc,
+      new AccessControlService(ws, KB, new NodeFs()),
+      KB,
+      () => DEFAULT_BRANCH,
+      stubEventBus().bus,
+      admins,
+    );
+  }
+
+  beforeEach(async () => {
+    root = await mkTmpRoot();
+    const workspaceDir = path.join(root, WS);
+    repo = path.join(workspaceDir, KB);
+    await write(repo, 'roles.yaml', ROLES);
+    ws = stubWorkspace(workspaceDir);
+    workflow = stubWorkflow();
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('lists the deployment admin as a fixed member of Admin, and of no other role', async () => {
+    const roster = await serviceWith([OWNER]).getRoster();
+    expect(roster.find((r) => r.canonical === 'admin')!.fixedMembers).toEqual([OWNER]);
+    expect(roster.find((r) => r.canonical === 'sales')!.fixedMembers).toEqual([]);
+  });
+
+  it('canonicalises the configured address and drops a blank one', async () => {
+    // The composition root passes `[config.adminEmail]` unconditionally, so an
+    // unset ADMIN_EMAIL arrives as [''] — that must not become a member "".
+    expect((await serviceWith(['']).getRoster()).find((r) => r.canonical === 'admin')!.fixedMembers)
+      .toEqual([]);
+    expect(
+      (await serviceWith(['  Owner@Bevel.Software  ']).getRoster()).find((r) => r.canonical === 'admin')!
+        .fixedMembers,
+    ).toEqual([OWNER]);
+  });
+
+  it('reports a fixed member the roles file ALSO names in both lists, so the invariant still counts the file', async () => {
+    // The seeded roles.yaml names ADMIN_EMAIL, so overlap is the normal case.
+    // `members` must keep it — the Admin >=1-direct-email invariant counts the
+    // FILE — and the page is what renders the overlap once.
+    const admin = (await serviceWith(['razvan@bevel.software']).getRoster()).find(
+      (r) => r.canonical === 'admin',
+    )!;
+    expect(admin.members).toContain('razvan@bevel.software');
+    expect(admin.fixedMembers).toEqual(['razvan@bevel.software']);
+  });
+
+  it('refuses to ADD the deployment admin to Admin, with the note the page shows', async () => {
+    const svc = serviceWith([OWNER]);
+    await expect(svc.addMember(ADMIN, 'admin', OWNER)).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'fixed-deployment-admin' },
+      message: expect.stringContaining(
+        'Deployment admin, set in the server configuration; cannot be removed here',
+      ),
+    });
+    // Nothing written: the file is byte-identical.
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toBe(ROLES);
+  });
+
+  it('refuses the add whatever the spelling of the configured address', async () => {
+    await expect(
+      serviceWith(['Owner@Bevel.Software']).addMember(ADMIN, 'admin', 'OWNER@bevel.software'),
+    ).rejects.toMatchObject({ status: 422, payload: { kind: 'fixed-deployment-admin' } });
+  });
+
+  it('refuses to REMOVE the deployment admin from Admin — the page shows no remove control either', async () => {
+    await write(repo, 'roles.yaml', `roles:\n  Admin:\n    - ${OWNER}\n    - juan@bevel.software\n`);
+    const svc = serviceWith([OWNER]);
+    await expect(svc.removeMember(ADMIN, 'admin', OWNER, true)).rejects.toMatchObject({
+      status: 422,
+      payload: { kind: 'fixed-deployment-admin' },
+      message: expect.stringContaining(
+        'Deployment admin, set in the server configuration; cannot be removed here',
+      ),
+    });
+    expect(await fs.readFile(path.join(repo, 'roles.yaml'), 'utf-8')).toContain(OWNER);
+  });
+
+  it('leaves OTHER roles editable for that address — a deployment admin is an ordinary Sales member', async () => {
+    const svc = serviceWith([OWNER]);
+    const roster = await svc.addMember(ADMIN, 'sales', OWNER);
+    expect(roster.find((r) => r.canonical === 'sales')!.members).toContain(OWNER);
+  });
+
+  it('with no ADMIN_EMAIL configured, no role has a fixed member', async () => {
+    const roster = await serviceWith([]).getRoster();
+    expect(roster.every((r) => r.fixedMembers.length === 0)).toBe(true);
+    // ...and ordinary Admin membership stays editable.
+    await expect(serviceWith([]).addMember(ADMIN, 'admin', OWNER)).resolves.toBeDefined();
+  });
+});

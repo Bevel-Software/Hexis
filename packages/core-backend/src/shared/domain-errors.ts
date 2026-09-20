@@ -18,6 +18,7 @@
  */
 
 import type { ValidationReport } from '@bevel-software/platform-shared';
+import { sanitizedPath } from './printable.js';
 
 export class WorkflowDomainError extends Error {
   readonly status: number;
@@ -167,10 +168,35 @@ export class PullRebaseConflictError extends WorkflowDomainError {
 }
 
 /**
+ * The platform has never heard of this branch: nothing it has cloned, and
+ * nothing any listing of origin's branches has mentioned. Distinct from
+ * `RemoteBranchGoneError`, which is the SAME git failure about a branch the
+ * platform did know — and answering that for a name nobody ever pushed told
+ * the reader their typo "no longer exists on the remote", which implies it
+ * once did. 404, and the message names the branch and nothing else: no git
+ * output, no remote URL.
+ */
+export class BranchNotFoundError extends WorkflowDomainError {
+  readonly kind = 'branch-not-found' as const;
+  constructor(readonly branch: string) {
+    super(`There is no branch named ${branch}.`, 404, {
+      kind: 'branch-not-found',
+      branch,
+    });
+    this.name = 'BranchNotFoundError';
+  }
+}
+
+/**
  * The clone's branch no longer exists on origin: the fetch that refreshes
  * `refs/remotes/origin/<branch>` found no such ref. Distinct from an
  * unreachable remote — the host answered, and the answer was "gone" — so a
  * caller can treat the clone as stale rather than the sync as failed. 410.
+ *
+ * Only for a branch the platform KNEW: a clone of it, or a listing that named
+ * it. For a name it has never heard of, the same git failure is a
+ * `BranchNotFoundError` — see `WorkspaceService.hasHeardOfBranch`. A sync
+ * always has the clone in hand, so it is always this one.
  */
 export class RemoteBranchGoneError extends WorkflowDomainError {
   readonly kind = 'remote-branch-gone' as const;
@@ -243,6 +269,53 @@ export class WorkflowValidationError extends WorkflowDomainError {
   constructor(message: string, payload?: Record<string, unknown>) {
     super(message, 400, payload);
     this.name = 'WorkflowValidationError';
+  }
+}
+
+/**
+ * The next step a missing path always offers, in one sentence.
+ *
+ * Lives HERE, the layer with no module imports, because both surfaces that
+ * answer a missing path need it and they sit on opposite sides of a module
+ * boundary: this class (raised by services, rendered by the HTTP routes) and
+ * `modules/workspace/not-found.ts` (the file tools), which re-exports the
+ * constant under its own name. One sentence, written once, so the two cannot
+ * drift apart.
+ */
+export const NOT_FOUND_NEXT_STEP = 'Check the path with list_files.';
+
+/**
+ * Nothing is at the path the caller named.
+ *
+ * Raised by a SERVICE that probed the path itself, where the file tools' own
+ * `not-found` helper (modules/workspace/not-found.ts) cannot reach: the zip
+ * reader, for instance, answers "ADM-ZIP: Invalid filename" for a missing
+ * archive, which is not a filesystem error at all and would otherwise be
+ * dressed up as an unreadable archive. The helper recognises this class and
+ * the raw `ENOENT`/`ENOTDIR` shapes alike, so both end as the one 404.
+ *
+ * 404 with a `not_found` kind and the requested path, which is also what the
+ * HTTP routes answer — a path that is not there gets one answer whichever
+ * surface asked. The MESSAGE AND THE PAYLOAD ARE BUILT HERE, not by whoever
+ * catches it, because not every surface catches it: the tools pass through
+ * `orDeclaredNotFound`, which re-renders the same three parts, but
+ * `POST /workspace/:id/unzip` sends this error straight to `domainErrorBody`.
+ * Sanitizing the path and appending the next step in the constructor is what
+ * makes those two answers the same answer.
+ */
+export class PathNotFoundError extends WorkflowDomainError {
+  readonly kind = 'not_found' as const;
+  /** The requested path, sanitized — never the path on disk. */
+  readonly path: string;
+  constructor(path: string) {
+    const safe = sanitizedPath(path);
+    super(
+      `There is no file or directory at "${safe}" in this workspace. ${NOT_FOUND_NEXT_STEP}`,
+      404,
+      { kind: 'not_found', path: safe },
+    );
+    this.name = 'PathNotFoundError';
+    this.path = safe;
   }
 }
 

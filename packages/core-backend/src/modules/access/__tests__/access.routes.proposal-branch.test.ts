@@ -12,7 +12,7 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
+import { usersDbDouble } from './users-db-double.js';
 import { AccessControlService } from '../access-control.service.js';
 import { createAccessRoutes } from '../access.routes.js';
 import { branchForWorkspaceId, workspaceIdForBranch } from '../../../shared/workspace-id.js';
@@ -135,7 +135,7 @@ describe('access routes on a proposal branch (real git)', () => {
         authService,
         workflowService,
         { emit: () => {} } as unknown as WorkflowEventBus,
-        {} as Database,
+        usersDbDouble(),
         KB,
       ),
     );

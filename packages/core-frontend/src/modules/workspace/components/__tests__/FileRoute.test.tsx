@@ -403,6 +403,31 @@ describe('FileRoute', () => {
     });
   });
 
+  it('renders the branch-not-found screen when the BOOTSTRAP of the URL branch answered 404', async () => {
+    // A name nobody ever pushed. Nothing was deleted, so the branch-gone
+    // screen would tell the reader something untrue — this is the
+    // file-missing story, told about a branch.
+    const workspace = makeWorkspace({
+      bootstrapError: {
+        branch: 'alice/draft',
+        status: 404,
+        message: 'There is no branch named alice/draft.',
+      },
+    });
+    const git = makeGit({ status: makeStatus('main') });
+
+    renderAt('/workspace/alice%2Fdraft/Knowledge/Foo.md', { git, workspace });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Branch not found/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/There is no branch named/i)).toBeInTheDocument();
+    expect(screen.getByText('alice/draft')).toBeInTheDocument();
+    // Not the deleted-branch screen, and not the generic bootstrap failure.
+    expect(screen.queryByText(/This branch no longer exists/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't open/i)).not.toBeInTheDocument();
+  });
+
   it('a stale bootstrap failure from another branch does not paint over this one', async () => {
     const workspace = makeWorkspace({ bootstrapError: { branch: 'someone/else', status: 410, message: 'Gone' } });
     const git = makeGit({ status: makeStatus('alice/draft') });

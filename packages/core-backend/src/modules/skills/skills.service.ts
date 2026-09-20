@@ -182,8 +182,6 @@ export class SkillService implements ISkillService {
                   name,
                   description: fm.description,
                   version: fm.version,
-                  owner: fm.owner,
-                  lifecycle: fm.lifecycle,
                   path: relFolder,
                 },
                 body: fm.body,
@@ -256,10 +254,6 @@ function scalarToString(value: unknown): string | undefined {
 export function parseSkillFrontmatter(raw: string): {
   description: string;
   version?: string;
-  /** `metadata.owner` (or a top-level `owner`) — the governance record's owner, verbatim. */
-  owner?: string;
-  /** `metadata.lifecycle` (or top-level) — e.g. `active`, `deprecated`, `retired`; lowercased. */
-  lifecycle?: string;
   allowedTools?: string[];
   body: string;
   /** The parsed frontmatter object (for shared id resolution: `id`/`name`). */
@@ -284,11 +278,6 @@ export function parseSkillFrontmatter(raw: string): {
   const description = typeof data.description === 'string' ? data.description.trim() : '';
   const metadata = (data.metadata ?? {}) as Record<string, unknown>;
   const version = scalarToString(data.version) ?? scalarToString(metadata.version);
-  // The governance record: `metadata.owner` / `metadata.lifecycle` first (the
-  // agentskills convention this catalog reads), a top-level spelling second.
-  const owner = (scalarToString(metadata.owner) ?? scalarToString(data.owner))?.trim() || undefined;
-  const lifecycle =
-    (scalarToString(metadata.lifecycle) ?? scalarToString(data.lifecycle))?.trim().toLowerCase() || undefined;
 
   // `allowed-tools` is a space-separated string (agentskills) or a YAML list.
   const at = data['allowed-tools'];
@@ -298,7 +287,7 @@ export function parseSkillFrontmatter(raw: string): {
       ? at.split(/\s+/).filter(Boolean)
       : undefined;
 
-  return { description, version, owner, lifecycle, allowedTools, body, frontmatter: data };
+  return { description, version, allowedTools, body, frontmatter: data };
 }
 
 /**

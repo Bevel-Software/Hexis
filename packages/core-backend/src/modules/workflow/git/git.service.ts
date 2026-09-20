@@ -324,6 +324,19 @@ export class GitService implements IGitService {
   }
 
   /**
+   * Late-bound by the composition root: notified with the branch names every
+   * `listBranches` returns. A listing is the one moment the platform sees
+   * origin's set of branches, and the workspace layer needs that memory to
+   * tell a branch that was deleted from a name that never existed — see
+   * `WorkspaceService.noteBranchesListed`.
+   */
+  private onBranchesListed: ((names: string[]) => void) | null = null;
+
+  setBranchesListedListener(listener: (names: string[]) => void): void {
+    this.onBranchesListed = listener;
+  }
+
+  /**
    * Mark a workspace as freshly fetched. Called by `WorkspaceService` right
    * after a branch's clone is created — `git clone` already downloaded every
    * ref, so the first `listBranches` can skip the redundant implicit
@@ -547,6 +560,17 @@ export class GitService implements IGitService {
           }
         }),
       );
+      // Every name this listing showed — origin's refs and the local heads
+      // alike, since a branch checked out here is one the platform has
+      // plainly heard of. A listener that misbehaves must not turn a good
+      // listing into a failed one.
+      try {
+        this.onBranchesListed?.(infos.map((info) => info.name));
+      } catch (err) {
+        log.error(`branches-listed listener failed for workspace ${workspaceId}:`, {
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
       return infos;
     });
   }
