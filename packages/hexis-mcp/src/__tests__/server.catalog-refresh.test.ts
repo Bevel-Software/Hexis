@@ -179,9 +179,25 @@ afterEach(() => {
 
 const settle = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A connected client, its notification log, and the teardown for both. */
+/** Poll until `condition` holds, or fail naming what was being waited for. */
+async function waitFor(condition: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await settle(20);
+  }
+}
+
+/**
+ * A connected client, its notification log, and the teardown for both.
+ *
+ * The heartbeat is OFF by default here, so each test below says which trigger
+ * it is about: most of them are about the activity check, and a timer firing
+ * underneath them would make it impossible to tell which one did the work.
+ * The heartbeat has its own tests, which turn it on.
+ */
 async function start(
-  catalogCheck: false | { minIntervalMs?: number } = { minIntervalMs: 0 },
+  catalogCheck: false | { minIntervalMs?: number; heartbeatMs?: number } = {},
 ): Promise<{
   client: Client;
   notifications: string[];
@@ -193,7 +209,9 @@ async function start(
     stderr.push(args.map(String).join(' '));
   });
   const config: HexisMcpConfig = { baseUrl: base, connectionKey: 'bevel_test' };
-  const handle = await createHexisMcpServer(config, '0.0.0', { catalogCheck });
+  const handle = await createHexisMcpServer(config, '0.0.0', {
+    catalogCheck: catalogCheck === false ? false : { minIntervalMs: 0, heartbeatMs: 0, ...catalogCheck },
+  });
   await handle.ready;
 
   const notifications: string[] = [];
@@ -360,23 +378,68 @@ describe('a manual added on the deployment reaches an already-connected client',
   });
 
   /**
-   * The whole point of checking on activity rather than on a timer: a laptop
-   * whose client nobody is using asks its deployment NOTHING.
+   * THE HEARTBEAT, and why it exists.
+   *
+   * Staging failed this ticket on exactly this case: an idle connection got
+   * zero notifications in eight seconds after a commit. A check driven only by
+   * activity cannot serve a notification, because the notification exists for
+   * the client that is NOT asking — an editor sitting open is the normal state
+   * of a connection, and it generates nothing to hang a check on.
+   *
+   * So the connection also checks on a timer. Nothing is touched here after
+   * `start` returns: no listing, no call.
    */
-  it('asks the deployment nothing while the connection is idle', { timeout: 60_000 }, async () => {
+  it('tells an IDLE connection, with no listing or call to prompt it', { timeout: 60_000 }, async () => {
     commit(['ping']);
-    const s = await start();
+    const s = await start({ heartbeatMs: 50 });
+    try {
+      commit(['ping', 'serper_search']);
+
+      await waitFor(
+        () => s.notifications.includes('tools/list_changed'),
+        'the tool-list-changed notification on an idle connection',
+      );
+      // The client did nothing to earn it: the notification is the FIRST
+      // thing that happened on this connection since it was opened.
+      expect(await listed(s.client)).toContain('serper_search');
+    } finally {
+      await s.shutdown();
+    }
+  });
+
+  /**
+   * And the heartbeat is what does it — the same commit, the same idle
+   * connection, with only the timer turned off.
+   */
+  it('stays silent on an idle connection when the heartbeat is off', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start({ heartbeatMs: 0 });
     try {
       // Discovery reads the revision once, before the manuals — that is the
       // baseline, not a check.
       const atStartup = revisionReads.length;
       expect(atStartup).toBe(1);
+
+      commit(['ping', 'serper_search']);
       await settle(400);
+
       expect(revisionReads.length).toBe(atStartup);
       expect(s.notifications).toEqual([]);
     } finally {
       await s.shutdown();
     }
+  });
+
+  /** A heartbeat must not outlive the server it belongs to. */
+  it('stops its heartbeat at shutdown', { timeout: 60_000 }, async () => {
+    commit(['ping']);
+    const s = await start({ heartbeatMs: 30 });
+    await waitFor(() => revisionReads.length > 2, 'a few heartbeat checks');
+
+    await s.shutdown();
+    const afterShutdown = revisionReads.length;
+    await settle(300);
+    expect(revisionReads.length).toBe(afterShutdown);
   });
 
   it('stays quiet while the catalog does not move, however often it is used', { timeout: 60_000 }, async () => {

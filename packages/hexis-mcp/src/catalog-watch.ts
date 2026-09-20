@@ -1,6 +1,6 @@
 /**
  * Notice when the deployment's catalog changes, under a connection nobody can
- * push to — and only when that connection is actually being used.
+ * push to.
  *
  * The hosted endpoint is stateless — every request there rebuilds its tool
  * surface from the live registry, so a manual committed a second ago is in the
@@ -15,18 +15,25 @@
  * and the MCP protocol has no upstream subscription — hence a check, and the
  * cheapest one possible: a single digest read.
  *
- * ON ACTIVITY, NOT ON A TIMER. A laptop with a connected client that nobody is
- * using would otherwise ask its deployment the same question every few seconds
- * for hours, and a deployment with fifty such laptops would answer it forever
- * for no one. The check runs when the connection does something — a tool call
- * finishing, a `tools/list` arriving — because that is exactly the moment a
- * stale toolset costs anything. Between two such moments nothing is asked.
- * Bursts are throttled: a chain of twenty calls in two seconds costs one
- * check, not twenty.
+ * THIS MODULE DECIDES WHAT A CHECK DOES, NOT WHEN ONE HAPPENS. `server.ts`
+ * owns the triggers, and there are two. ACTIVITY — a tool call finishing, a
+ * `tools/list` arriving — is the better one: it is exactly the moment a stale
+ * toolset costs anything, and a listing awaits its check, so the list handed
+ * back is the current one. A HEARTBEAT covers the connection that has no
+ * activity, which is not an edge case: an editor sitting open is the normal
+ * state of a connection, and the tool-list-changed notification exists
+ * precisely for a client that is not asking. A build that checked on activity
+ * alone told such a client nothing at all — which is how this reached staging
+ * and failed there.
+ *
+ * What this module contributes to the cost of that is the THROTTLE: whichever
+ * trigger asked, two checks inside one window collapse onto one digest read,
+ * so a chain of twenty calls costs one check and a heartbeat landing beside a
+ * listing costs nothing extra.
  *
  * Errors are survivable by design. A deployment that restarts, a laptop that
  * sleeps, a VPN that drops: the check fails, says so ONCE, and asks again on
- * the next activity. The one unrecoverable answer is a deployment too old to
+ * the next trigger. The one unrecoverable answer is a deployment too old to
  * serve the route, which stops the checker for good.
  */
 import { printable } from '@bevel-software/platform-mcp-core';
@@ -40,12 +47,36 @@ import type { HexisMcpConfig } from './config.js';
  * The least time between two checks. A burst of activity — a `call_tool_chain`
  * fanning out into a dozen calls, a client re-listing right after a
  * notification — collapses onto one digest read; the second and later calls in
- * the window see the answer the first one got. Short enough that a person
- * committing a manual and then calling a tool sees the new one on the call
- * after next at the latest, long enough that a busy connection costs the
- * deployment one small read per window rather than one per call.
+ * the window see the answer the first one got.
+ *
+ * It is also a CEILING ON STALENESS, which is what sets its size. A check that
+ * runs just before a commit reads the old catalog and opens a fresh window, so
+ * the change cannot be noticed until the window expires; add the digest read
+ * and the re-registration and that is the whole delay a person experiences.
+ * At five seconds this alone put the first sighting at ~7.6s against a
+ * deployment that had the manual in ~1s — the budget spent on a throttle. Two
+ * seconds leaves the rest of the five for the work.
  */
-export const CATALOG_CHECK_MIN_INTERVAL_MS = 5_000;
+export const CATALOG_CHECK_MIN_INTERVAL_MS = 2_000;
+
+/**
+ * How often an OTHERWISE IDLE connection checks anyway.
+ *
+ * Activity alone is not enough, and staging is where that showed: a client
+ * that connects and then waits — the normal state of an editor sitting open —
+ * generates no activity, so a purely activity-driven check never runs, and the
+ * tool-list-changed notification after a commit is never sent. The whole point
+ * of the notification is to reach a client that is NOT asking; a design that
+ * only checks when it asks has nothing to notify.
+ *
+ * So the connection also checks on a heartbeat. Two seconds, because the
+ * promise is five: the heartbeat's wait plus one digest read plus the
+ * re-registration a change costs has to fit inside that, and a heartbeat of
+ * five would spend the whole budget before the first question was asked.
+ * The cost of an idle connection is one small digest read every two seconds,
+ * which is what it was before the activity check existed.
+ */
+export const CATALOG_CHECK_INTERVAL_MS = 2_000;
 
 /** A running checker. `stop()` is idempotent and never throws. */
 export interface CatalogCheck {
@@ -118,8 +149,19 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
   let applied: string | null = initialRevision;
   /** False until a check has established what `applied` means. See `initialRevision`. */
   let baselineKnown = initialRevision !== null;
-  /** When the last check SETTLED — the throttle counts from there. */
-  let lastSettledAt: number | null = null;
+  /**
+   * When the last check STARTED — the throttle counts from there, not from
+   * when it settled.
+   *
+   * From the start, because the window has to be a cadence the budget can be
+   * computed from. Counting from the settle adds the check's own duration to
+   * every window, and a refresh runs INSIDE a check: one that re-registers
+   * costs a couple of seconds, so a two-second window becomes four or more,
+   * and a heartbeat ticking every two seconds has every second tick refused
+   * by a throttle that has silently grown. `inFlight` already stops two checks
+   * overlapping, so nothing here needs the settle to serialise them.
+   */
+  let lastStartedAt: number | null = null;
   /** The check in flight, so concurrent callers join it rather than stacking. */
   let inFlight: Promise<void> | null = null;
   /** So a deployment that is down for an hour writes one line, not one per call. */
@@ -196,10 +238,11 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
     // owed in the future: whatever the caller's clock is, a negative gap can
     // only mean it was adjusted, and refusing checks until it catches up would
     // hold the toolset stale for exactly the size of the adjustment.
-    if (lastSettledAt !== null) {
-      const sinceLast = now() - lastSettledAt;
+    if (lastStartedAt !== null) {
+      const sinceLast = now() - lastStartedAt;
       if (sinceLast >= 0 && sinceLast < minIntervalMs) return Promise.resolve();
     }
+    lastStartedAt = now();
     inFlight = run()
       .catch((err: unknown) => {
         // `run` handles its own failures; this is the belt for a bug in it,
@@ -207,7 +250,6 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
         log(`[hexis-mcp] the catalog check failed unexpectedly: ${reason(err)}`);
       })
       .finally(() => {
-        lastSettledAt = now();
         inFlight = null;
       });
     return inFlight;
