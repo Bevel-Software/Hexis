@@ -170,14 +170,14 @@ describe('creator read-grant hooks on the creation routes', () => {
     expect(h.creatorAccess.noteAccessFileWritten).toHaveBeenCalledWith(WS);
   });
 
-  it('a failing seed never fails the creation itself', async () => {
+  it('a failing seed fails the creation before anything lands — a root folder must not appear invisible to its creator', async () => {
     h = await makeHarness();
     h.creatorAccess.planForCreate.mockResolvedValue({
       kind: 'seed-access-md',
       wsRelPath: `${KB}/KnowledgeBase/Mine/access.md`,
       apply: () => 'seed',
     });
-    // Only the seed write blows up; the file write succeeds.
+    // The seed write blows up; the file write must then never be attempted.
     h.writeFileMock.mockImplementation(async (_id: string, p: string, content: string) => {
       if (p.endsWith('/access.md')) throw new Error('boom');
       h!.writes.push({ path: p, content });
@@ -186,8 +186,27 @@ describe('creator read-grant hooks on the creation routes', () => {
       `${h.baseUrl}/api/workspace/${WS}/file?path=${encodeURIComponent(`${KB}/KnowledgeBase/Mine/doc.md`)}`,
       { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'body' }) },
     );
-    expect(res.status).toBe(200);
-    expect(h.writes).toEqual([{ path: `${KB}/KnowledgeBase/Mine/doc.md`, content: 'body' }]);
+    expect(res.status).toBe(500);
+    expect(h.writes).toEqual([]);
+  });
+
+  it('an unzip whose destination seed fails extracts nothing', async () => {
+    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Fresh/a.md`] });
+    h.creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: `${KB}/KnowledgeBase/Fresh/access.md`,
+      apply: () => 'seed',
+    });
+    h.writeFileMock.mockImplementation(async () => {
+      throw new Error('boom');
+    });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip`, destination: `${KB}/KnowledgeBase/Fresh` }),
+    });
+    expect(res.status).toBe(500);
+    expect(h.unzipFileMock).not.toHaveBeenCalled();
   });
 
   it('POST /directory seeds the new folder access.md before the .gitkeep cycle', async () => {

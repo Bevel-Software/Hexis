@@ -535,18 +535,23 @@ export class LockingFilesystem extends GitGuardedFilesystem {
       }
     }
 
-    // Creator-grant seed locks are BEST-EFFORT, single attempt, acquired
-    // after the caller's paths: a contended access.md must drop that seed
-    // (with a warning), never fail or stall the batch the caller asked for.
-    // Single non-blocking attempts also can't deadlock against another batch.
+    // Creator-grant seed locks: single attempt, acquired after the caller's
+    // paths (a single non-blocking attempt cannot deadlock against another
+    // batch). A contended access.md fails the batch the same way a contended
+    // caller path does, with nothing written: the seed exists to keep a new
+    // root folder visible to the person creating it, and a batch that landed
+    // without it would leave that folder invisible to them.
     for (const p of [...seeds.keys()].sort()) {
       if (paths.includes(p)) continue; // already locked as a caller path
       const result = await workflow.acquireLock(workspaceId, branch, p, user);
       if (result.acquired) {
         acquired.push(p);
       } else {
-        seeds.delete(p);
-        log.warn(`creator access.md seed skipped for "${p}" — locked by ${result.lock.holderName ?? 'another user'}`);
+        await releaseAll(() => 'untouched');
+        throw new Error(
+          `Skipped editing "${p}" — locked by ${result.lock.holderName ?? 'another user'}. ` +
+            `Continuing with other edits; try this one again later.`,
+        );
       }
     }
 
@@ -807,31 +812,29 @@ export class LockingFilesystem extends GitGuardedFilesystem {
    * lock (single acquire+release cycle → one commit), re-read the CURRENT
    * bytes and splice the grant into them — never a blind overwrite, so a
    * concurrent creator's just-landed grant on the same new directory
-   * survives. Best-effort by contract: a contended lock, read, write, or
-   * release failure here logs and returns — it must never fail the creation
-   * that triggered the seed.
+   * survives. A contended lock, read, write, or release failure here FAILS
+   * the creation that triggered the seed: the seed is planned only for a new
+   * folder at a root the acting user cannot read, and without the grant the
+   * folder would come into existence invisible to them — the very thing the
+   * read gate exists to prevent.
    */
   private async seedAccessMd(
     plan: Extract<CreationGrantPlan, { kind: 'seed-access-md' }>,
   ): Promise<void> {
-    try {
-      await this.withLock(plan.wsRelPath, async () => {
-        let current = '';
-        const absolute = this.resolveAbsolutePath(plan.wsRelPath);
-        if (absolute) {
-          try {
-            current = await fs.readFile(absolute, 'utf-8');
-          } catch {
-            // Not there yet — the normal case for a brand-new directory.
-          }
+    await this.withLock(plan.wsRelPath, async () => {
+      let current = '';
+      const absolute = this.resolveAbsolutePath(plan.wsRelPath);
+      if (absolute) {
+        try {
+          current = await fs.readFile(absolute, 'utf-8');
+        } catch {
+          // Not there yet — the normal case for a brand-new directory.
         }
-        const next = plan.apply(current);
-        if (next !== current) await super.writeFile(plan.wsRelPath, next);
-      });
-      this.lockContext.creatorAccess?.noteAccessFileWritten(this.lockContext.workspaceId);
-    } catch (err) {
-      log.warn(`creator access.md seed failed for "${plan.wsRelPath}":`, { err });
-    }
+      }
+      const next = plan.apply(current);
+      if (next !== current) await super.writeFile(plan.wsRelPath, next);
+    });
+    this.lockContext.creatorAccess?.noteAccessFileWritten(this.lockContext.workspaceId);
   }
 
   /**

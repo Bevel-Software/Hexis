@@ -664,31 +664,35 @@ export function createWorkspaceRoutes(
    * grant on the same new directory survives. Runs BEFORE the creation itself
    * so the explorer never shows-then-hides the new subtree; if the creation
    * subsequently fails, the leftover is an empty new folder readable only by
-   * its creator. Best-effort by contract: a failure here logs and never
-   * blocks the creation.
+   * its creator.
+   *
+   * A failure here FAILS the creation, and propagates as it is. The seed is
+   * planned only for a new folder at a root the creator cannot read — the one
+   * creation the read gate lets past an unreadable spot — so without the
+   * grant the folder would come into existence invisible to the person who
+   * made it, which is exactly what the gate exists to prevent. The seed's
+   * own lock passes that gate too: if the folder appeared under someone else
+   * between the plan and this write, the refusal is theirs to see, and
+   * nothing lands.
    */
   async function seedCreatorAccessMd(
     workspaceId: string,
     user: AuthUser,
     plan: { wsRelPath: string; apply: (current: string) => string },
   ): Promise<void> {
-    try {
-      await withLock(workspaceId, user, plan.wsRelPath, async () => {
-        let current = '';
-        try {
-          current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
-        } catch {
-          // Not there yet — the normal case for a brand-new directory.
-        }
-        const next = plan.apply(current);
-        if (next !== current) {
-          await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
-        }
-      });
-      creatorAccess.noteAccessFileWritten(workspaceId);
-    } catch (err) {
-      log.warn(`creator access.md seed failed for "${plan.wsRelPath}":`, { err });
-    }
+    await withLock(workspaceId, user, plan.wsRelPath, async () => {
+      let current = '';
+      try {
+        current = await workspaceService.readFile(workspaceId, plan.wsRelPath);
+      } catch {
+        // Not there yet — the normal case for a brand-new directory.
+      }
+      const next = plan.apply(current);
+      if (next !== current) {
+        await workspaceService.writeFile(workspaceId, plan.wsRelPath, next);
+      }
+    });
+    creatorAccess.noteAccessFileWritten(workspaceId);
   }
 
   /**
