@@ -723,6 +723,8 @@ describe('merge gate — every file type', () => {
     const [, , , message] = mergeChangeRequestMock.mock.calls[0] as unknown as [
       string, string, string, { subject: string; body: string },
     ];
+    expect(message.body).toContain('- Waiting on approval for Knowledge/Ops/Makefile from Finance.');
+    expect(message.body).toContain('- Waiting on approval for Knowledge/Finance/report.pdf from Finance.');
     expect(message.body).not.toContain('Knowledge/Foo.md');
   });
 

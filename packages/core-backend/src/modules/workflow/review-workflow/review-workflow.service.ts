@@ -176,6 +176,48 @@ function eligibleLabel(a: FileApprovalState): string {
   return parts.join('; ') || 'someone with write access';
 }
 
+/**
+ * The gate split by what can override it: `hardReasons` (closed, merged, no
+ * files) refuse every merge; `warnings` (missing approvals) refuse too, but
+ * an admin may merge past them with the bypass flag.
+ */
+function evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[] } {
+  const reasons: string[] = [];
+  const warnings: string[] = [];
+
+  if (input.state === 'merged') {
+    reasons.push('This pull request has already been merged.');
+  } else if (input.state === 'closed') {
+    reasons.push('This pull request is closed.');
+  }
+
+  // Empty approvals = empty files array = nothing to approve. That's not
+  // mergeable either — a PR that touches no files shouldn't be opened in
+  // the first place, let alone merged.
+  if (input.approvals.length === 0 && input.state === 'open') {
+    reasons.push('This pull request has no file changes to approve.');
+  }
+
+  // Ownership enforcement binds every file with an eligible approver,
+  // whatever its extension; files nobody can approve are silent. For the
+  // gate-relevant files, "owner hasn't approved the current head" is a
+  // missing approval — it blocks, and only an admin bypass merges past it.
+  for (const a of input.approvals) {
+    if (!isGateRelevant(a)) continue;
+    if (a.isApproved) continue;
+
+    const hasStale = a.approvedBy.some((e) => e.isStale);
+    const label = eligibleLabel(a);
+    if (hasStale) {
+      warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
+    } else {
+      warnings.push(`Waiting on approval for ${a.path} from ${label}.`);
+    }
+  }
+
+  return { hardReasons: reasons, warnings };
+}
+
 function assertValidPath(p: unknown): asserts p is string | undefined {
   if (p === undefined || p === null) return;
   if (typeof p !== 'string') throw new WorkflowValidationError('path must be a string');
@@ -499,54 +541,18 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     return this.getApprovalStates(prNumber, files, headSha, baseBranch, prAuthorIdHash, workspaceId, user.email);
   }
 
+  /**
+   * Pure in `this`: the whole verdict comes out of `evaluateGateParts`, a
+   * module-level function. Call-sites borrow this off the prototype against a
+   * bare object to get the real gate without a service, so keep it that way —
+   * reaching for an instance field here breaks them with a TypeError.
+   */
   evaluateMergeGate(input: MergeGateInput): MergeGateResult {
     // A missing approval is both: a blocking reason (the request is not
     // mergeable while it remains) and a warning (the admin bypass names it).
-    const { hardReasons, warnings } = this.evaluateGateParts(input);
+    const { hardReasons, warnings } = evaluateGateParts(input);
     const reasons = [...hardReasons, ...warnings];
     return { mergeable: reasons.length === 0, reasons, warnings };
-  }
-
-  /**
-   * The gate split by what can override it: `hardReasons` (closed, merged, no
-   * files) refuse every merge; `warnings` (missing approvals) refuse too, but
-   * an admin may merge past them with the bypass flag.
-   */
-  private evaluateGateParts(input: MergeGateInput): { hardReasons: string[]; warnings: string[] } {
-    const reasons: string[] = [];
-    const warnings: string[] = [];
-
-    if (input.state === 'merged') {
-      reasons.push('This pull request has already been merged.');
-    } else if (input.state === 'closed') {
-      reasons.push('This pull request is closed.');
-    }
-
-    // Empty approvals = empty files array = nothing to approve. That's not
-    // mergeable either — a PR that touches no files shouldn't be opened in
-    // the first place, let alone merged.
-    if (input.approvals.length === 0 && input.state === 'open') {
-      reasons.push('This pull request has no file changes to approve.');
-    }
-
-    // Ownership enforcement binds every file with an eligible approver,
-    // whatever its extension; files nobody can approve are silent. For the
-    // gate-relevant files, "owner hasn't approved the current head" is a
-    // missing approval — it blocks, and only an admin bypass merges past it.
-    for (const a of input.approvals) {
-      if (!isGateRelevant(a)) continue;
-      if (a.isApproved) continue;
-
-      const hasStale = a.approvedBy.some((e) => e.isStale);
-      const label = eligibleLabel(a);
-      if (hasStale) {
-        warnings.push(`${label} need to re-approve ${a.path} after the latest push.`);
-      } else {
-        warnings.push(`Waiting on approval for ${a.path} from ${label}.`);
-      }
-    }
-
-    return { hardReasons: reasons, warnings };
   }
 
   async mergePr(
@@ -569,7 +575,7 @@ export class ReviewWorkflowService implements IReviewWorkflowService {
     // Hard blocks always refuse. Missing approvals refuse unless the caller
     // opted into bypass; with bypass, the bypassed warnings get inlined in the
     // merge commit body so git history captures the decision.
-    const gate = this.evaluateGateParts({ prNumber, state, approvals });
+    const gate = evaluateGateParts({ prNumber, state, approvals });
     if (gate.hardReasons.length > 0) throw new MergeBlockedError(gate.hardReasons);
     if (gate.warnings.length > 0 && !opts.bypass) {
       throw new MergeBlockedError(gate.warnings);
