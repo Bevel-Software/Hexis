@@ -299,6 +299,50 @@ export async function fetchFileAccessBatch(
   );
 }
 
+/**
+ * A principal as its grant names it — a group, a role, a plugin principal
+ * (spelled as its `plugin/<Name>/<verb>` token), or a person granted
+ * directly. What the prospective-access lists are made of.
+ */
+export interface AccessPrincipalRef {
+  kind: 'group' | 'role' | 'plugin' | 'person';
+  name: string;
+  email?: string;
+}
+
+/** Who can open and who can edit one path. */
+export interface PathPrincipals {
+  read: AccessPrincipalRef[];
+  write: AccessPrincipalRef[];
+}
+
+/** One file's holders where it is now and where a move would put it. */
+export interface ProspectiveAccess {
+  before: PathPrincipals;
+  after: PathPrincipals;
+}
+
+/**
+ * Resolve who holds read and write on `relativePath` today and who would hold
+ * them once the file sits in `toDir` — the destination's folder rules with the
+ * file's own frontmatter layered on top. Both paths are repo-relative
+ * (`Knowledge/Foo.md`, `Knowledge/Sales`); `toDir` is `''` for the repo root.
+ *
+ * `signal` lets the move dialog give up on it: the answer decorates the
+ * confirmation and must never hold it open.
+ */
+export async function fetchProspectiveAccess(
+  workspaceId: string,
+  relativePath: string,
+  toDir: string,
+  signal?: AbortSignal,
+): Promise<ProspectiveAccess> {
+  const query = `from=${encodeURIComponent(relativePath)}&toDir=${encodeURIComponent(toDir)}`;
+  return handleApiResponse(
+    await authFetch(`/api/workspace/${workspaceId}/access/prospective?${query}`, { signal }),
+  );
+}
+
 /** A principal named by a rule, as the overrides endpoint reports it. */
 export type AccessOverridePrincipal =
   | { kind: 'role'; role: string }

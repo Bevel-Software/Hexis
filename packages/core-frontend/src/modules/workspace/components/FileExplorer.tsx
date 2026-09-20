@@ -66,14 +66,15 @@ import { useOpenChangeRequests } from '../hooks/useOpenChangeRequests';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { useAppRegistry } from '../../../core/registry';
-import { fetchFileAccess } from '../../access/api';
+import { fetchFileAccess, fetchProspectiveAccess } from '../../access/api';
 import {
   TreeActionConfirmDialog,
   type DeleteMode,
   type FolderProposals,
+  type MoveAccessChange,
   type TreeConfirmRequest,
 } from './TreeActionConfirm';
-import { moveWarnings } from '../utils/treeConfirm';
+import { ACCESS_LOOKUP_TIMEOUT_MS, accessChangeOf, moveWarnings } from '../utils/treeConfirm';
 import { UnreadableCreateDialog } from './UnreadableCreateConfirm';
 import {
   UnreadableCreateContext,
@@ -773,6 +774,12 @@ function RenameInput({
 // ── Tree Node ──
 
 const DRAG_MIME = 'application/x-workspace-path';
+/**
+ * What kind of row is being dragged — `directory` or `file`. The path alone
+ * does not say (a folder may be named like a file), and the move dialog asks
+ * a file-only access question, so the kind travels with the path.
+ */
+const DRAG_KIND_MIME = 'application/x-workspace-kind';
 
 export function FileTreeNode({
   entry,
@@ -1014,9 +1021,10 @@ export function FileTreeNode({
   const handleDragStart = useCallback((e: React.DragEvent) => {
     if (isRoot || reserved) { e.preventDefault(); return; }
     e.dataTransfer.setData(DRAG_MIME, entry.relativePath);
+    e.dataTransfer.setData(DRAG_KIND_MIME, entry.type);
     e.dataTransfer.effectAllowed = 'move';
     setDragging(true);
-  }, [entry.relativePath, isRoot, reserved]);
+  }, [entry.relativePath, entry.type, isRoot, reserved]);
 
   const handleDragEnd = useCallback(() => {
     setDragging(false);
@@ -1050,6 +1058,7 @@ export function FileTreeNode({
         confirm({
           kind: 'move',
           sourcePath,
+          sourceIsDirectory: e.dataTransfer.getData(DRAG_KIND_MIME) === 'directory',
           targetDir,
           destinationLabel: targetDir ? entry.name : 'the top level',
           returnFocusTo: () => rowForPath(sourcePath),
@@ -1687,6 +1696,69 @@ export function TreeChrome({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [confirmRequest, workspaceId, kbDirName]);
+  // Who the move costs access and who it gains it for. The dialog opens at
+  // once and fills this in: the answer describes the move, it does not gate
+  // it, and Move is enabled the whole time. Keyed by the request it answers,
+  // so a late answer never decorates the next move.
+  const [accessAnswer, setAccessAnswer] = useState<
+    { request: TreeConfirmRequest; change: MoveAccessChange } | null
+  >(null);
+  const moveRequest = confirmRequest?.kind === 'move' ? confirmRequest : null;
+  // Both ends have to sit inside the KB clone for the access tree to govern
+  // them; outside it there are no rules to compare, and the dialog says
+  // nothing about access it cannot resolve. `kbDirName` alone is the KB root.
+  const insideKb = (path: string) =>
+    !!kbDirName && (path === kbDirName || path.startsWith(`${kbDirName}/`));
+  const accessLookup =
+    moveRequest && workspaceId && kbDirName
+    && !moveRequest.sourceIsDirectory
+    && moveRequest.sourcePath.startsWith(`${kbDirName}/`)
+    && insideKb(moveRequest.targetDir)
+      ? moveRequest
+      : null;
+  const moveAccessChange: MoveAccessChange = !accessLookup
+    ? { status: 'unavailable' }
+    : accessAnswer?.request === accessLookup
+      ? accessAnswer.change
+      : { status: 'loading' };
+  useEffect(() => {
+    if (!accessLookup || !workspaceId || !kbDirName) return;
+    const prefix = `${kbDirName}/`;
+    const controller = new AbortController();
+    // Two seconds is the whole budget; past it the answer is no longer wanted
+    // and the dialog falls back to saying it could not work the change out.
+    const timer = setTimeout(() => controller.abort(), ACCESS_LOOKUP_TIMEOUT_MS);
+    let cancelled = false;
+    fetchProspectiveAccess(
+      workspaceId,
+      accessLookup.sourcePath.slice(prefix.length),
+      accessLookup.targetDir === kbDirName ? '' : accessLookup.targetDir.slice(prefix.length),
+      controller.signal,
+    )
+      .then((access) => {
+        if (cancelled) return;
+        setAccessAnswer({
+          request: accessLookup,
+          change: { status: 'ready', ...accessChangeOf(access) },
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // Running out of the two seconds is a designed outcome, not a fault:
+        // the abort is ours, and the dialog already says what it means. Only
+        // a genuine failure is worth a line in the console.
+        if ((err as { name?: string } | null)?.name !== 'AbortError') {
+          console.warn('[FileExplorer] prospective access:', err);
+        }
+        setAccessAnswer({ request: accessLookup, change: { status: 'failed' } });
+      })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [accessLookup, workspaceId, kbDirName]);
   // A folder delete asks which open change requests propose files in the
   // folder. It asks for EVERY knowledge-base folder: the shared list may still
   // be loading, or have failed, and its silence is not "no proposals". A
@@ -1776,6 +1848,7 @@ export function TreeChrome({
               ? moveWarnings({ ...confirmRequest, kbDirName, canWrite: destinationWritable })
               : []
           }
+          accessChange={moveAccessChange}
           proposals={folderProposals}
           onCancel={() => closeConfirm(false)}
           onConfirm={(mode) => closeConfirm(true, mode)}
