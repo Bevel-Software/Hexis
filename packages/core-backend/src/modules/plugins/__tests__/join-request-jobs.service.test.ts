@@ -78,6 +78,7 @@ describe('PluginJoinRequestJobs', () => {
     // shifted clock makes the claim-window tests fail in ways that have
     // nothing to do with what they are testing. Harmless when no test
     // installed them.
+    vi.useRealTimers();
   });
 
   it('runs the same steps the endpoint used to run inline, and records the number', async () => {
