@@ -1310,8 +1310,16 @@ export function createWorkspaceRoutes(
       // cannot read is refused whole; a folder they can read — or a new
       // folder directly under a root — extracts, and each file then meets
       // the lock as any other write does.
-      const destDir = destination ?? path.posix.dirname(zipPath.replace(/\\/g, '/'));
-      await changeGate?.assertMayChange(id, user.email, destDir === '.' ? '' : destDir, 'dir');
+      //
+      // A new root folder gets its creator's access.md seeded first, as
+      // every other creation route does: extraction would otherwise bring
+      // the folder into existence itself, and the first file's lock would
+      // then find an existing folder the caller cannot read.
+      const inferred = path.posix.dirname(zipPath.replace(/\\/g, '/'));
+      const destDir = destination ?? (inferred === '.' ? '' : inferred);
+      const plan = await creatorAccess.planForCreate(id, user, destDir, 'dir');
+      if (plan?.kind === 'seed-access-md') await seedCreatorAccessMd(id, user, plan);
+      await changeGate?.assertMayChange(id, user.email, destDir, 'dir');
       // Extract first (all files land on disk), then sweep each extracted
       // file through a lock+release so it commits + pushes as its own
       // one-file change. Per-file commits mean the validator runs N times
@@ -1319,7 +1327,14 @@ export function createWorkspaceRoutes(
       // but correct for a 100-file zip. If a single file's release fails
       // (e.g. validator 422), the loop stops there so the user sees the
       // first concrete problem rather than a list of N similar failures.
-      const result = await workspaceService.unzipFile(id, zipPath, destination);
+      //
+      // Each entry is asked about before it is written, through the same
+      // gate: an archive can carry a path into a nested folder the caller
+      // cannot read, which the destination check above cannot see. Such an
+      // entry is skipped and reported, never written and then refused.
+      const result = await workspaceService.unzipFile(id, zipPath, destination, async (entryPath) => {
+        await changeGate?.assertMayChange(id, user.email, entryPath, 'file');
+      });
       for (const relFile of result.extracted) {
         // The file is already on disk from the unzip; the release commits +
         // pushes it.

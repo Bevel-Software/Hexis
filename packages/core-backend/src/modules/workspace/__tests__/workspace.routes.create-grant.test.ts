@@ -293,6 +293,45 @@ describe('POST /unzip asks the read-before-write gate about its destination firs
     expect(h.unzipFileMock).toHaveBeenCalledOnce();
     expect(h.lockedPaths).toEqual([`${KB}/KnowledgeBase/Open/a.md`]);
   });
+
+  it('a new root folder as destination is seeded with the creator grant BEFORE the gate and the extraction', async () => {
+    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
+    h = await makeHarness({ extracted: [`${KB}/KnowledgeBase/Fresh/a.md`], changeGate: gate });
+    const seedPath = `${KB}/KnowledgeBase/Fresh/access.md`;
+    h.creatorAccess.planForCreate.mockResolvedValue({
+      kind: 'seed-access-md',
+      wsRelPath: seedPath,
+      apply: () => '---\nread:\n  - Alice <alice@example.com>\n---\n',
+    });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: `${KB}/KnowledgeBase/drop.zip`, destination: `${KB}/KnowledgeBase/Fresh` }),
+    });
+    expect(res.status).toBe(200);
+    // Planned as a FOLDER, seeded under its own lock, then the gate, then the archive.
+    expect(h.creatorAccess.planForCreate).toHaveBeenCalledWith(WS, USER, `${KB}/KnowledgeBase/Fresh`, 'dir');
+    expect(h.writes.map((w) => w.path)).toEqual([seedPath]);
+    expect(h.lockedPaths).toEqual([seedPath, `${KB}/KnowledgeBase/Fresh/a.md`]);
+    const seedOrder = h.creatorAccess.planForCreate.mock.invocationCallOrder[0]!;
+    expect(judge.mock.invocationCallOrder[0]!).toBeGreaterThan(seedOrder);
+    expect(h.unzipFileMock.mock.invocationCallOrder[0]!).toBeGreaterThan(judge.mock.invocationCallOrder[0]!);
+  });
+
+  it('hands the extraction a per-entry guard that asks the gate about each entry as a file', async () => {
+    const { gate, judge } = gateThat({ allowed: true, via: 'readable' });
+    h = await makeHarness({ extracted: [], changeGate: gate });
+    const res = await fetch(`${h.baseUrl}/api/workspace/${WS}/unzip`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: `${KB}/KnowledgeBase/Open/drop.zip` }),
+    });
+    expect(res.status).toBe(200);
+    const guard = h.unzipFileMock.mock.calls[0]![3] as (p: string) => Promise<void>;
+    expect(typeof guard).toBe('function');
+    await guard(`${KB}/KnowledgeBase/Open/Nested/deep.md`);
+    expect(judge).toHaveBeenCalledWith(WS, USER.email, `${KB}/KnowledgeBase/Open/Nested/deep.md`, 'file');
+  });
 });
 
 describe('POST /upload is where new bytes of any kind arrive', () => {

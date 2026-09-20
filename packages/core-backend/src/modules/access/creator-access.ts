@@ -52,9 +52,14 @@ export class CreatorAccessService implements ICreatorAccess {
     private readonly disk: IFsProbe,
   ) {}
 
-  /** Whether something is at `abs`, links followed: a link to a real file is "there", a dangling one is not. */
+  /**
+   * Whether something is at `abs`. Links are NOT followed: a link, dangling
+   * or not, is something there — never a "new" folder to seed a grant under,
+   * so no seed is ever planned through one. (The write itself refuses a path
+   * behind a link regardless; this keeps the plan honest one step earlier.)
+   */
   private async exists(abs: string): Promise<boolean> {
-    return (await this.disk.statOrNull(abs)) !== null;
+    return (await this.disk.lstatOrNull(abs)) !== null;
   }
 
   /**

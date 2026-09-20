@@ -134,6 +134,13 @@ describe('CreatorAccessService.planForCreate', () => {
     expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/pic.png`, 'file')).toBeNull();
   });
 
+  it('plans nothing through a link standing where the new folder would be', async () => {
+    // Dangling on purpose: a stat that followed it would say "nothing there".
+    await fs.symlink(path.join(root, 'elsewhere'), path.join(repo, 'KnowledgeBase/Linked'));
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Linked/a.md`, 'file')).toBeNull();
+    expect(await svc.planForCreate(WS, ALICE, `${KB}/KnowledgeBase/Linked`, 'dir')).toBeNull();
+  });
+
   it('plans nothing under a root that is not one of the three', async () => {
     expect(await svc.planForCreate(WS, ALICE, `${KB}/Data/Engineering`, 'dir')).toBeNull();
     expect(await svc.planForCreate(WS, ALICE, `${KB}/Elsewhere/Thing/a.md`, 'file')).toBeNull();

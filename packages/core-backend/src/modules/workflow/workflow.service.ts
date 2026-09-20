@@ -318,11 +318,15 @@ export class WorkflowService implements IWorkflowService {
      * The read-before-write gate `acquireLock` asks on every branch (see
      * `access-model/change-gate.ts`). Optional so test constructions that
      * exercise other surfaces need not wire it; the composition root always
-     * does, and a boot without it would let a change land where its author
-     * cannot read.
+     * does, and a boot without it is logged as such at construction, since
+     * it would let a change land where its author cannot read.
      */
     private readonly changeGate?: IChangeReadGate,
-  ) {}
+  ) {
+    if (!changeGate) {
+      lockLog.warn('WorkflowService constructed without a read-before-write gate: acquireLock will not check read access');
+    }
+  }
 
   // ── Branches ──────────────────────────────────────────────────────────────
 

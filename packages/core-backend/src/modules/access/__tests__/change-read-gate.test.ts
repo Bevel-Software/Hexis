@@ -44,6 +44,7 @@ describe('ChangeReadGate', () => {
   let root: string;
   let repo: string;
   let gate: ChangeReadGate;
+  let access: AccessControlService;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'bevel-change-gate-'));
@@ -54,7 +55,8 @@ describe('ChangeReadGate', () => {
     }
     await write(repo, 'roles.yaml', ROLES_YAML);
     const ws = stubWorkspaceService(workspaceDir);
-    gate = new ChangeReadGate(ws, new AccessControlService(ws, KB, new NodeFs()), KB, new NodeFs());
+    access = new AccessControlService(ws, KB, new NodeFs());
+    gate = new ChangeReadGate(ws, access, KB, new NodeFs());
   });
 
   afterEach(async () => {
@@ -177,6 +179,31 @@ describe('ChangeReadGate', () => {
 
     it('a non-admin gets no rescue on root files', async () => {
       expect(await judge(ALICE, `${KB}/groups.yaml`)).toEqual({ allowed: false, unreadable: '' });
+    });
+
+    it('the rescues name FILES: a folder target at the root is judged as a folder, even for an admin', async () => {
+      // The KB clone's own folder, asked about as an extraction destination:
+      // the root scope, which here grants nobody — an admin included.
+      expect(await judge(ADMIN, KB, 'dir')).toEqual({ allowed: false, unreadable: '' });
+      expect(await judge(ADMIN, `${KB}/KnowledgeBase`, 'dir')).toEqual({ allowed: false, unreadable: 'KnowledgeBase' });
+      // With a root that lets the admin read (write folds into read), the same folders open.
+      await write(repo, 'access.md', `---\nowner:\n  - Admin\n---\nwrite:\n  - Admin\n`);
+      access.invalidate(WS);
+      expect(await judge(ADMIN, KB, 'dir')).toEqual({ allowed: true, via: 'readable' });
+    });
+
+    it('a roles.yaml that is there but unusable is not an open door', async () => {
+      await fs.mkdir(path.join(repo, 'KnowledgeBase/Sealed'), { recursive: true });
+      await write(repo, 'roles.yaml', 'roles: [not: valid\n');
+      await expect(judge(ALICE, `${KB}/KnowledgeBase/Sealed/x.md`)).rejects.toThrow(/Access-control config is invalid/);
+    });
+
+    it('a link where the new folder would be is something there, not a new folder', async () => {
+      await fs.symlink(path.join(root, 'elsewhere'), path.join(repo, 'KnowledgeBase/Linked'));
+      expect(await judge(ALICE, `${KB}/KnowledgeBase/Linked/a.md`)).toEqual({
+        allowed: false,
+        unreadable: 'KnowledgeBase/Linked',
+      });
     });
 
     it('the directory-sync file is machine-owned: the write rule names its writer, not this gate', async () => {

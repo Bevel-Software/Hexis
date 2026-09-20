@@ -61,22 +61,32 @@ export class ChangeReadGate implements IChangeReadGate {
     wsPath: string,
     kind: ChangeTargetKind,
   ): Promise<ChangeReadVerdict> {
-    const rel = toKbRelative(wsPath, this.kbDirName);
+    // A FOLDER target may be the repository root itself (the KB clone's own
+    // folder, which `toKbRelative` reads as "outside": no file lives there
+    // without rules). As a folder it is the root scope, `''`, and is judged
+    // like any other folder — an extraction into it is an extraction into
+    // whatever the root grants.
+    const norm = wsPath.replace(/^\.?\/+/, '').replace(/\/+$/, '');
+    const rel = kind === 'dir' && norm === this.kbDirName ? '' : toKbRelative(wsPath, this.kbDirName);
     if (rel === null) return { allowed: true, via: 'outside-kb' };
-    // The directory-sync bot's file: its writer is named by the write rule
-    // (`machineOwnedWriteRule`), and read rules never name a machine.
-    if (rel === SYNCED_GROUPS_YAML) return { allowed: true, via: 'machine-owned' };
 
     const exists = (p: string) => this.exists(workspaceId, p);
     try {
-      // The admin rescue, in the same shape the write floor has it: an admin
-      // holds write on the repository root's own files (`roles.yaml`,
-      // `access.md`, `groups.yaml`, `AGENTS.md`, …) whatever the root rules
-      // say, so that a tree whose root grants nobody can still be repaired
-      // from inside the app. A subfolder's `access.md` is an ordinary path:
-      // an admin who cannot read the folder cannot change it either.
-      if (!rel.includes('/') && (await this.accessControl.holdsAdminRootWrite(workspaceId, userEmail))) {
-        return { allowed: true, via: 'admin-rescue' };
+      // The two rescues the write rule already has, for FILE targets only —
+      // both name files, and a folder target is never one of them.
+      if (kind === 'file') {
+        // The directory-sync bot's file: its writer is named by the write
+        // rule (`machineOwnedWriteRule`), and read rules never name a machine.
+        if (rel === SYNCED_GROUPS_YAML) return { allowed: true, via: 'machine-owned' };
+        // The admin rescue, in the same shape the write floor has it: an
+        // admin holds write on the repository root's own files (`roles.yaml`,
+        // `access.md`, `groups.yaml`, `AGENTS.md`, …) whatever the root rules
+        // say, so that a tree whose root grants nobody can still be repaired
+        // from inside the app. A subfolder's `access.md` is an ordinary path:
+        // an admin who cannot read the folder cannot change it either.
+        if (!rel.includes('/') && (await this.accessControl.holdsAdminRootWrite(workspaceId, userEmail))) {
+          return { allowed: true, via: 'admin-rescue' };
+        }
       }
       if (await isNewTopLevelFolderPath(rel, kind, exists)) {
         return { allowed: true, via: 'new-top-level-folder' };
@@ -85,11 +95,15 @@ export class ChangeReadGate implements IChangeReadGate {
         return { allowed: true, via: 'readable' };
       }
     } catch (err) {
-      // No usable config on this tree (a repository before its first
+      // No config on this tree at all (a repository before its first
       // `roles.yaml`): the write gate treats the same state as "nothing to
-      // decide against" and so does this one. Any other failure propagates —
-      // a verdict from a half-read tree is not a verdict.
-      if (err instanceof AccessConfigError) return { allowed: true, via: 'no-rules' };
+      // decide against" and so does this one. A `roles.yaml` that is THERE
+      // but unusable is a different thing — a broken rule set must not read
+      // as an open door — and propagates, as does any other failure: a
+      // verdict from a half-read tree is not a verdict.
+      if (err instanceof AccessConfigError && !(await exists('roles.yaml'))) {
+        return { allowed: true, via: 'no-rules' };
+      }
       throw err;
     }
     return { allowed: false, unreadable: await this.unreadablePlace(rel, exists) };
@@ -122,9 +136,13 @@ export class ChangeReadGate implements IChangeReadGate {
     return parent === '.' ? '' : parent;
   }
 
-  /** Whether something is at the repo-relative `rel` on this workspace's disk, links followed. */
+  /**
+   * Whether something is at the repo-relative `rel` on this workspace's disk.
+   * Links are NOT followed: a link, dangling or not, is something there — a
+   * folder it stands in for is not "new", and no exception is read through it.
+   */
   private async exists(workspaceId: string, rel: string): Promise<boolean> {
     const wsDir = await this.workspaceService.getWorkspacePath(workspaceId);
-    return (await this.disk.statOrNull(path.join(wsDir, this.kbDirName, rel))) !== null;
+    return (await this.disk.lstatOrNull(path.join(wsDir, this.kbDirName, rel))) !== null;
   }
 }

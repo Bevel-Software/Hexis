@@ -259,12 +259,18 @@ Access to any path — reading it as much as writing it — is governed by
   branch, drafts included, whatever `write:` rules say. A write tool refused
   for this says so (`write-denied`, naming the unreadable folder), and
   proposing is not offered either: a proposal into a folder its author cannot
-  see would vanish from them the moment it landed. The one exception is a NEW
+  see would vanish from them the moment it landed. Two exceptions. A NEW
   FOLDER directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
   `{{pluginsDir}}/`: anyone may start one, whatever the root's rules grant
   them, and the new folder's `access.md` is seeded with the creator's own
-  `read:` grant so what they put there is visible to them. A loose FILE
-  directly at a root has no folder to carry that grant and is not excepted.
+  `read:` grant so what they put there is visible to them (a loose FILE
+  directly at a root has no folder to carry that grant and is not excepted).
+  And an Admin — or the deployment owner — may change the files directly in
+  the repository root (`roles.yaml`, `access.md`, `groups.yaml`, `AGENTS.md`,
+  …) even when the root grants read to nobody: the same rescue the write
+  floor gives them, so a tree whose root rules lock everyone out stays
+  repairable from inside the app. That rescue stops at the root; a subfolder
+  an admin cannot read is closed to them like to anyone else.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.
