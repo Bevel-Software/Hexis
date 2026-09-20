@@ -2,7 +2,7 @@
 '@bevel-software/platform-core-frontend': patch
 ---
 
-A card's name now keeps a readable width and its badges wrap under it when the row runs short. The report was a tool card reading "di…": the name was `truncate` and the badges beside it (`MCP server`, `Linked`, `Owner`, `Deprecated`) were `shrink-0`, so the whole of a 236px card's shortfall came out of the one part of it anybody was reading, and four pills that each said less than the word they had crowded out kept every pixel they asked for.
+A card's name now keeps a readable width and its badges wrap under it when the row runs short. The report was a tool card reading "di…": the name was `truncate` and the badges beside it (`MCP server`, `In review`, `Owner`, `Linked`) were `shrink-0`, so the whole of a 236px card's shortfall came out of the one part of it anybody was reading, and four pills that each said less than the word they had crowded out kept every pixel they asked for.
 
 The name now has a floor of 12 characters while badges are beside it, and the badges break onto a second line rather than take it. Below that floor nothing changes: the name still truncates with an ellipsis, still carries its full self in `title`, and is still in the DOM whole, so a screen reader reads all of it either way. A wide card is the card it always was — name and badges on one line. Which badges appear is untouched; the only thing that moves is where they sit when there is no room. Measured in chromium against the production stylesheet: on a 200px card the badges take a second line and the name keeps the first one whole, and from a 339px card on they share one line again.
 

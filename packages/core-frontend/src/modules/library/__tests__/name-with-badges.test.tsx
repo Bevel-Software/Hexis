@@ -118,7 +118,10 @@ describe('NameWithBadges', () => {
     );
     const row = container.firstElementChild as HTMLElement;
     expect(row.className).toContain('flex-nowrap');
-    expect(row.className).not.toContain('flex-wrap ');
+    // Bare `flex-wrap`, no trailing space: `flex-nowrap` does not contain it,
+    // so the space bought no disambiguation and would let the assertion pass
+    // the day `flex-wrap` landed last in the class list.
+    expect(row.className).not.toContain('flex-wrap');
   });
 
   it('opens no tooltip on a name that is missing', () => {
