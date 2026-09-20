@@ -57,6 +57,7 @@ import { ManualFailureMemo } from './manual-failure-memo.js';
 import { DownstreamPool, POOL_KEY_SEPARATOR, type DownstreamPoolOptions, type Lease } from './downstream-pool.js';
 import { SurfaceLogThrottle } from './surface-log-throttle.js';
 import { DownstreamRefreshGuard, isDownstreamTokenRejection } from './downstream-token-refresh.js';
+import { printable } from '../../shared/printable.js';
 import {
   composeAgentInstructions,
   prefixToolDescription,
@@ -137,6 +138,15 @@ interface DownstreamRoute {
   acquire: () => Promise<Lease<PooledDownstream>>;
   afterFailure: (err: unknown) => Promise<unknown>;
 }
+
+/**
+ * What a failed downstream operation turned out to be, for the code that has
+ * to decide more than "retry or throw" — see {@link McpService.attachDownstream}.
+ */
+type DownstreamFailure =
+  | { retry: true }
+  /** `credentialTransient`: a token rejection whose refresh could not be settled (network, 5xx, or the once-a-minute guard), so the very next call should try again rather than being written off. */
+  | { retry: false; error: unknown; credentialTransient: boolean };
 
 /** The {@link DownstreamRoute.afterFailure} answer that means "refreshed — retry once". */
 const RETRY_WITH_REFRESHED_TOKEN = Symbol('retry-with-refreshed-token');
@@ -233,6 +243,7 @@ export class McpService {
    * Both are dropped; the next request rebuilds whatever it needs.
    */
   onSecretsChanged(userId: string | null): void {
+    this.forgetStaleRefreshWindows(userId);
     if (userId === null) {
       this.manualFailures.clearAll();
       this.downstream.closeAll();
@@ -240,6 +251,26 @@ export class McpService {
     }
     this.manualFailures.clearUser(userId);
     this.downstream.evictWhere((key) => key.startsWith(`${userId}${POOL_KEY_SEPARATOR}`));
+  }
+
+  /**
+   * A credential changed, so a refresh window that FAILED to produce one no
+   * longer describes anything: a token the user has just re-authorized (or an
+   * admin has just re-keyed) must be tried on the very next rejection, not sit
+   * out the remainder of a minute earned by the credential it replaced.
+   *
+   * Only settled, non-`refreshed` windows are forgotten. A refresh of our own
+   * is itself a secrets mutation, and clearing on that would hand a provider
+   * that keeps minting tokens the downstream keeps refusing one refresh per
+   * call — precisely the loop the once-a-minute guard exists to bound. An
+   * in-flight attempt (no outcome yet) is left alone for the same reason: it
+   * may be the very refresh that raised this notification.
+   */
+  private forgetStaleRefreshWindows(userId: string | null): void {
+    const mine = (key: string) => userId === null || key.startsWith(`${userId}${POOL_KEY_SEPARATOR}`);
+    this.tokenRefreshes.clearWhere(
+      (key, outcome) => mine(key) && outcome !== undefined && outcome !== 'refreshed',
+    );
   }
 
   /**
@@ -438,7 +469,9 @@ export class McpService {
     const decision = this.surfaceLog.decide(userId, { tools: tools.length, manuals: manuals.length });
     if (decision.log) {
       log.info(
-        `request surface: user=${userId} tokenId=${tokenId ?? 'none'} — ` +
+        // Both ids come from the request (an identity provider's subject, a
+        // connection key's id), so neither is interpolated raw — see printable.
+        `request surface: user=${printable(userId)} tokenId=${tokenId ? printable(tokenId) : 'none'} — ` +
           `${tools.length} tool(s) across ${manuals.length} manual(s) in ${totalMs.toFixed(0)}ms ` +
           `(catalog ${catalogMs.toFixed(0)}ms, registration ${(totalMs - catalogMs).toFixed(0)}ms)` +
           (decision.suppressed > 0 ? ` [+${decision.suppressed} identical rebuild(s) since last line]` : ''),
@@ -648,7 +681,7 @@ export class McpService {
           // Neither path throws: a discovery/network failure and a validation
           // failure both come back as `{ ok: false }`, because the retry
           // policy — this memo — is ours, not the shared layer's.
-          const result: { ok: true } | { ok: false; error: string } =
+          const result: { ok: true } | { ok: false; error: string; retryable?: boolean } =
             !isKb && siblings.length > 0
               ? {
                   ok: false,
@@ -661,7 +694,11 @@ export class McpService {
                 : await registerManual(client, m);
           if (!result.ok) {
             if (isKb) return { isKb, ok: false as const, error: result.error };
-            this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
+            // A failure the manual may recover from on its own schedule (a
+            // token refresh that hasn't settled) is reported but NOT
+            // remembered: the memo's five minutes would outlast the refresh
+            // policy's one and hold the manual down after the provider is back.
+            if (!result.retryable) this.manualFailures.recordFailure(userId, memoKey, result.error, generation);
             log.warn(`skipping manual "${name}": ${result.error}`);
           } else if (!isKb) {
             this.manualFailures.clear(userId, memoKey);
@@ -698,12 +735,15 @@ export class McpService {
     template: CallTemplate,
     userId: string,
     routes: Map<string, DownstreamRoute>,
-  ): Promise<{ ok: true } | { ok: false; error: string }> {
+  ): Promise<{ ok: true } | { ok: false; error: string; retryable?: boolean }> {
     const key = downstreamPoolKey(userId, template);
     // The catalog name, which is what the manual's per-user variables are keyed by.
     const catalogName = String(template.name ?? '');
     const acquire = () => this.downstream.acquire(key, () => this.connectDownstream(userId, template));
     const afterFailure = (err: unknown) => this.afterDownstreamFailure(userId, catalogName, key, err);
+    // Set when the handshake failed on a credential the provider may yet
+    // renew: the caller must NOT remember that as a dead manual (see below).
+    let credentialTransient = false;
     try {
       let lease: Lease<PooledDownstream>;
       try {
@@ -711,8 +751,11 @@ export class McpService {
       } catch (err) {
         // A connection dialed with a token the server refuses fails right here,
         // at the handshake — the same refresh-and-retry applies.
-        const next = await afterFailure(err);
-        if (next !== RETRY_WITH_REFRESHED_TOKEN) throw next;
+        const verdict = await this.classifyDownstreamFailure(userId, catalogName, key, err);
+        if (!verdict.retry) {
+          credentialTransient = verdict.credentialTransient;
+          throw verdict.error;
+        }
         lease = await acquire();
       }
       const manualName = utcpManualName(template);
@@ -728,7 +771,14 @@ export class McpService {
       routes.set(manualName, { acquire, afterFailure });
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      // `retryable` keeps a transient credential failure out of the caller's
+      // five-minute failure memo: the refresh-and-retry policy for a rejected
+      // token is one minute, and a memo entry would silently outlast it.
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        retryable: credentialTransient,
+      };
     }
   }
 
@@ -791,37 +841,66 @@ export class McpService {
     poolKey: string,
     err: unknown,
   ): Promise<unknown> {
-    if (!isDownstreamTokenRejection(err)) return err;
+    const verdict = await this.classifyDownstreamFailure(userId, manualName, poolKey, err);
+    return verdict.retry ? RETRY_WITH_REFRESHED_TOKEN : verdict.error;
+  }
+
+  /** {@link afterDownstreamFailure}, keeping the one distinction its symbol-or-error answer drops. */
+  private async classifyDownstreamFailure(
+    userId: string,
+    manualName: string,
+    poolKey: string,
+    err: unknown,
+  ): Promise<DownstreamFailure> {
+    if (!isDownstreamTokenRejection(err)) return { retry: false, error: err, credentialTransient: false };
     const outcome = await this.refreshDownstreamToken(userId, manualName);
     if (outcome === 'refreshed') {
       // The vault's mutation signal evicts this user's connections too; doing it
       // here as well keeps the retry correct whether or not that is wired.
       this.downstream.evictWhere((k) => k === poolKey);
-      return RETRY_WITH_REFRESHED_TOKEN;
+      return { retry: true };
     }
     if (outcome === 'rejected') {
-      return new Error(
-        `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
-          `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
-      );
+      return {
+        retry: false,
+        credentialTransient: false,
+        error: new Error(
+          `Your sign-in for "${manualName}" was rejected and has been disconnected. ` +
+            `Re-authorize it on ${this.opts.publicFrontendUrl}/connect, then run the tool again.`,
+        ),
+      };
     }
-    return err;
+    // The token stands and so does the call's own error. Whether the NEXT
+    // call may try again depends on why: a refresh that failed transiently, or
+    // one the window refused, will be worth attempting shortly — while
+    // "nothing here to refresh" (no vault, no OAuth variable, no stored token)
+    // is a standing condition, and the failure memo should hold the manual
+    // down exactly as it does for any other broken credential.
+    const mayRecoverSoon = outcome === 'transient' || outcome === 'guarded';
+    return { retry: false, error: err, credentialTransient: mayRecoverSoon };
   }
 
   /**
    * Force-refresh the caller's OAuth token(s) for `manualName`, at most once per
    * (user, manual) per minute. Logs ONE line per attempt — manual, user,
-   * outcome, never token material. `undefined` when nothing was attempted: no
-   * vault wired, no OAuth variable on the manual, or the guard said not now.
+   * outcome, never token material.
+   *
+   * `'guarded'` when the window refused this one (a refresh just ran, or is
+   * running, for this pair); `undefined` when there was nothing to refresh at
+   * all: no vault wired, or no OAuth variable on the manual. The two are not
+   * the same thing to the caller — see {@link classifyDownstreamFailure}.
    */
-  private async refreshDownstreamToken(userId: string, manualName: string): Promise<ForcedRefreshOutcome | undefined> {
+  private async refreshDownstreamToken(
+    userId: string,
+    manualName: string,
+  ): Promise<ForcedRefreshOutcome | 'guarded' | undefined> {
     const vault = this.secretsVault;
     if (!vault || !this.toolManuals || !manualName) return undefined;
     let keys: string[];
     try {
       keys = (await this.toolManuals.userScopedKeysForManual(manualName)).filter((v) => v.oauth).map((v) => v.key);
     } catch (err) {
-      log.warn(`downstream token refresh: could not read the variables of manual=${manualName}:`, { err });
+      log.warn(`downstream token refresh: could not read the variables of manual=${printable(manualName)}:`, { err });
       return undefined;
     }
     if (keys.length === 0) return undefined;
@@ -839,11 +918,15 @@ export class McpService {
             ? 'refreshed'
             : 'skipped';
       if (outcome !== 'skipped') {
-        log.info(`downstream token refresh: manual=${manualName} user=${userId} outcome=${outcome}`);
+        // Both values reach the log from outside (a catalog name, an identity
+        // provider's id), so both are escaped: one event stays one line.
+        log.info(
+          `downstream token refresh: manual=${printable(manualName)} user=${printable(userId)} outcome=${outcome}`,
+        );
       }
       return outcome;
     });
-    return attempt ? await attempt : undefined;
+    return attempt ? await attempt : 'guarded';
   }
 
   /**

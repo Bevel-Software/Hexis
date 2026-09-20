@@ -54,6 +54,87 @@ function makeFakeDb(queue: any[]) {
   return { db, captured };
 }
 
+/**
+ * A drizzle stub that ANSWERS FROM THE WHERE-CLAUSE, for the one assertion the
+ * sequential `makeFakeDb` cannot make: that the optimistic-concurrency guard
+ * (`eq(valueEncrypted, <the ciphertext we read>)`) is what stops a stale write.
+ *
+ * `current` is the row as it is NOW — already rotated by a concurrent refresh.
+ * `stale` is the ciphertext the caller read a moment before that, which the
+ * FIRST select hands back; any later select sees `current`. An UPDATE is
+ * applied unless its where-clause binds `stale`, i.e. unless it is guarded on
+ * a version the row has moved past. Remove the guard from the code under test
+ * and the UPDATE lands — which is what makes such a test fail.
+ */
+function whereAwareDb(current: Record<string, unknown> & { valueEncrypted: string }, stale: string) {
+  const updates: Array<Record<string, unknown>> = [];
+  let row = { ...current };
+  let firstSelect = true;
+  // Drizzle builds the condition into an SQL object whose bound parameters sit
+  // in nested `queryChunks`; the test only needs to know WHETHER a given
+  // ciphertext was bound, so it scans the object graph for that string.
+  const binds = (cond: unknown, value: string): boolean => {
+    const seen = new Set<unknown>();
+    const walk = (node: unknown): boolean => {
+      if (node === value) return true;
+      if (node === null || typeof node !== 'object' || seen.has(node)) return false;
+      seen.add(node);
+      return Object.values(node as Record<string, unknown>).some(walk);
+    };
+    return walk(cond);
+  };
+  type Thenable<T> = { then: (onF: (v: T) => unknown, onR?: (e: unknown) => unknown) => Promise<unknown> };
+  type SelectChain = Thenable<Array<Record<string, unknown>>> & {
+    from: () => SelectChain;
+    where: () => SelectChain;
+    limit: () => SelectChain;
+  };
+  type UpdateChain = Thenable<Array<{ id: unknown }>> & {
+    set: (values: Record<string, unknown>) => UpdateChain;
+    where: (cond: unknown) => UpdateChain;
+    returning: () => UpdateChain;
+  };
+  const db = {
+    select: (): SelectChain => {
+      const chain: SelectChain = {
+        from: () => chain,
+        where: () => chain,
+        limit: () => chain,
+        then: (onF, onR) => {
+          const seen = firstSelect ? { ...row, valueEncrypted: stale } : row;
+          firstSelect = false;
+          return Promise.resolve([seen]).then(onF, onR);
+        },
+      };
+      return chain;
+    },
+    update: (): UpdateChain => {
+      let payload: Record<string, unknown> = {};
+      let matched = true;
+      const chain: UpdateChain = {
+        set: (values) => {
+          payload = values;
+          return chain;
+        },
+        where: (cond) => {
+          matched = !binds(cond, stale) || stale === row.valueEncrypted;
+          return chain;
+        },
+        returning: () => chain,
+        then: (onF, onR) => {
+          if (matched) {
+            updates.push(payload);
+            row = { ...row, ...payload } as typeof row;
+          }
+          return Promise.resolve(matched ? [{ id: row.id }] : []).then(onF, onR);
+        },
+      };
+      return chain;
+    },
+  };
+  return { db: db as unknown as Database, updates };
+}
+
 function sharedRow(over: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'shared-1',
@@ -432,15 +513,51 @@ describe('DbSecretsVaultService — forceRefresh (a downstream rejected the toke
 
   it('a concurrent refresh that already rotated the tokens wins over our stale rejection', async () => {
     const rotated = crypto.encrypt(JSON.stringify({ tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }));
-    const { db } = makeFakeDb([
-      [userRow()],
-      [], // guarded wipe matched nothing: the row changed underneath us
-      [{ valueEncrypted: rotated }],
-    ]);
+    // Not the sequential stub: this one READS the where-clause, so the wipe
+    // matches nothing precisely BECAUSE the row's ciphertext moved on. Drop the
+    // optimistic-concurrency guard from `wipeTokens` and the UPDATE matches, the
+    // rotated grant is wiped, and this test fails — which is the point of it.
+    const { db, updates } = whereAwareDb({ ...userRow(), valueEncrypted: rotated }, userRow().valueEncrypted);
     const svc = new DbSecretsVaultService(db, ENC_KEY);
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 400 })));
 
     await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('refreshed');
+    expect(updates).toEqual([]); // the guarded wipe never matched the rotated row
+  });
+
+  it('a refresh whose write loses the same race serves what the winner stored, not our unwritten token', async () => {
+    const rotated = crypto.encrypt(JSON.stringify({ tokens: { access_token: 'rotated-at', refresh_token: 'rt-2' } }));
+    const { db, updates } = whereAwareDb({ ...userRow(), valueEncrypted: rotated }, userRow().valueEncrypted);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    const onMutation = vi.fn();
+    svc.onMutation(onMutation);
+    // Our OWN refresh succeeds — but the row moved on while it was in flight.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ access_token: 'ours-at', expires_in: 3600 }), { status: 200 })),
+    );
+
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('refreshed');
+
+    // Nothing persisted, so nothing is announced and `resolve` keeps serving
+    // the winner's token — never the one that exists only in this call frame.
+    expect(updates).toEqual([]);
+    expect(onMutation).not.toHaveBeenCalled();
+  });
+
+  it('a refresh that loses the race to a WIPE reports the grant not connected', async () => {
+    const wipedOut = crypto.encrypt(JSON.stringify({ clientSecret: 'client-secret-1' }));
+    const { db, updates } = whereAwareDb({ ...userRow(), valueEncrypted: wipedOut }, userRow().valueEncrypted);
+    const svc = new DbSecretsVaultService(db, ENC_KEY);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ access_token: 'ours-at', expires_in: 3600 }), { status: 200 })),
+    );
+
+    // A concurrent path found the grant dead and wiped it; the stored truth is
+    // "not connected", and that is what the caller is told.
+    await expect(svc.forceRefresh('user-1', KEY)).resolves.toBe('rejected');
+    expect(updates).toEqual([]);
   });
 
   it('nothing to refresh — no row, or never signed in — is skipped without a provider call', async () => {

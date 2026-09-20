@@ -31,6 +31,23 @@ describe('isDownstreamTokenRejection', () => {
     // Digits inside a URL are not a status.
     expect(isDownstreamTokenRejection(new Error('connect ECONNREFUSED https://api.example.com/v1/401/x'))).toBe(false);
   });
+
+  it('a stated non-401 status outranks its own prose', () => {
+    // Providers do answer 403 with an OAuth error body. The status is the
+    // verdict — refreshing would swap a valid token for another equally
+    // unpermitted one, once a minute, forever.
+    expect(isDownstreamTokenRejection(new StreamableHTTPError(403, '{"error":"invalid_token"}'))).toBe(false);
+    expect(isDownstreamTokenRejection({ status: 403, message: 'Unauthorized' })).toBe(false);
+    expect(isDownstreamTokenRejection({ response: { status: 500 }, message: 'invalid_token' })).toBe(false);
+    // …and a 403 shell does not let its own body be re-read one link up.
+    expect(
+      isDownstreamTokenRejection(new Error('call failed', { cause: { status: 403, message: 'invalid_token' } })),
+    ).toBe(false);
+    // A status is still only a number in the HTTP range: `code` as a syscall
+    // name or a JSON-RPC code leaves the status unknown, so the message decides.
+    expect(isDownstreamTokenRejection({ code: 'ECONNRESET', message: 'invalid_token' })).toBe(true);
+    expect(isDownstreamTokenRejection({ code: -32000, message: 'invalid_token' })).toBe(true);
+  });
 });
 
 describe('DownstreamRefreshGuard — at most once per (user, manual) per minute', () => {
@@ -66,5 +83,39 @@ describe('DownstreamRefreshGuard — at most once per (user, manual) per minute'
     expect(runs).toBe(1);
     // Settled, still inside the window: no more.
     expect(guard.run('k', refresh)).toBeUndefined();
+  });
+
+  it('a refresh that never settles does not pin its key past the window', async () => {
+    let now = 0;
+    const guard = new DownstreamRefreshGuard<string>(60_000, () => now);
+    let runs = 0;
+    // A token request with no timeout, hanging forever.
+    const hang = () => {
+      runs += 1;
+      return new Promise<string>(() => {});
+    };
+    expect(guard.run('k', hang)).toBeDefined();
+    now += 59_999;
+    expect(guard.run('k', hang)).toBeDefined(); // still in flight — shared, not re-run
+    expect(runs).toBe(1);
+    now += 1;
+    // The window is over. The hung attempt is forgotten rather than holding
+    // this key — and this map entry — for the life of the process.
+    await expect(guard.run('k', async () => 'recovered')).resolves.toBe('recovered');
+    expect(runs).toBe(1);
+  });
+
+  it('clearWhere forgets the windows it selects, by key and by outcome', async () => {
+    const guard = new DownstreamRefreshGuard<string>(60_000, () => 0);
+    await guard.run('u1\0notion', async () => 'transient');
+    await guard.run('u1\0linear', async () => 'refreshed');
+    await guard.run('u2\0notion', async () => 'transient');
+
+    guard.clearWhere((key, outcome) => key.startsWith('u1\0') && outcome !== 'refreshed');
+
+    // Forgotten: u1's failed window. Kept: u1's successful one, and u2 entirely.
+    await expect(guard.run('u1\0notion', async () => 'again')).resolves.toBe('again');
+    expect(guard.run('u1\0linear', async () => 'again')).toBeUndefined();
+    expect(guard.run('u2\0notion', async () => 'again')).toBeUndefined();
   });
 });

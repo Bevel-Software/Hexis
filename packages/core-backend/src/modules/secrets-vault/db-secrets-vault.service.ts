@@ -664,15 +664,41 @@ export class DbSecretsVaultService implements ISecretsVaultService {
 
     // Optimistic concurrency: only persist if the stored ciphertext is unchanged,
     // so a concurrent refresh on the same row doesn't clobber (Microsoft pattern).
-    await this.db
+    const stored = await this.db
       .update(secrets)
       .set({ valueEncrypted: this.crypto().encrypt(JSON.stringify(next)), updatedAt: new Date() })
-      .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)));
+      .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
+      .returning({ id: secrets.id });
+    if (Array.isArray(stored) && stored.length === 0) {
+      // Nothing was written: the row changed under us, so our fresh token is
+      // not what the vault holds and handing it out would be a lie about
+      // stored state. Same resolution as the guarded wipe — re-read and serve
+      // whatever the winner persisted, or report the grant not-connected when
+      // the winner was a wipe.
+      const current = await this.currentAccessToken(row.id);
+      return current
+        ? { outcome: 'refreshed', accessToken: current }
+        : { outcome: 'rejected', accessToken: null };
+    }
     // A successful refresh is a credential repair — notify so dependent caches
     // (the MCP proxy's manual-failure memo) retry immediately. `row.userId` is
     // null for a shared (admin-scope) row, which maps to "affects everyone".
     this.notifyMutation(row.userId);
     return { outcome: 'refreshed', accessToken: refreshed.access_token };
+  }
+
+  /** The access token currently stored on `id`, or undefined if there is none to read. */
+  private async currentAccessToken(id: string): Promise<string | undefined> {
+    const [current] = await this.db
+      .select({ valueEncrypted: secrets.valueEncrypted })
+      .from(secrets)
+      .where(eq(secrets.id, id))
+      .limit(1);
+    try {
+      return current ? this.readBlob(current.valueEncrypted).tokens?.access_token : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Drop a dead grant's token set, keeping the client secret. See {@link refreshRow}. */
@@ -692,17 +718,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .where(and(eq(secrets.id, row.id), eq(secrets.valueEncrypted, row.valueEncrypted)))
       .returning({ id: secrets.id });
     if (Array.isArray(wiped) && wiped.length === 0) {
-      const [current] = await this.db
-        .select({ valueEncrypted: secrets.valueEncrypted })
-        .from(secrets)
-        .where(eq(secrets.id, row.id))
-        .limit(1);
-      let fresh: string | undefined;
-      try {
-        fresh = current ? this.readBlob(current.valueEncrypted).tokens?.access_token : undefined;
-      } catch {
-        fresh = undefined;
-      }
+      const fresh = await this.currentAccessToken(row.id);
       return fresh ? { outcome: 'refreshed', accessToken: fresh } : { outcome: 'rejected', accessToken: null };
     }
     // The sign-in just became not-connected — let credential-validity caches

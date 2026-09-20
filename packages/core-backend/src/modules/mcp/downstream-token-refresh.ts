@@ -31,7 +31,10 @@ export const DOWNSTREAM_REFRESH_WINDOW_MS = 60_000;
  * where the status is gone and only the response body is left to read.
  *
  * 403 is deliberately NOT a rejection: it means the token is valid but not
- * permitted, and a refreshed token carries the same permissions.
+ * permitted, and a refreshed token carries the same permissions. An error that
+ * STATES its HTTP status is believed over its prose, so a 403 whose body says
+ * `invalid_token` (or any other non-401 status that mentions one) is not
+ * refreshed: the status is the server's verdict, the message only its wording.
  */
 export function isDownstreamTokenRejection(err: unknown): boolean {
   const seen = new Set<unknown>();
@@ -41,17 +44,33 @@ export function isDownstreamTokenRejection(err: unknown): boolean {
     if (typeof current === 'string') return saysTokenRejected(current);
     if (typeof current !== 'object') return false;
     const e = current as Record<string, unknown>;
-    // `code` doubles as a JSON-RPC code in the SDK (negative), so only a value
-    // in the HTTP range can be read as a status.
-    for (const field of ['code', 'status', 'statusCode'] as const) {
-      if (e[field] === 401) return true;
-    }
-    const responseStatus = (e.response as { status?: unknown } | undefined)?.status;
-    if (responseStatus === 401) return true;
+    // A known status decides on its own — and ends the walk, so a 403's own
+    // body can't be re-read as a rejection one link further up the chain.
+    const status = httpStatusOf(e);
+    if (status !== undefined) return status === 401;
     if (typeof e.message === 'string' && saysTokenRejected(e.message)) return true;
     current = e.cause;
   }
   return false;
+}
+
+/**
+ * The HTTP status this error carries, if it carries one at all — the MCP SDK's
+ * `StreamableHTTPError.code`, a `status`/`statusCode`, or a nested response's.
+ *
+ * `code` doubles as a JSON-RPC code in the SDK (negative, e.g. `-32001`) and
+ * as a syscall string in Node (`'ECONNRESET'`), so only a number inside the
+ * HTTP range counts as a status; anything else leaves the status unknown and
+ * the message is read instead.
+ */
+function httpStatusOf(e: Record<string, unknown>): number | undefined {
+  const asStatus = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isInteger(v) && v >= 100 && v <= 599 ? v : undefined;
+  for (const field of ['status', 'statusCode', 'code'] as const) {
+    const status = asStatus(e[field]);
+    if (status !== undefined) return status;
+  }
+  return asStatus((e.response as { status?: unknown } | undefined)?.status);
 }
 
 function saysTokenRejected(message: string): boolean {
@@ -78,7 +97,10 @@ function saysTokenRejected(message: string): boolean {
  * downstream keeps refusing to one refresh a minute.
  */
 export class DownstreamRefreshGuard<T> {
-  private readonly attempts = new Map<string, { startedAt: number; outcome: Promise<T>; settled: boolean }>();
+  private readonly attempts = new Map<
+    string,
+    { startedAt: number; outcome: Promise<T>; settled: boolean; value?: T }
+  >();
 
   constructor(
     private readonly windowMs: number = DOWNSTREAM_REFRESH_WINDOW_MS,
@@ -91,10 +113,16 @@ export class DownstreamRefreshGuard<T> {
     this.prune(at);
     const existing = this.attempts.get(key);
     if (existing) return existing.settled ? undefined : existing.outcome;
-    const record = { startedAt: at, outcome: Promise.resolve() as Promise<unknown> as Promise<T>, settled: false };
+    const record: { startedAt: number; outcome: Promise<T>; settled: boolean; value?: T } = {
+      startedAt: at,
+      outcome: Promise.resolve() as Promise<unknown> as Promise<T>,
+      settled: false,
+    };
     record.outcome = (async () => {
       try {
-        return await refresh();
+        const value = await refresh();
+        record.value = value;
+        return value;
       } finally {
         record.settled = true;
       }
@@ -103,10 +131,32 @@ export class DownstreamRefreshGuard<T> {
     return record.outcome;
   }
 
-  /** Forget attempts whose window is over, so the map is bounded by recent (user, manual) pairs. */
+  /**
+   * Forget the attempts `predicate` selects — the key, and the outcome it
+   * settled on (`undefined` while it is still running).
+   *
+   * For when something OUTSIDE this guard changed the credential the window was
+   * protecting, so the window no longer describes anything real.
+   */
+  clearWhere(predicate: (key: string, outcome: T | undefined) => boolean): void {
+    for (const [key, record] of this.attempts) {
+      if (predicate(key, record.value)) this.attempts.delete(key);
+    }
+  }
+
+  /**
+   * Forget attempts whose window is over, so the map is bounded by recent
+   * (user, manual) pairs.
+   *
+   * Age alone decides, NOT settlement: a refresh that never settles — a token
+   * request that hangs with no timeout — would otherwise pin its key forever,
+   * so no later rejection for that (user, manual) could ever refresh again and
+   * the entry could never be evicted. Once the window has passed, a new attempt
+   * is within policy whether the previous one finished or not.
+   */
   private prune(at: number): void {
     for (const [key, record] of this.attempts) {
-      if (record.settled && at - record.startedAt >= this.windowMs) this.attempts.delete(key);
+      if (at - record.startedAt >= this.windowMs) this.attempts.delete(key);
     }
   }
 }

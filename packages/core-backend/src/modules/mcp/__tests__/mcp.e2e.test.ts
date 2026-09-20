@@ -40,9 +40,13 @@ import { formatProbeReport, probeFirstCall } from '../first-call-probe.js';
 
 const KEY_A = 'bevel_key_user_a';
 const KEY_B = 'bevel_key_user_b';
+const KEY_FORGER = 'bevel_key_user_forger';
+/** A user id carrying a newline + a whole forged log line, for the escaping test. */
+const FORGER_ID = 'user-C\ninfo: downstream token refresh: manual=notion user=root outcome=refreshed';
 const USERS: Record<string, { userId: string; tokenId: string }> = {
   [KEY_A]: { userId: 'user-A', tokenId: 'tok-A' },
   [KEY_B]: { userId: 'user-B', tokenId: 'tok-B' },
+  [KEY_FORGER]: { userId: FORGER_ID, tokenId: 'tok-C' },
 };
 
 const bearerOf = (req: express.Request) => (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
@@ -672,7 +676,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(state.refreshes).toBe(1);
     expect(downstream.rejections()).toBeGreaterThan(0);
     expect(refreshLines(logs)).toHaveLength(1);
-    expect(refreshLines(logs)[0]).toContain('manual=notion user=user-A outcome=refreshed');
+    expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed');
     valid = 'unused';
   });
 
@@ -720,7 +724,7 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     expect(toolText(res)).toContain('Re-authorize it on http://localhost:5173/connect');
     expect(state.refreshes).toBe(1);
     expect((await vault.statusFor('user-A', [KEY]))[0]?.userAuthorized).toBe(false);
-    expect(refreshLines(logs)[0]).toContain('manual=notion user=user-A outcome=rejected');
+    expect(refreshLines(logs)[0]).toContain('manual=\\"notion\\" user=\\"user-A\\" outcome=rejected');
   });
 
   it('transient refresh failure: the original error comes back, the token is kept, and a later call tries again', async () => {
@@ -806,11 +810,73 @@ describe('proxied third-party MCP servers: a rejected token gets one refresh and
     valid = 'secret-token-NEW';
     await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
 
-    expect(refreshLines(logs)).toEqual([expect.stringContaining('manual=notion user=user-A outcome=refreshed')]);
+    expect(refreshLines(logs)).toEqual([
+      expect.stringContaining('manual=\\"notion\\" user=\\"user-A\\" outcome=refreshed'),
+    ]);
     for (const line of logs) {
       expect(line).not.toContain('secret-token-OLD');
       expect(line).not.toContain('secret-token-NEW');
     }
+  });
+
+  it('the refresh line cannot be forged: caller-controlled text is escaped, so one attempt is one line', async () => {
+    quiet();
+    let valid = 'token-1';
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === valid });
+    const { vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const logs = captureLogs();
+    const { baseUrl } = await startPlatform({ manualsFor: notionManual(downstream), secretsVault: vault, toolManuals });
+    // This caller's user id is a newline plus a plausible-looking refresh line.
+    const { client } = await connectSdkClient(baseUrl, KEY_FORGER);
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'one' } });
+    valid = 'token-2';
+    await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'two' } });
+
+    // One attempt, one EVENT. The forged text is carried inside the line it
+    // belongs to, escaped, rather than starting a line of its own — here and
+    // in every other line that names the caller.
+    const messages = logs.map((entry) => JSON.parse(entry).message as string);
+    const events = messages.filter((m) => m.startsWith('downstream token refresh:'));
+    expect(events).toEqual(['downstream token refresh: manual="notion" user=' + JSON.stringify(FORGER_ID) + ' outcome=refreshed']);
+    const hasControlChar = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20);
+    for (const message of messages) expect(hasControlChar(message)).toBe(false);
+  });
+
+  it('a transient refresh at the HANDSHAKE is not remembered as a dead manual: the next call tries again', async () => {
+    quiet();
+    let now = 1_000_000;
+    // Rejects the stored token outright, so the very first connection — the
+    // handshake, before any tool call — is what gets the 401.
+    downstream = await startFakeDownstreamMcpServer({ acceptsToken: (t) => t === 'token-2' });
+    let providerUp = false;
+    const { state, vault, toolManuals } = fakeSignIn('token-1', (s) => {
+      if (!providerUp) return 'transient';
+      s.token = 'token-2';
+      return 'refreshed';
+    });
+    const { baseUrl } = await startPlatform({
+      manualsFor: notionManual(downstream),
+      secretsVault: vault,
+      toolManuals,
+      poolNow: () => now,
+    });
+    const { client } = await connectSdkClient(baseUrl);
+
+    // The provider is down: the manual cannot register, and the catalog says so.
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(false);
+    expect(state.refreshes).toBe(1);
+
+    // The provider comes back inside the manual-failure memo's five minutes.
+    // The refresh policy's window is one minute, and it is the one that governs:
+    // a transient credential failure is never written into that memo.
+    providerUp = true;
+    now += 60_000;
+    expect((await client.listTools()).tools.some((t) => t.name === 'notion_srv_echo')).toBe(true);
+    expect(state.refreshes).toBe(2);
+    expect(toolText(await client.callTool({ name: 'notion_srv_echo', arguments: { text: 'hi' } }))).toContain('hi');
   });
 });
 
