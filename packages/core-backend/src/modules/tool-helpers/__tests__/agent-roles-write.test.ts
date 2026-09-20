@@ -188,7 +188,7 @@ describe('agent writes to roles.yaml check `- group:<Name>` entries against the 
 
   it('an unknown group → 422 naming the entry and its role; nothing written', async () => {
     const base = await start();
-    const res = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platfrom Team\n` });
+    const res = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platfrom Team\n`, mode: 'overwrite' });
     expect(res.status).toBe(422);
     const { error } = (await res.json()) as { error: string };
     expect(error).toContain("'- group:Platfrom Team' under role 'Sales'");
@@ -199,11 +199,11 @@ describe('agent writes to roles.yaml check `- group:<Name>` entries against the 
   it('in IdP mode the synced file is the source, and groups.yaml no longer counts', async () => {
     await fs.writeFile(path.join(root, KB, 'synced-groups.yaml'), 'groups:\n  Directory Team:\n    - d@x.io\n');
     const base = await start();
-    const refused = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platform Team\n` });
+    const refused = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Platform Team\n`, mode: 'overwrite' });
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { error: string }).error).toContain('synced-groups.yaml');
     expect(await rolesOnDisk()).toBe(CURRENT);
-    const landed = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Directory Team\n` });
+    const landed = await call(base, 'write_file', { path: ROLES, content: `${CURRENT}    - group:Directory Team\n`, mode: 'overwrite' });
     expect(landed.status).toBe(200);
     expect(await rolesOnDisk()).toBe(`${CURRENT}    - group:Directory Team\n`);
   });
