@@ -22,7 +22,8 @@
  */
 
 import type { FileContent } from '@mastra/core/workspace';
-import { canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
+import { GROUP_REF_PREFIX, canonicalRoleName, parseRolesYaml, parseYamlSubset } from './access-grammar.js';
+import type { GroupsIndex } from './group-files.js';
 import { WorkflowDomainError } from '../../shared/domain-errors.js';
 import type { WriteValidator } from '../kb-fs/locking-filesystem.js';
 
@@ -149,8 +150,94 @@ export function assertNoNewRoles(current: string | null, candidate: string): voi
 }
 
 /**
+ * The active group source an agent write is checked against: its groups and
+ * the file they came from (`groups.yaml`, or `synced-groups.yaml` in IdP mode).
+ * `null` when the source exists but could not be read — group entries are then
+ * left unchecked rather than every one refused.
+ */
+export type ActiveGroupsForValidation = { groups: GroupsIndex; sourceFile: string } | null;
+
+/** One `- group:<Name>` member entry: the role it sits under and the entry as written. */
+interface GroupEntry {
+  role: string;
+  roleCanonical: string;
+  entry: string;
+  group: string;
+}
+
+/**
+ * An AGENT write whose candidate `roles.yaml` adds a `- group:<Name>` entry
+ * naming no group in the active group source. The resolver ignores such an
+ * entry with only a log warning — the role silently reaches nobody — so it is
+ * refused up front, naming each entry, in the same 422 shape as the others.
+ */
+export class RolesYamlUnknownGroupError extends WorkflowDomainError {
+  readonly entries: { role: string; entry: string }[];
+  constructor(entries: { role: string; entry: string }[], sourceFile: string) {
+    const listed = entries.map((e) => `'- ${e.entry}' under role '${e.role}'`).join(', ');
+    super(
+      `roles.yaml was not saved: ${listed} ${entries.length === 1 ? 'names a group' : 'name groups'} ` +
+        `that ${sourceFile} does not declare. Group names are matched case- and whitespace-insensitively; ` +
+        'use an existing group, or create the group first.',
+      422,
+      { kind: 'roles-yaml-unknown-group', entries, sourceFile },
+    );
+    this.name = 'RolesYamlUnknownGroupError';
+    this.entries = entries;
+  }
+}
+
+/** Every `- group:<Name>` entry `text` declares, in file order. Lenient, like {@link declaredRoleNames}. */
+function groupEntries(text: string | null): GroupEntry[] {
+  const out: GroupEntry[] = [];
+  if (text === null) return out;
+  const parsed = parseYamlSubset(text);
+  if (!parsed.ok) return out;
+  const roles = (parsed.value as Record<string, unknown> | null)?.roles;
+  if (roles == null || typeof roles !== 'object' || Array.isArray(roles)) return out;
+  for (const [display, members] of Object.entries(roles)) {
+    if (!Array.isArray(members)) continue;
+    for (const member of members) {
+      if (typeof member !== 'string') continue;
+      const entry = member.trim();
+      if (!entry.toLowerCase().startsWith(GROUP_REF_PREFIX)) continue;
+      out.push({
+        role: display.trim(),
+        roleCanonical: canonicalRoleName(display),
+        entry,
+        group: canonicalRoleName(entry.slice(GROUP_REF_PREFIX.length)),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Throw {@link RolesYamlUnknownGroupError} if `candidate` adds a group entry
+ * whose name (compared canonically) the active group source does not declare.
+ * Only ADDED entries are checked: an entry already in `current` whose group
+ * has since been retired is left alone, so it cannot block an unrelated
+ * membership edit.
+ */
+export function assertKnownGroups(
+  current: string | null,
+  candidate: string,
+  active: ActiveGroupsForValidation,
+): void {
+  if (active === null) return;
+  const key = (e: GroupEntry) => `${e.roleCanonical}\n${e.group}`;
+  const existing = new Set(groupEntries(current).map(key));
+  const unknown = groupEntries(candidate)
+    .filter((e) => !existing.has(key(e)) && !active.groups.has(e.group))
+    .map(({ role, entry }) => ({ role, entry }));
+  if (unknown.length > 0) throw new RolesYamlUnknownGroupError(unknown, active.sourceFile);
+}
+
+/**
  * The agent's `roles.yaml` gate: everything {@link makeRolesYamlWriteValidator}
- * refuses, plus any role the current file does not declare. Agents manage
+ * refuses, plus any role the current file does not declare and — when
+ * `loadGroups` is given — any added `- group:<Name>` entry naming a group the
+ * active group source does not declare. Agents manage
  * membership only; the human editor and the App roles service keep the plain
  * validator. `readCurrent` returns the file's current text, null when absent.
  * Content of any type is checked — decoded as UTF-8 — so bytes cannot slip past.
@@ -165,12 +252,15 @@ export function assertNoNewRoles(current: string | null, candidate: string): voi
 export function makeAgentRolesYamlWriteValidator(
   kbDirName: string,
   readCurrent: () => Promise<string | null>,
+  loadGroups?: () => Promise<ActiveGroupsForValidation>,
 ): WriteValidator {
   const validate: WriteValidator = async (path, content) => {
     if (!isRolesYamlPath(path, kbDirName)) return;
     const text = typeof content === 'string' ? content : Buffer.from(content).toString('utf-8');
     assertRolesYamlParsable(text);
-    assertNoNewRoles(await readCurrent(), text);
+    const current = await readCurrent();
+    assertNoNewRoles(current, text);
+    if (loadGroups) assertKnownGroups(current, text, await loadGroups());
   };
   validate.appliesTo = (path) => isRolesYamlPath(path, kbDirName);
   return validate;

@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ChevronRight } from 'lucide-react';
+import { HEADER_BAND, HEADER_BAND_LEAD, PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import { cn } from '../../../../lib/utils';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
 import { announceToolCredentialsChanged } from '../../../../core/events';
@@ -140,18 +141,28 @@ export function ToolPage({
         </Banner>
       )}
 
-      {backLink}
-
-      <header className="mt-4 flex items-start gap-4">
-        <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="mt-1" />
-        <div className="min-w-0 flex-1">
-          <h1 className="text-display font-semibold text-ink">{tool.name}</h1>
-          {page.detail?.description && (
-            <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
-              {page.detail.description}
-            </p>
-          )}
+      <header>
+        {/* The logo and the name are the title BAR — one band, the height the
+            sidebar's header row is. The description reads below it: a line of
+            prose inside the row would make this page's header taller than
+            every other page's, which is the drift the band removes. The way
+            back rides ON the band, as its leading item, for the same reason:
+            a back link in a row above would push the title bar off the line
+            the sidebar's header row holds. (The error and not-found returns
+            above still lead with it on its own row — they have no title bar
+            to hold a line with.) */}
+        <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
+          <div className={HEADER_BAND_LEAD}>{backLink}</div>
+          <ToolLogo slug={tool.slug} name={tool.name} size="lg" className="flex-none" />
+          <h1 className="min-w-0 truncate text-display font-semibold text-ink" title={tool.name}>
+            {tool.name}
+          </h1>
         </div>
+        {page.detail?.description && (
+          <p className="mt-1.5 max-w-[56ch] text-lede text-ink-muted">
+            {page.detail.description}
+          </p>
+        )}
         {/* No `Manage access` here, deliberately. Access is decided at the
             PLUGIN — a tool inherits its folder's `access.md`, so an editor on
             this page would either duplicate the plugin's one or quietly write a

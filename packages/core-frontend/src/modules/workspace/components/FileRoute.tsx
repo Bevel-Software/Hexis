@@ -445,6 +445,18 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
         : null;
 
   /**
+   * The URL names a branch the platform has never heard of (404 from
+   * `GET /workspace`) — a mistyped or made-up name, or a link to a branch
+   * that was never pushed. Nothing was deleted, so the branch-gone screen
+   * would be a lie; this is the file-missing story told about a branch.
+   * Matched to THIS branch for the same reason `goneBranch` is.
+   */
+  const unknownBranch =
+    workspace.bootstrapError?.status === 404 && workspace.bootstrapError.branch === branchFromUrl
+      ? branchFromUrl
+      : null;
+
+  /**
    * A bootstrap that failed for a reason OTHER than "the branch is gone" —
    * a 500, a 502, a dropped connection. It used to leave the page on its
    * empty state for good: `workspaceId` stays where it was, the effect above
@@ -459,6 +471,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
    */
   const bootstrapFailure =
     goneBranch === null &&
+    unknownBranch === null &&
     workspace.bootstrapError &&
     (workspace.bootstrapError.branch === branchFromUrl || workspaceId === null)
       ? workspace.bootstrapError
@@ -508,6 +521,7 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   const loadingFile =
     !error &&
     !goneBranch &&
+    !unknownBranch &&
     !bootstrapFailure &&
     !statusUnknown &&
     segment !== '' &&
@@ -518,11 +532,12 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
   const screen =
     error?.kind === 'dirty' ? 'dirty'
       : goneBranch !== null ? 'branch-gone'
-        : bootstrapFailure ? 'bootstrap-failed'
-          : statusUnknown ? 'git-status-failed'
-            : error ? error.kind
-              : loadingFile ? 'loading'
-                : 'viewer';
+        : unknownBranch !== null ? 'branch-not-found'
+          : bootstrapFailure ? 'bootstrap-failed'
+            : statusUnknown ? 'git-status-failed'
+              : error ? error.kind
+                : loadingFile ? 'loading'
+                  : 'viewer';
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { trace('screen', { screen, loadingFile }); }, [screen, loadingFile, traceOn]);
 
@@ -570,6 +585,21 @@ export function FileRoute({ canonicalize = true }: { canonicalize?: boolean } = 
           <span className="font-mono text-ink">{goneBranch}</span> was deleted in the git
           repository. Anything merged from it lives on{' '}
           <span className="font-mono text-ink">{DEFAULT_BRANCH}</span>.
+        </p>
+        <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
+      </ErrorScreen>
+    );
+  }
+
+  if (unknownBranch !== null) {
+    return (
+      <ErrorScreen title="Branch not found">
+        <p className="text-ui text-ink-muted">
+          There is no branch named{' '}
+          <span className="font-mono text-ink">{unknownBranch}</span>.
+        </p>
+        <p className="text-meta text-ink-faint">
+          It may never have been pushed, or this link may have the name wrong.
         </p>
         <Button onClick={() => navigate(kbFileUrl(DEFAULT_BRANCH))}>Go to {DEFAULT_BRANCH}</Button>
       </ErrorScreen>

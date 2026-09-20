@@ -9,6 +9,8 @@ import { EVERYONE_TEAM, emptyMessageFor, filterLibraryItems, type LibraryFilter 
 import { pluginEntriesFor } from '../utils/plugin-entries';
 import { personalPluginName } from '../utils/personal-plugin';
 import { Banner, TextField } from '../../../shared/components';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { ManageAccessDialog } from '../../access/components/ManageAccessDialog';
 import { offersManageAccess } from '../../access/manage-access-affordance';
 import { PluginItemSections } from './plugin-page-parts';
@@ -133,30 +135,35 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
 
   return (
     <>
-      <div className="flex items-start gap-4">
-        <div>
-          <h1 className="text-display font-semibold">{headingFor(filter)}</h1>
-          <p className="mt-0.5 text-ui text-ink-muted">
-            {data.loading ? '…' : `${count} ${count === 1 ? 'item' : 'items'}`}
-          </p>
-          {/* Everyone is not a group but the organisation: say what the page
-              holds, because the name alone reads like one more team. Only
-              once the list has settled and names it — while it loads, or
-              when it failed, the state below is the whole story. */}
-          {filter.kind === 'team' && filter.group === EVERYONE_TEAM && teamsSettled && !unknownTeam && (
-            <p className="mt-2 max-w-prose text-ui text-ink-muted">
-              Org-wide: what every signed-in person and their agents can use, with no group or role needed.
-            </p>
-          )}
-        </div>
+      {/* The title bar, on the band the sidebar's header row is also on. The
+          count and the org-wide note used to share a column with the heading
+          INSIDE this row, which made the row as tall as whatever prose it was
+          carrying — a height no other page could match. They read below it
+          now, where they always looked like they were. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-4')}>
+        <h1 className="min-w-0 truncate text-display font-semibold" title={headingFor(filter)}>
+          {headingFor(filter)}
+        </h1>
         <TextField
-          className="ml-auto w-64"
+          className="ml-auto w-64 flex-none"
           placeholder="Search"
           aria-label="Search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
+      <p className="mt-0.5 text-ui text-ink-muted">
+        {data.loading ? '…' : `${count} ${count === 1 ? 'item' : 'items'}`}
+      </p>
+      {/* Everyone is not a group but the organisation: say what the page
+          holds, because the name alone reads like one more team. Only
+          once the list has settled and names it — while it loads, or
+          when it failed, the state below is the whole story. */}
+      {filter.kind === 'team' && filter.group === EVERYONE_TEAM && teamsSettled && !unknownTeam && (
+        <p className="mt-2 max-w-prose text-ui text-ink-muted">
+          Org-wide: what every signed-in person and their agents can use, with no group or role needed.
+        </p>
+      )}
 
       {/* Somebody asking to join one of the plugins is the news on the page
           the Library opens on — the one place the ask is certain to be seen.

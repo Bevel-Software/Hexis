@@ -7,6 +7,7 @@ import {
   WorkspaceContext,
   type WorkspaceContextValue,
 } from '../../workspace/state/workspace.context';
+import { makeWorkspaceFixture } from '../../workspace/__tests__/testFixtures';
 import { AdminContext } from '../../admin/state/admin.context';
 import type { LibraryData } from '../hooks/useLibraryData';
 
@@ -110,12 +111,13 @@ function wrap(children: ReactNode, fileTree: FileTreeEntry | null = null) {
     rolesConfigErrors: [],
     runRolesRecovery: vi.fn(),
   };
-  const workspaceValue = {
+  // The shared fixture, not an ad-hoc literal: a cast-shaped stub goes on
+  // compiling when the context gains a field and fails at render instead.
+  const workspaceValue: WorkspaceContextValue = makeWorkspaceFixture({
     workspaceId: 'ws',
     kbDirName: KB,
     fileTree,
-    pendingUploads: new Map(),
-  } as unknown as WorkspaceContextValue;
+  });
   return (
     <AdminContext.Provider value={adminValue}>
       <WorkspaceContext.Provider value={workspaceValue}>

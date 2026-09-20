@@ -99,6 +99,23 @@ describe('LibraryCard', () => {
   });
 
   /**
+   * A skill's lifecycle is its authors' business, not the platform's, and the
+   * card lost the `deprecated`/`retired` badge with it.
+   *
+   * Scope, so this is not read as more than it is: the removal PROPER is
+   * pinned a layer up, in `library-data.mapping.test.tsx` — no `lifecycle`
+   * survives the catalog mapping, so no card can be handed one by the real
+   * data flow. This is the re-introduction guard on the rendering itself,
+   * and the cast is deliberate: the prop is gone from `LibraryCardProps`, so
+   * a caller reaching for it again has to come back through this door.
+   */
+  it('renders no lifecycle badge, even when handed the removed prop', () => {
+    card({ lifecycle: 'retired' } as Partial<LibraryCardProps>);
+    expect(screen.queryByText(/^Deprecated$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Retired$/i)).not.toBeInTheDocument();
+  });
+
+  /**
    * A proposed skill — one that exists only on an open change request.
    *
    * Before this, a skill an agent proposed was in the product nowhere at all

@@ -70,6 +70,26 @@ export type GrantPrincipal =
 export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' | 'plugin' };
 
 /**
+ * The principals holding ONE verb at one path, in the shape every `eligible*`
+ * lookup answers in: the kinded collectives, the same names with their kind
+ * erased (for the name-only consumers), and the directly granted people.
+ */
+export type HolderList = {
+  principals?: ResolvedPrincipal[];
+  roles: string[];
+  users: { name: string; email: string }[];
+};
+
+/** Who can open and who can edit one path — the two verbs a move compares. */
+export type PathHolders = { read: HolderList; write: HolderList };
+
+/**
+ * One file's holders where it is now and where a move would put it — see
+ * {@link IAccessControl.prospectiveHolders}.
+ */
+export type ProspectiveHolders = { before: PathHolders; after: PathHolders };
+
+/**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
  * actually holds (via a named file entry) appear; each maps to the closest-first
  * list of scopes that grant it (see `VerbSources`). A principal with no named
@@ -308,6 +328,27 @@ export interface IAccessControl {
     roles: string[];
     users: { name: string; email: string }[];
   }>;
+
+  /**
+   * Who can open and who can edit one file where it IS, and where a move
+   * would put it. `toPath` names a path that does not exist yet — the point
+   * of the call is to answer before the move happens — so the resolution
+   * layers the file's OWN rules (its frontmatter, read from `fromPath`,
+   * which travels with the bytes) over the destination's folder chain.
+   *
+   * Writes nothing and moves nothing. The move confirmation diffs the two
+   * sides to name who loses and who gains access.
+   *
+   * A FILE question only: a `fromPath` that is a directory is refused with a
+   * 400. A folder's access is its own `access.md` — which moves with it and
+   * governs everything beneath it — so resolving it as a file would name the
+   * wrong principals with the same confidence as the right ones.
+   */
+  prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders>;
 
   /**
    * Finite expanded email set for configured users who could approve this path

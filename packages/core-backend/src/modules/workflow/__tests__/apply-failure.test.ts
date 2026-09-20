@@ -936,7 +936,12 @@ describe('PullRequestService — a recorded or cleared refusal reaches cached li
     } as unknown as Database;
     const svc = new RealPullRequestService(
       db,
-      { findAnyWorkspaceId: async () => 'ws' } as unknown as WorkspaceService,
+      {
+        findAnyWorkspaceId: async () => 'ws',
+        // The list refreshes the clone once per read instead of once per
+        // request; nothing here is about the network, so it is a no-op.
+        ensureRemotesFetched: async () => undefined,
+      } as unknown as WorkspaceService,
       {} as unknown as IAccessControl,
       { changedPathsForPr: async () => ['Plugins/x/SKILL.md'] } as unknown as GitService,
     );

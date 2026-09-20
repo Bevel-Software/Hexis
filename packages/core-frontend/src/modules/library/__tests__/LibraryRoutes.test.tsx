@@ -12,6 +12,7 @@ import type { LibraryData } from '../hooks/useLibraryData';
 import type { ToolSecrets } from '../../secrets-vault/services/tool-secrets.api';
 import type { PluginSummary } from '../services/plugins.api';
 import type { ToolPageState } from '../hooks/useToolPage';
+import { PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 
 /**
  * The Library's routes, end to end through the layout: URL in, page + lit
@@ -385,6 +386,18 @@ describe('LibraryRoutes', () => {
     fireEvent.click(await screen.findByRole('link', { name: 'Everything' }));
     await waitFor(() => expect(pathname()).toBe('/skills-and-tools'));
     expect(await screen.findByRole('heading', { name: 'Everything', level: 1 })).toBeInTheDocument();
+  });
+
+  it('carries the breadcrumb ON the title band, not in a row above it', async () => {
+    // The band's TOP EDGE is the seam it holds with the sidebar's header row
+    // (`shared/theme/header`). A breadcrumb in its own row above the band
+    // pushes the title bar down by that row's height, and the two headers
+    // stop lining up however exactly their heights agree — which is the
+    // whole bug. So the trail rides on the band, and this is what says so.
+    renderAt('/skills-and-tools/plugins/GTM');
+    const band = await screen.findByTestId(PAGE_HEADER_TESTID);
+    expect(band).toContainElement(screen.getByRole('navigation', { name: 'Breadcrumb' }));
+    expect(band).toContainElement(screen.getByRole('heading', { name: 'GTM', level: 1 }));
   });
 
   it('leads the sidebar with Everything, from anywhere in the Library', async () => {

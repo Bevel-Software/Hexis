@@ -68,13 +68,6 @@ export interface LibraryCardCommonProps {
    */
   pending?: { authorName: string; mine: boolean };
   /**
-   * A skill's governance lifecycle (`metadata.lifecycle`). Only the two states
-   * that need a reader's attention are shown — `deprecated` (still works,
-   * find the replacement) and `retired` (kept for its owners, never
-   * distributed); `active` and absence render nothing.
-   */
-  lifecycle?: string;
-  /**
    * Where the item LIVES, when it reaches the page showing this card through
    * a link rather than by sitting in its folder — `Skills/Testing`. Draws the
    * Linked pill, with that folder in its tooltip.
@@ -123,7 +116,6 @@ export function LibraryCard({
   status,
   version,
   pending,
-  lifecycle,
   linkedHome,
   onOpen,
   onShare,
@@ -211,11 +203,6 @@ export function LibraryCard({
             title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
           >
             Linked
-          </Badge>
-        )}
-        {(lifecycle === 'deprecated' || lifecycle === 'retired') && (
-          <Badge tone="wait" size="xs" className="shrink-0 uppercase">
-            {lifecycle === 'retired' ? 'Retired' : 'Deprecated'}
           </Badge>
         )}
       </span>

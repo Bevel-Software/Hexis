@@ -112,8 +112,15 @@ export async function listPlugins(): Promise<PluginSummary[]> {
  * Make a plugin. `parent` is a grouping folder below the plugins root to
  * make it in (`Teams`, `Teams/EU`); omitted or empty, it goes at the root.
  * The server owns every rule about where a plugin may go.
+ *
+ * The answer carries both names as the manifest now holds them: the identity
+ * the endpoint derived, and the display name — the typed name, trimmed —
+ * that was written into the file.
  */
-export async function createPlugin(name: string, parent = ''): Promise<{ folder: string; name: string }> {
+export async function createPlugin(
+  name: string,
+  parent = '',
+): Promise<{ folder: string; name: string; displayName: string }> {
   const res = await authFetch('/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -123,7 +130,7 @@ export async function createPlugin(name: string, parent = ''): Promise<{ folder:
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? "Couldn't create that plugin.");
   }
-  return (await res.json()) as { folder: string; name: string };
+  return (await res.json()) as { folder: string; name: string; displayName: string };
 }
 
 /**
