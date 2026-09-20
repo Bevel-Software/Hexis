@@ -1,12 +1,13 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { cn } from '../../../lib/utils';
+import { HEADER_BAND, PAGE_HEADER_TESTID } from '../../../shared/theme/header';
 import { Badge, Button, Surface } from '../../../shared/components';
-import { pathForPluginsIndex } from '../routes/library-paths';
 import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
 import { AlreadyReadableError, requestPluginAccess, type PluginSummary } from '../services/plugins.api';
 import { firstNames, joinNames } from '../utils/names';
 import { useLibraryToast } from '../state/toast.context';
 import { LockGlyph } from './LockGlyph';
+import { PluginBreadcrumb } from './plugin-page-parts';
 
 /**
  * A plugin you cannot read, as a place you can still stand in.
@@ -93,18 +94,20 @@ export function LockedPluginView({ plugin, onRequested, onUnlocked, onManage }: 
 
   return (
     <div className="pb-14">
-      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-detail text-ink-faint">
-        <Link to={pathForPluginsIndex()} className="rounded-xs hover:text-ink">
-          Everything
-        </Link>
-        <span aria-hidden="true">›</span>
-        <span aria-current="page" className="truncate text-ink-muted">
+      {/* The same band every other page title bar is on, so a plugin you
+          cannot open still lines its heading up with the nav beside it — and
+          the page's FIRST row, with the breadcrumb on the band rather than
+          above it, for the same reason. `PluginBreadcrumb` is the one an
+          openable plugin page uses; a locked page is still a plugin page, and
+          two copies of one trail drift the first time either is touched. */}
+      <div data-testid={PAGE_HEADER_TESTID} className={cn(HEADER_BAND, 'gap-2.5')}>
+        <PluginBreadcrumb />
+        <h1
+          className="min-w-0 truncate text-display font-semibold"
+          title={plugin.displayName || plugin.name}
+        >
           {plugin.displayName || plugin.name}
-        </span>
-      </nav>
-
-      <div className="mt-1.5 flex items-center gap-2.5">
-        <h1 className="text-display font-semibold">{plugin.displayName || plugin.name}</h1>
+        </h1>
         <Badge tone="outline" size="sm">
           <LockGlyph className="size-3 shrink-0" />
           Locked

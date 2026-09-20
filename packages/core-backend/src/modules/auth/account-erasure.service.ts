@@ -18,6 +18,16 @@ import {
   users,
 } from '../database/schema.js';
 
+/** The anonymised id of one erasure — how a commit or log may name the account. */
+export function erasedAccountId(erasureId: string): string {
+  return `deleted-${erasureId}`;
+}
+
+/** The placeholder email anonymised audit rows carry for one erasure. */
+export function erasedEmailFor(erasureId: string): string {
+  return `${erasedAccountId(erasureId)}@erased.invalid`;
+}
+
 /** A user row as the admin surface needs it (no avatar, no timestamps churn). */
 export interface AdminUserView {
   id: string;
@@ -90,8 +100,13 @@ export interface IErasureParticipant {
  */
 export interface IAccountErasureService {
   listUsers(): Promise<AdminUserView[]>;
-  /** Erase `userId`. Returns false when no such user exists. */
-  eraseUser(userId: string): Promise<boolean>;
+  /**
+   * Erase `userId`. Returns false when no such user exists. `erasureId` fixes
+   * the anonymised identity (`deleted-<erasureId>@erased.invalid`) so a caller
+   * can name the erased account elsewhere — e.g. a commit message — without
+   * the email; random when omitted.
+   */
+  eraseUser(userId: string, opts?: { erasureId?: string }): Promise<boolean>;
 }
 
 export class AccountErasureService implements IAccountErasureService {
@@ -108,14 +123,14 @@ export class AccountErasureService implements IAccountErasureService {
     return rows.map((r) => ({ ...r, createdAt: r.createdAt.getTime() }));
   }
 
-  async eraseUser(userId: string): Promise<boolean> {
+  async eraseUser(userId: string, opts: { erasureId?: string } = {}): Promise<boolean> {
     const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
     if (!user) return false;
 
     const target: ErasureTarget = {
       userId,
       email: user.email.toLowerCase(),
-      erasedEmail: `deleted-${randomUUID()}@erased.invalid`,
+      erasedEmail: erasedEmailFor(opts.erasureId ?? randomUUID()),
       erasedName: 'Deleted user',
     };
 

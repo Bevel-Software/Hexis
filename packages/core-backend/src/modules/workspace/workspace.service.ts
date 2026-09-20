@@ -12,8 +12,15 @@ import {
   DEFAULT_BRANCH,
   FOLDER_PLACEHOLDER,
   isFolderPlaceholder,
+  entryExistsMessage,
+  type ExistingEntryKind,
 } from '@bevel-software/platform-shared';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
+import {
+  DestinationTakenError,
+  inspectDestination,
+  renameNoReplace,
+} from '../../shared/rename-no-replace.js';
 import type { IGitRunner } from '../../shared/git.contract.js';
 import { NodeGitRunner } from '../workflow/git/node-git-runner.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
@@ -26,6 +33,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { workspaceIdForBranch, branchForWorkspaceId } from '../../shared/workspace-id.js';
 import {
+  BranchNotFoundError,
   RemoteBranchGoneError,
   WorkflowDomainError,
   isMissingRemoteBranchFailure,
@@ -96,6 +104,29 @@ export class FolderTooLargeError extends Error {
   constructor(public readonly limitBytes: number) {
     super(`Folder exceeds the ${limitBytes}-byte download size limit`);
     this.name = 'FolderTooLargeError';
+  }
+}
+
+/**
+ * A rename or move would land on a name something else already has. 409, like
+ * every other precondition the caller has to clear first: nothing was moved,
+ * and the entry already there is untouched.
+ *
+ * Lives here rather than in `shared/domain-errors.ts` because the sentence is
+ * built by `entryExistsMessage` and that file deliberately imports no VALUE
+ * from `@bevel-software/platform-shared`, only a type. It still extends
+ * `WorkflowDomainError`, so the routes' `sendError` maps it to 409 with
+ * `{ kind: 'entry-exists', … }` without knowing this class exists.
+ */
+export class EntryExistsError extends WorkflowDomainError {
+  readonly kind = 'entry-exists' as const;
+  constructor(readonly entryKind: ExistingEntryKind, readonly destination: string) {
+    super(entryExistsMessage(entryKind, destination), 409, {
+      kind: 'entry-exists',
+      entryKind,
+      destination,
+    });
+    this.name = 'EntryExistsError';
   }
 }
 
@@ -288,6 +319,77 @@ export class WorkspaceService implements IWorkspaceService {
 
   setWorkspaceClonedListener(listener: (workspaceId: string) => void): void {
     this.onWorkspaceCloned = listener;
+  }
+
+  /**
+   * Every branch name this process has been shown to be real: named by a
+   * listing of origin's branches, or registered as a clone of ours. Together
+   * with the clones still on disk this is the whole of what the platform
+   * KNOWS about branch names — and the difference between "your link is to a
+   * branch that was deleted" (410) and "there is no branch by that name"
+   * (404).
+   *
+   * Names ACCUMULATE and are never removed, and the two halves of that are
+   * the same rule: the evidence we need is evidence about a branch that is
+   * no longer there. Replacing the set on each listing would forget a
+   * deleted branch at the moment its deletion becomes the thing we have to
+   * report; evicting an old name would silently turn a long-dead branch back
+   * into "never existed"; dropping a clone's name when its workspace is swept
+   * would do that to a branch we cloned ourselves. So nothing here is ever
+   * dropped. Growth is one short string per distinct branch name origin has
+   * ever shown this process — kilobytes for any real repository, and reset
+   * by a restart.
+   *
+   * In memory only, by the spec's decision — no new persistence. A restart
+   * forgets a deleted branch whose clone was already retired, and that name
+   * then reads as unknown, which is exactly what the platform then knows.
+   */
+  private readonly branchesEverHeardOf = new Set<string>();
+
+  /**
+   * Record the branch names a listing returned. Called by the git layer after
+   * every `listBranches` (wired in the composition root), which is the one
+   * place the platform ever sees origin's set of branches.
+   */
+  noteBranchesListed(names: readonly string[]): void {
+    for (const name of names) this.branchesEverHeardOf.add(name);
+  }
+
+  /**
+   * Register a branch's clone directory — the only writer of `branchDirs`, so
+   * that every clone this process opens (fresh, adopted off disk, or handed
+   * over by a concurrent bootstrap) also leaves its branch name in
+   * `branchesEverHeardOf`. `branchDirs` is a cache of live clones and loses the
+   * branch when its workspace is swept; the name left behind is the record
+   * that the branch was real, and outlives the clone.
+   */
+  private registerBranchDir(branch: string, workspaceDir: string): void {
+    this.branchDirs.set(branch, workspaceDir);
+    this.branchesEverHeardOf.add(branch);
+  }
+
+  /**
+   * Has the platform ever heard of this branch? A clone of it — registered in
+   * this process, remembered from one, or sitting on disk from a previous one
+   * — or a listing that named it. Only asked on the failure path, where
+   * origin has just answered that it has no such ref: a yes means the branch
+   * was deleted (410), a no means it never existed as far as the platform is
+   * concerned (404).
+   */
+  private async hasHeardOfBranch(branch: string): Promise<boolean> {
+    if (this.branchDirs.has(branch)) return true;
+    if (this.branchesEverHeardOf.has(branch)) return true;
+    try {
+      await fs.access(path.join(this.workspacesRoot, workspaceIdForBranch(branch), this.kbDirName, '.git'));
+      return true;
+    } catch (err) {
+      // Only "there is nothing there" answers the question. A permission or
+      // I/O fault means we could not look, and a storage failure of ours must
+      // not be reported to the caller as a branch that never existed: it
+      // stays the 500 the operator reads.
+      if (isAbsence(err)) return false;
+      throw err;
+    }
   }
 
   /**
@@ -519,7 +621,7 @@ export class WorkspaceService implements IWorkspaceService {
       // pulls it. Once per branch per process — the cached paths above return
       // before reaching here.
       await this.normalizeCloneConfig(repoDir, branch);
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     } catch {
       // Not on disk — bootstrap below.
@@ -538,7 +640,7 @@ export class WorkspaceService implements IWorkspaceService {
     const existingBootstrap = this.inFlightBootstraps.get(branch);
     if (existingBootstrap) {
       await existingBootstrap;
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       return this.buildWorkspaceInfo(branch, workspaceDir);
     }
     this.inFlightBootstraps.set(branch, bootstrap);
@@ -548,7 +650,7 @@ export class WorkspaceService implements IWorkspaceService {
       // naturally; seeding the remote is the KB startup phase's job, at boot.
       await fs.mkdir(workspaceDir, { recursive: true });
       await this.cloneProcessMapForBranch(workspaceDir, branch);
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       resolveBootstrap();
     } catch (err) {
       this.branchDirs.delete(branch);
@@ -818,13 +920,30 @@ export class WorkspaceService implements IWorkspaceService {
       // Roll back partial state so the next bootstrap retries cleanly.
       await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
       // A branch origin does not have is a fact about the branch, not a
-      // failure of ours: the host deleted it (and the sync retired the
-      // clone), or the link was to a branch that never existed. Typed, so the
-      // routes answer 410 with the branch named and the browser can say "this
-      // branch no longer exists" instead of "something went wrong".
+      // failure of ours — but WHICH fact depends on whether the platform ever
+      // knew the name. A branch it cloned or listed and origin no longer has
+      // was deleted (410, "this branch no longer exists"); a name it has
+      // never seen is simply not a branch (404), and saying "no longer exists
+      // on the remote" to a typo tells the reader it once did.
       if (isMissingRemoteBranchFailure(redacted)) {
-        log.info(`branch "${branch}" does not exist on origin — nothing to clone`);
-        throw new RemoteBranchGoneError(branch);
+        let everHeardOf: boolean;
+        try {
+          everHeardOf = await this.hasHeardOfBranch(branch);
+        } catch (probeErr) {
+          // We could not read our own storage, so we cannot say which of the
+          // two stories this is — and guessing either one states something
+          // about the branch that we do not know. Our failure, so: 500.
+          log.error(`Could not tell whether branch "${branch}" was ever known here:`, {
+            detail: redactError(probeErr),
+          });
+          throw new Error(`Failed to clone process map: ${redacted}`);
+        }
+        if (everHeardOf) {
+          log.info(`branch "${branch}" is gone from origin — nothing to clone`);
+          throw new RemoteBranchGoneError(branch);
+        }
+        log.info(`branch "${branch}" has never existed here — nothing to clone`);
+        throw new BranchNotFoundError(branch);
       }
       log.error(`Failed to clone for branch "${branch}":`, { detail: redacted });
       throw new Error(`Failed to clone process map: ${redacted}`);
@@ -1188,12 +1307,49 @@ export class WorkspaceService implements IWorkspaceService {
     // is not something the app moves around, any more than reads it.
     await this.assertNotThroughLink(oldAbsolute, workspaceDir);
     await this.assertNotThroughLink(newAbsolute, workspaceDir);
+    // Before `mkdir`, so a refused move leaves no empty folder behind — and
+    // it is the look that produces the sentence naming what is in the way.
+    await this.assertDestinationFree(oldAbsolute, newAbsolute, newRelativePath);
     await fs.mkdir(path.dirname(newAbsolute), { recursive: true });
-    await fs.rename(oldAbsolute, newAbsolute);
+    // The move itself cannot replace anything either, so a destination that
+    // appears between the look above and this line is refused rather than
+    // eaten (`shared/rename-no-replace.ts`). This path takes no lock on
+    // purpose — see the note above — so the atomicity has to come from the
+    // filesystem call.
+    try {
+      await renameNoReplace(oldAbsolute, newAbsolute, newRelativePath);
+    } catch (err) {
+      if (err instanceof DestinationTakenError) {
+        throw new EntryExistsError(err.entryKind, newRelativePath);
+      }
+      throw err;
+    }
     if (this.diffService) {
       await this.diffService.markUserDeleted(workspaceId, oldRelativePath);
       await this.diffService.syncFromDisk(workspaceId, newRelativePath);
     }
+  }
+
+  /**
+   * Refuse a move onto a name that is taken. `fs.rename` REPLACES an existing
+   * file on every platform — that is how renaming a `.docx` onto an existing
+   * `.md` handed the markdown file the Word bytes — so the destination is
+   * looked at first, and a move never overwrites a file or merges into a
+   * folder.
+   *
+   * Judged by `inspectDestination`, which reads a case-only rename on a
+   * case-insensitive filesystem — where `notes.md` → `Notes.md` finds the
+   * SOURCE at the destination — as the rename that was asked for rather than a
+   * clash, and everything else as a clash. It is the same reading the move
+   * itself uses, so the sentence and the refusal cannot drift apart.
+   */
+  private async assertDestinationFree(
+    oldAbsolute: string,
+    newAbsolute: string,
+    newRelativePath: string,
+  ): Promise<void> {
+    const verdict = await inspectDestination(oldAbsolute, newAbsolute);
+    if (verdict.state === 'taken') throw new EntryExistsError(verdict.kind, newRelativePath);
   }
 
   /**
@@ -1889,7 +2045,7 @@ export class WorkspaceService implements IWorkspaceService {
     const workspaceDir = this.workspaceDirWithinRoot(workspaceId);
     try {
       await fs.access(path.join(workspaceDir, this.kbDirName, '.git'));
-      this.branchDirs.set(branch, workspaceDir);
+      this.registerBranchDir(branch, workspaceDir);
       return workspaceDir;
     } catch {
       // Fall through to lazy bootstrap.

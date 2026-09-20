@@ -70,6 +70,26 @@ export type GrantPrincipal =
 export type ResolvedPrincipal = { name: string; kind: 'role' | 'group' | 'plugin' };
 
 /**
+ * The principals holding ONE verb at one path, in the shape every `eligible*`
+ * lookup answers in: the kinded collectives, the same names with their kind
+ * erased (for the name-only consumers), and the directly granted people.
+ */
+export type HolderList = {
+  principals?: ResolvedPrincipal[];
+  roles: string[];
+  users: { name: string; email: string }[];
+};
+
+/** Who can open and who can edit one path — the two verbs a move compares. */
+export type PathHolders = { read: HolderList; write: HolderList };
+
+/**
+ * One file's holders where it is now and where a move would put it — see
+ * {@link IAccessControl.prospectiveHolders}.
+ */
+export type ProspectiveHolders = { before: PathHolders; after: PathHolders };
+
+/**
  * Per-verb sources of a principal's access on a target. Only verbs the principal
  * actually holds (via a named file entry) appear; each maps to the closest-first
  * list of scopes that grant it (see `VerbSources`). A principal with no named
@@ -310,6 +330,27 @@ export interface IAccessControl {
   }>;
 
   /**
+   * Who can open and who can edit one file where it IS, and where a move
+   * would put it. `toPath` names a path that does not exist yet — the point
+   * of the call is to answer before the move happens — so the resolution
+   * layers the file's OWN rules (its frontmatter, read from `fromPath`,
+   * which travels with the bytes) over the destination's folder chain.
+   *
+   * Writes nothing and moves nothing. The move confirmation diffs the two
+   * sides to name who loses and who gains access.
+   *
+   * A FILE question only: a `fromPath` that is a directory is refused with a
+   * 400. A folder's access is its own `access.md` — which moves with it and
+   * governs everything beneath it — so resolving it as a file would name the
+   * wrong principals with the same confidence as the right ones.
+   */
+  prospectiveHolders(
+    workspaceId: string,
+    fromPath: string,
+    toPath: string,
+  ): Promise<ProspectiveHolders>;
+
+  /**
    * Finite expanded email set for configured users who could approve this path
    * — role members + direct user grants, minus anyone denied. The built-in
    * `everyone` role can grant arbitrary signed-in users and therefore cannot be
@@ -506,6 +547,36 @@ export interface IAccessControl {
    * root: the floor keeps it, so the deny could only be rolled back.
    */
   holdsAdminRootWrite(workspaceId: string, userEmail: string): Promise<boolean>;
+
+  /**
+   * Whether `userEmail` may put a misplaced platform file back at
+   * `destinationRelativePath` — the ONE write that is allowed to land on a
+   * destination whose own rules would refuse it.
+   *
+   * A repository whose `access.md` or `roles.yaml` was moved out of the root
+   * is one nobody can repair through the app: the root then resolves to
+   * default-deny and the move that would fix it is the move the gate refuses.
+   * So an admin (the `Admin` role or the deployment owner) may move a file
+   * named `roles.yaml`, `.bevelignore` or `AGENTS.md` into the repository
+   * root, and a file named `access.md` into a folder that has none.
+   *
+   * Only where the file is MISSING: a destination that already holds it is
+   * false, because a move is a rename on disk and landing on the file would
+   * replace the very rules the exception exists to bring back.
+   *
+   * Narrow on purpose, and the narrowness lives here rather than in the
+   * caller: false for any other path, for any other destination, for a
+   * destination spelled with `..`, and for anyone who is not an admin. It
+   * grants no write anywhere else, and it is asked only about where a move
+   * LANDS — never about what a move takes away, which is why a caller that
+   * could take one away (the move route, the lock gate) also checks the
+   * SOURCE with `isPlatformRestoreShape`.
+   */
+  canRestorePlatformFile(
+    workspaceId: string,
+    userEmail: string,
+    destinationRelativePath: string,
+  ): Promise<boolean>;
 
   /**
    * Batched: resolve eligible writers + expanded emails for a list of paths

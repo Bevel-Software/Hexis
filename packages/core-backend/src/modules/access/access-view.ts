@@ -3,6 +3,7 @@ import type {
   AccessTargetKind,
   GrantSource,
   GrantSources,
+  HolderList,
   IAccessControl,
   ResolvedPrincipal,
 } from './access-control.interface.js';
@@ -93,6 +94,32 @@ export type AccessView = Awaited<ReturnType<typeof resolveAccessView>>;
 /** The dialog's row key for a collective principal. */
 function rowKey(p: ResolvedPrincipal): string {
   return `${p.kind === 'group' ? 'g' : p.kind === 'plugin' ? 'p' : 'r'}:${p.name.toLowerCase()}`;
+}
+
+/**
+ * A principal as its grant names it — a group, a role, a plugin principal
+ * (`plugin/<Name>/<verb>`), or a person granted directly. The reduced
+ * {@link RosterEntry} without the sources, for consumers that only need to
+ * know WHO holds a verb: the move confirmation's before/after lists.
+ */
+export interface AccessPrincipalRef {
+  kind: 'group' | 'role' | 'plugin' | 'person';
+  name: string;
+  email?: string;
+}
+
+/**
+ * The principals holding one verb, in the roster's order — collectives as the
+ * resolver kinded them, then the directly granted people. An older resolver
+ * double omitting `principals` degrades to the name-only `roles` (all roles),
+ * exactly as `accessRoster` does, so the two never disagree about a name.
+ */
+export function holderPrincipals(list: HolderList): AccessPrincipalRef[] {
+  const kinded = list.principals ?? list.roles.map((name) => ({ name, kind: 'role' as const }));
+  return [
+    ...kinded.map((p): AccessPrincipalRef => ({ kind: p.kind, name: p.name })),
+    ...list.users.map((u): AccessPrincipalRef => ({ kind: 'person', name: u.name, email: u.email })),
+  ];
 }
 
 /** One principal holding one verb, with every scope that names it for that verb, closest first. */

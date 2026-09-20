@@ -671,6 +671,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —
   // admin-gated inside. The per-user key surface stays on /api/mcp/…
