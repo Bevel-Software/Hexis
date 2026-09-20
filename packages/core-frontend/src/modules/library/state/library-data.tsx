@@ -269,32 +269,40 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
      *
      * `owned`/`canWrite` are false and stay false: there is no file on the
      * default branch to own or to edit, and every affordance that reads them
-     * would address a path that is not there. The plugin comes from the
-     * declaration's own path, which is where the file will land.
+     * would address a path that is not there. Membership is derived from the
+     * declaration's own path — where the file will land — by the same
+     * `pluginsHoldingTool` the released tools use, so a proposal into a root a
+     * plugin LINKS is on that plugin's page the way its released neighbours
+     * are. Without it a linked-root proposal would belong to no plugin here and
+     * simply never appear.
      */
-    const pendingToolItems: LibraryItem[] = data.pendingTools.map((t) => ({
-      kind: 'integration',
-      id: t.slug,
-      name: t.name,
-      // The released tool cards carry no description either — detail lives
-      // behind the card — and a proposal has even less standing to differ.
-      description: '',
-      owned: false,
-      canWrite: false,
-      plugin: pluginOfItem(t.path, undefined, pluginSummaries),
-      path: t.path,
-      // The neutral `ok`, as for a proposed skill: a proposal has no
-      // credential resolved against it, and reporting `warn` would put it in
-      // the setup filter and the plugin's amber count as though an integration
-      // somebody has to configure had appeared.
-      status: { state: 'ok', text: 'In review' },
-      pending: {
-        changeRequestNumber: t.changeRequestNumber,
-        branch: t.branch,
-        authorName: t.authorName,
-        mine: t.isAuthor,
-      },
-    }));
+    const pendingToolItems: LibraryItem[] = data.pendingTools.map((t) => {
+      const plugins = pluginsHoldingTool(t.path, pluginSummaries);
+      return {
+        kind: 'integration',
+        id: t.slug,
+        name: t.name,
+        // The released tool cards carry no description either — detail lives
+        // behind the card — and a proposal has even less standing to differ.
+        description: '',
+        owned: false,
+        canWrite: false,
+        plugin: pluginOfItem(t.path, plugins, pluginSummaries),
+        plugins,
+        path: t.path,
+        // The neutral `ok`, as for a proposed skill: a proposal has no
+        // credential resolved against it, and reporting `warn` would put it in
+        // the setup filter and the plugin's amber count as though an integration
+        // somebody has to configure had appeared.
+        status: { state: 'ok', text: 'In review' },
+        pending: {
+          changeRequestNumber: t.changeRequestNumber,
+          branch: t.branch,
+          authorName: t.authorName,
+          mine: t.isAuthor,
+        },
+      };
+    });
     return [...skillItems, ...pendingItems, ...toolItems, ...pendingToolItems];
   }, [
     data.skills,

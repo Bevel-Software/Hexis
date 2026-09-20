@@ -68,6 +68,7 @@ vi.mock('../../change-requests/components/ChangeRequestDialog', () => ({
 import { LibraryProvider, attentionOf, type LibraryItem } from '../state/library-data';
 import { LibraryToastProvider } from '../state/toast';
 import { PluginPage } from '../components/PluginPage';
+import { PersonalPluginPage } from '../components/PersonalPluginPage';
 
 const workspace = {
   workspaceId: 'target-company-state',
@@ -136,8 +137,9 @@ function LocationProbe() {
   return <div aria-label="href">{location.pathname + location.search}</div>;
 }
 
-function renderOps() {
-  return render(
+/** The whole tree the tests mount, so a re-render can reuse it verbatim. */
+function opsTree() {
+  return (
     <MemoryRouter initialEntries={['/skills-and-tools/plugins/Ops']}>
       <AdminContext.Provider value={nonAdmin}>
         <WorkspaceContext.Provider value={workspace}>
@@ -153,6 +155,25 @@ function renderOps() {
                 </>,
               )}
             </LibraryProvider>
+          </LibraryToastProvider>
+        </WorkspaceContext.Provider>
+      </AdminContext.Provider>
+    </MemoryRouter>
+  );
+}
+
+function renderOps() {
+  return render(opsTree());
+}
+
+/** Your own space — the page for the items that belong to no plugin at all. */
+function renderYours() {
+  return render(
+    <MemoryRouter initialEntries={['/skills-and-tools/yours']}>
+      <AdminContext.Provider value={nonAdmin}>
+        <WorkspaceContext.Provider value={workspace}>
+          <LibraryToastProvider>
+            <LibraryProvider>{withAuth(<PersonalPluginPage />)}</LibraryProvider>
           </LibraryToastProvider>
         </WorkspaceContext.Provider>
       </AdminContext.Provider>
@@ -232,12 +253,82 @@ describe('a tool proposed on an open change request', () => {
     dataMock.useLibraryData.mockReturnValue({ ...emptyCatalog, pendingTools: [pendingTool()] });
     const view = renderOps();
     await screen.findByTestId('library-card-integration-weather');
-    view.unmount();
 
+    // The SAME mounted tree, re-rendered against the answer the reloaded
+    // catalog now gives — the request merged or closed, so the backend lists
+    // no proposal. Mounting a second, fresh tree would prove nothing: a
+    // provider that cached proposals in state would still start empty there,
+    // and the caching regression this guards against is exactly the one that
+    // survives across a reload.
     dataMock.useLibraryData.mockReturnValue(emptyCatalog);
-    renderOps();
+    view.rerender(opsTree());
+
     await screen.findByText('No tools yet.');
     expect(screen.queryByTestId('library-card-integration-weather')).not.toBeInTheDocument();
+  });
+
+  /**
+   * A tool's plugin membership is DERIVED from where its file sits, and a
+   * plugin can LINK a root outside its own folder. A released tool under such a
+   * root is on that plugin's page; a proposal into the same root must be too,
+   * or the card the reviewer is meant to act on is on no page at all.
+   */
+  it('shows under a plugin that only LINKS the root its declaration lands in', async () => {
+    pluginsMock.listPlugins.mockResolvedValue([
+      ops({ folders: ['Plugins/Ops'], linkedRoots: ['Integrations'] }),
+    ]);
+    dataMock.useLibraryData.mockReturnValue({
+      ...emptyCatalog,
+      pendingTools: [pendingTool({ path: 'Integrations/weather.tool', plugin: null })],
+    });
+    renderOps();
+
+    const card = await screen.findByTestId('library-card-integration-weather');
+    expect(card).toHaveTextContent('In review');
+  });
+
+  /**
+   * A proposal in NO plugin folder lands on your own space — and its card says
+   * "waiting on you" just as it does anywhere else. A card that names the
+   * reader as the reviewer and then does nothing when clicked is the one
+   * arrangement that cannot be right, so this page opens the request too.
+   */
+  it('opens its change request from your own space as well', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...emptyCatalog,
+      pendingTools: [pendingTool({ path: 'Plugins/weather.tool', plugin: null })],
+    });
+    renderYours();
+
+    const card = await screen.findByTestId('library-card-integration-weather');
+    expect(card).toHaveTextContent('From Ali Raza: waiting on you');
+    fireEvent.click(card);
+    expect(await screen.findByRole('dialog', { name: 'Change request 7' })).toBeInTheDocument();
+  });
+
+  /**
+   * Nothing has been approved yet, so nothing has been refused a collision:
+   * one request can add the same basename to two plugin folders, and both
+   * cards have to render. Keyed on the id and the request number alone they
+   * would be one key, and React would drop one of them.
+   */
+  it('renders both proposals when one request adds the same name twice', async () => {
+    dataMock.useLibraryData.mockReturnValue({
+      ...emptyCatalog,
+      pendingTools: [
+        pendingTool({ path: 'Plugins/Ops/weather.tool' }),
+        pendingTool({ path: 'Plugins/Ops/Field/weather.tool' }),
+      ],
+    });
+    const complaints = vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderOps();
+    expect(await screen.findAllByTestId('library-card-integration-weather')).toHaveLength(2);
+    // Two same-keyed siblings still PAINT — React only warns — so the render
+    // count alone would pass either way. The warning is the failure.
+    expect(
+      complaints.mock.calls.map((c) => String(c[0])).join('\n'),
+    ).not.toMatch(/same key/i);
+    complaints.mockRestore();
   });
 
   /**

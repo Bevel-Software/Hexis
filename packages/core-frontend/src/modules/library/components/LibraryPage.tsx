@@ -65,7 +65,7 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
   const navigate = useNavigate();
   const { kbDirName } = useWorkspace();
   const [query, setQuery] = useState('');
-  /** The proposed skill being reviewed, if the reader opened one. */
+  /** The proposal — skill or tool — being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
   /**
    * What the gallery's ONE access dialog is open on — the folder of whichever
@@ -259,9 +259,9 @@ export function LibraryPage({ filter }: { filter: LibraryFilter }) {
           onClose={() => setReviewing(null)}
           onResolved={() => {
             setReviewing(null);
-            // The skill leaves the review shelf and joins the catalog by the
-            // same reload — one load answers both, so the card cannot appear
-            // twice in the frame between them.
+            // The proposal — skill or tool alike — leaves the review shelf and
+            // joins the catalog by the same reload: one load answers both, so
+            // the card cannot appear twice in the frame between them.
             data.reload();
           }}
         />

@@ -166,11 +166,13 @@ export interface PendingToolSummary {
 export async function listPendingTools(): Promise<PendingToolSummary[]> {
   const res = await authFetch('/api/tools/pending');
   if (!res.ok) await unwrap(res, "Couldn't load proposed tools.");
-  const body = (await res.json()) as { tools?: PendingToolSummary[] };
+  const body = (await res.json()) as { tools?: PendingToolSummary[] } | null;
   // Guarded, not trusted: a backend BUILT BEFORE this route existed answers
   // through `/tools/:slug` — a 200 whose shape is not this one. The review
   // shelf degrading to empty is the right failure; `undefined` reaching the
   // item mapper takes the whole library down (blank page), which is exactly
-  // what it did on the skills side before its own guard.
-  return Array.isArray(body.tools) ? body.tools : [];
+  // what it did on the skills side before its own guard. A bare `null` body is
+  // one of those shapes, and reading `.tools` off it would throw BEFORE the
+  // guard ran — so the optional chain is the guard's first half, not decoration.
+  return Array.isArray(body?.tools) ? body.tools : [];
 }

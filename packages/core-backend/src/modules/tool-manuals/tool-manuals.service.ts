@@ -791,9 +791,12 @@ function capabilitiesOf(m: ToolManualDescriptor): ToolCapability[] {
 }
 
 /**
- * A `.tool` file's provisional slug — its filename without the extension. Exported
- * for the pending-tool surface, which parses a `.tool` read at a change
- * request's branch and must derive the same id the catalog would.
+ * A `.tool` file's PROVISIONAL slug — its filename without the extension, which
+ * is what `normalizeToolManual` falls back to when the frontmatter names
+ * nothing. It is not the served id: `scanDisk` overwrites `slug` with the
+ * resolved manual `name` just below. Exported for the pending-tool surface,
+ * which parses a `.tool` read at a change request's branch and must feed the
+ * parser the same provisional value — and then resolve the slug the same way.
  */
 export function baseName(rel: string): string {
   const base = rel.slice(rel.lastIndexOf('/') + 1);

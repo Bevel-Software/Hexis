@@ -11,6 +11,7 @@ import { type WorkspaceService } from '../workspace/workspace.service.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { readAt, visibleProposedFiles } from '../../shared/pending-proposals.js';
+import { utcpNamespacePrefix } from '../../shared/utcp-namespace.js';
 import { baseName, normalizeToolManual } from './tool-manuals.service.js';
 import { descriptorsFromMcpJson } from './mcp-json-discovery.js';
 import type {
@@ -36,10 +37,15 @@ import type {
  *    MCP servers).
  *
  * ADDITIONS ONLY. "Added" is judged by the catalog's own identity, the UTCP
- * manual NAME: a declaration whose name the default branch already serves is an
- * EDIT of a live tool, and that already has a home — the tool's own page, which
- * lists the change requests against its file. Showing it here too would put a
- * second, ghost card beside every tool under review.
+ * NAMESPACE the manual name resolves to: a declaration whose namespace the
+ * default branch already serves is an EDIT of a live tool, and that already has
+ * a home — the tool's own page, which lists the change requests against its
+ * file. Showing it here too would put a second, ghost card beside every tool
+ * under review. The namespace rather than the raw name because that is the
+ * identity `scanDisk` dedups by, and the two are not the same function: an
+ * `mcp.json` server key may carry a `-`, which namespaces to the same `__` as a
+ * `.tool` id's `_`, so `a-b` and `a_b` are one tool as far as the catalog (and
+ * its secret vault) is concerned.
  *
  * Who may see a proposal, and how it is read at its own branch, is
  * `shared/pending-proposals.ts` — one answer for skills and tools alike.
@@ -59,7 +65,9 @@ export class PendingToolsService implements IPendingToolService {
     // a review that is not happening.
     let released: Set<string>;
     try {
-      released = new Set((await this.toolManuals.listAllSummaries()).map((s) => s.name));
+      released = new Set(
+        (await this.toolManuals.listAllSummaries()).map((s) => utcpNamespacePrefix(s.name)),
+      );
     } catch {
       return [];
     }
@@ -77,7 +85,7 @@ export class PendingToolsService implements IPendingToolService {
     const out: PendingTool[] = [];
     for (const { cr, path, content, isAuthor } of proposed) {
       for (const descriptor of await this.declarationsIn(cr, path, content)) {
-        if (released.has(descriptor.name)) continue;
+        if (released.has(utcpNamespacePrefix(descriptor.name))) continue;
         out.push({
           slug: descriptor.slug,
           name: descriptor.name,
@@ -112,11 +120,19 @@ export class PendingToolsService implements IPendingToolService {
     content: string,
   ): Promise<ToolManualDescriptor[]> {
     if (!isMcpJson(path)) {
+      let descriptor: ToolManualDescriptor;
       try {
-        return [normalizeToolManual(baseName(path), path, content)];
+        descriptor = normalizeToolManual(baseName(path), path, content);
       } catch {
         return [];
       }
+      // The filename is only the PROVISIONAL slug the parser needs when the
+      // frontmatter names nothing; the catalog overwrites it with the resolved
+      // manual name and serves that as the route (`scanDisk`). Do the same here
+      // or the two disagree the moment a `.tool` declares its own `id`, or the
+      // moment a filename is not route-safe to begin with (`My Weather.tool`).
+      descriptor.slug = descriptor.name;
+      return [descriptor];
     }
     // The plugin's own manifest carries what the portable `mcp.json` may not:
     // the descriptions and the `local: true` that exempts a localhost server

@@ -71,7 +71,7 @@ export function PluginPage() {
   const [manageTarget, setManageTarget] = useState<FileTreeEntry | null>(null);
   /** Bumped when an access edit lands, so the join-request surface refetches. */
   const [accessRevision, setAccessRevision] = useState(0);
-  /** The proposed skill being reviewed, if the reader opened one. */
+  /** The proposal — skill or tool — being reviewed, if the reader opened one. */
   const [reviewing, setReviewing] = useState<LibraryItem | null>(null);
   /**
    * Whether the join-requests banner is actually on screen. The empty band's
@@ -512,8 +512,9 @@ export function PluginPage() {
           onClose={() => setReviewing(null)}
           onResolved={() => {
             setReviewing(null);
-            // One reload moves it off the review shelf and into the catalog;
-            // the plugin index follows because its skill count just changed.
+            // One reload moves the proposal — skill or tool — off the review
+            // shelf and into the catalog; the plugin index follows because the
+            // plugin's own count just changed.
             data.reload();
             data.reloadPlugins();
           }}

@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createToolManualsBrowserRoutes } from '../tool-manuals.routes.js';
 import type {
   IPendingToolService,
@@ -82,10 +82,15 @@ describe('GET /api/tools/pending', () => {
     expect(seen).toEqual(['ali@bevel.software']);
   });
 
-  it('refuses an unauthenticated caller', async () => {
-    const base = await baseUrlAs(undefined, { listPendingTools: async () => [PENDING] });
+  it('refuses an unauthenticated caller without asking the service', async () => {
+    const listPendingTools = vi.fn(async () => [PENDING]);
+    const base = await baseUrlAs(undefined, { listPendingTools });
     const res = await fetch(`${base}/api/tools/pending`);
     expect(res.status).toBe(401);
+    // The status alone would still pass if the route asked FIRST and refused
+    // after — and the whole visibility rule is an argument this caller has
+    // not got. Not asking is the guarantee; 401 is only how it reads.
+    expect(listPendingTools).not.toHaveBeenCalled();
   });
 
   it('answers with an empty shelf when no pending service is composed', async () => {

@@ -1,11 +1,11 @@
 ---
-'@bevel-software/platform-core-backend': patch
-'@bevel-software/platform-core-frontend': patch
+'@bevel-software/platform-core-backend': minor
+'@bevel-software/platform-core-frontend': minor
 ---
 
 A tool proposed in an open change request now shows in the library as a Proposed card, the way a proposed skill already did. Ask the agent for a tool and a change request opens; until it merged, the tools UI showed nothing at all — not to the person who asked, and not to the person who had to approve it — because the tool catalog is built from the default branch and the declaration was not on it yet.
 
-`GET /api/tools/pending` is the missing half of that catalog. It walks the OPEN change requests and reports the ones that ADD a tool: a `.tool` UTCP manual anywhere under the plugins root, or a server added to a plugin's `mcp.json`. Each entry carries the tool's name, the plugin it targets, the declaration's path and the change request's number and branch. A declaration whose UTCP name the default branch already serves is an edit of a live tool, not a proposal, and is left to the tool's own page.
+`GET /api/tools/pending` is the missing half of that catalog. It walks the OPEN change requests and reports the ones that ADD a tool: a `.tool` UTCP manual anywhere under the plugins root, or a server added to a plugin's `mcp.json`. Each entry carries the tool's name, the plugin it targets, the declaration's path and the change request's number and branch. Only requests aimed at the default branch are walked, since that is the branch a merge would release onto. A declaration whose UTCP namespace the default branch already serves is an edit of a live tool, not a proposal, and is left to the tool's own page — the namespace rather than the raw name, because that is the identity the catalog itself dedups by, and an `mcp.json` server key differing only in `-` versus `_` resolves to the same one.
 
 Who may see one is exactly who may see a proposed skill: its author, and whoever could approve it — `canWrite` on the very path the request would create, resolved on the default branch, so the verdict inherits from the plugin folder that is the plugin's admin. Somebody who cannot see the change request sees no card. That rule and the read-at-the-branch mechanics now live in one place shared by both surfaces, so the two cannot drift on the part that matters most.
 

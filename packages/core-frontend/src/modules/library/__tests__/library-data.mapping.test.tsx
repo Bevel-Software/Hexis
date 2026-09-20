@@ -26,6 +26,7 @@ function catalog(skills: LibrarySkillSummary[]): LibraryData {
     error: null,
     skills,
     pendingSkills: [],
+    pendingTools: [],
     tools: [],
     ownedSkills: new Set(),
     writableSkills: new Set(),

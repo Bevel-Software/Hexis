@@ -3,6 +3,9 @@ import type { WorkspaceService } from '../modules/workspace/workspace.service.js
 import { workspaceIdForBranch } from './workspace-id.js';
 import type { IAccessControl } from '../modules/access/access-control.interface.js';
 import { canonicalEmail, hashEmail } from './email-identity.js';
+import { logger } from './logging.js';
+
+const log = logger('pending-proposals');
 
 /**
  * The mechanics every "proposed, not released" surface shares.
@@ -69,7 +72,14 @@ export async function visibleProposedFiles(
 
   let crs: ChangeRequest[];
   try {
-    crs = (await sources.workflow.listChangeRequests()).filter((c) => c.state === 'open');
+    // Open, and aimed at the DEFAULT BRANCH. Everything downstream is written
+    // in terms of that branch — the released set that decides "added", and the
+    // access tree that decides who may review — so a request targeting some
+    // other branch is not a proposal these surfaces can speak about: merging it
+    // puts nothing in the catalog, and the card would never resolve.
+    crs = (await sources.workflow.listChangeRequests()).filter(
+      (c) => c.state === 'open' && c.base === DEFAULT_BRANCH,
+    );
   } catch {
     return [];
   }
@@ -116,7 +126,18 @@ export async function visibleProposedFiles(
   return out;
 }
 
-/** The file at a branch, or null when it is absent/unreadable there. */
+/**
+ * The file at a branch, or null when it is not there.
+ *
+ * `readFileAtRef` ALREADY answers `null` for genuine absence (a `git show` that
+ * finds no such blob), so everything reaching the catch below is an infra
+ * failure instead — an unresolvable workspace, a rejected ref, a git call that
+ * timed out. The contract of this module is "never throws", so those still
+ * become `null` and the card still drops; what they must not do is drop
+ * SILENTLY, which is how a fetch problem reads as "the proposer withdrew it".
+ * The warning is the difference between a shelf that degraded and a shelf that
+ * lied.
+ */
 export async function readAt(
   workspaceService: Pick<WorkspaceService, 'readFileAtRef'>,
   wsId: string,
@@ -125,7 +146,11 @@ export async function readAt(
 ): Promise<string | null> {
   try {
     return await workspaceService.readFileAtRef(wsId, `origin/${branch}`, repoRelPath);
-  } catch {
+  } catch (err) {
+    log.warn(
+      `could not read "${repoRelPath}" at origin/${branch} in ${wsId}; ` +
+        `dropping it from the review shelf: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
 }

@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest';
-import type { ChangeRequest, IWorkflowService } from '@bevel-software/platform-shared';
+import { DEFAULT_BRANCH, type ChangeRequest, type IWorkflowService } from '@bevel-software/platform-shared';
 import { PendingToolsService } from '../pending-tools.service.js';
 import { hashEmail } from '../../../shared/email-identity.js';
 import type { WorkspaceService } from '../../workspace/workspace.service.js';
@@ -48,7 +48,7 @@ function cr(over: Partial<ChangeRequest> = {}): ChangeRequest {
     author: { login: 'user-abc', name: 'service' },
     appAuthor: { name: 'Ali Raza' },
     branch: 'agent/weather',
-    base: 'main',
+    base: DEFAULT_BRANCH,
     state: 'open',
     createdAt: '2026-09-06T09:00:00.000Z',
     touchedNodePaths: [TOOL_PATH],
@@ -65,6 +65,8 @@ function harness(opts: {
   branchFiles?: Record<string, string>;
   /** Emails allowed to write each path. Absent path ⇒ nobody. */
   writers?: Record<string, string[]>;
+  /** The access tree cannot be read at all — `canWriteBatch` REJECTS. */
+  accessThrows?: boolean;
 }) {
   const branchFiles = opts.branchFiles ?? { [`agent/weather:${TOOL_PATH}`]: WEATHER_TOOL };
   const workspaceService = {
@@ -74,8 +76,13 @@ function harness(opts: {
   } as unknown as WorkspaceService;
 
   const accessControl = {
-    canWriteBatch: async (_ws: string, email: string, paths: string[]) =>
-      new Map(paths.map((p) => [p, (opts.writers?.[p] ?? []).includes(email)])),
+    canWriteBatch: async (_ws: string, email: string, paths: string[]) => {
+      // A tree that cannot be read REJECTS — it does not answer `false` for
+      // every path. The two are different code paths in the caller and only
+      // this one reaches its `.catch`.
+      if (opts.accessThrows) throw new Error('access.md is unreadable');
+      return new Map(paths.map((p) => [p, (opts.writers?.[p] ?? []).includes(email)]));
+    },
   } as unknown as IAccessControl;
 
   const toolManuals = {
@@ -133,10 +140,16 @@ describe('PendingToolsService', () => {
    * every open proposal to everyone.
    */
   test('shows nothing to a non-author when the access tree cannot be read', async () => {
-    const broken = harness({ crs: [cr()], writers: {} });
+    const broken = harness({ crs: [cr()], accessThrows: true });
     expect(await broken.listPendingTools(ADMIN)).toEqual([]);
     // …and the author still sees their own, because that verdict needs no tree.
     expect(await broken.listPendingTools(AUTHOR)).toHaveLength(1);
+  });
+
+  /** The ordinary denial, which is a verdict rather than a failure. */
+  test('shows nothing to a non-author the tree names as no writer', async () => {
+    const svc = harness({ crs: [cr()], writers: {} });
+    expect(await svc.listPendingTools(ADMIN)).toEqual([]);
   });
 
   /**
@@ -152,6 +165,59 @@ describe('PendingToolsService', () => {
       writers: ADMIN_WRITES,
     });
     expect(await svc.listPendingTools(AUTHOR)).toEqual([]);
+  });
+
+  /**
+   * The catalog is the DEFAULT BRANCH, and everything this surface says is said
+   * in terms of it — what counts as already released, and whose access tree
+   * decides the review. A request aimed somewhere else could merge in full and
+   * still put no tool in the catalog, so its card would never resolve.
+   */
+  test('ignores a change request aimed at a branch other than the default', async () => {
+    const svc = harness({ crs: [cr({ base: 'some-other-branch' })], writers: ADMIN_WRITES });
+    expect(await svc.listPendingTools(AUTHOR)).toEqual([]);
+  });
+
+  /**
+   * The catalog dedups by the UTCP NAMESPACE, not by the raw name: an mcp.json
+   * server key may carry a `-`, and `a-b` namespaces to the same `a__b_` a
+   * `.tool` id `a_b` does. Compared by name, a request re-declaring a
+   * released tool under the other spelling would get a ghost card beside the
+   * live one — for a namespace the catalog would refuse to serve twice.
+   */
+  test('drops a proposal whose UTCP namespace the catalog already serves', async () => {
+    const svc = harness({
+      crs: [cr({ number: 11, branch: 'agent/tickets', touchedNodePaths: [MCP_PATH] })],
+      branchFiles: {
+        [`agent/tickets:${MCP_PATH}`]: JSON.stringify({
+          mcpServers: { 'on-call': { type: 'streamable-http', url: 'https://oc.example/mcp' } },
+        }),
+      },
+      released: [{ slug: 'on_call', name: 'on_call', path: 'Plugins/Ops/oncall.tool', type: 'http' }],
+      writers: { [MCP_PATH]: [ADMIN] },
+    });
+    expect(await svc.listPendingTools(ADMIN)).toEqual([]);
+  });
+
+  /**
+   * The slug is the ROUTE the tool will be served at once released, and the
+   * catalog serves the resolved manual name — not the filename, which is only
+   * the parser's fallback. A card keyed to the filename would not line up with
+   * the tool that replaces it, and a filename like `My Weather.tool` is not
+   * route-safe to begin with.
+   */
+  test('slugs a proposal by its resolved manual name, not its file name', async () => {
+    const ODD = 'Plugins/Ops/My Weather.tool';
+    const svc = harness({
+      crs: [cr({ touchedNodePaths: [ODD] })],
+      branchFiles: {
+        [`agent/weather:${ODD}`]: '---\nid: get_weather\ntype: http\nurl: https://w.example/utcp\n---\n',
+      },
+      writers: { [ODD]: [ADMIN] },
+    });
+    const [pending] = await svc.listPendingTools(ADMIN);
+    expect(pending?.name).toBe('get_weather');
+    expect(pending?.slug).toBe('get_weather');
   });
 
   test('ignores change requests that are merged, closed or cancelled', async () => {

@@ -398,7 +398,20 @@ export interface IToolManualService {
  * spelled out again here.
  */
 export interface PendingTool {
-  /** Provisional route-safe id, from the file name (`.tool`) or the server key. */
+  /**
+   * The route-safe id this tool would be served under once released — the
+   * resolved UTCP manual name, exactly what the catalog puts on a
+   * {@link ToolManualSummary}. NOT the file name: a `.tool` that declares its
+   * own `id`, or one whose filename is not route-safe, must still line up with
+   * the card the next load replaces it with.
+   *
+   * Unique among released tools, because the catalog refuses a namespace
+   * collision — but NOT yet unique among proposals, which is the price of
+   * nothing having been approved: two open requests may each propose the name,
+   * and until one merges neither has claimed it. A list rendering these keys on
+   * the slug alone must compose it with {@link PendingTool.path} and
+   * {@link PendingTool.changeRequestNumber}.
+   */
   slug: string;
   /** The UTCP manual name the declaration would take once released. */
   name: string;
