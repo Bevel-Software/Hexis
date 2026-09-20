@@ -64,13 +64,6 @@ export interface LibraryCardCommonProps {
    */
   pending?: { authorName: string; mine: boolean };
   /**
-   * A skill's governance lifecycle (`metadata.lifecycle`). Only the two states
-   * that need a reader's attention are shown — `deprecated` (still works,
-   * find the replacement) and `retired` (kept for its owners, never
-   * distributed); `active` and absence render nothing.
-   */
-  lifecycle?: string;
-  /**
    * Where the item LIVES, when it reaches the page showing this card through
    * a link rather than by sitting in its folder — `Skills/Testing`. Draws the
    * Linked pill, with that folder in its tooltip.
@@ -119,7 +112,6 @@ export function LibraryCard({
   status,
   version,
   pending,
-  lifecycle,
   linkedHome,
   onOpen,
   onShare,
@@ -151,9 +143,9 @@ export function LibraryCard({
    * The chips that qualify the name — as an ARRAY, not a fragment.
    *
    * `NameWithBadges` gives the name its minimum width only while something is
-   * actually competing with it for the row, and a fragment of five falsy
-   * branches is indistinguishable from a fragment of five pills. An array can
-   * be counted. Which badges appear is untouched: these are the same five
+   * actually competing with it for the row, and a fragment of four falsy
+   * branches is indistinguishable from a fragment of four pills. An array can
+   * be counted. Which badges appear is untouched: these are the same four
    * conditions, in the same order, that this row has always rendered.
    */
   const badges = [
@@ -190,11 +182,6 @@ export function LibraryCard({
         title={`Lives in ${linkedHome}; linked from this plugin's manifest`}
       >
         Linked
-      </Badge>
-    ) : null,
-    lifecycle === 'deprecated' || lifecycle === 'retired' ? (
-      <Badge key="lifecycle" tone="wait" size="xs" className="shrink-0 uppercase">
-        {lifecycle === 'retired' ? 'Retired' : 'Deprecated'}
       </Badge>
     ) : null,
   ].filter((badge) => badge !== null);
