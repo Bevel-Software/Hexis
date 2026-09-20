@@ -53,6 +53,7 @@ import { materializePlugin, prepareStdioSpec, type StdioServerSpec } from './mat
 import { REMOTE_MANUAL_NAME, localManualTemplates, remoteManualTemplate } from './manuals.js';
 import {
   bindLocalVariableResolver,
+  dropLocalVariableCache,
   registerLocalVariableLoader,
   localVariableLoaderConfig,
   resetLocalVariableResolver,
@@ -662,8 +663,13 @@ export async function createHexisMcpServer(
         localOnlyNow,
       );
       // In place: the variable-resolver binding holds this map by reference.
+      // And its cache goes with the old set: a manual that kept its name but
+      // changed its file may declare other variables or answer to another
+      // slug, and values resolved against the old definition must not be
+      // handed to the new tools for the rest of the cache's life.
       localOnly.clear();
       for (const [name, info] of localOnlyNow) localOnly.set(name, info);
+      if (bindingId) dropLocalVariableCache(bindingId);
       // A manual added since startup may need the loopback variables startup
       // seeded for the ones it knew about (see `buildClient`). Merged, never
       // replaced: nothing a running manual resolves through goes away.

@@ -89,6 +89,36 @@ describe('createCatalogCheck', () => {
     expect(fetchCatalogRevision).toHaveBeenCalledTimes(2);
   });
 
+  /**
+   * A clock set BACK — a sleep, an NTP correction, a VM migration — must not
+   * turn the throttle into a refusal that lasts as long as the adjustment: a
+   * negative gap since the last check can only mean the clock moved, and reads
+   * as an expired throttle.
+   */
+  it('treats a clock that went backward as an expired throttle', async () => {
+    const t = clock();
+    fetchCatalogRevision.mockResolvedValue('rev-1');
+    const check = createCatalogCheck({
+      config,
+      initialRevision: 'rev-1',
+      minIntervalMs: 5_000,
+      onChanged: vi.fn(),
+      now: t.now,
+    });
+
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(1);
+
+    t.advance(-60_000);
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(2);
+
+    // …and the throttle counts from the new reading, not the old one.
+    t.advance(1_000);
+    await check.check();
+    expect(fetchCatalogRevision).toHaveBeenCalledTimes(2);
+  });
+
   it('joins a check already in flight rather than starting a second', async () => {
     let release: (value: string) => void = () => {};
     fetchCatalogRevision.mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));

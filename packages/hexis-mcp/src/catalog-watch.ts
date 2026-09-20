@@ -86,7 +86,13 @@ export interface CatalogCheckOptions {
   onChanged: (revision: string) => void | Promise<void>;
   /** Where a notice goes. Defaults to stderr — the only stream this process may write. */
   log?: (message: string) => void;
-  /** The clock, for tests. */
+  /**
+   * The clock the throttle reads. Monotonic by default (`performance.now`):
+   * the wall clock can be set back — a sleep, an NTP correction, a VM
+   * migration — and a throttle stamped from it would then refuse every check
+   * until the wall caught up with a timestamp from the future. Tests pass
+   * their own.
+   */
   now?: () => number;
 }
 
@@ -100,7 +106,7 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
     minIntervalMs = CATALOG_CHECK_MIN_INTERVAL_MS,
     onChanged,
     log = (message: string) => console.error(message),
-    now = () => Date.now(),
+    now = () => performance.now(),
   } = options;
 
   let stopped = false;
@@ -186,7 +192,14 @@ export function createCatalogCheck(options: CatalogCheckOptions): CatalogCheck {
   const check = (): Promise<void> => {
     if (stopped) return Promise.resolve();
     if (inFlight) return inFlight;
-    if (lastSettledAt !== null && now() - lastSettledAt < minIntervalMs) return Promise.resolve();
+    // A clock that went BACKWARD reads as an expired throttle, not a check
+    // owed in the future: whatever the caller's clock is, a negative gap can
+    // only mean it was adjusted, and refusing checks until it catches up would
+    // hold the toolset stale for exactly the size of the adjustment.
+    if (lastSettledAt !== null) {
+      const sinceLast = now() - lastSettledAt;
+      if (sinceLast >= 0 && sinceLast < minIntervalMs) return Promise.resolve();
+    }
     inFlight = run()
       .catch((err: unknown) => {
         // `run` handles its own failures; this is the belt for a bug in it,
