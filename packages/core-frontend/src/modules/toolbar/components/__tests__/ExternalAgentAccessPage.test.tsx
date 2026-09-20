@@ -541,17 +541,19 @@ describe('the Marketplaces tab', () => {
     // Both of its screens are drawings rather than captures, and the slide
     // says so under each one: a reader comparing their own Claude to a
     // sketch should not be left deciding they are on the wrong screen. One
-    // note per shot, and none on the five slides of real captures.
+    // note per shot.
     expect(within(carousel).getAllByText(/Illustration, not a capture/)).toHaveLength(2);
-    fireEvent.keyDown(carousel, { key: 'Home' });
-    expect(within(carousel).queryByText(/Illustration, not a capture/)).toBeNull();
-    fireEvent.keyDown(carousel, { key: 'End' });
 
-    // And Home goes back to the first, so End is not a one-way door.
+    // And Home goes back to the first, so End is not a one-way door. The
+    // first slide is a real capture, so the same press is what shows the
+    // note is per-shot rather than part of the shell. One press proving
+    // both: a second one here would only be re-entering a state the press
+    // before it had already produced.
     fireEvent.keyDown(carousel, { key: 'Home' });
     expect(within(carousel).getByRole('group')).toHaveAccessibleName(
       'Step 1 of 6: Select this deployment in Claude Code',
     );
+    expect(within(carousel).queryByText(/Illustration, not a capture/)).toBeNull();
   });
 
   /**
