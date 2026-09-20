@@ -709,7 +709,7 @@ export async function createHexisMcpServer(
       // until some later commit happened to move the catalog again. The
       // checker owns the operator line, so this one only carries the reason.
       if (!result.ok) throw new Error(`re-registering the remote manual failed: ${result.error}`);
-      await removeRemoteMetaTools(live);
+      await removeUnservedRemoteTools(live);
       noteManualReregistered(live, REMOTE_MANUAL_NAME);
       // A local manual failing is isolated and logged, as at discovery: one
       // unreachable local server must not cost the caller everything else.

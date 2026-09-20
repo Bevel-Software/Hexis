@@ -956,7 +956,7 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
 
   it('refuses a protected target when the caller could not commit the changed files directly', async () => {
     expect(isProtectedBranch(PROTECTED)).toBe(true);
-    const { svc, git, access } = harness({ canWrite: new Map([['Team/Process.md', false]]) });
+    const { svc, git, access, merge } = harness({ canWrite: new Map([['Team/Process.md', false]]) });
     const err = await svc.mergeBranch(makeUser(), 'alice/other', PROTECTED).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 403, payload: { kind: 'protected-merge-target', deniedPaths: ['Team/Process.md'] } });
     // roles.yaml is not stripped from this merge, and a rename's old path is a
@@ -964,8 +964,17 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
     expect(git.changedPathsForPr).toHaveBeenCalledWith(PROTECTED, PROTECTED, 'alice/other', { forAccessCheck: true });
     // Decided at the tip the merge is built on, never the workspace HEAD.
     expect(access.canWriteBatchAtRef).toHaveBeenCalledWith(PROTECTED, TARGET_TIP, 'alice@example.com', ['Team/Process.md']);
-    // The refusal came from inside the merge, so nothing was pushed.
-    expect(git.pull).not.toHaveBeenCalled();
+    // The refusal is the HOOK's, raised inside the merge — not a caller-side
+    // pre-check that ran before it. That is what this level can see: the merge
+    // was entered, and it was handed an `authorize` to refuse with.
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(typeof merge.mock.calls[0][5].authorize).toBe('function');
+    // That refusing hook commits and pushes nothing is a git-level guarantee,
+    // pinned on a real repository by
+    // `git.service.mergeChangeRequest.test.ts` > authorize > "refuses before
+    // anything is committed or pushed when the hook throws". A `git.pull`
+    // assertion here could not see it: `mergeBranch` only reaches a pull
+    // through `pullMergeTarget`, which no refusal path gets to anyway.
   });
 
   it('merges into a protected target when the caller could commit every changed file directly', async () => {
@@ -981,19 +990,26 @@ describe('WorkflowService.mergeBranch — an agent merges branches, never an ope
       kind: 'conflicts-need-resolution',
       conflictedPaths: ['A.md', 'B.md'],
     });
-    // Nothing landed, so nothing to pull.
+    // A conflict returns before `pullMergeTarget`, so the post-merge pull is
+    // skipped: nothing landed on origin for this workspace to catch up to.
     expect(git.pull).not.toHaveBeenCalled();
   });
 
-  it('refuses while the target has edits not yet shared, before touching its clone', async () => {
-    const { svc, git } = harness();
+  it('refuses while the target has edits not yet shared, asked inside the merge', async () => {
+    const { svc, git, merge } = harness();
     (git.pendingChanges as ReturnType<typeof vi.fn>).mockResolvedValue(['knowledge-base/X.md']);
     await expect(svc.mergeBranch(makeUser(), 'alice/other', 'alice/feat')).rejects.toMatchObject({
       status: 409,
       payload: { kind: 'merge-target-busy' },
     });
-    // The refusal is the merge's own, asked inside the reservation that also
-    // holds the reset — so the clone is never touched and nothing is pushed.
-    expect(git.pull).not.toHaveBeenCalled();
+    // The guard lives INSIDE the merge now, so the merge is entered and
+    // refuses from there — a caller-side pre-check would show up here as
+    // `merge` never being called, which is the regression this pins. The
+    // question and the `reset --hard` it guards then share one workspace
+    // reservation; that a save landing in between survives is pinned on a
+    // real repository by `git.service.mergeChangeRequest.test.ts` >
+    // requireCleanTarget.
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(merge.mock.calls[0][5]).toMatchObject({ requireCleanTarget: true });
   });
 });
