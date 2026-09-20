@@ -4,10 +4,10 @@ import {
   PLUGIN_TOKEN_PREFIX,
   PLUGIN_TOKEN_VERBS,
   pluginPrincipalKey,
+  sourceVerbsFor,
   type AccessFile,
   type PluginTokenVerb,
   type RolesIndex,
-  type Verb,
 } from './access-grammar.js';
 
 /**
@@ -18,10 +18,12 @@ import {
  *
  * WHAT A PLUGIN'S ROSTER IS: the folder-governing rules of
  * `Plugins/<Name>/access.md` — the file provisioning seeds and the join flow
- * edits. Three principals per plugin, following the resolver's own superset
- * convention (write implies read, owner implies both):
+ * edits. Three principals per plugin, folded by the resolver's own
+ * `sourceVerbsFor` table — the ONE place the nesting is written down, so a
+ * roster can never drift from what resolution itself grants (`write` and
+ * `download` each imply `read`; `owner` implies all three):
  *
- *   plugin/<slug>/read    everyone under read, write or owner
+ *   plugin/<slug>/read    everyone under read, write, download or owner
  *   plugin/<slug>/write   everyone under write or owner
  *   plugin/<slug>/owner   everyone under owner
  *
@@ -95,18 +97,6 @@ export function synthesizePluginPrincipals(
         index.publicKeys.add(key);
       }
     }
-  }
-}
-
-/** The verbs whose grants confer `verb` on the plugin (the superset fold). */
-function sourceVerbsFor(verb: PluginTokenVerb): Verb[] {
-  switch (verb) {
-    case 'read':
-      return ['read', 'write', 'owner'];
-    case 'write':
-      return ['write', 'owner'];
-    case 'owner':
-      return ['owner'];
   }
 }
 

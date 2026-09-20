@@ -222,15 +222,38 @@ export interface ChangeRequestRejectedEvent {
 }
 
 /**
+ * An apply did NOT land, announced to EVERY session — the counterpart of the
+ * user-scoped `change-request-merge-failed` below, which only the clicker gets.
+ *
+ * The request stays open, so everyone who can see it (its author waiting on
+ * the verdict, another owner, another admin) needs to learn that the attempt
+ * failed and why. The reason is deliberately NOT carried here: it is persisted
+ * on the request (`PullRequestSummary.lastApplyFailure`) and read back through
+ * the list and detail endpoints the viewer already uses, so the broadcast puts
+ * no error text in front of every session, and a session that missed the event
+ * reads the same answer on its next fetch.
+ *
+ * Also sent when a recorded refusal is CLEARED because a change made it
+ * obsolete (an approval for a gate refusal, a moved source head for any):
+ * either way the request's `lastApplyFailure` changed, and every viewer
+ * re-reads it.
+ */
+export interface ChangeRequestApplyFailedEvent {
+  kind: 'change-request-apply-failed';
+  number: number;
+}
+
+/**
  * A merge the caller triggered did NOT land — either the gate refused it, the
  * branch needs conflict resolution, or `gh pr merge` failed. The merge route
  * is async (returns 202 immediately so a large PR's merge can't outlive the
  * gateway timeout), so this is how the failure reaches the UI that kicked it
  * off. Success travels on `change-request-merged` instead.
  *
- * User-scoped (`forUserId`, no `workspaceId`) — a failed merge changes no
- * shared state; only the user who clicked needs the reason, so we don't
- * broadcast the error string to every session.
+ * User-scoped (`forUserId`, no `workspaceId`) — the clicker's immediate
+ * answer, which also routes a conflict into the resolution flow. Everyone else
+ * learns of the failure from `change-request-apply-failed`, which carries no
+ * error string; the reason itself is persisted on the request.
  */
 export interface ChangeRequestMergeFailedEvent {
   kind: 'change-request-merge-failed';
@@ -243,6 +266,12 @@ export interface ChangeRequestMergeFailedEvent {
    * The UI routes to the agent resolution flow instead of showing an error.
    */
   conflicts: boolean;
+  /**
+   * When the attempt failed (ISO) — the same instant persisted as
+   * `lastApplyFailure.at` when the refusal is recorded, so the clicker's tab
+   * can tell its own refusal from a later one somebody else's attempt made.
+   */
+  at?: string;
 }
 
 /**
@@ -296,6 +325,7 @@ export type WorkflowEventPayload =
   | ChangeRequestMergedEvent
   | ChangeRequestRejectedEvent
   | ChangeRequestMergeFailedEvent
+  | ChangeRequestApplyFailedEvent
   | ApprovalChangedEvent
   | HeartbeatEvent
   | ResyncEvent;

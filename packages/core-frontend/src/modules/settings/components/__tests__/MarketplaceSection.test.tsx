@@ -66,9 +66,8 @@ describe('MarketplaceSection', () => {
     // The deployment's own host and port, never a hard-coded example.
     expect(section).toHaveTextContent('kb.acme.com');
     expect(section).toHaveTextContent('the port is 443');
-    // Optional is a first-run word; settings has nothing to skip.
+    // Optional is a first-run word.
     expect(within(section).queryByText('Optional')).toBeNull();
-    expect(within(section).queryByRole('button', { name: 'Skip for now' })).toBeNull();
   });
 
   /**
@@ -102,22 +101,28 @@ describe('MarketplaceSection', () => {
     expect(screen.queryByDisplayValue(CREDS.clientSecret)).toBeNull();
   });
 
-  it('is marked optional on first run, and skipping it fetches nothing secret', async () => {
-    const user = userEvent.setup();
+  /**
+   * First run marks the section Optional and offers no way to decline it: an
+   * admin who does not want a marketplace walks past it, exactly as they walk
+   * past single sign-on by leaving it blank. Nothing waits on the section, so
+   * a skip control only added a decision nobody had to make.
+   */
+  it('is marked optional on first run, with no skip control, and fetches nothing secret unopened', async () => {
     mount('setup');
     const section = await screen.findByTestId('marketplace-deployment-section');
     expect(within(section).getByText('Optional')).toBeInTheDocument();
 
-    await user.click(within(section).getByRole('button', { name: 'Skip for now' }));
-    const skipped = screen.getByTestId('marketplace-deployment-section');
-    expect(skipped).toHaveTextContent('Marketplace skipped');
-    expect(within(skipped).queryByText('Register this deployment with your Claude organization')).toBeNull();
+    expect(within(section).queryByRole('button', { name: 'Skip for now' })).toBeNull();
+    expect(section).not.toHaveTextContent('Marketplace skipped');
+    expect(within(section).queryByRole('button', { name: 'Set it up now' })).toBeNull();
+
+    // The section still renders its own content, and still holds back the
+    // credentials until the drawer is opened.
+    expect(
+      within(section).getByText('Register this deployment with your Claude organization'),
+    ).toBeInTheDocument();
     expect(api.fetchGitHubFacade).not.toHaveBeenCalled();
     expect(api.setMarketplaceRegistration).not.toHaveBeenCalled();
-
-    // And it can be picked back up.
-    await user.click(within(skipped).getByRole('button', { name: 'Set it up now' }));
-    expect(screen.getByText('Register this deployment with your Claude organization')).toBeInTheDocument();
   });
 
   it('marks the deployment registered, and back', async () => {

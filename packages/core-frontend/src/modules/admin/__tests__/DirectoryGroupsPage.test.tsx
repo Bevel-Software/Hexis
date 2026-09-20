@@ -529,7 +529,10 @@ describe('DirectoryGroupsPage: opened on a named group', () => {
     const name = await screen.findByText('Sales');
     const row = name.closest('li')!;
     expect(row).toHaveAttribute('aria-current', 'true');
-    expect(scrolled).toEqual([row]);
+    // The scroll is an effect, so it can land a tick after the row does —
+    // asserting on it synchronously made this the one flaky case here. (The
+    // manual-mode test above is already shielded by its focus `waitFor`.)
+    await waitFor(() => expect(scrolled).toEqual([row]));
     expect(
       screen.getByText(/Groups are synced from your identity provider and are read-only here/),
     ).toBeInTheDocument();

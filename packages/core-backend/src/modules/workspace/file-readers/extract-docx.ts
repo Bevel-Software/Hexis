@@ -10,7 +10,13 @@ import { localBlocks, localElementBlocks, localName, paragraphRunText, zipEntryO
  *
  *  - Paragraphs become lines. `<w:t>` runs are concatenated with NO separator
  *    (Word splits runs mid-word on formatting boundaries).
+ *  - A soft line break (`<w:br/>`, `<w:cr/>`) inside a paragraph becomes one
+ *    space and a `<w:tab/>` one tab, between the runs around it.
  *  - Tables become lines with cell text tab-separated, one line per row.
+ *
+ * Known limitation: heading and other paragraph STYLES are not read, so a
+ * heading extracts as a plain line — the summary says formatting is omitted.
+ * See README.md beside this file.
  */
 export function extractDocx(bytes: Buffer): ExtractResult {
   let xml: string;

@@ -8,7 +8,7 @@ import {
 const apiMock = vi.hoisted(() => ({ authFetch: vi.fn() }));
 vi.mock('../../../../../lib/api', () => ({ authFetch: apiMock.authFetch }));
 
-import { getFileRenderer, hasFileViewer } from '../index';
+import { getFileRenderer, hasFileViewer, rendersAsText } from '../index';
 import { LegacyOfficeRenderer } from '../LegacyOfficeRenderer';
 import { TextRenderer } from '../TextRenderer';
 import { ImageRenderer } from '../ImageRenderer';
@@ -103,6 +103,27 @@ describe('hasFileViewer', () => {
     'notes/scratch.unknown',
   ])('%s has none', (path) => {
     expect(hasFileViewer(path)).toBe(false);
+  });
+});
+
+/**
+ * `rendersAsText` answers for names the registry ROUTES to `TextRenderer`,
+ * not for everything the text fallback happens to catch.
+ */
+describe('rendersAsText', () => {
+  it.each(['access.md', 'Teams/Eng/Access.md'])('%s is routed to text', (path) => {
+    expect(rendersAsText(path)).toBe(true);
+  });
+
+  it.each([
+    // An ordinary document.
+    'notes/readme.md',
+    // The text fallback over bytes nobody can read as text.
+    'archive/bundle.zip',
+    'blobs/unknown.bin',
+    'notes/scratch.unknown',
+  ])('%s is not', (path) => {
+    expect(rendersAsText(path)).toBe(false);
   });
 });
 

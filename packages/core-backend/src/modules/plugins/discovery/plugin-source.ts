@@ -26,7 +26,12 @@ export interface DiscoveredPlugin {
    * plugin's is the bundle's `name`. Unique per source.
    */
   name: string;
-  /** What a person sees it called: the manifest's `displayName`, else the folder name. */
+  /**
+   * What a person sees it called: the manifest's `displayName`, else its
+   * `name`. The manifest is the only source — never the folder. (The bundle
+   * dialect's own folder rule is resolved INTO the manifest it synthesizes,
+   * so the shared reader still says what the source reports.)
+   */
   displayName: string;
   /** Repo-relative folder holding the plugin, e.g. `Plugins/GTM`. */
   folder: string;

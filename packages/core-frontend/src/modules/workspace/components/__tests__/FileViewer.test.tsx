@@ -3,6 +3,7 @@ import { render, screen, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import { PAGE_HEADER_TESTID } from '../../../../shared/theme/header';
 import type {
   BranchInfo,
   FileTreeEntry,
@@ -85,6 +86,9 @@ vi.mock('../../../change-requests/services/change-requests.api', () => ({
   listOpenChangeRequests: vi.fn(async () => []),
   listMyChangeRequests: myCrsMock,
   readFileOnBranch: readBranchMock,
+  // No fork point: the change boxes fall back to the default branch, which is
+  // what these tests diff against.
+  readFileAtForkPoint: vi.fn(async () => ({ content: null, forkSha: null })),
 }));
 
 // The access sheet is a 1200-line dialog with its own suite and its own
@@ -256,6 +260,8 @@ function ViewerHarness({
     kbDirName,
     fileTree,
     bootstrapError: null,
+    workspaceBranch: 'main',
+    retryBootstrap: () => {},
     openTabs: tab ? [tab] : [],
     activeTab: tab,
     dirtyTabFilenames: [],
@@ -265,8 +271,8 @@ function ViewerHarness({
     hasUnsavedFileChanges: false,
     pendingFileContent,
     setActiveTabContent: captureTyped ? (v: string) => setOpenFileContent(v) : () => {},
-    uploadError: null,
-    uploadNotice: null,
+    uploadErrors: new Map(),
+    uploadNotices: new Map(),
     clearUploadNotice: () => {},
     isUploading: false,
     uploadProgress: null,
@@ -280,7 +286,7 @@ function ViewerHarness({
     activateTab: () => {},
     reorderTab: () => {},
     closeAllTabs: () => {},
-    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [] }),
+    hydrateTabs: async () => ({ surviving: [], dropped: [], denied: [], superseded: false }),
     createFile: async () => {},
     createDirectory: async () => {},
     unzipHere: async () => ({ extracted: 0, skipped: [], destination: '' }),
@@ -401,6 +407,41 @@ describe('FileViewer', () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
     }));
+  });
+
+  /**
+   * The seam, in the page that broke it.
+   *
+   * `HeaderAlignment.test.tsx` measures the band's HEIGHT and checks that a
+   * document column opens on it. This checks the thing only the real page can
+   * say: that the file page actually hands its title bar to that slot. It
+   * used to render `<EditorTabs />` above `<KbPageHeader>` inside the column,
+   * so the title bar opened 54px below the sidebar header row it is supposed
+   * to line up with — at every width, unaffected by collapsing or resizing the
+   * sidebar, and invisible to a suite in which no test rendered the header
+   * anywhere near a tab strip. Staging found it; this is what would have.
+   *
+   * Structural, not measured: happy-dom has no layout engine, so "nothing is
+   * drawn above the band" is the checkable form of "the band's top edge is
+   * the column's top edge".
+   */
+  it('opens the document column with the title bar, above the tab strip', async () => {
+    render(<ViewerHarness initialContent="Base content" />);
+
+    const band = await screen.findByTestId(PAGE_HEADER_TESTID);
+    // The harness opens one tab, so the strip really is rendered — without it
+    // this test would pass on the broken code too.
+    const tabs = screen.getByRole('tablist', { name: 'Open files' });
+
+    // Nothing above the band inside its column — the checkable form of "its
+    // top edge is the column's top edge".
+    expect(band.previousElementSibling).toBeNull();
+    // And the strip did not leave the column to get there; it went below the
+    // title. One column still holds the title, the tabs and the text
+    // (proto:700-705) — this only changed the order inside it.
+    const column = band.parentElement!;
+    expect(column.contains(tabs)).toBe(true);
+    expect(band.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('immediately enters review mode when pending arrives on a clean file', async () => {

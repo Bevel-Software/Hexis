@@ -83,3 +83,5 @@ export {
   findToolsByNames,
   AmbiguousToolNameError,
 } from './code-mode-names.js';
+
+export { printable } from './printable.js';

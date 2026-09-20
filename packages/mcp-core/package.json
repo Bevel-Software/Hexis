@@ -20,7 +20,7 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
-    "node": ">=22.13 <23"
+    "node": ">=22.13 <23 || >=24 <25"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

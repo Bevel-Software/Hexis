@@ -22,6 +22,39 @@ export type ApplyPhase = 'idle' | 'approving' | 'applying';
 export interface ApplyRefusal {
   reason: string;
   conflicts: boolean;
+  /**
+   * When it failed (ISO): the server's instant for a refusal the server
+   * reported — the same one it persists — else this tab's clock.
+   */
+  at?: string;
+}
+
+/**
+ * The refusal line a change box shows for `cr`. This tab's own attempt speaks
+ * first, and a conflict there says nothing here because the box's blocked state
+ * already does — unless the request carries a LATER refusal, from somebody
+ * else's attempt since. Otherwise the refusal PERSISTED on the request, which
+ * is how the author and every other viewer learn that somebody's apply failed.
+ * That one never withdraws the button: the author may already have fixed the
+ * cause, and only a new attempt can say so.
+ */
+export function refusalLine(
+  cr: PullRequestSummary,
+  refusals: ReadonlyMap<number, ApplyRefusal>,
+): string | null {
+  const own = refusals.get(cr.number);
+  const persisted = cr.lastApplyFailure ?? null;
+  if (own && !isLater(persisted?.at, own.at)) return own.conflicts ? null : own.reason;
+  return persisted?.reason ?? null;
+}
+
+/** True when `a` is a strictly later instant than `b`; unknown is never later. */
+function isLater(a: string | undefined, b: string | undefined): boolean {
+  if (!a) return false;
+  if (!b) return true;
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  return Number.isFinite(ta) && Number.isFinite(tb) && ta > tb;
 }
 
 export interface ApplyChangeRequest {
@@ -111,7 +144,8 @@ export function useApplyChangeRequest(opts: {
   const fail = useCallback(
     (number: number, refusal: ApplyRefusal) => {
       stop();
-      setRefusals((m) => new Map(m).set(number, refusal));
+      const at = refusal.at ?? new Date().toISOString();
+      setRefusals((m) => new Map(m).set(number, { ...refusal, at }));
       onFailedRef.current?.(number, refusal);
     },
     [stop],
@@ -133,6 +167,7 @@ export function useApplyChangeRequest(opts: {
       fail(e.number, {
         reason: e.reason || "Couldn't apply this change.",
         conflicts: e.conflicts === true,
+        at: e.at,
       });
     });
     return () => {

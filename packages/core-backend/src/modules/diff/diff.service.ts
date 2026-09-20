@@ -7,6 +7,7 @@ import type { WorkspaceMutex } from '../kb-fs/mutex.js';
 import { isAbsence, type ITreeWalker, type TreeWalkOptions } from '../../shared/fs.contract.js';
 import { isDiffable } from './diff.config.js';
 import { assertWithinDirectory } from '../../shared/path-containment.js';
+import { assertNotGitInternals, hasGitInternalsSegment } from '../../shared/git-internals.js';
 import { countLineChanges } from './line-diff.js';
 
 /**
@@ -150,8 +151,10 @@ export class DiffService implements IDiffService {
       const writes: { path: string; content: Buffer }[] = [];
       const deletes: string[] = [];
       for (const rel of paths) {
-        if (!isDiffable(rel)) continue;
+        // Resolved BEFORE the diffable test, like accept and reject: the git
+        // folder is refused for every path the caller names.
         const { backupAbs } = await this.resolvePair(workspaceId, rel);
+        if (!isDiffable(rel)) continue;
         try {
           // Backup exists → the revert is a write of the pre-agent baseline
           // bytes (Buffer: pending changes can be binary).
@@ -282,8 +285,10 @@ export class DiffService implements IDiffService {
   }
 
   private async acceptOneUnlocked(workspaceId: string, relativePath: string): Promise<void> {
-    if (!isDiffable(relativePath)) return;
+    // Resolved BEFORE the diffable test, so the git folder is refused for
+    // every path rather than left to the fact that nothing in it is markdown.
     const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
+    if (!isDiffable(relativePath)) return;
     let diskExists = true;
     try {
       await fs.access(fileAbs);
@@ -300,8 +305,9 @@ export class DiffService implements IDiffService {
   }
 
   private async rejectOneUnlocked(workspaceId: string, relativePath: string): Promise<void> {
-    if (!isDiffable(relativePath)) return;
+    // Resolved first, like `acceptOneUnlocked` — same reason.
     const { fileAbs, backupAbs } = await this.resolvePair(workspaceId, relativePath);
+    if (!isDiffable(relativePath)) return;
     let backupExists = true;
     try {
       await fs.access(backupAbs);
@@ -336,6 +342,11 @@ export class DiffService implements IDiffService {
     const backupDir = await this.getBackupDir(workspaceId);
     const fileAbs = path.resolve(workspaceDir, relativePath);
     const backupAbs = path.resolve(backupDir, relativePath);
+    // Every review operation resolves its pair here — the file diff, accept,
+    // reject, the ledger sync — so the git folder is refused for all of them
+    // in one place, links into it included. FIRST, so a path into the folder
+    // gets the one sanitized refusal rather than a containment error.
+    await assertNotGitInternals(workspaceDir, relativePath, fileAbs);
     assertWithinDirectory(fileAbs, workspaceDir);
     assertWithinDirectory(backupAbs, backupDir);
     return { workspaceDir, backupDir, fileAbs, backupAbs };
@@ -401,7 +412,7 @@ function looksBinary(buf: Buffer): boolean {
  * that cannot be listed is left out — the ledger shows what it can.
  */
 function diffableWalk(): TreeWalkOptions {
-  return { skip: (e) => e.name === '.git' || e.name === '.workspace.json', ignore: true };
+  return { skip: (e) => hasGitInternalsSegment(e.name) || e.name === '.workspace.json', ignore: true };
 }
 
 /** Every diffable file under `root`, as `/`-separated paths relative to it. */
@@ -415,9 +426,15 @@ async function walkDiffable(disk: ITreeWalker, root: string, out: Set<string>): 
   ]);
 }
 
-/** Every file under the backup `root`, as `/`-separated paths relative to it. */
+/**
+ * Every file under the backup `root`, as `/`-separated paths relative to it.
+ * The git folder is skipped here as well as on the workspace side: a ledger
+ * seeded before this rule existed can still hold `.git`/`.GIT` entries, and
+ * listing one would pair it with the workspace path and read the folder back
+ * out through the review session.
+ */
 async function walkAll(disk: ITreeWalker, root: string, out: Set<string>): Promise<void> {
-  await disk.walk(root, {}, [
+  await disk.walk(root, { skip: (e) => hasGitInternalsSegment(e.name) }, [
     {
       onFile(dir, name) {
         // Strip the .tmp suffix from in-flight atomic writes so a crashed write

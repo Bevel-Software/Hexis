@@ -86,12 +86,14 @@ async function makeHarness(opts: {
     canDownload: vi.fn(async (_w: string, email: string) => effEmail(email, false)),
     canOwner: vi.fn(async (_w: string, email: string) => effEmail(email, false)),
     eligibleWriters: vi.fn(async () => opts.eligibleWriters ?? { roles: [], users: [] }),
+    holdsAdminRootWrite: vi.fn(async () => false),
     eligibleReaders: vi.fn(async () => ({ restricted: true, roles: [], users: [] })),
     eligibleOwners: vi.fn(async () => ({ roles: [], users: [] })),
     eligibleDownloaders: vi.fn(async () => ({ roles: [], users: [] })),
   } as unknown as IAccessControl;
 
   const workspaceService = {
+    withPathTurn: async (_id: string, _p: string, op: () => Promise<unknown>) => op(),
     getOrCreateForBranch: vi.fn(async () => ({ id: WS, name: WS, kbDirName: KB })),
     readFile: vi.fn(async (_id: string, wsRel: string) => {
       const v = files.get(wsRel);
@@ -102,6 +104,9 @@ async function makeHarness(opts: {
       }
       return v;
     }),
+    readFileBinary: vi.fn(async (_id: string, wsRel: string) =>
+      Buffer.from(await (workspaceService.readFile as (id: string, p: string) => Promise<string>)(_id, wsRel), 'utf-8'),
+    ),
     writeFile: vi.fn(async (_id: string, wsRel: string, content: string) => {
       files.set(wsRel, content);
     }),

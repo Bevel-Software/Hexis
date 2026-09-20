@@ -65,3 +65,21 @@ describe('formatAffectedOwnersBlock', () => {
     expect(MAX_AFFECTED_PATHS_LISTED).toBe(50);
   });
 });
+
+describe('formatAffectedOwnersBlock — folder placeholder', () => {
+  it('never lists a placeholder, and placeholders do not count against the cap', () => {
+    const admin = { roles: ['Admin'], users: [] };
+    const placeholders = Array.from({ length: MAX_AFFECTED_PATHS_LISTED + 5 }, (_, i) => `F${i}/.gitkeep`);
+    const out = formatAffectedOwnersBlock(
+      [...placeholders, 'real.md'],
+      resolvedOf(Object.fromEntries([...placeholders, 'real.md'].map((p) => [p, admin]))),
+    );
+    expect(out).toBe(['## Affected owners', '', '- `real.md` — Admin'].join('\n'));
+  });
+
+  it('is empty when the only changes are placeholders', () => {
+    expect(
+      formatAffectedOwnersBlock(['A/.gitkeep'], resolvedOf({ 'A/.gitkeep': { roles: ['Admin'], users: [] } })),
+    ).toBe('');
+  });
+});

@@ -51,6 +51,32 @@ export interface PullRequestSummary {
   url: string;
   /** Present when `url` is relative — says how to get absolute links. */
   urlNote?: string;
+  /**
+   * The most recent apply attempt that did not land, while the request is
+   * still open — so its author and every other viewer see the refusal the
+   * person who clicked Apply saw. Replaced by a newer refusal; null or
+   * absent when there is nothing to report.
+   */
+  lastApplyFailure?: ChangeRequestApplyFailure | null;
+}
+
+/**
+ * What refused an apply: the merge gate (approvals it still waits on), git
+ * (conflicts with the target), or anything else (a push, the roles.yaml guard,
+ * an internal error). Decides which later change makes the refusal obsolete.
+ */
+export type ChangeRequestApplyFailureKind = 'gate' | 'conflicts' | 'error';
+
+/** Why the last apply of a change request failed, as persisted on the request. */
+export interface ChangeRequestApplyFailure {
+  /** Human-readable reason, credentials already redacted. */
+  reason: string;
+  /** True when git refused the merge on conflicts with the target. */
+  conflicts: boolean;
+  /** ISO timestamp of the failed attempt. */
+  at: string;
+  /** Display name of whoever attempted the apply. */
+  byName: string;
 }
 
 export type PrFileStatus =
@@ -152,6 +178,14 @@ export interface FileApprovalState {
   };
   approvedBy: FileApprovalEntry[];
   /**
+   * True only when `eligibleApprovers` is the access tree's actual answer for
+   * this file. False (or absent) when it could not be resolved — no workspace,
+   * no usable access config on the base, a failed lookup — in which case the
+   * empty approver set means "unknown", not "outside the gate", and anything
+   * granted on the strength of that emptiness must fail closed.
+   */
+  eligibilityResolved?: boolean;
+  /**
    * True iff at least one eligible approver has submitted a non-stale
    * approval. Always `false` when `eligibleApprovers` is empty — with no
    * eligible set, nobody can satisfy the check.
@@ -234,6 +268,25 @@ export interface PullRequestDetail extends PullRequestSummary {
    * tree can't be resolved.
    */
   viewerCanCancel: boolean;
+  /**
+   * The commit this request forked from its target (merge base of `headSha`
+   * and `baseSha`). Every file diff in the request reads its "before" side
+   * here, never at the target tip — an edit made on the target after the
+   * proposal must not look like something the proposal deletes. `null` when
+   * the branches share no history (or no workspace could resolve them).
+   */
+  mergeBaseSha: string | null;
+  /**
+   * True iff the target holds commits the proposal does not contain — the
+   * request needs updating. False for anything not open.
+   */
+  behind: boolean;
+  /**
+   * True iff the viewer may Update the request (merge its target into it):
+   * the request is open AND the viewer is its author or may apply it. A UX
+   * hint — the update route re-checks the same predicate server-side.
+   */
+  viewerCanUpdate: boolean;
 }
 
 /**

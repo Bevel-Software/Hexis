@@ -17,10 +17,13 @@
  * rather than moving the column. That is deliberate: hiding the nav should buy
  * margin, not line length.
  *
- * TOP padding is deliberately NOT here. It is the one measure the two surfaces
- * do not share: Knowledge opens on a tab strip and starts high (12px), Skills
- * opens on a heading and keeps the roomier default (34px). See
- * `plans/05-knowledge-ui.md` §1. Set it at the call site.
+ * TOP padding is NOT here either, but it is no longer the measure the two
+ * surfaces disagree about. It used to be — Knowledge opened on a tab strip at
+ * 12px, Skills on a heading at 34px (`plans/05-knowledge-ui.md` §1) — and
+ * those 22px were the reported seam: the Library's title bar sat a fifth of an
+ * inch below the sidebar header row beside it. Both columns now open on
+ * `HEADER_COLUMN_TOP` from `./header.ts`, which is where the shared band's
+ * geometry lives. Take it from there rather than restating a number here.
  */
 
 /** The default column: an 880px measure, centred. */
