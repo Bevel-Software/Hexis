@@ -29,9 +29,13 @@ describe('isKeyInNamespace', () => {
     expect(isKeyInNamespace('foo__bar_API_KEY', fooBar)).toBe(true);
   });
 
-  it('keeps a declared `_`-leading variable, which is the one legal exception', () => {
+  it('never takes a `_`-leading remainder, not even for a manual that declares it', () => {
+    // `foo` declaring `_X` and a manual named `foo_X` store under the same
+    // key, and nothing about the key says which. Since the only use of this
+    // predicate is counting and WIPING a namespace, the ambiguous row is left
+    // standing — recoverable, where one wrongly deleted is not.
     expect(isKeyInNamespace('foo__X', foo)).toBe(false);
-    expect(isKeyInNamespace('foo__X', foo, ['_X'])).toBe(true);
+    expect(isKeyInNamespace('foo__bar_KEY', foo)).toBe(false);
   });
 
   it('is not the prefix itself, and not an unrelated key', () => {
@@ -87,7 +91,10 @@ function fakeDb(initial: Row[], onSelect?: (store: Row[]) => void) {
         store = store.filter((r) => !ids.includes(r.id));
         return c;
       });
-      c.returning = vi.fn(() => Promise.resolve(gone.map((r) => ({ id: r.id }))));
+      c.returning = vi.fn(() =>
+        // What the DELETE itself saw, not the scan's copy of it.
+        Promise.resolve(gone.map((r) => ({ userId: r.userId, kind: r.kind }))),
+      );
       return c;
     }),
   } as unknown as Database;
@@ -163,5 +170,33 @@ describe('countNamespace / removeNamespace', () => {
     const vault = new DbSecretsVaultService(db, '');
     await expect(vault.removeNamespace('foo_')).resolves.toEqual({ keys: 0, signIns: 0 });
     expect(deleted).toHaveLength(0);
+  });
+});
+
+describe('removeNamespace under a database that misbehaves', () => {
+  it('counts what the DELETE returned, not what the scan saw', async () => {
+    // A same-key upsert between the scan and the delete can change a row's
+    // `kind`. The scan's copy would then misreport a sign-in as a stored key.
+    const scanned = { id: '1', key: 'foo_MCP_OAUTH', userId: 'u-1', kind: 'static' };
+    const { db } = fakeDb([scanned]);
+    // The row is an oauth row by the time it is deleted.
+    scanned.kind = 'oauth';
+    const vault = new DbSecretsVaultService(db, '');
+    await expect(vault.removeNamespace('foo_')).resolves.toEqual({ keys: 0, signIns: 1 });
+  });
+
+  it('still tells the listeners about the rows an interrupted run did delete', async () => {
+    // Those rows ARE gone. A listener that never heard would keep serving a
+    // pooled connection for a credential that no longer exists.
+    let scans = 0;
+    const { db } = fakeDb([{ id: '1', key: 'foo_API_KEY', userId: 'u-1', kind: 'static' }], () => {
+      scans += 1;
+      if (scans === 2) throw new Error('connection reset');
+    });
+    const vault = new DbSecretsVaultService(db, '');
+    const notified: (string | null)[] = [];
+    vault.onMutation((u) => notified.push(u));
+    await expect(vault.removeNamespace('foo_')).rejects.toThrow('connection reset');
+    expect(notified).toEqual(['u-1']);
   });
 });

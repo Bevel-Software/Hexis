@@ -130,26 +130,33 @@ export interface NamespaceSecretCount {
  * A bare `startsWith` is not enough: namespacing doubles every underscore, so
  * manual `foo`'s prefix `foo_` is also the start of manual `foo_bar`'s
  * `foo__bar_`. A remainder starting with `_` therefore belongs to a longer
- * name — unless it is exactly a variable this manual DECLARES (`_X` is a legal
- * variable name), which the caller passes in `declared`.
+ * name.
+ *
+ * `_X` IS a legal variable name, so `foo` declaring `_bar_KEY` stores under
+ * `foo__bar_KEY` — the very key `foo_bar` declaring `KEY` stores under. The
+ * UTCP encoding makes those one row with two honest claimants, and no rule
+ * applied to the key can tell them apart. This predicate therefore answers NO
+ * for every `_`-leading remainder, with no exception for a declaring manual:
+ * the only thing it is used for is counting and WIPING a whole namespace, and
+ * an ambiguous row left standing is recoverable where one wrongly deleted is
+ * not. (Establishing that no colliding manual exists is not an option either
+ * — the tool catalog omits what it could not read, so its silence is not
+ * proof.)
  */
-export function isKeyInNamespace(key: string, prefix: string, declared: readonly string[] = []): boolean {
+export function isKeyInNamespace(key: string, prefix: string): boolean {
   if (!key.startsWith(prefix)) return false;
   const rest = key.slice(prefix.length);
-  return rest.length > 0 && (!rest.startsWith('_') || declared.includes(rest));
+  return rest.length > 0 && !rest.startsWith('_');
 }
 
 export interface ISecretsVaultService {
-  /**
-   * Count every user's secrets under one namespace prefix (see
-   * {@link isKeyInNamespace}; `declared` are the manual's variable names).
-   */
-  countNamespace(prefix: string, declared?: readonly string[]): Promise<NamespaceSecretCount>;
+  /** Count every user's secrets under one namespace prefix — see {@link isKeyInNamespace}. */
+  countNamespace(prefix: string): Promise<NamespaceSecretCount>;
   /**
    * Delete every secret under one namespace prefix — the shared rows and every
    * user's. What deleting a tool wipes; returns what it removed.
    */
-  removeNamespace(prefix: string, declared?: readonly string[]): Promise<NamespaceSecretCount>;
+  removeNamespace(prefix: string): Promise<NamespaceSecretCount>;
   /** The caller's secrets (values omitted). */
   list(userId: string): Promise<SecretSummary[]>;
   /** One secret's summary, or null if it isn't the caller's. */

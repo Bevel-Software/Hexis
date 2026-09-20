@@ -40,6 +40,20 @@ export function DeleteToolDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [typed, setTyped] = useState('');
+  const [shownFor, setShownFor] = useState(slug);
+
+  // A tool page can navigate to ANOTHER tool with this dialog still open, and
+  // the dependents read for the new slug does not resolve instantly. Clearing
+  // during the render that first sees the new slug — not in an effect, which
+  // runs after it — is what stops a confirmation typed for the old tool from
+  // arming Delete against the new one.
+  if (shownFor !== slug) {
+    setShownFor(slug);
+    setDependents(null);
+    setLoadError(null);
+    setError(null);
+    setTyped('');
+  }
 
   useEffect(() => {
     let live = true;

@@ -126,7 +126,8 @@ function build(
   } as unknown as IAccessControl;
   const toolManuals = {
     listAccessible: vi.fn(async () => opts.accessible ?? summaries),
-    listAllSummaries: vi.fn(async () => opts.accessible ?? summaries),
+    // NOT the accessible subset: this one answers the same for everybody.
+    listAllSummaries: vi.fn(async () => summaries),
     invalidate: vi.fn(() => {
       invalidatedTools += 1;
     }),
@@ -246,7 +247,7 @@ describe('deleting a `.tool` manual', () => {
       { systemAuthorized: true },
     );
     // Every user's secrets under the tool's namespace, declared vars included.
-    expect(vault.removeNamespace).toHaveBeenCalledWith('weather_', ['KEY']);
+    expect(vault.removeNamespace).toHaveBeenCalledWith('weather_');
     expect(invalidatedTools).toBe(1);
     expect(invalidatedPlugins).toBe(1);
     // No leftover parked file beside it.
@@ -292,7 +293,7 @@ describe('deleting an MCP server entry', () => {
       USER,
       { systemAuthorized: true },
     );
-    expect(vault.removeNamespace).toHaveBeenCalledWith('vendor_', []);
+    expect(vault.removeNamespace).toHaveBeenCalledWith('vendor_');
   });
 
   it('answers 404 when the entry is already gone from mcp.json', async () => {
@@ -321,7 +322,7 @@ describe('dependents', () => {
 
   it('counts the stored keys and sign-ins under the name, without any value', async () => {
     const d = await svc.dependents(USER.email, 'weather');
-    expect(vault.countNamespace).toHaveBeenCalledWith('weather_', ['KEY']);
+    expect(vault.countNamespace).toHaveBeenCalledWith('weather_');
     expect(d.storedKeys).toBe(2);
     expect(d.signIns).toBe(3);
     expect(JSON.stringify(d)).not.toContain('secret');
@@ -444,11 +445,13 @@ describe('the credentials wipe', () => {
     await expect(fs.stat(path.join(repo, 'Plugins/GTM/weather.tool'))).rejects.toThrow();
   });
 
-  it('does not claim a variable another tool’s namespace could also produce', async () => {
-    // `owner` declaring `_side_KEY` and `owner_side` declaring `KEY` name the
-    // SAME vault row. Counting it is generous; wiping it would take a live
-    // credential from a tool nobody asked to delete.
-    const ambiguous: ToolManualSummary[] = [
+  it('asks for the namespace by prefix alone, claiming no variable list', async () => {
+    // Which rows the prefix owns is the VAULT's rule (`isKeyInNamespace`), and
+    // deliberately not a list this service assembles: a declared `_`-leading
+    // variable names the same row a longer tool would, and the catalog this
+    // service could consult omits whatever the scan could not read — its
+    // silence is not proof that no such tool exists.
+    const declaring: ToolManualSummary[] = [
       {
         slug: 'owner',
         name: 'owner',
@@ -456,11 +459,11 @@ describe('the credentials wipe', () => {
         type: 'http',
         variables: [{ name: 'KEY', scope: 'admin' }, { name: '_side_KEY', scope: 'admin' }],
       },
-      { slug: 'owner-side', name: 'owner_side', path: 'Plugins/GTM/owner-side.tool', type: 'http' },
     ];
     await write('Plugins/GTM/owner.tool', '---\nid: owner\ntype: http\nurl: https://o.example\n---\n');
-    svc = build({ accessible: ambiguous });
+    svc = build({ accessible: declaring });
     await svc.deleteTool(USER, 'owner');
-    expect(vault.removeNamespace).toHaveBeenCalledWith('owner_', ['KEY']);
+    expect(vault.removeNamespace).toHaveBeenCalledWith('owner_');
+    expect(vault.removeNamespace).toHaveBeenCalledTimes(1);
   });
 });

@@ -79,6 +79,7 @@ vi.mock('../../secrets-vault/services/connect.api', () => ({ startToolOAuth: vi.
 vi.mock('../utils/navigate-external', () => ({ navigateExternal: vi.fn() }));
 
 import { ToolPage } from '../components/tool-page/ToolPage';
+import { DeleteToolDialog } from '../components/tool-page/DeleteToolDialog';
 
 const TOOL: ToolSecrets = {
   slug: 'heyreach',
@@ -310,5 +311,46 @@ describe('confirming', () => {
       await screen.findByText("Only the owners of this tool's plugin can delete it."),
     ).toBeInTheDocument();
     expect(screen.getByLabelText('pathname')).toHaveTextContent('/skills-and-tools/tools/heyreach');
+  });
+});
+
+/**
+ * The dialog outlives a navigation: a tool page can route to ANOTHER tool with
+ * it still open, and the dependents read for the new slug does not resolve
+ * instantly. What must not survive that is the confirmation — a name typed for
+ * the old tool arming Delete against the new one.
+ */
+describe('when the tool changes underneath it', () => {
+  function renderDialog(slug: string, name: string) {
+    return render(
+      <DeleteToolDialog slug={slug} name={name} onClose={vi.fn()} onDeleted={vi.fn()} />,
+    );
+  }
+
+  it('drops the typed confirmation and the old dependents', async () => {
+    let resolveSecond: ((d: ToolDependents) => void) | undefined;
+    toolsMock.getToolDependents
+      .mockResolvedValueOnce(DEPENDENTS)
+      .mockImplementationOnce(() => new Promise<ToolDependents>((r) => (resolveSecond = r)));
+
+    const { rerender } = renderDialog('heyreach', 'heyreach');
+    await screen.findByText('outreach, follow-up');
+    confirmName();
+    expect(screen.getByRole('button', { name: 'Delete tool' })).toBeEnabled();
+
+    // The page navigates; the new tool's dependents have not arrived yet.
+    rerender(<DeleteToolDialog slug="other" name="other" onClose={vi.fn()} onDeleted={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Delete tool' })).toBeDisabled();
+    expect(screen.queryByText('outreach, follow-up')).toBeNull();
+    expect(screen.getByText('Checking what depends on this tool…')).toBeInTheDocument();
+
+    // And once they do, it is the NEW tool's name that arms it.
+    resolveSecond!({ ...DEPENDENTS, slug: 'other', name: 'other', skills: [], plugins: [] });
+    await screen.findByText('No other plugin carries it.');
+    confirmName('heyreach');
+    expect(screen.getByRole('button', { name: 'Delete tool' })).toBeDisabled();
+    confirmName('other');
+    expect(screen.getByRole('button', { name: 'Delete tool' })).toBeEnabled();
+    expect(toolsMock.deleteTool).not.toHaveBeenCalled();
   });
 });

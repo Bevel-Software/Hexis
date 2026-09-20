@@ -37,6 +37,11 @@ import type { IToolManualService, ToolManualSummary } from './tool-manuals.contr
  * or remove, and a later tool reusing the name would inherit it. The skills'
  * files are NOT touched: their `allowed-tools` entry becomes a dangling name,
  * which the skill page already surfaces.
+ *
+ * One kind of row is deliberately left behind: a key whose remainder starts
+ * with `_`, which the UTCP encoding makes indistinguishable from a longer
+ * tool's (see `isKeyInNamespace`). It is neither counted nor wiped, so the
+ * dialog's number stays true to what goes.
  */
 
 export interface ToolDependents {
@@ -127,9 +132,7 @@ export class ToolDeleteService {
     const [skills, plugins, secrets] = await Promise.all([
       this.dependentSkills(userEmail, tool.name),
       this.carryingPlugins(userEmail, tool, folder, plugin),
-      this.claimedVars(tool).then((declared) =>
-        this.vault.countNamespace(utcpNamespacePrefix(tool.name), declared),
-      ),
+      this.vault.countNamespace(utcpNamespacePrefix(tool.name)),
     ]);
     return {
       slug: tool.slug,
@@ -216,11 +219,10 @@ export class ToolDeleteService {
    * itself happened, and the one action left is a manual one.
    */
   private async wipeSecrets(tool: ToolManualSummary): Promise<void> {
-    const declared = await this.claimedVars(tool);
     let last: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        await this.vault.removeNamespace(utcpNamespacePrefix(tool.name), declared);
+        await this.vault.removeNamespace(utcpNamespacePrefix(tool.name));
         return;
       } catch (err) {
         last = err;
@@ -232,31 +234,6 @@ export class ToolDeleteService {
       `The ${tool.name} tool was deleted, but its stored credentials could not be wiped (${why}). ` +
         'Remove them from Secrets before anything reuses the name.',
       500,
-    );
-  }
-
-  /**
-   * The variable names this tool may CLAIM in its vault namespace — its
-   * declared ones, minus any another tool's namespace could also produce.
-   *
-   * UTCP doubles every underscore when it namespaces, so tool `foo` declaring
-   * `_bar_KEY` and tool `foo_bar` declaring `KEY` name the SAME vault row
-   * (`foo__bar_KEY`): one row with two honest claimants, which no membership
-   * rule can split. Counting it is merely generous; WIPING it would take a
-   * live credential from a tool nobody asked to delete. So an ambiguous
-   * variable is dropped from the claim and its row survives, still visible to
-   * the tool that still declares it. (Nothing to do for the ordinary name: a
-   * variable not starting with `_` cannot collide.)
-   */
-  private async claimedVars(tool: ToolManualSummary): Promise<string[]> {
-    const names = declaredNames(tool);
-    if (!names.some((n) => n.startsWith('_'))) return names;
-    const prefix = utcpNamespacePrefix(tool.name);
-    const others = (await this.toolManuals.listAllSummaries())
-      .filter((t) => t.name !== tool.name)
-      .map((t) => utcpNamespacePrefix(t.name));
-    return names.filter(
-      (n) => !n.startsWith('_') || !others.some((other) => `${prefix}${n}`.startsWith(other)),
     );
   }
 
@@ -422,6 +399,3 @@ export class ToolDeleteService {
   }
 }
 
-function declaredNames(tool: ToolManualSummary): string[] {
-  return (tool.variables ?? []).map((v) => v.name);
-}

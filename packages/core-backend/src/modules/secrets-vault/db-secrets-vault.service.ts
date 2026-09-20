@@ -258,38 +258,52 @@ export class DbSecretsVaultService implements ISecretsVaultService {
     this.notifyMutation(userId);
   }
 
-  async countNamespace(prefix: string, declared: readonly string[] = []): Promise<NamespaceSecretCount> {
-    return tally(await this.namespaceRows(prefix, declared));
+  async countNamespace(prefix: string): Promise<NamespaceSecretCount> {
+    return tally(await this.namespaceRows(prefix));
   }
 
-  async removeNamespace(prefix: string, declared: readonly string[] = []): Promise<NamespaceSecretCount> {
+  async removeNamespace(prefix: string): Promise<NamespaceSecretCount> {
     // Scanned and deleted until a pass finds NOTHING. The membership rule
     // (`isKeyInNamespace`) cannot be said in SQL, so the ids have to be read
     // before they are deleted — and a row written in that window would
     // otherwise outlive the namespace it belongs to, which is precisely the
     // orphan this method exists to prevent. Bounded, so a writer looping
-    // against us cannot hold the request open; what it deleted is what it
-    // reports, taken from the delete's own `returning`, never from the scan.
-    const gone: { key: string; userId: string | null; kind: string }[] = [];
-    for (let pass = 0; pass < 5; pass++) {
-      const rows = await this.namespaceRows(prefix, declared);
-      if (rows.length === 0) break;
-      const deleted = await this.db
-        .delete(secrets)
-        .where(inArray(secrets.id, rows.map((r) => r.id)))
-        .returning({ id: secrets.id });
-      const ids = new Set(deleted.map((d) => d.id));
-      gone.push(...rows.filter((r) => ids.has(r.id)));
+    // against us cannot hold the request open.
+    //
+    // What it reports and notifies is what the DELETE itself returned, row by
+    // row — never the scan's copy, which a same-key upsert may have changed
+    // the `kind` of in between.
+    const gone: { userId: string | null; kind: string }[] = [];
+    try {
+      for (let pass = 0; pass < 5; pass++) {
+        const rows = await this.namespaceRows(prefix);
+        if (rows.length === 0) break;
+        const deleted = await this.db
+          .delete(secrets)
+          .where(inArray(secrets.id, rows.map((r) => r.id)))
+          .returning({ userId: secrets.userId, kind: secrets.kind });
+        gone.push(...deleted);
+      }
+    } finally {
+      // In `finally`, because a pass that throws does not un-delete the passes
+      // before it: those rows are gone, and a listener that never heard would
+      // serve a cached connection for a credential that no longer exists.
+      this.notifyNamespaceGone(gone);
     }
-    if (gone.length === 0) return { keys: 0, signIns: 0 };
-    // The `null` sentinel means "everyone's pooled connection" — earned only
-    // by a SHARED row actually going. A namespace of nothing but per-user rows
-    // tells those users and no one else.
+    return tally(gone);
+  }
+
+  /**
+   * Tell the tiers a namespace deletion actually touched. The `null` sentinel
+   * means "everyone's pooled connection" — earned only by a SHARED row going,
+   * never by one user's secret.
+   */
+  private notifyNamespaceGone(gone: readonly { userId: string | null }[]): void {
+    if (gone.length === 0) return;
     if (gone.some((r) => r.userId === null)) this.notifyMutation(null);
     for (const userId of new Set(gone.map((r) => r.userId).filter((u): u is string => u !== null))) {
       this.notifyMutation(userId);
     }
-    return tally(gone);
   }
 
   /**
@@ -299,7 +313,6 @@ export class DbSecretsVaultService implements ISecretsVaultService {
    */
   private async namespaceRows(
     prefix: string,
-    declared: readonly string[],
   ): Promise<{ id: string; key: string; userId: string | null; kind: string }[]> {
     if (!prefix) return [];
     const pattern = `${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -307,7 +320,7 @@ export class DbSecretsVaultService implements ISecretsVaultService {
       .select({ id: secrets.id, key: secrets.key, userId: secrets.userId, kind: secrets.kind })
       .from(secrets)
       .where(like(secrets.key, pattern));
-    return rows.filter((r) => isKeyInNamespace(r.key, prefix, declared));
+    return rows.filter((r) => isKeyInNamespace(r.key, prefix));
   }
 
   async statusFor(userId: string, keys: string[]): Promise<SecretConfigStatus[]> {
