@@ -573,6 +573,42 @@ async function grepWalk(
   }
 }
 
+/** One `allowed-tools` entry a saved SKILL.md names that no visible tool matches. */
+export interface SkillSaveWarning {
+  entry: string;
+  message: string;
+  suggestion?: string;
+}
+
+/** The save-time skill check the write tools consult — satisfied by the skills module's `AllowedToolsChecker`. */
+export interface SkillSaveCheck {
+  checkSave(userEmail: string, path: string, content: string): Promise<SkillSaveWarning[]>;
+  /** The batch form: `result[i]` is for `files[i]`, and the catalog is read once. */
+  checkSaves(userEmail: string, files: readonly { path: string; content: string }[]): Promise<SkillSaveWarning[][]>;
+}
+
+const SAVE_WARNINGS_OUTPUT: JsonSchema = {
+  type: 'array',
+  description:
+    'Present only when the file is a SKILL.md whose `allowed-tools` names platform tools you cannot use: ' +
+    'each `{ entry, message, suggestion? }`. The write still happened.',
+  items: { type: 'object' },
+};
+
+/**
+ * The batch form of {@link SAVE_WARNINGS_OUTPUT}. A batch may save several
+ * skills at once, so each warning also carries the `path` it is about —
+ * without it the caller cannot tell which SKILL.md a warning names.
+ */
+const BATCH_SAVE_WARNINGS_OUTPUT: JsonSchema = {
+  type: 'array',
+  description:
+    'Present only when the batch wrote a SKILL.md whose `allowed-tools` names platform tools you cannot use: ' +
+    'each `{ path, entry, message, suggestion? }`, where `path` is the written file the warning is about. ' +
+    'The writes still happened.',
+  items: { type: 'object' },
+};
+
 /**
  * Workspace domain tools: the file primitives (replacing Mastra's auto-injected
  * Workspace tools) + unzip. Most just re-expose the SAME `LocalFilesystem`
@@ -595,6 +631,12 @@ export function registerWorkspaceTools(
   writePolicy: IRoutineWritePolicy,
   sessionSink: ISessionSink,
   /**
+   * Save-time skill check (see `AllowedToolsChecker`): a write to a SKILL.md
+   * returns `warnings` for `allowed-tools` entries naming no visible tool.
+   * Advisory only — it never refuses the write.
+   */
+  skillSaveCheck?: SkillSaveCheck,
+  /**
    * Read-before-write, for the `write-denied` answer's "may you propose this
    * instead?" — the same verdict the lock applies on the draft the proposal
    * would be made on. Optional so tool harnesses need not wire it; the read
@@ -609,6 +651,17 @@ export function registerWorkspaceTools(
    * around the shared extraction cache.
    */
   const readers = createFileReaderRegistry(docExtract);
+
+  /** `{ warnings }` when a saved skill names tools nobody can resolve, else `{}` — spread into a write's result. */
+  const saveWarnings = async (
+    ctx: ToolContext,
+    path: string,
+    content: string,
+  ): Promise<{ warnings?: SkillSaveWarning[] }> => {
+    if (!skillSaveCheck) return {};
+    const warnings = await skillSaveCheck.checkSave(ctx.user.email, path, content);
+    return warnings.length > 0 ? { warnings } : {};
+  };
 
   /** Build the per-call read gate from the tool's branch input + caller identity. */
   const readGateFor = (branch: string, ctx: ToolContext): ReadGate => ({
@@ -1570,6 +1623,7 @@ export function registerWorkspaceTools(
           enum: ['created', 'replaced', 'updated'],
           description: 'What the write did: `created` (nothing was there), `replaced` (`mode: overwrite` over an existing file), `updated` (`mode: update`).',
         },
+        warnings: SAVE_WARNINGS_OUTPUT,
       },
       required: ['path', 'bytes', 'outcome'],
     },
@@ -1617,6 +1671,7 @@ export function registerWorkspaceTools(
         path: a.path,
         bytes: Buffer.byteLength(a.content as string, 'utf8'),
         outcome: (locked ?? preflight) as WriteOutcome,
+        ...(await saveWarnings(ctx, a.path as string, a.content as string)),
       };
     },
   });
@@ -1677,6 +1732,7 @@ export function registerWorkspaceTools(
             required: ['path', 'outcome'],
           },
         },
+        warnings: BATCH_SAVE_WARNINGS_OUTPUT,
       },
       required: ['count', 'files'],
     },
@@ -1760,7 +1816,29 @@ export function registerWorkspaceTools(
       if (writes.length > 0) {
         await batching.writeFiles(writes, `Write ${writes.length} file(s)`, [], recheck);
       }
-      return { count: outcomes.filter((o) => o.outcome !== 'refused').length, files: outcomes };
+      // Only the content that actually landed is checked: a refused entry wrote
+      // nothing, and a path the batch names twice (which `overwrite` allows) is
+      // judged by its LAST landed entry — the earlier one is not in the branch,
+      // so warning about it would describe text nobody can find. `outcomes[i]`
+      // is the entry for `files[i]`. One catalog read for the whole batch.
+      const landed: number[] = [];
+      for (let i = 0; i < files.length; i++) {
+        if (outcomes[i].outcome === 'refused') continue;
+        if (files.some((f, j) => j > i && f.path === files[i].path && outcomes[j].outcome !== 'refused')) continue;
+        landed.push(i);
+      }
+      const warnings: (SkillSaveWarning & { path: string })[] = [];
+      if (skillSaveCheck && landed.length > 0) {
+        const perFile = await skillSaveCheck.checkSaves(ctx.user.email, landed.map((i) => files[i]));
+        landed.forEach((i, k) => {
+          warnings.push(...(perFile[k] ?? []).map((w) => ({ path: files[i].path, ...w })));
+        });
+      }
+      return {
+        count: outcomes.filter((o) => o.outcome !== 'refused').length,
+        files: outcomes,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     },
   });
 
@@ -1784,7 +1862,7 @@ export function registerWorkspaceTools(
     },
     outputs: {
       type: 'object',
-      properties: { path: str('The path edited (echoes the input).'), replaced: int('Number of occurrences replaced.') },
+      properties: { path: str('The path edited (echoes the input).'), replaced: int('Number of occurrences replaced.'), warnings: SAVE_WARNINGS_OUTPUT },
       required: ['path', 'replaced'],
     },
     write: true,
@@ -1810,7 +1888,7 @@ export function registerWorkspaceTools(
       }
       const updated = a.replace_all === true ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
       await fs.writeFile(path, updated);
-      return { path, replaced: a.replace_all === true ? count : 1 };
+      return { path, replaced: a.replace_all === true ? count : 1, ...(await saveWarnings(ctx, path, updated)) };
     },
   });
 

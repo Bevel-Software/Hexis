@@ -104,6 +104,7 @@ async function makeHarness(opts: { extracted?: string[]; changeGate?: IChangeRea
       // Not exercised here — only `.bevelignore`'s tree visibility consults it.
       { isAdmin: async () => false } as unknown as IAdminAccessService,
       new NodeFs(),
+      undefined,
       opts.changeGate,
     ),
   );

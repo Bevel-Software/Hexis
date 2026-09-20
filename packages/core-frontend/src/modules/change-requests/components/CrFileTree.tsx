@@ -8,6 +8,7 @@ import {
   FileEdit,
   FilePlus2,
   FileX2,
+  Lock,
 } from 'lucide-react';
 import type { FileApprovalState, PrFileStatus } from '@bevel-software/platform-shared';
 import { cn } from '../../../lib/utils';
@@ -45,6 +46,14 @@ export interface CrTreeFileState {
   /** Git status when changed (drives the kind icon). */
   status?: PrFileStatus;
   approval?: FileApprovalState;
+  /**
+   * The access sentence when this file's copy came back REFUSED — the lock
+   * glyph's tooltip, and the reason it is there. The same sentence the pane
+   * shows, so a reader who meets the lock in the list and the sentence in the
+   * pane is told one thing, not two. Absent for every other file, including
+   * one whose read merely broke: that is retryable and says so in the pane.
+   */
+  deniedNote?: string;
 }
 
 interface CrFileTreeProps {
@@ -238,6 +247,7 @@ function Level({
             >
               {name}
             </button>
+            {file.deniedNote && <DeniedMark note={file.deniedNote} />}
             {viewerMark ? (
               <ViewerApprovalMark state={viewerMark} />
             ) : (
@@ -268,6 +278,24 @@ function KindIcon({ status }: { status?: PrFileStatus }) {
       // A scope file this request does not touch.
       return <File size={size} className="flex-none text-ink-faint" />;
   }
+}
+
+/**
+ * A file whose copy the viewer may not read. Beside the name rather than in
+ * place of the kind icon: what the request DID to the file is still true and
+ * still worth seeing, and the lock is the extra fact — this one you can't open.
+ */
+function DeniedMark({ note }: { note: string }) {
+  return (
+    <span
+      role="img"
+      aria-label={note}
+      title={note}
+      className="flex flex-none items-center text-ink-faint"
+    >
+      <Lock size={11} />
+    </span>
+  );
 }
 
 /** The viewer's own approval state on a file that is theirs to approve. */

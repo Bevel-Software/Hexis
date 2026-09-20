@@ -2,10 +2,16 @@ import type { ReactNode } from 'react';
 import { ListRow } from '../../../shared/components';
 import { cn } from '../../../lib/utils';
 import { ItemMenuFrame, type ItemAction } from './ItemActionsMenu';
+import { NameWithBadges } from './NameWithBadges';
 
 export interface PluginIndexRowProps {
   label: string;
-  /** Inline with the label — the `Owner` chip. */
+  /**
+   * Beside the label — the `Owner` and `Private` chips. Beside it while there
+   * is room for both: past that the chips drop below the name rather than go
+   * on taking width from it (see `NameWithBadges`), so a row with chips can
+   * be two lines tall on a narrow window.
+   */
   badge?: ReactNode;
   description?: string;
   /** Right-aligned counts, e.g. `4 skills · 2 tools`. */
@@ -58,16 +64,14 @@ export function PluginIndexRow({
       density="row"
       onClick={onOpen}
       className={cn(actions && actions.length > 0 && 'pr-10')}
-      label={
-        badge ? (
-          <span className="flex items-center gap-2">
-            <span className="truncate">{label}</span>
-            {badge}
-          </span>
-        ) : (
-          label
-        )
-      }
+      // The same rule a card's name lives by, and for the same reason: a row
+      // narrowed by its counts used to spend all of its shortfall on the
+      // plugin's name while `Owner` and `Private` kept every pixel they
+      // asked for. Through `NameWithBadges` the chips drop to a second line
+      // before the name goes under a readable width — and the name carries
+      // its full self in `title` even on a row that has no chips at all,
+      // which the bare string it used to be could not.
+      label={<NameWithBadges name={label} badges={badge} />}
       description={description}
       meta={
         meta || trailing ? (

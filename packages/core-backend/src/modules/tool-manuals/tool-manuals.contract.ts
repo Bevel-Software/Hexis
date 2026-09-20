@@ -20,6 +20,16 @@ import type { CallTemplate } from '@utcp/sdk';
 /** The external KB manual's name — shared by `/agent/all-tools` and the MCP proxy. */
 export const EXTERNAL_KB_MANUAL_NAME = 'KNOWLEDGE_BASE';
 
+/**
+ * How many embedded tools a manual may advertise on the tool page. A `.tool` is
+ * author-written, so its `tools` array is unbounded input; the page renders one
+ * bullet per entry, and a thousand of them is a broken page, not a useful one.
+ * On the contract, not the service: the skills module reads it to know when a
+ * detail's capability list may be incomplete, and must not pull the service's
+ * UTCP plugins in to learn a number.
+ */
+export const MAX_CAPABILITIES = 100;
+
 export type ToolManualType = 'inline' | 'http' | 'mcp';
 
 /** How a tool variable's secret is provisioned. */

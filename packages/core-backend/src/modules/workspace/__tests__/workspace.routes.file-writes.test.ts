@@ -12,6 +12,7 @@ import type { IAdminAccessService } from '../../admin/admin.interface.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import { createWorkspaceRoutes } from '../workspace.routes.js';
+import type { SkillSaveCheck } from '../workspace.tools.js';
 import type { WorkspaceService } from '../workspace.service.js';
 
 /**
@@ -52,7 +53,7 @@ interface Harness {
   order: string[];
 }
 
-async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
+async function makeHarness(opts: { canRead?: boolean; skillSaveCheck?: SkillSaveCheck } = {}): Promise<Harness> {
   const lockedPaths: string[] = [];
   const discardedPaths: string[] = [];
   const untouchedPaths: string[] = [];
@@ -152,6 +153,7 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
       stubCreatorAccess,
       { isAdmin: async () => true } as unknown as IAdminAccessService,
       new NodeFs(),
+      opts.skillSaveCheck,
     ),
   );
   const server = await new Promise<Server>((resolve) => {
@@ -221,6 +223,37 @@ describe('PUT /workspace/:id/file — roles.yaml from the editor', () => {
     const res = await put(h, { content: 'roles: [oops' }, `${KB}/roles.yaml`);
     expect(res.status).toBe(422);
     expect(h.writeFileMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /workspace/:id/file — allowed-tools warnings', () => {
+  let h: Harness | null = null;
+  afterEach(async () => {
+    if (h) await close(h.server);
+    h = null;
+  });
+
+  const warning = { entry: 'hubspot.serch', message: 'not a tool', suggestion: 'hubspot.search' };
+
+  it('writes the skill, then answers with the warnings for the saving user', async () => {
+    const checkSave = vi.fn(async () => [warning]);
+    h = await makeHarness({ skillSaveCheck: { checkSave, checkSaves: async () => [] } });
+    const skill = `${KB}/Plugins/Sales/rfi/SKILL.md`;
+    const content = '---\nallowed-tools: Bash hubspot.serch\n---\n';
+
+    const res = await put(h, { content }, skill);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'written', warnings: [warning] });
+    // Never a block: the bytes landed before the check was even asked.
+    expect(h.writeFileMock).toHaveBeenCalledWith(WS, skill, content, expect.anything());
+    expect(checkSave).toHaveBeenCalledWith(USER.email, skill, content);
+  });
+
+  it('answers the plain shape when there is nothing to warn about', async () => {
+    h = await makeHarness({ skillSaveCheck: { checkSave: async () => [], checkSaves: async () => [] } });
+    const res = await put(h, { content: 'Body.' });
+    expect(await res.json()).toEqual({ status: 'written' });
   });
 });
 
