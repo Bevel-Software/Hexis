@@ -1,11 +1,16 @@
 import { useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ExternalLink, UserPlus, Users } from 'lucide-react';
 import { Badge, Banner } from '../../../shared/components';
 import { useAdmin } from '../../admin/state/admin.context';
 import { useLibrary, workspaceHasNoPlugins } from '../state/library-data';
 import { LIBRARY_ROOT, pathForPlugin } from '../routes/library-paths';
-import { ownersTextOf } from '../utils/plugin-summary';
+import { adminNamesOf, ownersTextOf, primaryFolderOf } from '../utils/plugin-summary';
+import { AlreadyReadableError, requestPluginAccess } from '../services/plugins.api';
+import { useLibraryToast } from '../state/toast.context';
+import { firstNames, joinNames } from '../utils/names';
 import type { PluginEntry } from '../utils/plugin-entries';
+import type { ItemAction } from './ItemActionsMenu';
 import { EmptyStateAction } from './plugin-page-parts';
 import { PluginIndexRow } from './PluginIndexRow';
 import { LockGlyph } from './LockGlyph';
@@ -32,15 +37,108 @@ import { NewPluginDialog } from './NewPluginDialog';
 export function PluginRows({
   entries,
   showCreate = false,
+  onShare,
 }: {
   entries: PluginEntry[];
   showCreate?: boolean;
+  /**
+   * Open Manage access on a plugin's primary folder, repo-relative — the
+   * plugin page's `Share`, offered from its row. The dialog itself belongs to
+   * the page (it is one dialog for the rows AND the cards), so the band only
+   * says WHICH folder. Absent when the page cannot address folders yet, and
+   * the rows then offer Subscribe or nothing at all rather than a verb that
+   * would open on the wrong path.
+   */
+  onShare?(folder: string): void;
 }) {
   const lib = useLibrary();
   const { pluginsLoading, pluginsError, pluginSummaries, reload, reloadPlugins } = lib;
   const { isAdmin } = useAdmin();
   const navigate = useNavigate();
+  const toast = useLibraryToast();
   const [newPluginOpen, setNewPluginOpen] = useState(false);
+  /** Plugins this reader has asked to join since the page loaded. */
+  const [justRequested, setJustRequested] = useState<readonly string[]>([]);
+
+  /**
+   * The locked page's button, as a menu item. Identical wiring on purpose —
+   * same call, same toast, same two answers — because a reader who subscribes
+   * from the row and one who subscribes from the page have done the same
+   * thing and must be told so in the same words.
+   */
+  async function subscribe(name: string) {
+    const summary = pluginSummaries.find((g) => g.name === name);
+    const admins = summary ? adminNamesOf(summary) : [];
+    try {
+      await requestPluginAccess(name);
+      setJustRequested((names) => (names.includes(name) ? names : [...names, name]));
+      toast(
+        `Asked ${admins.length > 0 ? joinNames(firstNames(admins)) : 'the admins'}. You get its skills and tools once they grant access.`,
+      );
+      reloadPlugins();
+    } catch (err) {
+      // Access arrived between the page load and the click. Nothing went
+      // wrong — the plugin is simply open now, so re-read and let the row
+      // become a member's row.
+      if (err instanceof AlreadyReadableError) {
+        reload();
+        reloadPlugins();
+        return;
+      }
+      toast("Couldn't send that: try again.", 'danger');
+    }
+  }
+
+  /**
+   * What a row's `…` offers. Open is always there — it is the row's own click,
+   * said in words, and it is what makes the menu a menu rather than a single
+   * button. The second item is the whole point of the menu, and there are
+   * three of it:
+   *
+   *  - SHARE, for a plugin the reader can read: the plugin page's Share, on
+   *    the same primary folder. Ungated, like the page's — for a non-writer
+   *    the dialog renders read-only, which is the honest answer to "who is
+   *    this shared with?".
+   *  - SUBSCRIBE, for one they cannot: the locked page's button.
+   *  - REQUESTED, once they have asked — stated and not offered, exactly as
+   *    the locked page replaces its button with the same word.
+   *
+   * A row with neither — the caller's own space, which is not a plugin, and a
+   * plugin whose folder the page cannot address — gets no menu at all.
+   */
+  function actionsOf(entry: PluginEntry): ItemAction[] {
+    const open: ItemAction = {
+      label: 'Open',
+      icon: <ExternalLink size={14} />,
+      onSelect: () => openEntry(entry),
+    };
+    if (entry.name === null) return [];
+    if (entry.member) {
+      const folder = entry.summary ? primaryFolderOf(entry.summary) : null;
+      if (!folder || !onShare) return [];
+      return [
+        open,
+        { label: 'Share', icon: <Users size={14} />, onSelect: () => onShare(folder), separated: true },
+      ];
+    }
+    const name = entry.name;
+    const pending = entry.summary?.hasRequested === true || justRequested.includes(name);
+    return [
+      open,
+      pending
+        ? { label: 'Requested', icon: <UserPlus size={14} />, disabled: true, separated: true }
+        : {
+            label: 'Subscribe',
+            icon: <UserPlus size={14} />,
+            onSelect: () => void subscribe(name),
+            separated: true,
+          },
+    ];
+  }
+
+  function openEntry(entry: PluginEntry) {
+    navigate(entry.name === null ? `${LIBRARY_ROOT}/yours` : pathForPlugin(entry.name));
+  }
 
   const offerCreate = showCreate && isAdmin && workspaceHasNoPlugins(lib);
   // Loading is the plugin REQUEST's state, never the rows': the caller's own
@@ -88,10 +186,12 @@ export function PluginRows({
               label={entry.label}
               badge={badgesOf(entry)}
               {...describe(entry)}
-              trailing={trailingOf(entry)}
-              onOpen={() =>
-                navigate(entry.name === null ? `${LIBRARY_ROOT}/yours` : pathForPlugin(entry.name))
-              }
+              trailing={trailingOf(
+                entry,
+                entry.name !== null && justRequested.includes(entry.name),
+              )}
+              actions={actionsOf(entry)}
+              onOpen={() => openEntry(entry)}
             />
           ))}
         </div>
@@ -155,7 +255,7 @@ function describe(entry: PluginEntry): { description: string; meta?: string } {
  * tool the reader has not set up); for everyone else, the one thing the row
  * can tell them that they did not already know — whether they have asked.
  */
-function trailingOf(entry: PluginEntry): ReactNode {
+function trailingOf(entry: PluginEntry, justRequested = false): ReactNode {
   if (entry.member) {
     return entry.attention > 0 ? (
       <Badge tone={entry.urgent ? 'urgent' : 'wait'} size="xs">
@@ -163,7 +263,7 @@ function trailingOf(entry: PluginEntry): ReactNode {
       </Badge>
     ) : undefined;
   }
-  return entry.summary?.hasRequested ? (
+  return entry.summary?.hasRequested || justRequested ? (
     <Badge tone="wait" size="xs" title="Requested" className="uppercase">
       Requested
     </Badge>

@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { DEFAULT_BRANCH } from '@bevel-software/platform-shared';
 import { Banner, Button, buttonClasses } from '../../../../shared/components';
+import { announceToolCredentialsChanged } from '../../../../core/events';
 import { useWorkspace } from '../../../workspace/state/workspace.context';
 import { kbFileUrl } from '../../../workspace/routing/kb-routes';
 import {
@@ -241,6 +242,14 @@ export function ToolConnectionSection({
     // describing a credential that no longer exists while the refetch is
     // still in flight.
     setProbed(null);
+    // And the rest of the Library, which derives "needs setup" from a catalog
+    // loaded before this write: the card, the plugin banner and the sidebar
+    // count all keep the old answer otherwise, and the reader meets it the
+    // moment they press back. Announced HERE, on the landing, rather than
+    // after the probe — what the catalog believes about a stored key does not
+    // depend on whether the provider likes it, and making the reload wait for
+    // a round-trip nobody is watching only widens the stale window.
+    announceToolCredentialsChanged();
     onChanged();
   }
 
@@ -275,7 +284,7 @@ export function ToolConnectionSection({
           {settled && (
             <Button
               variant="quiet"
-              size="tiny"
+              size="sm"
               disabled={checking}
               onClick={() => void runCheck()}
               aria-label={`Test connection: ${tool.name}`}
@@ -283,7 +292,7 @@ export function ToolConnectionSection({
               {checking ? 'Testing…' : 'Test connection'}
             </Button>
           )}
-          <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'tiny' })}>
+          <Link to="/secrets" className={buttonClasses({ variant: 'quiet', size: 'sm' })}>
             Open Secrets
           </Link>
         </div>
@@ -315,7 +324,7 @@ export function ToolConnectionSection({
               {kbDirName && !isMcpJsonServer && (
                 <Button
                   variant="quiet"
-                  size="tiny"
+                  size="sm"
                   className="mt-1.5"
                   // `rawFile` asks the item route for the raw editor: this
                   // URL is the tool page's own canonical address, and the

@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { PluginSummary } from '../services/plugins.api';
 import type { LibraryFilter } from '../utils/status';
@@ -153,6 +153,10 @@ async function renderGallery(filter: LibraryFilter) {
     </MemoryRouter>,
   );
   await screen.findByRole('list', { name: 'cards' });
+  // `latest` is set by an effect, which can trail the commit that put the
+  // list on screen: on a slow runner the value read here was still the
+  // loading render's (no items). Wait for the loaded value itself.
+  await waitFor(() => expect(latest && !latest.loading && !latest.pluginsLoading).toBe(true));
   return latest!;
 }
 

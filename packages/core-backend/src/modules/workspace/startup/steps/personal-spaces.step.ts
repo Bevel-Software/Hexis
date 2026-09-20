@@ -105,11 +105,12 @@ function closeFolderRules(text: string, folder: Record<Verb, ParsedEntry[]>): st
   // A file whose folder rules already settle `everyone`'s READ is left as it
   // is: an entry under `read` itself (a denial means the space is closed; a
   // grant means someone opened it on purpose), or a GRANT under a verb that
-  // folds into read (`write`, `owner` — the grammar's own list). A denial
-  // written beside such a grant would change nothing (a same-scope grant
-  // wins) while making the file read as a contradiction. Anything else —
-  // `deny everyone` under write alone, `download: everyone` — says nothing
-  // about read, and the space is still open to an inherited `read: everyone`.
+  // folds into read (`write`, `download`, `owner` — the grammar's own list,
+  // which it reads rather than restates). A denial written beside such a
+  // grant would change nothing (a same-scope grant wins) while making the
+  // file read as a contradiction. Anything else — `deny everyone` under
+  // write alone — says nothing about read, and the space is still open to
+  // an inherited `read: everyone`.
   const settled = sourceVerbsFor('read').some((verb) =>
     folder[verb].some((e) => everyone(e) && (verb === 'read' || !e.deny)),
   );
@@ -123,15 +124,16 @@ function closeFolderRules(text: string, folder: Record<Verb, ParsedEntry[]>): st
 
 /**
  * The frontmatter — the FILE's rules — saying what the folder's say: `deny
- * everyone`, then the people the folder admits (its user grants under
- * `read`, `write` and `owner`). Only for a file whose folder rules settle
+ * everyone`, then the people the folder admits (its user grants under every
+ * verb that folds into read). Only for a file whose folder rules settle
  * `everyone`'s read as DENIED — a denial under `read` with no grant under
- * any verb that folds into read (`write: everyone` opens the folder to all
- * despite the denial, a same-scope grant winning): a space its owner opened
- * on purpose, either way, keeps the file open too. A frontmatter that
- * already mentions `everyone` under `read` — a denial, or a grant that
- * lists the file for all — is left as written; so is a legacy single-block
- * file, whose frontmatter IS the folder's rules and was closed above.
+ * any verb that folds into read (`write: everyone` or `download: everyone`
+ * opens the folder to all despite the denial, a same-scope grant winning):
+ * a space its owner opened on purpose, either way, keeps the file open too.
+ * A frontmatter that already mentions `everyone` under `read` — a denial, or
+ * a grant that lists the file for all — is left as written; so is a legacy
+ * single-block file, whose frontmatter IS the folder's rules and was closed
+ * above.
  */
 function closeFileRules(text: string, relativePath: string): string {
   if (!accessMdDeclaresBodyRules(text)) return text;

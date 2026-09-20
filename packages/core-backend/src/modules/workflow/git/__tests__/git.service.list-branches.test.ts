@@ -195,4 +195,39 @@ describe('GitService.listBranches', () => {
     const branches = await svc.listBranches(workspaceId);
     expect(branches.map((b) => b.name)).not.toContain('carol/draft-three');
   });
+
+  // A listing is the one moment the platform sees origin's set of branches,
+  // and the workspace layer needs that memory to tell a branch that was
+  // DELETED (410) from a name that never existed (404). Wired in the
+  // composition root; the listener is how the fact gets there.
+  it('tells the listener every branch name the listing returned', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    const seen: string[][] = [];
+    svc.setBranchesListedListener((names) => seen.push(names));
+
+    const branches = await svc.listBranches(workspaceId);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(branches.map((b) => b.name));
+    expect(seen[0]).toContain('alice/draft-one');
+  });
+
+  it('still serves the listing when the listener throws', async () => {
+    await seedWorkspace(root, workspaceId);
+    const svc = new GitService(
+      stubWorkspaceService(workspaceId, path.join(root, workspaceId)),
+      new WorkflowHooks(),
+      'knowledge-base',
+    );
+    svc.setBranchesListedListener(() => { throw new Error('listener blew up'); });
+
+    await expect(svc.listBranches(workspaceId)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'alice/draft-one' })]),
+    );
+  });
 });

@@ -10,6 +10,10 @@ This command closes that gap by being where those tools actually are, without gi
 npx @bevel-software/hexis-mcp --url https://your-workspace.example
 ```
 
+**Needs Node 22.13+ or 24.** Those are the versions this server's sandbox (`isolated-vm`) publishes a prebuilt binary for; on any other one it would compile C++ on your machine, so the command refuses with one sentence instead. Select one with `nvm install 22`, or point your MCP client's `"command"` at that version's `npx` — the absolute path, with the `-y @bevel-software/hexis-mcp` arguments unchanged (`node` will not do: it would read `-y` as its own option).
+
+Once it is signed in, the server answers a client's `initialize` immediately and discovers your workspace's tools in the background, so a run that downloads the package and every plugin does not trip a client's handshake timeout. (The one exception is the very first keyless run: browser sign-in happens before the MCP transport exists, so nothing can be answered until you have signed in — the credential is cached afterwards and every later start is immediate.) `tools/list` waits for that discovery and then answers normally; if it fails, the failure arrives as a tool named `hexis_unavailable` whose description says why, and on stderr — the process stays up rather than disappearing.
+
 ## Signing in
 
 Two ways in, and whether you pass a key decides:
@@ -75,7 +79,11 @@ The MCP endpoint itself is not a setting: the server asks the deployment for it 
 
 Diagnostics go to **stderr** (stdout carries the protocol), and MCP clients surface them as server logs.
 
-- *"The connection key was rejected"* — the key was revoked or belongs to another workspace. Mint a new one.
+- **The client says `npx` (or `ENOENT`) was not found** — the client was launched from the Dock, the Start menu or a desktop icon, so it was started by the window server rather than by a login shell and never read the profile that put Homebrew's or nvm's `npx` on PATH. Cursor and Claude Desktop on macOS are the usual pair. Run `which npx` in a terminal (`where npx` in PowerShell) and use the full path it prints as `"command"`; the `args` stay as they are. If the client then reports `env: node: No such file or directory`, that `npx` is a script starting with `#!/usr/bin/env node` and the same PATH gap now hides `node` — add the folder the path names to the client's `"env"`: `{ "PATH": "/that/folder:/usr/bin:/bin" }`. (Running the same configuration from a terminal-launched client works, which is what makes this look like a broken config rather than a missing PATH.)
+- *"hexis-mcp runs on Node 22.13+ or 24"* — this process is on some other version (a nightly or an `rc` of a supported one counts as another version: no binary was published for an ABI that was not settled yet). The sandbox is a native module with no prebuilt binary there, and building it would be a C++ compile on your machine. `nvm install 22`, or set `"command"` to a supported version's `npx` — a GUI-launched client cannot be fixed by switching versions in a terminal, because it never reads that shell.
+- *"hexis-mcp could not load its native sandbox"* — the Node major is supported but the binary will not load: usually an install that was copied between machines or architectures. Reinstall (`npx -y` again, or delete `node_modules` and install) on the machine that runs it.
+- **The only tool listed is `hexis_unavailable`** — discovery failed after the handshake; its description carries the reason, and the same sentence is in the server's stderr log. The server stays connected on purpose, so the reason reaches you instead of the client reporting that it died. Fix the cause and restart it.
+- *"The connection key was rejected"* — the key is invalid or revoked, or belongs to another workspace. Mint a new one in External agent access. The process exits instead of offering a browser sign-in. Claude Code shows only that the server failed; `claude mcp get <name>` or running the command in a terminal shows the message.
 - *"Your sign-in was rejected"* / *"could not be refreshed"* — the workspace revoked the sign-in, or it expired. Restart the command to sign in through your browser again.
 - *"This deployment is too old for browser sign-in"* — the workspace predates the sign-in exchange. Upgrade it, or pass a connection key.
 - **A local tool is missing from the list** — it registered but failed; the log names it and why. A tool whose local server is not running is the usual cause.

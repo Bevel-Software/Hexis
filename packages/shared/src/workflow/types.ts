@@ -134,6 +134,40 @@ export type ChangeRequestComment = PrReviewComment;
 export type PostChangeRequestCommentInput = PostPrCommentInput;
 
 /**
+ * One open change request proposing files under a folder, as a folder delete
+ * lists it. `mayRemove`: the caller may take those files out of it (their own,
+ * they are an admin, or they may write every file it proposes under the
+ * folder); a refusal always says why.
+ */
+export type FolderChangeRequest = {
+  number: number;
+  title: string;
+  authorName: string | null;
+  /** The caller authored it. */
+  mine: boolean;
+  /** KB-repo-relative paths it proposes under the folder. */
+  paths: string[];
+} & ({ mayRemove: true } | { mayRemove: false; reason: string });
+
+/** What removing a folder's files did to one change request. */
+export interface FolderChangeRequestRemoval {
+  number: number;
+  removedPaths: string[];
+  /** The request proposed nothing else, so it was withdrawn. */
+  withdrawn: boolean;
+  /**
+   * Files under the folder it still proposes: added while the removal ran,
+   * so never judged, and left alone.
+   */
+  stillProposed: string[];
+  /**
+   * It proposes nothing now but was kept open, because a save to its branch
+   * was still landing — withdrawing would have deleted that save.
+   */
+  keptForSaves: boolean;
+}
+
+/**
  * Input for opening a new change request. The workflow auto-merges
  * `targetBranch` into `sourceBranch` as part of opening, so callers don't
  * pass a head SHA — the workflow resolves the head itself.

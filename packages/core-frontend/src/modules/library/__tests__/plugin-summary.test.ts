@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pluginLabel, pluginNameForPath } from '../utils/plugin-summary';
+import { pluginLabel, pluginNameForPath, pluginsHoldingTool } from '../utils/plugin-summary';
 
 const summaries = [
   { name: 'gtm', displayName: 'Go To Market', folders: ['Plugins/GTM'] },
@@ -28,5 +28,40 @@ describe('pluginLabel', () => {
   it('is the display name, else the identity', () => {
     expect(pluginLabel('gtm', summaries)).toBe('Go To Market');
     expect(pluginLabel('unknown', summaries)).toBe('unknown');
+  });
+});
+
+describe('pluginsHoldingTool', () => {
+  // A tool file in one plugin's folder, and a root two other plugins link.
+  const withRoots = [
+    { name: 'gtm', folders: ['Plugins/GTM'], linkedRoots: ['Plugins/Shared/observability'] },
+    { name: 'ops', folders: ['Plugins/Ops'], linkedRoots: ['Plugins/Shared/observability'] },
+    { name: 'finance', folders: ['Plugins/Finance'], linkedRoots: [] },
+  ];
+
+  it('is INLINE in the plugin whose folder holds the file', () => {
+    expect(pluginsHoldingTool('Plugins/GTM/heyreach.tool', withRoots)).toEqual([
+      { name: 'gtm', linked: false, granted: true },
+    ]);
+  });
+
+  it('is LINKED into every plugin whose linked root holds it — a shared root reaches them all', () => {
+    expect(pluginsHoldingTool('Plugins/Shared/observability/grafana.tool', withRoots)).toEqual([
+      { name: 'gtm', linked: true, granted: true },
+      { name: 'ops', linked: true, granted: true },
+    ]);
+  });
+
+  it('says INLINE once, never twice: a root inside the plugin’s own folder adds nothing', () => {
+    const selfRooted = [{ name: 'gtm', folders: ['Plugins/GTM'], linkedRoots: ['Plugins/GTM/tools'] }];
+    expect(pluginsHoldingTool('Plugins/GTM/tools/grafana.tool', selfRooted)).toEqual([
+      { name: 'gtm', linked: false, granted: true },
+    ]);
+  });
+
+  it('claims nothing on a sibling folder sharing a prefix, nor from an older server with no roots', () => {
+    expect(pluginsHoldingTool('Plugins/Shared/observability-archive/old.tool', withRoots)).toEqual([]);
+    const older = [{ name: 'gtm', folders: ['Plugins/GTM'] }];
+    expect(pluginsHoldingTool('Plugins/Shared/observability/grafana.tool', older)).toEqual([]);
   });
 });

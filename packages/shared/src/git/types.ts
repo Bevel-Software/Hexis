@@ -249,6 +249,38 @@ export interface IGitService {
    * Just the repo-relative paths a change request touches (three-dot diff,
    * no statuses, no patches): the cheap form behind change-request list
    * summaries and owner routing.
+   *
+   * `fetch: false` skips the per-request fetch of the two refs — for a caller
+   * that has just refreshed the whole clone's remote-tracking refs in one
+   * round trip, which is what a LIST does rather than paying one fetch per
+   * request. Pass it only when that is true; otherwise the diff can describe
+   * a stale head.
    */
-  changedPathsForPr(workspaceId: string, baseBranch: string, headBranch: string): Promise<string[]>;
+  changedPathsForPr(
+    workspaceId: string,
+    baseBranch: string,
+    headBranch: string,
+    opts?: { fetch?: boolean },
+  ): Promise<string[]>;
+
+  /**
+   * A change request's fork point (merge base of the two resolved commits)
+   * and whether the target has commits the proposal does not contain. No
+   * fetch: `at` is what `resolvePrShas` just returned.
+   */
+  forkPointForPr(
+    workspaceId: string,
+    at: { baseSha: string; headSha: string },
+  ): Promise<{ mergeBaseSha: string | null; behind: boolean }>;
+
+  /**
+   * A file's content at a change request's fork point — a commit that must
+   * be on `baseBranch`'s history. `null` when the path did not exist there.
+   */
+  readFileAtForkPoint(
+    workspaceId: string,
+    baseBranch: string,
+    sha: string,
+    relativePath: string,
+  ): Promise<string | null>;
 }

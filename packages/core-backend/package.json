@@ -33,6 +33,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "vitest run .live.test",
+    "probe:first-call": "tsx src/modules/mcp/first-call-probe.cli.ts",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { Router, RequestHandler } from 'express';
 import { createAuthRoutes } from '../modules/auth/auth.routes.js';
 import { createWorkspaceRoutes } from '../modules/workspace/workspace.routes.js';
+import { createGitInternalsRouteGuard } from '../modules/workspace/git-internals.middleware.js';
 import { createDiffRoutes } from '../modules/diff/diff.routes.js';
 import { createWorkflowRoutes } from '../modules/workflow/workflow.routes.js';
 import { createEventsRoutes } from '../modules/workflow/events.routes.js';
@@ -44,6 +45,7 @@ import { createUpdateCheckRoutes } from '../modules/update-check/update-check.ro
 import { createAccountRoutes } from '../modules/auth/account.routes.js';
 import { createConnectionKeysAdminRoutes } from '../modules/tool-auth/connection-keys-admin.routes.js';
 import { createSetupRoutes } from '../modules/settings/setup.routes.js';
+import { oidcRedirectUri } from '../modules/auth/oidc-auth-provider.js';
 import { repositoryConnectionCheck } from '../modules/settings/connection-check.js';
 import {
   createKbSyncRoutes,
@@ -171,6 +173,14 @@ export async function createCoreServer(
   // which a parsed-and-reserialised body cannot reproduce.
   const jsonExemptPaths = new Set(ext.jsonParserExemptPaths ?? []);
   const globalJson = express.json({ limit: '10mb' });
+  // The git folder is refused BEFORE the body parser: a request naming it in
+  // the query with a malformed body would otherwise be answered 400 by the
+  // parser, and the promise is one sanitized 403 for such a path whatever else
+  // is wrong with the request. Only the query can be judged this early — a
+  // body that does not parse names nothing anyone can read — so the same guard
+  // is mounted again below, once the body is parsed and once the caller is
+  // known (see the two mounts under `/api/workspace/:id`).
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
   app.use((req, res, next) => {
     if (jsonExemptPaths.has(req.path) || isSyncRawBodyPath(req.path)) return next();
     return globalJson(req, res, next);
@@ -487,6 +497,15 @@ export async function createCoreServer(
   ));
   app.use('/api', toolsRouter);
 
+  // The same guard on the PARSED body, for the WHOLE `/workspace/:id` prefix
+  // and ahead of EVERY router under it — the file routes, the review, workflow
+  // and access ones, and whatever an extension mounts below. Mounted here,
+  // before the extension phase, so an overlay surface added there is covered
+  // by its prefix rather than by remembering this. No auth in front of it: the
+  // lexical rule reads the caller's own string and touches no disk, so it
+  // answers nothing; the resolved half waits for the JWT check below.
+  app.use('/api/workspace/:id', createGitInternalsRouteGuard(core.workspaceService));
+
   // Non-JWT overlay surfaces that sit between the tools router and the
   // JWT-protected `/api` routes (LLM proxy, embed, upload — see the phase
   // doc on ServerExtensions.postTools).
@@ -515,6 +534,10 @@ export async function createCoreServer(
   );
 
   // Protected routes
+  // The same guard again, now BEHIND the JWT check, so an authenticated
+  // request also gets the resolved form judged — a link in the repository that
+  // points into the git folder — before any read gate or lock.
+  app.use('/api/workspace/:id', core.authMiddleware, createGitInternalsRouteGuard(core.workspaceService));
   app.use('/api', core.authMiddleware, createWorkspaceRoutes(
     core.workspaceService,
     core.authService,
@@ -630,6 +653,7 @@ export async function createCoreServer(
     core.authService,
     core.adminAccess,
     core.accountErasureService,
+    core.userAccessRemovalService,
   ));
   // Connection keys across the deployment (list per account, revoke any) —
   // admin-gated inside. The per-user key surface stays on /api/mcp/…
@@ -657,6 +681,8 @@ export async function createCoreServer(
       },
       // The connection probe's git runs through the deployment's one runner.
       repositoryConnectionCheck(core.gitRunner),
+      undefined,
+      oidcRedirectUri(core.config.publicBackendUrl),
     ),
   );
   const toolPageUser = async (userId: string): Promise<AuthUser | undefined> => {

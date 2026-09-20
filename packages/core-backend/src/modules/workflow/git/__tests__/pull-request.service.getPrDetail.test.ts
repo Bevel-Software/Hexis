@@ -34,6 +34,7 @@ function makeDb(): Database {
 
 const BASE = 'b'.repeat(40);
 const HEAD = 'a'.repeat(40);
+const FORK = 'c'.repeat(40);
 
 /**
  * A detail read is the hot path behind every change-request poll, every
@@ -47,7 +48,8 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
   function harness() {
     const resolvePrShas = vi.fn(async () => ({ baseSha: BASE, headSha: HEAD }));
     const changedFilesForPr = vi.fn(async () => []);
-    const git = { resolvePrShas, changedFilesForPr } as unknown as GitService;
+    const forkPointForPr = vi.fn(async () => ({ mergeBaseSha: FORK, behind: true }));
+    const git = { resolvePrShas, changedFilesForPr, forkPointForPr } as unknown as GitService;
     const workspace = {
       findAnyWorkspaceId: async () => 'ws-main',
       ensureRemotesFetched: async () => undefined,
@@ -61,7 +63,7 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
       getApprovalStates,
       evaluateMergeGate: () => ({ mergeable: false, reasons: [], warnings: [] }),
     });
-    return { svc, resolvePrShas, changedFilesForPr, getApprovalStates };
+    return { svc, resolvePrShas, changedFilesForPr, forkPointForPr, getApprovalStates };
   }
 
   it('pins the file list to the SHAs it just resolved, and keeps patches for a client read', async () => {
@@ -111,6 +113,24 @@ describe('PullRequestService.getPrDetail — git work per read', () => {
       { at: { baseSha: BASE, headSha: HEAD } },
     );
   });
+
+  it('carries the fork point and "needs updating", pinned to the same SHAs as the file list', async () => {
+    const { svc, forkPointForPr } = harness();
+    const detail = await svc.getPrDetail(7, { fresh: true });
+    expect(forkPointForPr).toHaveBeenCalledWith('ws-main', { baseSha: BASE, headSha: HEAD });
+    expect(detail?.mergeBaseSha).toBe(FORK);
+    expect(detail?.behind).toBe(true);
+    // Anonymous read: no viewer, no Update.
+    expect(detail?.viewerCanUpdate).toBe(false);
+  });
+
+  it('the target moving on invalidates a cached detail, even with the head unchanged', async () => {
+    const { svc, resolvePrShas, getApprovalStates } = harness();
+    await svc.getPrDetail(7, { fresh: true });
+    resolvePrShas.mockResolvedValueOnce({ baseSha: 'd'.repeat(40), headSha: HEAD });
+    await svc.getPrDetail(7);
+    expect(getApprovalStates).toHaveBeenCalledTimes(2);
+  });
 });
 
 /**
@@ -122,6 +142,7 @@ describe('PullRequestService — change request link', () => {
     const git = {
       resolvePrShas: async () => ({ baseSha: BASE, headSha: HEAD }),
       changedFilesForPr: async () => [],
+      forkPointForPr: async () => ({ mergeBaseSha: FORK, behind: false }),
     } as unknown as GitService;
     const workspace = {
       findAnyWorkspaceId: async () => 'ws-main',
