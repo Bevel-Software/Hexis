@@ -54,6 +54,35 @@ describe('friendlyGitError: translates raw backend git messages', () => {
     expect(friendlyGitError(err)).toBe('something completely new went wrong');
   });
 
+  it('rewrites the read-before-write refusal to name the folder the person cannot read', () => {
+    // The backend's `AccessDeniedError` with `unreadable` set: the folder a
+    // new file would land in, or the file itself when it exists.
+    const folder = new GitApiError(
+      403,
+      'You don\'t have permission to write to "knowledge-base/KnowledgeBase/Sales/brief.pdf". You don\'t have read access to "KnowledgeBase/Sales"; only what you can read can be created, changed or removed.',
+    );
+    expect(friendlyGitError(folder)).toBe(
+      'You can\'t add or change anything in "KnowledgeBase/Sales" because you don\'t have read access to it. Ask an admin or the folder\'s owners to share it with you first.',
+    );
+    const root = new GitApiError(
+      403,
+      'You don\'t have permission to write to "knowledge-base/notes.md". You don\'t have read access to the top level; only what you can read can be created, changed or removed.',
+    );
+    expect(friendlyGitError(root)).toBe(
+      'You can\'t add or change anything in the top level because you don\'t have read access to it. Ask an admin or the folder\'s owners to share it with you first.',
+    );
+  });
+
+  it('still rewrites the write-grant refusal, which shares the same lead', () => {
+    const err = new GitApiError(
+      403,
+      'You don\'t have permission to write to "knowledge-base/KnowledgeBase/Sales/brief.md". Eligible: Sales; Ana <ana@x.io>.',
+    );
+    expect(friendlyGitError(err)).toBe(
+      'You don\'t have permission to edit "knowledge-base/KnowledgeBase/Sales/brief.md". Editing is restricted to Sales; Ana <ana@x.io>. Ask one of them to make the change, or to broaden access for this folder.',
+    );
+  });
+
   it('rewrites raw "no history in common" CLI errors when pre-flight is bypassed', () => {
     const err = new GitApiError(
       500,

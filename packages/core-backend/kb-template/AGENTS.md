@@ -254,6 +254,17 @@ Access to any path — reading it as much as writing it — is governed by
   strips a separate read grant. So `download: Ana <ana@x.io>` alone lets Ana
   open the node as well as download it, and a `deny download` beside an
   inherited read leaves her able to open it but not save it.
+- **You can only change what you can read.** Nothing is created, changed,
+  moved into or removed from a place the caller cannot read — on every
+  branch, drafts included, whatever `write:` rules say. A write tool refused
+  for this says so (`write-denied`, naming the unreadable folder), and
+  proposing is not offered either: a proposal into a folder its author cannot
+  see would vanish from them the moment it landed. The one exception is a NEW
+  FOLDER directly under `{{knowledgeBaseDir}}/`, `{{skillsDir}}/` or
+  `{{pluginsDir}}/`: anyone may start one, whatever the root's rules grant
+  them, and the new folder's `access.md` is seeded with the creator's own
+  `read:` grant so what they put there is visible to them. A loose FILE
+  directly at a root has no folder to carry that grant and is not excepted.
 - **Resolution** walks repo root → file directory, accumulating per-principal
   state. User-level entries trump role-level entries. A role denial removes
   only that role's contribution; it does not undo grants from other roles.

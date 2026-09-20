@@ -1,6 +1,7 @@
 import { branchAuthorLocalpart, isProtectedBranch, suggestionsBranchPrefixFor } from '@bevel-software/platform-shared';
 import { ToolError } from '../tool-helpers/tool.contract.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { toKbRelative } from '../access-model/kb-read-filter.js';
 import type { IAccessControl } from '../access/access-control.interface.js';
 import { workspaceIdForBranch } from '../../shared/workspace-id.js';
@@ -98,14 +99,20 @@ export function proposalTitleFor(path: string): string {
  *
  * `canPropose` follows the rule that routes a UI upload to a suggestion: the
  * refusal is on a protected branch (the only kind that takes change requests
- * as a target) and the caller may READ the path. Nothing is created here —
- * the agent decides whether to follow the steps.
+ * as a target) and the caller may make the change on a draft — which is the
+ * read-before-write gate's question (`IChangeReadGate`): they can READ the
+ * path, or it starts a new folder directly under one of the three roots.
+ * Nothing is created here — the agent decides whether to follow the steps.
+ *
+ * Without a gate the read verdict alone decides, which is the same answer
+ * everywhere but at a root.
  */
 export async function writeDenial(
   err: AccessDeniedError,
   input: { tool: string; branch: string; userEmail: string; userId: string },
   accessControl: IAccessControl,
   kbDirName: string,
+  changeGate?: IChangeReadGate,
 ): Promise<ToolError> {
   const path = err.access.path;
   const base = { kind: 'write-denied' as const, path, reason: reasonOf(err) };
@@ -119,14 +126,17 @@ export async function writeDenial(
   }
   // The lock gate reports workspace paths, the git gates repo-relative ones.
   const rel = toKbRelative(path, kbDirName) ?? path.replace(/^\.?\/+/, '');
-  let readable: boolean;
+  const workspaceId = workspaceIdForBranch(input.branch);
+  let mayChange: boolean;
   try {
-    readable = await accessControl.canRead(workspaceIdForBranch(input.branch), input.userEmail, rel);
+    mayChange = changeGate
+      ? (await changeGate.judge(workspaceId, input.userEmail, `${kbDirName}/${rel}`, 'file')).allowed
+      : await accessControl.canRead(workspaceId, input.userEmail, rel);
   } catch {
     // Fail closed: offering a route the caller may not take is worse than none.
     return refuse('Proposing is not offered: whether you can read this path could not be determined; try again.');
   }
-  if (!readable) return refuse('Proposing is not available: you cannot read this path.');
+  if (!mayChange) return refuse('Proposing is not available: you cannot read this path.');
 
   const draft = draftNameFor({ email: input.userEmail, id: input.userId }, path);
   const details: WriteDeniedDetails = {
@@ -167,9 +177,10 @@ export async function rethrowAsWriteDenial(
   input: { tool: string; branch: unknown; userEmail: string; userId: string },
   accessControl: IAccessControl,
   kbDirName: string,
+  changeGate?: IChangeReadGate,
 ): Promise<never> {
   if (err instanceof AccessDeniedError && typeof input.branch === 'string') {
-    throw await writeDenial(err, { ...input, branch: input.branch }, accessControl, kbDirName);
+    throw await writeDenial(err, { ...input, branch: input.branch }, accessControl, kbDirName, changeGate);
   }
   throw err;
 }

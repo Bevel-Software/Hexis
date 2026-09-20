@@ -107,7 +107,6 @@ async function makeHarness(opts: { canRead?: boolean } = {}): Promise<Harness> {
   });
   const stubCreatorAccess = {
     planForCreate,
-    grantInExtractedFile: async () => null,
     noteAccessFileWritten: () => {},
   } as unknown as ICreatorAccess;
 

@@ -123,11 +123,12 @@ export interface LockingFilesystemContext {
   fileChanges?: FileChangeNotifier;
   /**
    * Optional creator read-grant planner (see `modules/access/creator-access`).
-   * When present, a write/mkdir that CREATES a KB node the acting user can't
-   * read gets an automatic `read:` grant — seeded into a new directory's
-   * `access.md` or folded into a new markdown file's frontmatter — so the
-   * agent's creations don't vanish from the driving user's explorer under
-   * default-deny reads. Absent (tests, non-KB filesystems) → no grants.
+   * When present, a write/mkdir that starts a NEW FOLDER directly under one
+   * of the three roots the acting user can't read gets an automatic `read:`
+   * grant seeded into that folder's `access.md`, so the agent's creations
+   * don't vanish from the driving user's explorer under default-deny reads.
+   * Any other creation the user could not see is refused by the lock's read
+   * gate. Absent (tests, non-KB filesystems) → no grants.
    */
   creatorAccess?: ICreatorAccess;
 }
@@ -167,15 +168,12 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     const validate = this.lockContext.validateWrite;
     await validate?.(inputPath, content);
     // Creator read grant (see LockingFilesystemContext.creatorAccess): planned
-    // BEFORE the write so the topmost-new-directory detection sees the
-    // pre-creation tree. A subtree seed lands first in its own lock+commit
-    // cycle so the grant is on disk before the file it makes visible.
+    // BEFORE the write so the new-folder detection sees the pre-creation
+    // tree. The seed lands first in its own lock+commit cycle so the grant is
+    // on disk before the file it makes visible.
     const plan = await this.planCreate(inputPath, 'file');
     if (plan?.kind === 'seed-access-md') await this.seedAccessMd(plan);
-    const toWrite =
-      plan?.kind === 'frontmatter' && typeof content === 'string'
-        ? plan.apply(content)
-        : content;
+    const toWrite = content;
     return this.withLock(
       inputPath,
       () => super.writeFile(inputPath, toWrite, options),
@@ -400,32 +398,24 @@ export class LockingFilesystem extends GitGuardedFilesystem {
     for (const w of writes) await this.assertNotGitInternals(w.path);
     for (const d of deletes) await this.assertNotGitInternals(d);
     for (const w of writes) this.assertInsideRepo(w.path);
-    // Creator read grants for the batch: transform new markdown files'
-    // content in place, and fold any subtree access.md seeds into the SAME
-    // atomic batch (deduped — several files landing in one new folder share
-    // one seed). Plans are computed against the pre-batch disk state, which
-    // is exactly right: nothing below has hit disk yet. A seed whose path the
-    // caller explicitly writes in this batch is skipped — the caller's bytes
-    // win.
+    // Creator read grants for the batch: fold any new-root-folder access.md
+    // seeds into the SAME atomic batch (deduped — several files landing in
+    // one new folder share one seed). Plans are computed against the
+    // pre-batch disk state, which is exactly right: nothing below has hit
+    // disk yet. A seed whose path the caller explicitly writes in this batch
+    // is skipped — the caller's bytes win.
     const seeds = new Map<string, (current: string) => string>();
     // Which of the caller's writes asked for each seed. A seed exists only to
     // make the files below it visible to their creator, so one whose every
     // origin `check` drops has nothing left to make visible and is dropped too.
     const seedOrigins = new Map<string, string[]>();
-    const grantedWrites: { path: string; content: FileContent }[] = [];
     for (const w of writes) {
       const plan = await this.planCreate(w.path, 'file');
       if (plan?.kind === 'seed-access-md' && !writes.some((x) => x.path === plan.wsRelPath)) {
         seeds.set(plan.wsRelPath, plan.apply);
         seedOrigins.set(plan.wsRelPath, [...(seedOrigins.get(plan.wsRelPath) ?? []), w.path]);
       }
-      grantedWrites.push(
-        plan?.kind === 'frontmatter' && typeof w.content === 'string'
-          ? { path: w.path, content: plan.apply(w.content) }
-          : w,
-      );
     }
-    writes = grantedWrites;
     // Pre-disk gate every file BEFORE acquiring any lock (fail-closed): a
     // refusal must not leave a lock held or a partial batch on disk.
     if (this.lockContext.validateWrite) {

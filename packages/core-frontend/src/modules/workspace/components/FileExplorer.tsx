@@ -82,13 +82,6 @@ import {
   platformFileDragRefusal,
   platformFileMoveRefusal,
 } from '../utils/treeConfirm';
-import { UnreadableCreateDialog } from './UnreadableCreateConfirm';
-import {
-  UnreadableCreateContext,
-  useUnreadableCreateGate,
-  useUnreadableCreateGateState,
-} from '../state/unreadable-create.context';
-import { unreadableAmong, unreadableNames } from '../utils/unreadableCreate';
 
 /**
  * The tree row — the prototype's `.trow` (proto:684-693), and token for token
@@ -947,9 +940,6 @@ export function FileTreeNode({
   // One shared fetch behind this — see `OpenChangeRequestsProvider`.
   const openChangeRequests = useOpenChangeRequests();
   const suggestions = useSuggestions();
-  // Asks before anything that would land invisible here — see
-  // `UnreadableCreateConfirm`. Every create/upload path below goes through it.
-  const unreadableCreateGate = useUnreadableCreateGate();
 
   /**
    * A refused download, said in place under the row. Never an `alert()`: the
@@ -1034,27 +1024,15 @@ export function FileTreeNode({
   }, []);
 
   /**
-   * Every upload into this row goes through here: the batch is shown to the
-   * read gate FIRST, and a Cancel uploads nothing at all. One call per batch,
-   * so a fifty-file drop asks one question.
+   * Every upload into this row goes through here. Nothing is asked first: an
+   * upload into a folder the caller cannot read is refused by the server's
+   * read-before-write gate, and the refusal shows in this tree's banner.
    */
   const uploadAfterGate = useCallback(
     (input: UploadInput, targetDir: string) => {
-      const invisible = unreadableNames(input);
-      // Nothing here could be hidden — dispatch on this very tick, exactly as
-      // the drop handlers always did. Only a batch with something to ask
-      // about waits for an answer.
-      if (invisible.length === 0) {
-        void dispatchUpload(input, targetDir, uploadTarget);
-        return;
-      }
-      void (async () => {
-        if (await unreadableCreateGate(targetDir, invisible)) {
-          await dispatchUpload(input, targetDir, uploadTarget);
-        }
-      })();
+      void dispatchUpload(input, targetDir, uploadTarget);
     },
-    [unreadableCreateGate, dispatchUpload, uploadTarget],
+    [dispatchUpload, uploadTarget],
   );
 
   // Resetting `value` after dispatch lets users re-select the same file and
@@ -1423,25 +1401,15 @@ export function FileTreeNode({
                     // "Failed to create …" popup loop against an unchanging
                     // 403. Unmounting first breaks that cycle.
                     setCreating(null);
-                    // A file the creator will not be able to see says so
-                    // first; Cancel creates nothing. A FOLDER never asks: a
-                    // new directory carries the creator's read grant in its
-                    // own `access.md`, whatever goes in it later.
-                    const invisible = kind === 'file' ? unreadableAmong([name]) : [];
-                    if (
-                      invisible.length > 0
-                      && !(await unreadableCreateGate(dirPath, invisible))
-                    ) {
-                      return;
-                    }
                     try {
                       if (kind === 'file') await createFile(fullPath);
                       else await createDirectory(fullPath);
                     } catch (err) {
-                      // Surface the refusal (e.g. a protected branch's write
-                      // gate: "You don't have permission to write to …") —
-                      // otherwise the input clears and nothing appears, which
-                      // reads as the file silently vanishing.
+                      // Surface the refusal (a protected branch's write gate,
+                      // or the read-before-write gate: "You don't have
+                      // permission to write to …") — otherwise the input
+                      // clears and nothing appears, which reads as the file
+                      // silently vanishing.
                       const msg = err instanceof Error ? err.message : String(err);
                       alert(`Failed to create ${name}:\n${msg}`);
                     }
@@ -1801,26 +1769,6 @@ export function TreeChrome({
   // workspace it was asked in: its `run` closes over that workspace's
   // operations, so a switch while it is open drops it rather than letting
   // Confirm act on a branch the dialog never described.
-
-  // The read check before a non-markdown creation — one gate for the whole
-  // tree, so a multi-file drop asks once (see `UnreadableCreateConfirm`).
-  const {
-    gate: unreadableCreateGate,
-    pending: unreadableCreate,
-    answer: answerUnreadableCreate,
-  } = useUnreadableCreateGateState({
-    // Stamped with the workspace it was asked in, exactly as the move/delete
-    // confirmation below is: a switch while the question is open drops it
-    // rather than letting Continue upload into a tree nobody is looking at.
-    identity: workspaceId ?? null,
-    toRepoRelative: (folder) => {
-      if (!workspaceId || !kbDirName) return null;
-      if (folder === kbDirName) return '';
-      return folder.startsWith(`${kbDirName}/`) ? folder.slice(kbDirName.length + 1) : null;
-    },
-    canRead: async (repoRelative) =>
-      (await fetchFileAccess(workspaceId!, repoRelative, 'folder')).canRead,
-  });
   const [openConfirm, setOpenConfirm] = useState<
     { request: TreeConfirmRequest; workspaceId: string | null } | null
   >(null);
@@ -1980,7 +1928,6 @@ export function TreeChrome({
   return (
     <>
       <TreeConfirmContext.Provider value={askConfirm}>
-      <UnreadableCreateContext.Provider value={unreadableCreateGate}>
       <TreeNavContext.Provider value={nav}>
       <UploadTargetContext.Provider value={uploadTarget}>
       <PinnedContext.Provider value={pinned ?? NO_PINNING}>
@@ -1992,15 +1939,7 @@ export function TreeChrome({
       </PinnedContext.Provider>
       </UploadTargetContext.Provider>
       </TreeNavContext.Provider>
-      </UnreadableCreateContext.Provider>
       </TreeConfirmContext.Provider>
-      {unreadableCreate && (
-        <UnreadableCreateDialog
-          request={unreadableCreate}
-          onCancel={() => answerUnreadableCreate(false)}
-          onContinue={() => answerUnreadableCreate(true)}
-        />
-      )}
       {confirmRequest && (
         <TreeActionConfirmDialog
           request={confirmRequest}

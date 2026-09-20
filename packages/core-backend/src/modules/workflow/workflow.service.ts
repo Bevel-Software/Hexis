@@ -92,6 +92,7 @@ import {
 } from '../../shared/domain-errors.js';
 import { RECOVERY_BOT_EMAIL, RECOVERY_BOT_NAME } from './recovery-bot.js';
 import { AccessDeniedError } from '../access-model/access-errors.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { printable } from '../../shared/printable.js';
 
 const execFileAsync = promisify(execFile);
@@ -313,6 +314,14 @@ export class WorkflowService implements IWorkflowService {
      * exercise hooks) unchanged.
      */
     public readonly hooks: WorkflowHooks = new WorkflowHooks(),
+    /**
+     * The read-before-write gate `acquireLock` asks on every branch (see
+     * `access-model/change-gate.ts`). Optional so test constructions that
+     * exercise other surfaces need not wire it; the composition root always
+     * does, and a boot without it would let a change land where its author
+     * cannot read.
+     */
+    private readonly changeGate?: IChangeReadGate,
   ) {}
 
   // ── Branches ──────────────────────────────────────────────────────────────
@@ -892,6 +901,10 @@ export class WorkflowService implements IWorkflowService {
    * Always reads at-ref, never at the working tree, so a user can't broaden
    * their own access by editing `roles.yaml` / `access.md` in the same
    * session.
+   *
+   * Resolves to `'restore'` when the write passed ONLY as a platform-file
+   * restore — the caller then knows the destination denies this admin, and
+   * the read gate that follows stands aside for the same rescue.
    */
   private async assertCanWriteAtPath(
     workspaceId: string,
@@ -904,7 +917,7 @@ export class WorkflowService implements IWorkflowService {
      * never taken on trust — see `acquireLock`'s `opts`.
      */
     platformRestore?: { source: string },
-  ): Promise<void> {
+  ): Promise<'granted' | 'restore'> {
     // The lock route passes workspace-relative paths
     // (`knowledge-base/GTM/.../Foo.md`), but the access model is keyed by
     // *repo-relative* paths — `git ls-tree` runs inside the inner repo dir,
@@ -923,8 +936,8 @@ export class WorkflowService implements IWorkflowService {
       userEmail,
       [repoRelative],
     );
-    if (!result) return; // no config at ref → default-allow (bootstrap)
-    if (result.get(repoRelative)) return;
+    if (!result) return 'granted'; // no config at ref → default-allow (bootstrap)
+    if (result.get(repoRelative)) return 'granted';
     // The one write allowed past a destination that denies it: an admin
     // putting a platform file back where the platform reads it. The access
     // module decides who — a repository whose root `access.md` is the file
@@ -942,7 +955,7 @@ export class WorkflowService implements IWorkflowService {
       isPlatformRestoreShape(toRepoRelative(platformRestore.source), repoRelative) &&
       (await this.accessControl.canRestorePlatformFile(workspaceId, userEmail, repoRelative))
     ) {
-      return;
+      return 'restore';
     }
     const eligible = await this.accessControl.eligibleWritersAtRef(
       workspaceId,
@@ -987,14 +1000,24 @@ export class WorkflowService implements IWorkflowService {
     // the lock and the editor never opens. Once the lock is in hand, the
     // commit + push pipeline does not re-check (see `commitFile`).
     //
-    // **Protected branches only** (mirrors the legacy commit-time gate). On
-    // feature/draft branches anyone can write; canonical state changes go
-    // through change-request approval, which is where the real security
-    // boundary lives. Checking at HEAD (not at the working tree) so a user
-    // can't grant themselves access by editing `roles.yaml` in the same
+    // **Write gate — protected branches only** (mirrors the legacy commit-time
+    // gate). On feature/draft branches anyone can write; canonical state
+    // changes go through change-request approval, which is where the real
+    // security boundary lives. Checking at HEAD (not at the working tree) so a
+    // user can't grant themselves access by editing `roles.yaml` in the same
     // session.
     //
-    // **Coordination acquires skip the gate** (see the interface doc): the
+    // **Read gate — every branch.** Nothing is created, changed or removed
+    // where its author cannot read, drafts included: a proposal that lands in
+    // a folder its author cannot see would vanish from them the moment it was
+    // added, and a write grant only implies read — a nearer `deny read` can
+    // take the read away while the write stands. The one exception, a new
+    // folder directly under one of the three roots, and the reasons are in
+    // `access-model/change-gate.ts`. A write that passed only as a
+    // platform-file restore is not asked: that rescue exists exactly for a
+    // destination whose rules deny the admin making it.
+    //
+    // **Coordination acquires skip both gates** (see the interface doc): the
     // caller wants only mutual exclusion with the path's writer — e.g. the
     // roles admin holding machine-owned `synced-groups.yaml` steady across
     // its IdP-mode recheck — and will never write the path. Gating those on
@@ -1003,16 +1026,22 @@ export class WorkflowService implements IWorkflowService {
     // authority flows from the hold: the mode is persisted on the lock row
     // and `commitFileWhileLocked` / `releaseLock` refuse to treat a
     // coordination hold as write possession (see those methods).
-    if (isProtectedBranch(branch) && !opts?.coordination) {
-      // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
-      // eligible-writers payload so the frontend can render a useful refusal.
-      await this.assertCanWriteAtPath(
-        workspaceId,
-        branch,
-        user.email,
-        targetPath,
-        opts?.platformRestore,
-      );
+    if (!opts?.coordination) {
+      let via: 'granted' | 'restore' = 'granted';
+      if (isProtectedBranch(branch)) {
+        // `assertCanWriteAtPath` throws AccessDeniedError on denial, with the
+        // eligible-writers payload so the frontend can render a useful refusal.
+        via = await this.assertCanWriteAtPath(
+          workspaceId,
+          branch,
+          user.email,
+          targetPath,
+          opts?.platformRestore,
+        );
+      }
+      if (via !== 'restore' && this.changeGate) {
+        await this.changeGate.assertMayChange(workspaceId, user.email, targetPath, 'file');
+      }
     }
     const result = await this.fileLocks.acquire(workspaceId, branch, targetPath, user, opts);
     if (result.acquired) {

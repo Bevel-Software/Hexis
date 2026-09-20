@@ -53,6 +53,7 @@ import {
 import { AccessDeniedError } from '../access-model/access-errors.js';
 import { removeEmptyDirs } from './empty-dirs.js';
 import { PROPOSAL_ROUTE_NOTE, rethrowAsWriteDenial } from './write-denial.js';
+import type { IChangeReadGate } from '../access-model/change-gate.js';
 import { notFound, orDeclaredNotFound, orNotFound } from './not-found.js';
 import { logger } from '../../shared/logging.js';
 import { printable } from '../../shared/printable.js';
@@ -593,6 +594,13 @@ export function registerWorkspaceTools(
   sessionOntologyGate: SessionOntologyGate,
   writePolicy: IRoutineWritePolicy,
   sessionSink: ISessionSink,
+  /**
+   * Read-before-write, for the `write-denied` answer's "may you propose this
+   * instead?" — the same verdict the lock applies on the draft the proposal
+   * would be made on. Optional so tool harnesses need not wire it; the read
+   * verdict alone then decides, which differs only at a root.
+   */
+  changeGate?: IChangeReadGate,
 ): void {
   /**
    * The one extension→reader registry every read-shaped decision routes
@@ -1054,6 +1062,7 @@ export function registerWorkspaceTools(
               { tool: spec.name, branch: args.branch, userEmail: ctx.user.email, userId: ctx.user.id },
               accessControl,
               kbDirName,
+              changeGate,
             );
           }
         },
