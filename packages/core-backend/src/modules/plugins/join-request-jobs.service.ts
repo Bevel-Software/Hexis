@@ -77,25 +77,54 @@ export class JoinRequestNotReadyError extends Error {
 }
 
 /**
- * The row stopped being this process's to finish, mid-work.
+ * What a beat found out about the claim — including that it found out
+ * nothing.
  *
- * Two ways that happens, and neither is the request's fault. The claim
+ * `held` and `lost` are the database's answers. `unknown` is the absence of
+ * one: the UPDATE threw, so ownership was not established either way. It is a
+ * third case rather than a shade of one of the others because the periodic
+ * beat and the pre-side-effect guard must treat it oppositely — tolerated by
+ * the one, refused by the other — and a boolean would have to pick.
+ */
+type ClaimState = 'held' | 'lost' | 'unknown';
+
+/**
+ * The row is not demonstrably this process's to finish, mid-work.
+ *
+ * Three ways that happens, and none is the request's fault. The claim
  * LAPSED — this process stalled past {@link CLAIM_STALE_AFTER_MS}, so another
  * took the row over and is doing the work now. Or the row was DELETED, which
  * is what account erasure does to it: the person who asked no longer exists,
- * so neither does the ask.
+ * so neither does the ask. Or ownership simply could not be ESTABLISHED,
+ * because the beat that would have settled it threw.
  *
- * In both cases the only correct thing left is to stop, and in particular to
- * stop BEFORE opening a change request. Carrying on would open a second
- * change request alongside the replacement's for the first case, and one for
- * an erased account in the second — a change request in a deleted person's
- * name, which the row that would have recorded it no longer exists to undo.
+ * The third is the reason this is thrown on `unknown` and not only on a
+ * confirmed loss. In front of an irreversible step, "I do not know whether I
+ * still own this" has to be read the same way as "I do not" — a database that
+ * cannot answer is exactly a database a replacement may have claimed the row
+ * through. Failing open there buys nothing and risks a second change request;
+ * failing closed costs one retry.
+ *
+ * In every case the only correct thing left is to stop, and in particular to
+ * stop BEFORE mutating the shared workspace or opening a change request.
+ * Carrying on would open a second change request alongside the replacement's
+ * in the first case, and one for an erased account in the second — a change
+ * request in a deleted person's name, which the row that would have recorded
+ * it no longer exists to undo.
+ *
  * Nothing is written and nothing is said to the requester: for a lapsed claim
- * the holder will say it, and for an erased account there is nobody to tell.
+ * the holder will say it, for an erased account there is nobody to tell, and
+ * for an unreachable database there is nothing to write with. The row stays
+ * `pending`, this process stops beating, the claim goes stale, and the next
+ * sweep does the whole thing again — so the request is delayed, never lost.
  */
 class ClaimLostError extends Error {
-  constructor() {
-    super('the recorded request is no longer this process\'s to finish');
+  constructor(state: Exclude<ClaimState, 'held'>) {
+    super(
+      state === 'lost'
+        ? "the recorded request is no longer this process's to finish"
+        : "the recorded request could not be confirmed as this process's to finish",
+    );
     this.name = 'ClaimLostError';
   }
 }
@@ -195,10 +224,25 @@ export interface JoinRequestJobsDeps {
  * The same mechanism is what makes the row's DELETION visible. Account
  * erasure removes a requester's rows outright, in a transaction this has no
  * part in; a beat against a row that is gone matches nothing, exactly as a
- * beat against a stolen one does. Both read as "not ours any more", which is
- * why {@link attempt} beats the claim immediately before the git and again
- * immediately before the change request, and stops rather than opening one
- * for an account that no longer exists.
+ * beat against a stolen one does. Both read as "not ours any more".
+ *
+ * So {@link attempt} beats the claim in front of each step that touches the
+ * world — before the branch, after the clone and immediately before the file
+ * write and push, and again immediately before the change request — rather
+ * than once at the end. The clone between the first two is the long step, and
+ * a check taken before it says nothing about who owns the row by the time it
+ * returns. Anything short of a confirmed `held` stops the work, including a
+ * beat that could not reach the database at all: in front of something
+ * irreversible, not knowing is treated as not owning.
+ *
+ * None of that makes a gate and the step behind it atomic, and it is not
+ * meant to. It narrows the exposure from the whole of a clone to a single
+ * statement, and what carries the rest is that every step here is idempotent
+ * and the deciding writes are fenced — so even two workers racing through the
+ * git leave exactly one change request. A lease that could not expire across
+ * these steps would close the window instead, and is the one option not open:
+ * that is precisely what the heartbeat replaced, and it left the request of
+ * any process that died owed forever.
  *
  * AND SOMETHING ALWAYS LOOKS AGAIN. {@link startSweeping} re-reads the owed
  * rows on a timer, not only at boot, because the one case boot cannot cover
@@ -331,27 +375,45 @@ export class PluginJoinRequestJobs {
     // are the same statement, so asking the second costs nothing beyond the
     // first — which is why the guard before each side effect can afford to
     // ask it rather than trust a flag last refreshed up to thirty seconds ago.
+    //
+    // THREE answers, not two, and the third is the point. A beat that THREW
+    // has not said the claim is held and has not said it is lost: it has said
+    // nothing at all. Collapsing that into either boolean is a bug in one
+    // direction or the other, and the two callers below want opposite
+    // defaults — so the ambiguity is kept in the type and each decides.
     let held = true;
-    const beat = async (): Promise<boolean> => {
-      if (!held) return false;
-      const still = await this.store.heartbeat(live.id, live.claimToken).catch((err: unknown) => {
-        // A missed beat is survivable — the window is three of them — and the
-        // work is still running, so there is nothing to do but note it. In
-        // particular it is NOT read as the claim being lost: a database blip
-        // must not abandon work that is going fine.
+    const beat = async (): Promise<ClaimState> => {
+      if (!held) return 'lost';
+      try {
+        const still = await this.store.heartbeat(live.id, live.claimToken);
+        if (!still) held = false;
+        return still ? 'held' : 'lost';
+      } catch (err: unknown) {
         log.warn(`could not refresh a join-request claim: ${loggable(sanitizeError(err))}`);
-        return true;
-      });
-      if (!still) held = false;
-      return still;
+        return 'unknown';
+      }
     };
 
+    // The periodic beat TOLERATES the unknown. Its only job is to push the
+    // claim forward, it takes no action on the answer, and the window is
+    // three beats wide precisely so that a database blip costs one of them
+    // rather than the work. Giving up here would abandon a clone that is
+    // going perfectly well because one UPDATE timed out.
     const heartbeat = setInterval(() => void beat(), CLAIM_HEARTBEAT_MS);
     heartbeat.unref?.();
 
     try {
+      // The GUARD refuses it, for the exact opposite reason. It stands in
+      // front of a side effect that cannot be taken back, and "I could not
+      // find out whether I still own this row" is not a licence to push a
+      // branch or open a change request — a replacement may well have claimed
+      // it while the database was unreachable. So anything short of a
+      // confirmed `held` stops the work. Stopping is cheap and recoverable:
+      // the row stays `pending`, this process stops beating, the claim goes
+      // stale, and the next sweep picks it up and does the whole thing again.
       await this.attempt(record, live, async () => {
-        if (!(await beat())) throw new ClaimLostError();
+        const state = await beat();
+        if (state !== 'held') throw new ClaimLostError(state);
       });
     } catch (err) {
       const reason = sanitizeError(err);
@@ -463,6 +525,25 @@ export class PluginJoinRequestJobs {
       { target: 'folder' },
     );
     if (spliced.changed) {
+      // AFTER THE CLONE, and immediately before the first thing that changes
+      // the shared workspace. `getOrCreateForBranch` above is the long step —
+      // a first-ever request clones the whole plugins repository, which is
+      // minutes — and a gate before it says nothing about who owns the row by
+      // the time it returns. Two processes writing this file and pushing the
+      // same branch into one shared workspace is the corruption the claim
+      // exists to prevent, so the check belongs here as well as at the end.
+      //
+      // It NARROWS the window rather than closing it: nothing makes the check
+      // and the write one atomic act, so a claim could still lapse in the
+      // instant between them. What makes that harmless is that everything in
+      // this block is idempotent — the same grant, spliced onto the same
+      // branch, is the same commit — and the durable outcome is fenced
+      // separately, so two racing workers still leave exactly one change
+      // request. The alternative cubic offered, a lease that cannot expire
+      // across these steps, is the one thing not available here: a claim that
+      // outlives a crashed process is precisely the bug the heartbeat
+      // replaced, and it left recorded requests owed forever.
+      await stillOurs();
       await workspaceService.writeFile(ws.id, accessPath, spliced.text);
       await workflow.commitChanges(ws.id, user, `Request access to ${target.displayName}`);
     }

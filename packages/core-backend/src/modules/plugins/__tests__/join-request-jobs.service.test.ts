@@ -348,6 +348,88 @@ describe('PluginJoinRequestJobs', () => {
     expect(h.store.all()[0]).toMatchObject({ status: 'pending', failureReason: null });
   });
 
+  it('will not push or open anything while ownership is unknown', async () => {
+    // The beat THREW rather than answering. That is not "still mine" — the
+    // database a replacement would have claimed through is exactly the
+    // database that just refused to answer — so in front of an irreversible
+    // step it has to read as "not mine".
+    const h = harness();
+    const record = pendingRow(h.store);
+    const realHeartbeat = h.store.heartbeat.bind(h.store);
+    let beats = 0;
+    h.store.heartbeat = async (id: string, token: string) => {
+      // Healthy up to the gate that stands in front of the git, then down.
+      if (++beats > 1) throw new Error('the database went away');
+      return realHeartbeat(id, token);
+    };
+
+    await h.jobs.start(record);
+
+    // Nothing was written to the branch and nothing was opened — and the row
+    // is left exactly as it was, pending, for the next sweep to redo.
+    expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(h.workflow.commitChanges).not.toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+    expect(h.store.all()[0]).toMatchObject({ status: 'pending', failureReason: null });
+  });
+
+  it('a database blip does not abandon work that is going fine', async () => {
+    // The other direction, and the reason `unknown` is a third case rather
+    // than a synonym for `lost`. The PERIODIC beat takes no action on its
+    // answer, and the window is three beats wide exactly so one failed UPDATE
+    // costs a beat rather than a clone that is running perfectly well.
+    vi.useFakeTimers();
+    const h = harness();
+    const record = pendingRow(h.store);
+    const realHeartbeat = h.store.heartbeat.bind(h.store);
+    // Every beat from the interval fails; the gates' beats still succeed.
+    let inGit = false;
+    h.store.heartbeat = async (id: string, token: string) => {
+      if (inGit) throw new Error('the database blipped');
+      return realHeartbeat(id, token);
+    };
+
+    let finishClone = (): void => {};
+    h.workflow.createBranch.mockReturnValue(
+      new Promise((resolve) => {
+        finishClone = () => resolve({ name: 'x', isDefault: false, isProtected: false });
+      }) as never,
+    );
+
+    const flight = h.jobs.start(record);
+    await vi.advanceTimersByTimeAsync(0);
+    inGit = true;
+    await vi.advanceTimersByTimeAsync(3 * CLAIM_STALE_AFTER_MS);
+    inGit = false;
+
+    // The interval swallowed every failure rather than tearing the job down.
+    finishClone();
+    await flight;
+    expect(h.store.all()[0]).toMatchObject({ status: 'opened', changeRequestNumber: 42 });
+  });
+
+  it('checks the claim again after the clone, before it writes or pushes', async () => {
+    // The gate before the git says nothing about who owns the row by the time
+    // the clone returns, and a first-ever request clones the whole plugins
+    // repository. So the row is taken over DURING the clone here: the write
+    // and the push must not happen against a shared workspace this process no
+    // longer has the right to touch.
+    const h = harness();
+    const record = pendingRow(h.store);
+    h.workspaceService.getOrCreateForBranch = async (branch: string) => {
+      await h.store.claim(record.id, 0); // the window lapsed; another worker took it
+      return { id: workspaceIdForBranch(branch) };
+    };
+
+    await h.jobs.start(record);
+
+    // The branch was created under a claim this process did hold — that is
+    // idempotent and harmless — but nothing after the clone ran.
+    expect(h.workspaceService.writeFile).not.toHaveBeenCalled();
+    expect(h.workflow.commitChanges).not.toHaveBeenCalled();
+    expect(h.workflow.openChangeRequest).not.toHaveBeenCalled();
+  });
+
   it('a superseded token can neither beat nor decide the row', async () => {
     // The fence itself, at the store: the contract `DbJoinRequestStore` puts
     // in SQL (`where claim_token = $token`) and this fake mirrors.
