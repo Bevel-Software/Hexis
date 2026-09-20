@@ -1,8 +1,11 @@
 import { PLUGINS_DIR, SKILLS_DIR } from '@bevel-software/platform-shared';
 import { logger } from '../../shared/logging.js';
 import type { IToolRegistry } from '../tool-registry/tool.contract.js';
-import { EXTERNAL_KB_MANUAL_NAME, type IToolManualService } from '../tool-manuals/tool-manuals.contract.js';
-import { MAX_CAPABILITIES } from '../tool-manuals/tool-manuals.service.js';
+import {
+  EXTERNAL_KB_MANUAL_NAME,
+  MAX_CAPABILITIES,
+  type IToolManualService,
+} from '../tool-manuals/tool-manuals.contract.js';
 import { parseSkillFrontmatter } from './skills.service.js';
 
 const log = logger('skills');
@@ -249,6 +252,14 @@ export interface IAllowedToolsChecker {
    * file. Never throws — a save must not fail because a check could not run.
    */
   checkSave(userEmail: string, workspacePath: string, content: string): Promise<AllowedToolWarning[]>;
+  /**
+   * `checkSave` for a whole batch, reading the caller's catalog ONCE:
+   * `result[i]` is the warnings for `files[i]`. Never throws.
+   */
+  checkSaves(
+    userEmail: string,
+    files: readonly { path: string; content: string }[],
+  ): Promise<AllowedToolWarning[][]>;
 }
 
 /** Resolves "the tools a user can see" from the tool catalog and the manuals they may read. */
@@ -266,23 +277,55 @@ export class AllowedToolsChecker implements IAllowedToolsChecker {
   ) {}
 
   async check(userEmail: string, allowedTools: readonly string[] | undefined): Promise<AllowedToolWarning[]> {
-    // Nothing the platform could have an opinion on → nothing to read.
-    if (!allowedTools?.some(looksLikePlatformTool)) return [];
-    try {
-      return checkAllowedTools(allowedTools, await this.visibleTools(userEmail));
-    } catch (err) {
-      log.warn('allowed-tools check skipped', { err });
-      return [];
-    }
+    return (await this.checkLists(userEmail, [allowedTools]))[0]!;
   }
 
   async checkSave(userEmail: string, workspacePath: string, content: string): Promise<AllowedToolWarning[]> {
-    if (skillFileRepoPath(this.kbDirName, workspacePath) === null) return [];
+    return (await this.checkSaves(userEmail, [{ path: workspacePath, content }]))[0]!;
+  }
+
+  async checkSaves(
+    userEmail: string,
+    files: readonly { path: string; content: string }[],
+  ): Promise<AllowedToolWarning[][]> {
+    return this.checkLists(
+      userEmail,
+      files.map((f) => this.declaredTools(f.path, f.content)),
+    );
+  }
+
+  /**
+   * The `allowed-tools` a file being saved declares — `undefined` for a file
+   * that is not a skill, or whose frontmatter will not parse (a save must not
+   * fail because a check could not run).
+   */
+  private declaredTools(workspacePath: string, content: string): readonly string[] | undefined {
+    if (skillFileRepoPath(this.kbDirName, workspacePath) === null) return undefined;
     try {
-      return await this.check(userEmail, parseSkillFrontmatter(content).allowedTools);
+      return parseSkillFrontmatter(content).allowedTools;
     } catch (err) {
       log.warn('allowed-tools check skipped', { err });
-      return [];
+      return undefined;
+    }
+  }
+
+  /**
+   * One catalog read for however many lists. A list with nothing the platform
+   * could have an opinion on costs nothing — and when no list has, the catalog
+   * is not read at all.
+   */
+  private async checkLists(
+    userEmail: string,
+    lists: readonly (readonly string[] | undefined)[],
+  ): Promise<AllowedToolWarning[][]> {
+    const worth = lists.map((l) => l?.some(looksLikePlatformTool) === true);
+    if (!worth.some(Boolean)) return lists.map(() => []);
+    try {
+      const visible = await this.visibleTools(userEmail);
+      return lists.map((l, i) => (worth[i] ? checkAllowedTools(l!, visible) : []));
+    } catch (err) {
+      log.warn('allowed-tools check skipped', { err });
+      return lists.map(() => []);
     }
   }
 

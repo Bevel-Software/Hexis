@@ -545,7 +545,9 @@ export function SkillPage({
   async function saveDirect(content: string) {
     const { workspace } = await getOrCreateWorkspace(DEFAULT_BRANCH);
     const saved = await writeFile(workspace.id, `${workspace.kbDirName}/${fileRepoPath}`, content);
-    setSavedWarnings(saved?.warnings ?? []);
+    // Only a SKILL.md save has a say: a bundled file's answer carries no
+    // warnings, and taking it as "none" would hide the loaded skill's.
+    if (active === 'SKILL.md') setSavedWarnings(saved?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast('Saved: the skill now reads with your change.');
@@ -562,7 +564,7 @@ export function SkillPage({
       userName: user.name,
       existingCr: ownCr,
     });
-    setSavedWarnings(proposed?.warnings ?? []);
+    if (active === 'SKILL.md') setSavedWarnings(proposed?.warnings ?? []);
     setEditing(false);
     setRevision((r) => r + 1);
     toast(`Sent to ${ownerName}: nothing changes until they approve it.`);

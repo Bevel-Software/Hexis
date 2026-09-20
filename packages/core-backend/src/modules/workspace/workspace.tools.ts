@@ -582,6 +582,8 @@ export interface SkillSaveWarning {
 /** The save-time skill check the write tools consult — satisfied by the skills module's `AllowedToolsChecker`. */
 export interface SkillSaveCheck {
   checkSave(userEmail: string, path: string, content: string): Promise<SkillSaveWarning[]>;
+  /** The batch form: `result[i]` is for `files[i]`, and the catalog is read once. */
+  checkSaves(userEmail: string, files: readonly { path: string; content: string }[]): Promise<SkillSaveWarning[][]>;
 }
 
 const SAVE_WARNINGS_OUTPUT: JsonSchema = {
@@ -1805,15 +1807,23 @@ export function registerWorkspaceTools(
       if (writes.length > 0) {
         await batching.writeFiles(writes, `Write ${writes.length} file(s)`, [], recheck);
       }
-      // Only the paths that actually landed are checked: a refused entry wrote
-      // nothing, so warning about its allowed-tools would describe content that
-      // is not in the branch. `outcomes[i]` is the entry for `files[i]`.
-      const warnings: (SkillSaveWarning & { path: string })[] = [];
+      // Only the content that actually landed is checked: a refused entry wrote
+      // nothing, and a path the batch names twice (which `overwrite` allows) is
+      // judged by its LAST landed entry — the earlier one is not in the branch,
+      // so warning about it would describe text nobody can find. `outcomes[i]`
+      // is the entry for `files[i]`. One catalog read for the whole batch.
+      const landed: number[] = [];
       for (let i = 0; i < files.length; i++) {
         if (outcomes[i].outcome === 'refused') continue;
-        const found = await saveWarnings(ctx, files[i].path, files[i].content);
-        if (found.warnings)
-          warnings.push(...found.warnings.map((w) => ({ path: files[i].path, ...w })));
+        if (files.some((f, j) => j > i && f.path === files[i].path && outcomes[j].outcome !== 'refused')) continue;
+        landed.push(i);
+      }
+      const warnings: (SkillSaveWarning & { path: string })[] = [];
+      if (skillSaveCheck && landed.length > 0) {
+        const perFile = await skillSaveCheck.checkSaves(ctx.user.email, landed.map((i) => files[i]));
+        landed.forEach((i, k) => {
+          warnings.push(...(perFile[k] ?? []).map((w) => ({ path: files[i].path, ...w })));
+        });
       }
       return {
         count: outcomes.filter((o) => o.outcome !== 'refused').length,

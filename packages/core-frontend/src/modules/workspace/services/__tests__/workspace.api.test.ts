@@ -107,6 +107,15 @@ describe('writeFile', () => {
     } as unknown as Response);
     await expect(writeFile('ws', 'kb/Plugins/a/SKILL.md', 'x')).resolves.toEqual({ warnings: [warning] });
 
+    // The usual answer: a body with no `warnings` key at all.
+    mockedFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: 'written' }),
+    } as unknown as Response);
+    await expect(writeFile('ws', 'kb/Plugins/a/SKILL.md', 'x')).resolves.toEqual({});
+
+    // A backend built before the check existed answers with no body worth reading.
     mockedFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,

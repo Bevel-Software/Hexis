@@ -189,6 +189,25 @@ describe('AllowedToolsChecker', () => {
     expect(getDetail).toHaveBeenCalledWith('alice@example.com', 'hubspot');
   });
 
+  test('a batch of saves reads the catalog once, and answers per file in order', async () => {
+    const listExternal = vi.fn(registry.listExternal);
+    const listAccessible = vi.fn(manuals.listAccessible);
+    const getDetail = vi.fn(manuals.getDetail);
+    const spying = new AllowedToolsChecker({ listExternal }, { listAccessible, getDetail }, 'knowledge-base');
+
+    const results = await spying.checkSaves('a@x.com', [
+      { path: 'knowledge-base/Plugins/Sales/rfi/SKILL.md', content: skill('hubspot.serch') },
+      { path: 'knowledge-base/Data/notes.md', content: skill('nope.nothing') },
+      { path: 'knowledge-base/Skills/quote/SKILL.md', content: skill('Bash Read') },
+      { path: 'knowledge-base/Skills/triage/SKILL.md', content: skill('retired_crm') },
+    ]);
+
+    expect(results.map(entries)).toEqual([['hubspot.serch'], [], [], ['retired_crm']]);
+    expect(listExternal).toHaveBeenCalledTimes(1);
+    expect(listAccessible).toHaveBeenCalledTimes(1);
+    expect(getDetail).toHaveBeenCalledTimes(1);
+  });
+
   test('a list of nothing but client tools reads no catalog at all', async () => {
     // `get_skill` runs on every skill use; a skill that names only the
     // client's tools must not cost a skill listing and a manual listing each time.

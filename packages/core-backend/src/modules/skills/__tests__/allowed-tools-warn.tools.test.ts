@@ -67,6 +67,19 @@ let tempDir = '';
 async function start(): Promise<string> {
   tempDir = await mkdtemp(join(tmpdir(), 'allowed-tools-'));
   const fs = new LocalFilesystem({ basePath: tempDir, contained: true });
+  // `write_files` lands its batch through the locking filesystem's `writeFiles`
+  // (re-judge every path under the lock, then write what is kept). This plain
+  // filesystem has none, so the same contract is honoured by hand.
+  Object.assign(fs, {
+    writeFiles: async (
+      writes: { path: string; content: string }[],
+      _summary: string,
+      _deletes: string[],
+      check: (pending: readonly { path: string; content: string }[]) => Promise<{ path: string; content: string }[]>,
+    ) => {
+      for (const w of await check(writes)) await fs.writeFile(w.path, w.content);
+    },
+  });
   const registry = new ToolRegistry();
   const resolve = async (auth: ToolAuth, signal: AbortSignal, sessionId?: string): Promise<ToolContext> => ({
     user: { id: 'u', email: 'e@x', name: 'N' },
@@ -140,6 +153,26 @@ describe('allowed-tools warnings on the agent surfaces', () => {
       new_string: '',
     });
     expect(await res.json()).toEqual({ path: SKILL_PATH, replaced: 1 });
+  });
+
+  it('write_files judges each landed skill once, by the content that is in the branch', async () => {
+    const base = await start();
+    const quote = `${KB_DIR}/Plugins/Sales/quote/SKILL.md`;
+    const res = await post(`${base}/api/agent/tools/write_files`, {
+      branch: 'main',
+      mode: 'overwrite',
+      files: [
+        // Named twice: this first content is replaced below and must not be judged.
+        { path: SKILL_PATH, content: SKILL },
+        { path: SKILL_PATH, content: SKILL.replace(' hubspot.serch legacy_crm', '') },
+        { path: quote, content: SKILL.replace('name: rfi', 'name: quote').replace(' hubspot.serch', '') },
+        { path: `${KB_DIR}/Data/notes.md`, content: '---\nallowed-tools: nope.nothing\n---\n' },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { count: number; warnings?: (Warning & { path: string })[] };
+    expect(body.count).toBe(4);
+    expect(body.warnings).toEqual([{ path: quote, entry: 'legacy_crm', message: expect.any(String) }]);
   });
 
   it('a non-skill file is never checked', async () => {

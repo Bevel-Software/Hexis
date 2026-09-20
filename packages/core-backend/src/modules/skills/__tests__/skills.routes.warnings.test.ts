@@ -25,10 +25,12 @@ const WARNING = { entry: 'hubspot.serch', message: 'not a tool', suggestion: 'hu
 
 const skillService = {
   listSkills: async () => [],
-  getSkill: async (_email: string, _name: string, file?: string) =>
-    file
+  getSkill: async (_email: string, name: string, file?: string) => {
+    if (name === 'secret') return { ok: false, error: 'forbidden' };
+    return file
       ? { ok: true, kind: 'file', file: { name: 'rfi', file, path: `Plugins/Sales/rfi/${file}`, content: 'notes' } }
-      : { ok: true, kind: 'skill', skill: SKILL },
+      : { ok: true, kind: 'skill', skill: SKILL };
+  },
   invalidate: () => {},
 } as unknown as ISkillService;
 
@@ -55,7 +57,7 @@ afterEach(async () => {
 describe('GET /api/skills/:name — allowed-tools warnings', () => {
   it('answers with the warnings for the requesting user beside the skill', async () => {
     const check = vi.fn(async () => [WARNING]);
-    const base = await start({ check, checkSave: async () => [] });
+    const base = await start({ check, checkSave: async () => [], checkSaves: async () => [] });
 
     const body = await (await fetch(`${base}/api/skills/rfi`)).json();
 
@@ -65,12 +67,20 @@ describe('GET /api/skills/:name — allowed-tools warnings', () => {
 
   it('leaves a bundled-file answer alone: nothing there to check', async () => {
     const check = vi.fn(async () => [WARNING]);
-    const base = await start({ check, checkSave: async () => [] });
+    const base = await start({ check, checkSave: async () => [], checkSaves: async () => [] });
 
     const body = (await (await fetch(`${base}/api/skills/rfi?file=notes.md`)).json()) as { kind: string };
 
     expect(body.kind).toBe('file');
     expect(body).not.toHaveProperty('warnings');
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it('passes a refusal through untouched, without asking the checker', async () => {
+    const check = vi.fn(async () => [WARNING]);
+    const base = await start({ check, checkSave: async () => [], checkSaves: async () => [] });
+
+    expect(await (await fetch(`${base}/api/skills/secret`)).json()).toEqual({ ok: false, error: 'forbidden' });
     expect(check).not.toHaveBeenCalled();
   });
 

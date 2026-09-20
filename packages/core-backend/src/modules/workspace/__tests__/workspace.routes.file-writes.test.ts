@@ -238,7 +238,7 @@ describe('PUT /workspace/:id/file — allowed-tools warnings', () => {
 
   it('writes the skill, then answers with the warnings for the saving user', async () => {
     const checkSave = vi.fn(async () => [warning]);
-    h = await makeHarness({ skillSaveCheck: { checkSave } });
+    h = await makeHarness({ skillSaveCheck: { checkSave, checkSaves: async () => [] } });
     const skill = `${KB}/Plugins/Sales/rfi/SKILL.md`;
     const content = '---\nallowed-tools: Bash hubspot.serch\n---\n';
 
@@ -252,7 +252,7 @@ describe('PUT /workspace/:id/file — allowed-tools warnings', () => {
   });
 
   it('answers the plain shape when there is nothing to warn about', async () => {
-    h = await makeHarness({ skillSaveCheck: { checkSave: async () => [] } });
+    h = await makeHarness({ skillSaveCheck: { checkSave: async () => [], checkSaves: async () => [] } });
     const res = await put(h, { content: 'Body.' });
     expect(await res.json()).toEqual({ status: 'written' });
   });

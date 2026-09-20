@@ -40,6 +40,7 @@ import {
 } from '../../shared/utcp-namespace.js';
 import {
   EXTERNAL_KB_MANUAL_NAME,
+  MAX_CAPABILITIES,
   type IToolManualService,
   type ToolManualDescriptor,
   type ToolManualDescriptorBase,
@@ -59,13 +60,6 @@ import {
 } from './tool-manuals.contract.js';
 
 const CACHE_TTL_MS = 60_000;
-
-/**
- * How many embedded tools a manual may advertise on the tool page. A `.tool` is
- * author-written, so its `tools` array is unbounded input; the page renders one
- * bullet per entry, and a thousand of them is a broken page, not a useful one.
- */
-export const MAX_CAPABILITIES = 100;
 
 /**
  * UTCP namespaces a user `.tool` may NOT claim: they belong to built-in manuals
