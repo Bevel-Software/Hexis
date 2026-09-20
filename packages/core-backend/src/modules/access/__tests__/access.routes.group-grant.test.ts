@@ -8,8 +8,8 @@ import type { WorkspaceService } from '../../workspace/workspace.service.js';
 import type { AuthService } from '../../auth/auth.service.js';
 import type { WorkflowService } from '../../workflow/workflow.service.js';
 import type { WorkflowEventBus } from '../../workflow/event-bus.js';
-import type { Database } from '../../database/connection.js';
 import { createAccessRoutes } from '../access.routes.js';
+import { usersDbDouble } from './users-db-double.js';
 
 /**
  * HTTP-level contract tests for GROUP and ROLE principals on the share
@@ -79,7 +79,7 @@ async function makeHarness(opts: {
     releaseLockNoCommit: vi.fn(async () => undefined),
   } as unknown as WorkflowService;
   const eventBus = { emit: vi.fn() } as unknown as WorkflowEventBus;
-  const db = {} as unknown as Database;
+  const db = usersDbDouble();
 
   const app = express();
   app.use(express.json());
