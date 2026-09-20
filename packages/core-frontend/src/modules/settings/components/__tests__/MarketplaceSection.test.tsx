@@ -54,9 +54,17 @@ function mount(variant: 'setup' | 'settings') {
 const drawer = () =>
   screen.getByText('Register this deployment with Claude').closest('details') as HTMLDetailsElement;
 
-/** The admin carousel inside the drawer. */
+/**
+ * The admin carousel inside the drawer. Its region name says what the region
+ * IS rather than repeating the drawer's summary, which already reads
+ * "Register this deployment with Claude" one level up.
+ */
 const carousel = () =>
-  within(drawer()).getByRole('region', { name: 'Register this deployment with Claude' });
+  within(drawer()).getByRole('region', { name: 'Claude registration steps' });
+
+/** The slide on screen, by the accessible name the live region carries. */
+const slideName = (strip: HTMLElement) =>
+  within(strip).getByRole('group').getAttribute('aria-label');
 
 /** Open the drawer and hand back the carousel it holds. */
 async function openDrawer(user: ReturnType<typeof userEvent.setup>) {
@@ -146,6 +154,78 @@ describe('MarketplaceSection', () => {
     expect(alts).toHaveLength(2);
     expect(alts[0]).toContain('Not added');
     expect(alts[1]).toContain('Add custom connector dialog');
+  });
+
+  /**
+   * The keyboard half of the shared shell, on the admin route. The personal
+   * carousel covers the same keys on its own page; asserting them here too
+   * is what stops a regression in `SetupCarousel` from passing green on the
+   * route that only ever exercised End.
+   *
+   * The two no-op edges are part of the contract, not an oversight: Left on
+   * the first slide and Right on the last leave the keys to the browser, so
+   * a reader who tabbed onto a screenshot link still gets the default
+   * scroll. What the test can see is that the slide does not move.
+   */
+  it('moves through the admin carousel with the arrow keys, Home and End', async () => {
+    const user = userEvent.setup();
+    mount('settings');
+    await screen.findByTestId('marketplace-deployment-section');
+    const strip = await openDrawer(user);
+    expect(slideName(strip)).toBe('Step 1 of 5: Register this deployment with your Claude organization');
+
+    // Left on the first slide is a no-op, and does not wrap to the end.
+    // fireEvent hands back false when the handler called preventDefault, so
+    // this also asserts the key was LEFT to the browser rather than
+    // swallowed by a section that had nowhere to move.
+    expect(fireEvent.keyDown(strip, { key: 'ArrowLeft' })).toBe(true);
+    expect(slideName(strip)).toBe('Step 1 of 5: Register this deployment with your Claude organization');
+
+    // A key that does move is ours, and is prevented.
+    expect(fireEvent.keyDown(strip, { key: 'ArrowRight' })).toBe(false);
+    expect(slideName(strip)).toBe('Step 2 of 5: Fill the form and add the configuration');
+    fireEvent.keyDown(strip, { key: 'ArrowRight' });
+    expect(slideName(strip)).toBe('Step 3 of 5: Connect your own Claude account to it');
+    fireEvent.keyDown(strip, { key: 'ArrowLeft' });
+    expect(slideName(strip)).toBe('Step 2 of 5: Fill the form and add the configuration');
+
+    fireEvent.keyDown(strip, { key: 'End' });
+    expect(slideName(strip)).toBe('Step 5 of 5: Add the hexis connector');
+    // Right on the last slide is the other no-op edge: no wrap to step 1,
+    // and the key goes back to the browser. End on the last slide is the
+    // same, which is what a reader focused on a screenshot link needs.
+    expect(fireEvent.keyDown(strip, { key: 'ArrowRight' })).toBe(true);
+    expect(fireEvent.keyDown(strip, { key: 'End' })).toBe(true);
+    expect(slideName(strip)).toBe('Step 5 of 5: Add the hexis connector');
+
+    expect(fireEvent.keyDown(strip, { key: 'Home' })).toBe(false);
+    expect(slideName(strip)).toBe('Step 1 of 5: Register this deployment with your Claude organization');
+  });
+
+  /**
+   * "Review again" is the one control that wraps. The footer button
+   * relabels itself on the last slide rather than disappearing, and
+   * pressing it puts the admin back on step 1 with the progress strip
+   * reset — which is the whole reason it is a relabel and not a second
+   * button somewhere else.
+   */
+  it('restarts the admin carousel at step 1 from Review again', async () => {
+    const user = userEvent.setup();
+    mount('settings');
+    await screen.findByTestId('marketplace-deployment-section');
+    const strip = await openDrawer(user);
+
+    fireEvent.keyDown(strip, { key: 'End' });
+    expect(slideName(strip)).toBe('Step 5 of 5: Add the hexis connector');
+
+    await user.click(within(strip).getByRole('button', { name: 'Review again' }));
+    expect(slideName(strip)).toBe('Step 1 of 5: Register this deployment with your Claude organization');
+    expect(within(strip).getByText('1 / 5')).toBeInTheDocument();
+    expect(within(strip).getByRole('button', { name: 'Next' })).toBeInTheDocument();
+    expect(within(strip).getByRole('button', { name: 'Back' })).toBeDisabled();
+    expect(
+      within(strip).getByRole('button', { name: 'Go to step 1: Add manually' }),
+    ).toHaveAttribute('aria-current', 'step');
   });
 
   /**

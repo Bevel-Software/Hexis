@@ -90,8 +90,8 @@ all, that is the account connection in step 1, not the connector.
 
 The same steps are a six-screen walkthrough on the **External agent access**
 page in the app, identical for admins and everyone else once the deployment is
-marked registered. The registration half is the same walkthrough in
-**Deployment → Marketplace**, and ends on the same connector step.
+marked registered. The registration half lives in **Deployment → Marketplace**
+and ends on the same connector step.
 
 ## When connecting does not take
 

@@ -44,6 +44,19 @@ export interface Shot {
    */
   width?: number;
   height?: number;
+  /**
+   * Set when the file is a DRAWING of the screen rather than a capture of
+   * it. `ScreenshotStep` then prints a line under the frame saying so, for
+   * the reader who is holding their own Claude next to it and wondering why
+   * the detail does not match. The instruction and the `alt` name the row
+   * and the control; the pixels are a sketch of where they sit.
+   *
+   * It exists because the connector screens had no capture when the step
+   * was written, and the honest answer to that was to say so on the page
+   * rather than only in the asset README. Delete the flag from a shot the
+   * moment a real capture replaces it.
+   */
+  illustration?: boolean;
 }
 
 /**
@@ -122,6 +135,12 @@ export const installPluginsShot: Shot = {
  * the screen that says so and the dialog that does it. Both are 1400x700 —
  * a plugin panel and a dialog, not a full window — so they declare their own
  * size rather than being padded to the window shots' 1080.
+ *
+ * Both are `illustration` for now: drawings of the two screens, not captures
+ * of them, because the connector flow was not in front of a camera when the
+ * step was written. That is stated on the page rather than only in the asset
+ * README — a reader comparing their own Claude to a sketch should be told it
+ * is one. Drop the flag and re-measure the boxes when real captures land.
  */
 export const connectorNotAddedShot: Shot = {
   src: new URL('../assets/claude-setup/10-connector-not-added.webp', import.meta.url).href,
@@ -132,6 +151,7 @@ export const connectorNotAddedShot: Shot = {
   ],
   width: 1400,
   height: 700,
+  illustration: true,
 };
 
 export const addCustomConnectorShot: Shot = {
@@ -143,4 +163,5 @@ export const addCustomConnectorShot: Shot = {
   ],
   width: 1400,
   height: 700,
+  illustration: true,
 };

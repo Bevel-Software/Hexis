@@ -118,10 +118,10 @@ export function ClaudeRegistrationSteps({ opened }: { opened: boolean }) {
         same action.
       </Prose>
 
-      <SetupCarousel
-        label="Register this deployment with Claude"
-        slides={slides(host, opened)}
-      />
+      {/* Not the drawer's own words. The <summary> above already reads
+          "Register this deployment with Claude", and a region nested inside
+          the control that carries that name would announce it twice. */}
+      <SetupCarousel label="Claude registration steps" slides={slides(host, opened)} />
     </div>
   );
 }

@@ -47,19 +47,25 @@ export function SetupCarousel({ label, slides }: { label: string; slides: Carous
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
       return;
     }
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault();
-      setCurrent((step) => Math.max(0, step - 1));
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      setCurrent((step) => Math.min(slides.length - 1, step + 1));
-    } else if (event.key === 'Home') {
-      event.preventDefault();
-      setCurrent(0);
-    } else if (event.key === 'End') {
-      event.preventDefault();
-      setCurrent(slides.length - 1);
-    }
+    const last = slides.length - 1;
+    const next =
+      event.key === 'ArrowLeft'
+        ? Math.max(0, current - 1)
+        : event.key === 'ArrowRight'
+        ? Math.min(last, current + 1)
+        : event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+        ? last
+        : current;
+    // Only a key that actually moves the carousel is ours to swallow. Left on
+    // the first slide, Right on the last, Home at the start and End at the
+    // end change nothing here, so they stay with the browser — a reader who
+    // tabbed onto a screenshot link keeps the default scroll rather than
+    // finding those keys dead inside the section.
+    if (next === current) return;
+    event.preventDefault();
+    setCurrent(next);
   }
 
   return (

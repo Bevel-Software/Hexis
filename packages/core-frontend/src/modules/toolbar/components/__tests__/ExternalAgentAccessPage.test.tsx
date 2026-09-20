@@ -444,7 +444,7 @@ describe('the Marketplaces tab', () => {
   /**
    * The registration steps live on pages inside Claude's ADMIN settings, and
    * now in Deployment configuration here. This page has no admin branch left:
-   * the five actions every person takes, one at a time, and none of the
+   * the six actions every person takes, one at a time, and none of the
    * registration screenshots.
    */
   it('gives everyone only the personal steps, and none of the admin screenshots', async () => {
@@ -537,6 +537,15 @@ describe('the Marketplaces tab', () => {
     expect(carousel).toHaveTextContent('approve the sign-in on this deployment');
     expect(carousel).toHaveTextContent('no longer reads');
     expect(carousel).toHaveTextContent('Without organization-admin rights');
+
+    // Both of its screens are drawings rather than captures, and the slide
+    // says so under each one: a reader comparing their own Claude to a
+    // sketch should not be left deciding they are on the wrong screen. One
+    // note per shot, and none on the five slides of real captures.
+    expect(within(carousel).getAllByText(/Illustration, not a capture/)).toHaveLength(2);
+    fireEvent.keyDown(carousel, { key: 'Home' });
+    expect(within(carousel).queryByText(/Illustration, not a capture/)).toBeNull();
+    fireEvent.keyDown(carousel, { key: 'End' });
 
     // And Home goes back to the first, so End is not a one-way door.
     fireEvent.keyDown(carousel, { key: 'Home' });

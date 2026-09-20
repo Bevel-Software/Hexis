@@ -55,6 +55,10 @@ describe('Claude setup screenshot callouts', () => {
   it('keeps every connector box inside the image, as a percentage', () => {
     for (const shot of [connectorNotAddedShot, addCustomConnectorShot]) {
       for (const box of shot.boxes) {
+        // Both edges, not just the far one: a negative offset leaves the
+        // image off the left or the top and still satisfies x + w <= 100.
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.y).toBeGreaterThanOrEqual(0);
         expect(box.x + box.w).toBeLessThanOrEqual(100);
         expect(box.y + box.h).toBeLessThanOrEqual(100);
         expect(box.w).toBeGreaterThan(1);
@@ -77,6 +81,24 @@ describe('Claude setup screenshot callouts', () => {
       expect(shot.width).toBe(SHOT_WIDTH);
       expect(shot.height).toBe(700);
       expect(shot.height).not.toBe(SHOT_HEIGHT);
+    }
+  });
+
+  /**
+   * The connector screens are drawings, not captures — nobody had the flow
+   * in front of a camera when the step was written. That is declared on the
+   * shot rather than left to the asset README, so the page can say it to
+   * the reader; the nine real captures stay unflagged, which is what keeps
+   * the note from becoming decoration on every screenshot.
+   *
+   * When real captures land, this flag comes off and the test flips with
+   * it.
+   */
+  it('marks only the drawn connector shots as illustrations', () => {
+    expect(connectorNotAddedShot.illustration).toBe(true);
+    expect(addCustomConnectorShot.illustration).toBe(true);
+    for (const shot of [addManuallyShot, installPluginsShot, pluginsAddShot, selectRepositoryShot]) {
+      expect(shot.illustration).toBeUndefined();
     }
   });
 });

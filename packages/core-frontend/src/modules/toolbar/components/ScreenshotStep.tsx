@@ -24,9 +24,15 @@ import { SHOT_HEIGHT, SHOT_WIDTH, type Shot } from './claude-setup-shots';
  * not. They only reserve the right box before the bytes land — the image is
  * `w-full h-auto` either way — but reserving the wrong one is what makes the
  * page jump.
+ *
+ * A shot marked `illustration` gets a line under the frame saying it is a
+ * drawing rather than a capture. It is visible text, not a `title`: the
+ * reader it is for is the one holding their own Claude beside the picture,
+ * and they need to be told before they conclude they are on the wrong
+ * screen.
  */
 export function ScreenshotStep({ shot }: { shot: Shot }) {
-  return (
+  const frame = (
     <a
       href={shot.src}
       target="_blank"
@@ -52,5 +58,20 @@ export function ScreenshotStep({ shot }: { shot: Shot }) {
         />
       ))}
     </a>
+  );
+
+  if (!shot.illustration) return frame;
+
+  // The note goes OUTSIDE the anchor. The boxes are positioned against that
+  // element, so a line of text inside it would make every percentage refer
+  // to a taller box than the image and slide the callouts up the screen.
+  return (
+    <div className="space-y-1">
+      {frame}
+      <p className="text-meta leading-snug text-ink-faint">
+        Illustration, not a capture: this is drawn to the screen's layout, so the detail on your
+        Claude may differ. The instruction above names the row and the control to look for.
+      </p>
+    </div>
   );
 }

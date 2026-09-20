@@ -40,6 +40,15 @@ screens they describe rather than photographed on a deployment. Replace them
 with real captures when the connector flow is next in front of a camera. Until
 then the alt text, not the pixels, is what the step relies on.
 
+Both carry `illustration: true` in `claude-setup-shots.ts`, so the carousel
+prints a line under each frame telling the reader it is a drawing. That flag
+is not a label on the file, it is the promise the page makes: a real capture
+means deleting it, re-measuring the two boxes against the new pixels, and
+updating the intrinsic size if the shape changed. Shipping a capture while
+the flag stays on tells readers to distrust a true picture; leaving the flag
+off while the drawing stays sends them looking for a row that is not where
+the picture puts it.
+
 They are 1400x700, not 1400x1080: a plugin panel and a dialog are not the
 shape of a full window, and padding them to the window shots' height would
 reserve a column of empty space before the bytes land. That is what the
